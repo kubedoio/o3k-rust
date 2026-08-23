@@ -1,0 +1,48 @@
+syntax = "proto3";
+package o3k.composition.v1;
+
+message Scope { string id = 1; string kind = 2; }
+message ResourceRef { string namespace = 1; string type = 2; string id = 3; int64 generation = 4; }
+message ParentContext {
+  string request_id = 1;
+  string operation_id = 2;
+  string service_id = 3;
+  string service_principal = 4;
+  string parent_action = 5;
+  ResourceRef parent = 6;
+  int64 parent_generation = 7;
+  Scope owner_scope = 8;
+  string session_id = 9;
+  uint64 session_generation = 10;
+  string slot = 11;
+  string replay_identity = 12;
+  string audit_correlation = 13;
+  bytes delegation = 14;
+}
+message ChildRequest { ParentContext parent = 1; string lifecycle = 2; string resource_type = 3; bytes desired_spec = 4; string requested_action = 5; ResourceRef child = 6; }
+message ChildResponse {
+  ResourceRef resource = 1;
+  string operation_id = 2;
+  string state = 3;
+  bytes observed_status = 4;
+  string diagnostic = 5;
+  string request_id = 6;
+  string service_id = 7;
+  string session_id = 8;
+  uint64 session_generation = 9;
+  string parent_operation_id = 10;
+  string slot = 11;
+  string ownership = 12;
+}
+message ObserveRequest { ParentContext parent = 1; ResourceRef resource = 2; string child_operation_id = 3; }
+message DeleteRequest { ChildRequest child = 1; }
+message Relationship { string slot = 1; string resource_type = 2; ResourceRef resource = 3; string ownership = 4; string state = 5; string parent_operation_id = 6; string child_operation_id = 7; }
+message RelationshipRequest { ParentContext parent = 1; }
+message RelationshipResponse { repeated Relationship relationships = 1; }
+message Failure { string category = 1; string diagnostic = 2; }
+service CompositionService {
+  rpc CreateChild(ChildRequest) returns (ChildResponse);
+  rpc ObserveChild(ObserveRequest) returns (ChildResponse);
+  rpc DeleteChild(DeleteRequest) returns (ChildResponse);
+  rpc ListRelationships(RelationshipRequest) returns (RelationshipResponse);
+}

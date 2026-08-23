@@ -106,6 +106,25 @@ pub struct ResourceReference {
     pub generation: i64,
 }
 
+/// Durable parent/child ownership metadata used by composing services. The
+/// kernel models only generic relationship authority; service-specific slot
+/// names and workflow semantics remain outside the kernel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceRelationship {
+    pub parent: ResourceReference,
+    pub child: ResourceReference,
+    pub relationship: String,
+    pub ownership: RelationshipOwnership,
+    pub parent_operation_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationshipOwnership {
+    Exclusive,
+    Referenced,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceSnapshot {
     pub reference: ResourceReference,

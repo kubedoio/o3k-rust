@@ -654,11 +654,9 @@ pub(crate) fn validate_canonical_idempotent_operation_identity(
             "canonical operation identity is incomplete".into(),
         ));
     }
-    if kernel.service != kernel.action.namespace()
-        || kernel.service != kernel.resource_type.namespace()
-    {
+    if kernel.action.namespace() != kernel.resource_type.namespace() {
         return Err(StoreError::Corrupt(
-            "operation service, action, and resource namespaces differ".into(),
+            "operation action and resource namespaces differ".into(),
         ));
     }
     if kernel.action.as_str() != request.action {
@@ -736,12 +734,9 @@ pub(crate) fn validate_canonical_operation_read(
     let resource_type = o3k_kernel::ResourceType::new(namespace, name)
         .map_err(|e| StoreError::Corrupt(format!("invalid operation resource type: {e}")))?;
     let expected_resource_type = canonical_resource_type_for_record(resource)?;
-    if canonical.service != action.namespace()
-        || canonical.service != resource_type.namespace()
-        || resource_type != expected_resource_type
-    {
+    if action.namespace() != resource_type.namespace() || resource_type != expected_resource_type {
         return Err(StoreError::Corrupt(
-            "canonical operation namespaces/resource type differ".into(),
+            "canonical operation action/resource namespace or resource type differ".into(),
         ));
     }
     if operation.state != canonical.state {
@@ -802,6 +797,10 @@ async fn insert_sqlite_canonical_acceptance(
 pub(crate) fn canonical_resource_type_for_record(
     resource: &ResourceRecord,
 ) -> Result<o3k_kernel::ResourceType, StoreError> {
+    if let Some((namespace, name)) = resource.kind.split_once(':') {
+        return o3k_kernel::ResourceType::new(namespace, name)
+            .map_err(|e| StoreError::Corrupt(format!("invalid canonical resource type: {e}")));
+    }
     let (namespace, name) = match resource.kind.as_str() {
         "compute_instance" | "compute_server" | "server" | "compute:server" => {
             ("compute", "server")
@@ -1153,6 +1152,102 @@ pub enum StoreError {
     #[error("reservation not found")]
     ReservationNotFound,
 }
+
+/// Generic durable parent/child relationship intent used by external service
+/// composition. The record is intentionally service-neutral; service-owned
+/// slot names are data, not schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceRelationshipRecord {
+    pub parent_resource_id: Uuid,
+    pub parent_resource_type: String,
+    pub slot: String,
+    pub expected_child_resource_type: String,
+    pub child_resource_id: Option<Uuid>,
+    pub ownership: String,
+    pub parent_operation_id: Uuid,
+    pub child_operation_id: Option<Uuid>,
+    pub owner_scope: String,
+    pub state: String,
+    pub fingerprint: String,
+}
+
+/// Generic durable parent/child relationship port.
+///
+/// This deliberately contains no service-specific vocabulary.  External
+/// controllers use it through the composition boundary so recovery does not
+/// depend on controller-local memory.
+#[async_trait]
+pub trait RelationshipRepository: Send + Sync {
+    async fn reserve_relationship(
+        &self,
+        record: &ResourceRelationshipRecord,
+    ) -> Result<ResourceRelationshipRecord, StoreError>;
+    async fn get_relationship(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError>;
+    async fn list_relationships(
+        &self,
+        parent_resource_id: Uuid,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError>;
+    async fn bind_relationship(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+        child_resource_id: Uuid,
+        child_operation_id: Uuid,
+    ) -> Result<ResourceRelationshipRecord, StoreError>;
+    async fn set_relationship_state(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+        state: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError>;
+}
+
+fn relationship_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<ResourceRelationshipRecord, StoreError> {
+    let parse = |value: String| Uuid::parse_str(&value).map_err(StoreError::InvalidUuid);
+    Ok(ResourceRelationshipRecord {
+        parent_resource_id: parse(
+            row.try_get("parent_resource_id")
+                .map_err(StoreError::Database)?,
+        )?,
+        parent_resource_type: row
+            .try_get("parent_resource_type")
+            .map_err(StoreError::Database)?,
+        slot: row.try_get("slot").map_err(StoreError::Database)?,
+        expected_child_resource_type: row
+            .try_get("expected_child_resource_type")
+            .map_err(StoreError::Database)?,
+        child_resource_id: row
+            .try_get::<Option<String>, _>("child_resource_id")
+            .map_err(StoreError::Database)?
+            .map(parse)
+            .transpose()?,
+        ownership: row.try_get("ownership").map_err(StoreError::Database)?,
+        parent_operation_id: parse(
+            row.try_get("parent_operation_id")
+                .map_err(StoreError::Database)?,
+        )?,
+        child_operation_id: row
+            .try_get::<Option<String>, _>("child_operation_id")
+            .map_err(StoreError::Database)?
+            .map(parse)
+            .transpose()?,
+        owner_scope: row.try_get("owner_scope").map_err(StoreError::Database)?,
+        state: row.try_get("state").map_err(StoreError::Database)?,
+        fingerprint: row.try_get("fingerprint").map_err(StoreError::Database)?,
+    })
+}
+
+const RELATIONSHIP_RESERVED: &str = "reserved";
+const RELATIONSHIP_BOUND: &str = "bound";
+const RELATIONSHIP_DELETING: &str = "deleting";
+const RELATIONSHIP_DELETED: &str = "deleted";
+const RELATIONSHIP_UNKNOWN: &str = "unknown";
 
 pub use quota::QuotaRepository;
 
@@ -1785,6 +1880,110 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    pub async fn reserve_relationship(
+        &self,
+        record: &ResourceRelationshipRecord,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        let result = sqlx::query("INSERT INTO resource_relationships (parent_resource_id,parent_resource_type,slot,expected_child_resource_type,child_resource_id,ownership,parent_operation_id,child_operation_id,owner_scope,state,fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(record.parent_resource_id.to_string())
+            .bind(&record.parent_resource_type).bind(&record.slot)
+            .bind(&record.expected_child_resource_type)
+            .bind(record.child_resource_id.map(|id| id.to_string()))
+            .bind(&record.ownership).bind(record.parent_operation_id.to_string())
+            .bind(record.child_operation_id.map(|id| id.to_string()))
+            .bind(&record.owner_scope).bind(RELATIONSHIP_RESERVED).bind(&record.fingerprint)
+            .execute(&self.pool).await;
+        let result = result.map_err(|error| {
+            if let sqlx::Error::Database(db) = &error
+                && db.is_unique_violation()
+            {
+                return StoreError::IdempotencyConflict;
+            }
+            StoreError::Database(error)
+        });
+        if matches!(result, Err(StoreError::IdempotencyConflict)) {
+            let existing = self
+                .get_relationship(record.parent_resource_id, &record.slot)
+                .await?;
+            if existing.fingerprint == record.fingerprint
+                && existing.expected_child_resource_type == record.expected_child_resource_type
+                && existing.ownership == record.ownership
+                && existing.owner_scope == record.owner_scope
+            {
+                return Ok(existing);
+            }
+            return Err(StoreError::IdempotencyConflict);
+        }
+        let result = result?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::IdempotencyConflict);
+        }
+        self.get_relationship(record.parent_resource_id, &record.slot)
+            .await
+    }
+
+    pub async fn get_relationship(
+        &self,
+        parent: Uuid,
+        slot: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        let row = sqlx::query("SELECT parent_resource_id,parent_resource_type,slot,expected_child_resource_type,child_resource_id,ownership,parent_operation_id,child_operation_id,owner_scope,state,fingerprint FROM resource_relationships WHERE parent_resource_id=? AND slot=?")
+            .bind(parent.to_string()).bind(slot).fetch_optional(&self.pool).await.map_err(StoreError::Database)?
+            .ok_or(StoreError::ResourceNotFound)?;
+        relationship_from_row(&row)
+    }
+
+    pub async fn list_relationships(
+        &self,
+        parent: Uuid,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
+        let rows = sqlx::query("SELECT parent_resource_id,parent_resource_type,slot,expected_child_resource_type,child_resource_id,ownership,parent_operation_id,child_operation_id,owner_scope,state,fingerprint FROM resource_relationships WHERE parent_resource_id=? ORDER BY slot")
+            .bind(parent.to_string()).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(relationship_from_row).collect()
+    }
+
+    pub async fn bind_relationship(
+        &self,
+        parent: Uuid,
+        slot: &str,
+        child: Uuid,
+        child_operation: Uuid,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        sqlx::query("UPDATE resource_relationships SET child_resource_id=?,child_operation_id=?,state=? WHERE parent_resource_id=? AND slot=? AND state IN (?,?)")
+            .bind(child.to_string()).bind(child_operation.to_string()).bind(RELATIONSHIP_BOUND)
+            .bind(parent.to_string()).bind(slot).bind(RELATIONSHIP_RESERVED).bind(RELATIONSHIP_UNKNOWN)
+            .execute(&self.pool).await.map_err(StoreError::Database)?;
+        self.get_relationship(parent, slot).await
+    }
+
+    pub async fn set_relationship_state(
+        &self,
+        parent: Uuid,
+        slot: &str,
+        state: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        if !matches!(
+            state,
+            RELATIONSHIP_RESERVED
+                | RELATIONSHIP_BOUND
+                | RELATIONSHIP_DELETING
+                | RELATIONSHIP_DELETED
+                | RELATIONSHIP_UNKNOWN
+        ) {
+            return Err(StoreError::Corrupt("invalid relationship state".into()));
+        }
+        sqlx::query(
+            "UPDATE resource_relationships SET state=? WHERE parent_resource_id=? AND slot=?",
+        )
+        .bind(state)
+        .bind(parent.to_string())
+        .bind(slot)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        self.get_relationship(parent, slot).await
+    }
+
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
         let is_memory = database_url == "sqlite::memory:" || database_url == "sqlite://:memory:";
         let mut options =
@@ -4911,6 +5110,57 @@ impl SqliteStore {
             .map_err(StoreError::Database)?;
         let updated = resource_from_row(&updated_row)?;
         Ok(updated)
+    }
+}
+
+#[async_trait]
+impl RelationshipRepository for SqliteStore {
+    async fn reserve_relationship(
+        &self,
+        record: &ResourceRelationshipRecord,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        Self::reserve_relationship(self, record).await
+    }
+
+    async fn get_relationship(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        Self::get_relationship(self, parent_resource_id, slot).await
+    }
+
+    async fn list_relationships(
+        &self,
+        parent_resource_id: Uuid,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
+        Self::list_relationships(self, parent_resource_id).await
+    }
+
+    async fn bind_relationship(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+        child_resource_id: Uuid,
+        child_operation_id: Uuid,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        Self::bind_relationship(
+            self,
+            parent_resource_id,
+            slot,
+            child_resource_id,
+            child_operation_id,
+        )
+        .await
+    }
+
+    async fn set_relationship_state(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+        state: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        Self::set_relationship_state(self, parent_resource_id, slot, state).await
     }
 }
 
@@ -8707,6 +8957,66 @@ fn restrict_sqlite_sidecars(path: &Path) -> Result<(), StoreError> {
 mod tests {
     use super::*;
     use std::error::Error;
+
+    #[tokio::test]
+    async fn sqlite_relationship_intent_is_unique_replayable_and_reopenable()
+    -> Result<(), StoreError> {
+        let path = std::env::temp_dir().join(format!("o3k-relationship-{}.sqlite", Uuid::now_v7()));
+        let parent = Uuid::now_v7();
+        let operation = Uuid::now_v7();
+        let resource = ResourceRecord {
+            id: parent,
+            kind: "database:instance".into(),
+            project_id: "project-a".into(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "{}".into(),
+            observed_state: "provisioning".into(),
+            provider_id: None,
+        };
+        let store = SqliteStore::connect_file(&path).await?;
+        store.insert_resource(&resource).await?;
+        let record = ResourceRelationshipRecord {
+            parent_resource_id: parent,
+            parent_resource_type: "database:instance".into(),
+            slot: "network-primary".into(),
+            expected_child_resource_type: "network:network".into(),
+            child_resource_id: None,
+            ownership: "exclusive".into(),
+            parent_operation_id: operation,
+            child_operation_id: None,
+            owner_scope: "project-a".into(),
+            state: "reserved".into(),
+            fingerprint: "fp-1".into(),
+        };
+        let reserved = store.reserve_relationship(&record).await?;
+        assert_eq!(reserved.state, "reserved");
+        assert_eq!(store.reserve_relationship(&record).await?, reserved);
+        let mut conflicting = record.clone();
+        conflicting.fingerprint = "different".into();
+        assert!(matches!(
+            store.reserve_relationship(&conflicting).await,
+            Err(StoreError::IdempotencyConflict)
+        ));
+        let child = Uuid::now_v7();
+        let child_operation = Uuid::now_v7();
+        let bound = store
+            .bind_relationship(parent, "network-primary", child, child_operation)
+            .await?;
+        assert_eq!(bound.child_resource_id, Some(child));
+        assert_eq!(store.list_relationships(parent).await?.len(), 1);
+        drop(store);
+        let reopened = SqliteStore::connect_file(&path).await?;
+        assert_eq!(
+            reopened
+                .get_relationship(parent, "network-primary")
+                .await?
+                .child_operation_id,
+            Some(child_operation)
+        );
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn sqlite_store_passes_conformance() -> Result<(), StoreError> {

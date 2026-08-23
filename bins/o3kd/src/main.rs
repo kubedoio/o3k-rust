@@ -1,18 +1,91 @@
 use async_trait::async_trait;
-mod native_adapters;
+use o3kd::native_adapters;
 
 use o3k_domain::ServerId;
+use o3k_kernel::Controller;
 use o3k_provider::{
     AgentNodeSnapshot, ArtifactKind, ComputeProvider, ConfigDriveRequest, CreateArtifactResolver,
     CreateInstanceRequest, OperationState, ProviderError, ResolvedCreateArtifact,
     ResolvedCreateInputs, ResolvedCreateResolver,
 };
 use o3k_store::ComputeRepository;
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+#[derive(Debug, serde::Deserialize)]
+struct ExternalControllerConfigFile {
+    controllers: Vec<ExternalControllerConfig>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ExternalControllerConfig {
+    service_id: String,
+    namespace: String,
+    endpoint: String,
+    server_name: String,
+    ca: PathBuf,
+    client_certificate: PathBuf,
+    client_key: PathBuf,
+    principal_id: String,
+    principal_name: String,
+    manifest_digest: String,
+    manifest_generation: u64,
+    #[serde(default)]
+    delegation_key_id: Option<String>,
+    #[serde(default)]
+    delegation_signing_key_file: Option<PathBuf>,
+}
+
+async fn external_controllers_from_config() -> Result<
+    std::collections::BTreeMap<String, std::sync::Arc<o3k_service_sdk::GrpcControllerAdapter>>,
+    Box<dyn std::error::Error>,
+> {
+    let Some(path) = std::env::var_os("O3K_EXTERNAL_CONTROLLER_CONFIG") else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let config: ExternalControllerConfigFile = serde_json::from_slice(&std::fs::read(path)?)?;
+    let mut controllers = std::collections::BTreeMap::new();
+    for entry in config.controllers {
+        let tls = o3k_service_sdk::tls::client(
+            &entry.ca,
+            &entry.client_certificate,
+            &entry.client_key,
+            &entry.server_name,
+        )?;
+        let principal = o3k_kernel::ServicePrincipal::new(
+            o3k_kernel::PrincipalId::new(entry.principal_id)?,
+            entry.principal_name,
+            entry.namespace.clone(),
+        );
+        let controller = o3k_service_sdk::GrpcControllerAdapter::connect(
+            &entry.endpoint,
+            tls,
+            entry.service_id.clone(),
+            entry.namespace,
+            principal,
+            entry.manifest_digest,
+            entry.manifest_generation,
+        )
+        .await?;
+        let controller = match (entry.delegation_key_id, entry.delegation_signing_key_file) {
+            (Some(key_id), Some(path)) => controller.with_delegation_signer(
+                key_id,
+                ed25519_dalek::SigningKey::from_bytes(
+                    &fs::read(path)?
+                        .try_into()
+                        .map_err(|_| "delegation signing key must be 32 bytes")?,
+                ),
+            ),
+            (None, None) => controller,
+            _ => return Err("delegation key id and key file must be configured together".into()),
+        };
+        controllers.insert(entry.service_id, std::sync::Arc::new(controller));
+    }
+    Ok(controllers)
+}
 
 #[derive(Clone)]
 struct DaemonCreateResolver {
@@ -1109,6 +1182,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     native_manifest_registry
         .seed_core()
         .map_err(|e| format!("native manifest seed_core failed: {e}"))?;
+    if let Ok(manifest_directory) = std::env::var("O3K_MANIFEST_DIR") {
+        let path = std::path::Path::new(&manifest_directory);
+        native_manifest_registry
+            .register_json_directory(path)
+            .map_err(|e| format!("external manifest directory failed: {e}"))?;
+        info!(directory = %path.display(), "external service manifests loaded");
+    }
 
     // Wire native API service adapters.
     let server_reader: Option<std::sync::Arc<dyn o3k_native_api::compute::ServerReader>> =
@@ -1138,20 +1218,124 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 service: std::sync::Arc::new(id_service.clone()),
             }) as std::sync::Arc<dyn o3k_native_api::auth::TokenIssuer>
         });
+    let external_controllers = external_controllers_from_config().await?;
+    for (service_id, controller) in &external_controllers {
+        let manifest = native_manifest_registry
+            .get(service_id)
+            .ok_or_else(|| format!("external controller has no manifest: {service_id}"))?;
+        let capabilities = controller.capabilities().await;
+        let declared_types = manifest
+            .resource_types
+            .iter()
+            .map(|resource| resource.resource_type.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let required_actions = manifest
+            .resource_types
+            .iter()
+            .flat_map(|resource| resource.operations.values().map(ToString::to_string))
+            .collect::<std::collections::BTreeSet<_>>();
+        if !capabilities
+            .resource_types
+            .iter()
+            .all(|resource| declared_types.contains(resource))
+            || !capabilities
+                .actions
+                .iter()
+                .all(|action| manifest.actions.iter().any(|declared| declared == action))
+            || !required_actions.iter().all(|action| {
+                capabilities
+                    .actions
+                    .iter()
+                    .any(|advertised| advertised == action)
+            })
+        {
+            return Err(
+                format!("external controller capabilities exceed manifest: {service_id}").into(),
+            );
+        }
+        native_manifest_registry.register_controller(service_id, controller.session().clone())?;
+        let health = controller.health().await;
+        native_manifest_registry.update_controller_health(service_id, health)?;
+    }
     let generic_application: std::sync::Arc<dyn o3k_native_api::resource::ResourceApplication> =
         std::sync::Arc::new(native_adapters::GenericResourceApplication {
             compute: std::sync::Arc::new(compute_service.clone()),
+            network_service: std::sync::Arc::new(network_service.clone()),
             store: native_api_store.clone(),
             server: server_reader
                 .clone()
                 .ok_or("generic native application requires compute reader")?,
-            volume: volume_reader
-                .clone()
-                .ok_or("generic native application requires volume reader")?,
             network: network_reader
                 .clone()
                 .ok_or("generic native application requires network reader")?,
+            external_controllers: std::sync::Arc::new(external_controllers),
         });
+
+    let composition_task = if let Ok(listen_addr) = std::env::var("O3K_COMPOSITION_LISTEN_ADDR") {
+        let address: std::net::SocketAddr = listen_addr
+            .parse()
+            .map_err(|_| "invalid O3K_COMPOSITION_LISTEN_ADDR")?;
+        let ca = std::env::var("O3K_COMPOSITION_CLIENT_CA")
+            .map_err(|_| "O3K_COMPOSITION_CLIENT_CA is required")?;
+        let certificate = std::env::var("O3K_COMPOSITION_SERVER_CERT")
+            .map_err(|_| "O3K_COMPOSITION_SERVER_CERT is required")?;
+        let key = std::env::var("O3K_COMPOSITION_SERVER_KEY")
+            .map_err(|_| "O3K_COMPOSITION_SERVER_KEY is required")?;
+        let service_id = std::env::var("O3K_COMPOSITION_SERVICE_ID")
+            .map_err(|_| "O3K_COMPOSITION_SERVICE_ID is required")?;
+        let service_principal = std::env::var("O3K_COMPOSITION_SERVICE_PRINCIPAL")
+            .map_err(|_| "O3K_COMPOSITION_SERVICE_PRINCIPAL is required")?;
+        let key_id = std::env::var("O3K_COMPOSITION_DELEGATION_KEY_ID")
+            .map_err(|_| "O3K_COMPOSITION_DELEGATION_KEY_ID is required")?;
+        let key_path = std::env::var("O3K_COMPOSITION_DELEGATION_KEY")
+            .map_err(|_| "O3K_COMPOSITION_DELEGATION_KEY is required")?;
+        let key_bytes = std::fs::read(key_path)?;
+        let key_bytes: [u8; 32] = key_bytes
+            .try_into()
+            .map_err(|_| "delegation verification key must be 32 bytes")?;
+        let verification_key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|_| "invalid delegation verification key")?;
+        let tls = o3k_service_sdk::tls::server(&ca, &certificate, &key)
+            .map_err(|error| format!("composition TLS configuration failed: {error}"))?;
+        let handler = std::sync::Arc::new(native_adapters::CompositionResourceHandler {
+            application: generic_application.clone(),
+            store: native_api_store.clone(),
+            manifests: std::sync::Arc::new(native_manifest_registry.clone()),
+            delegation_keys: std::collections::HashMap::from([(key_id.clone(), verification_key)]),
+            dispatcher: o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(
+                &native_manifest_registry,
+            )
+            .map_err(|_| "failed to build composition resource descriptors")?,
+        });
+        let service = o3k_service_sdk::composition::CompositionServiceAdapter::new(
+            handler,
+            service_id,
+            service_principal,
+        )
+        .with_delegation_keys(
+            "o3k-composition",
+            std::collections::HashMap::from([(key_id, verification_key)]),
+        );
+        info!(address = %address, "generic composition service enabled");
+        Some(tokio::spawn(async move {
+            let mut builder = match tonic::transport::Server::builder().tls_config(tls) {
+                Ok(builder) => builder,
+                Err(error) => {
+                    tracing::error!(%error, "composition server configuration failed");
+                    return;
+                }
+            };
+            if let Err(error) = builder
+                .add_service(service.into_server())
+                .serve(address)
+                .await
+            {
+                tracing::error!(%error, "composition service stopped");
+            }
+        }))
+    } else {
+        None
+    };
 
     let inspect_compute_service = compute_service.clone();
     let volume_attachments_enabled = compute_service.cinder_configured();
@@ -1247,6 +1431,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, o3k_api::router_with_state(state))
         .with_graceful_shutdown(shutdown_signal(shutdown_state))
         .await?;
+    if let Some(task) = composition_task {
+        task.abort();
+        let _ = task.await;
+    }
     if let Some(mut task) = control_task
         && tokio::time::timeout(std::time::Duration::from_secs(5), &mut task)
             .await

@@ -4,11 +4,12 @@
 //! are available. Internal errors are logged via tracing, NOT sent to
 //! the client.
 
-use std::sync::Arc;
 use std::time::SystemTime;
+use std::{collections::BTreeMap, sync::Arc};
 
 use o3k_kernel::{
-    ActionId, AuthorizationRequest, Authorizer, ResourceId, ResourceTarget, ResourceType,
+    ActionId, AuthorizationRequest, Authorizer, Controller, ResourceId, ResourceTarget,
+    ResourceType,
 };
 use o3k_native_api::{
     auth::{NativeCredentialV1, NativeTokenRequestV1, TokenIssuer},
@@ -404,10 +405,11 @@ pub struct ServerReaderAdapter {
 /// canonical mutation service is wired for the resource.
 pub struct GenericResourceApplication {
     pub compute: Arc<o3k_compute::ComputeService>,
+    pub network_service: Arc<o3k_network::NetworkService>,
     pub store: Arc<o3k_store::unified::O3kStore>,
     pub server: Arc<dyn o3k_native_api::compute::ServerReader>,
-    pub volume: Arc<dyn o3k_native_api::volume::VolumeReader>,
     pub network: Arc<dyn o3k_native_api::network::NetworkReader>,
+    pub external_controllers: Arc<BTreeMap<String, Arc<o3k_service_sdk::GrpcControllerAdapter>>>,
 }
 
 fn compute_error(error: o3k_compute::ComputeError) -> ResourceApplicationError {
@@ -432,12 +434,45 @@ fn server_json(item: ServerItem) -> serde_json::Value {
     serde_json::json!({"api_version":"o3k.io/v1","kind":"compute:server","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"name":item.name,"flavor_id":item.flavor_id,"image_id":item.image_id},"status":{"state":item.state}})
 }
 
-fn volume_json(item: VolumeItem) -> serde_json::Value {
-    serde_json::json!({"api_version":"o3k.io/v1","kind":"volume:volume","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"size_bytes":item.size_bytes,"volume_type":item.volume_type},"status":{"state":item.state}})
-}
-
 fn realm_json(item: AddressRealmItem) -> serde_json::Value {
     serde_json::json!({"api_version":"o3k.io/v1","kind":"network:address_realm","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"prefix":item.prefix,"overlapping_prefixes":item.overlapping_prefixes},"status":{"state":item.state}})
+}
+
+fn network_json(item: o3k_store::NetworkRecord) -> serde_json::Value {
+    serde_json::json!({
+        "api_version":"o3k.io/v1",
+        "kind":"network:network",
+        "metadata":{"id":item.id,"owner_scope":item.project_id,"generation":1},
+        "spec":{"name":item.name},
+        "status":{"state":item.status}
+    })
+}
+
+fn generic_volume_json(resource: &o3k_store::ResourceRecord) -> serde_json::Value {
+    let spec = serde_json::from_str::<serde_json::Value>(&resource.desired_state)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    serde_json::json!({
+        "api_version":"o3k.io/v1",
+        "kind":"volume:volume",
+        "metadata":{"id":resource.id,"owner_scope":resource.project_id,"generation":resource.generation},
+        "spec":spec,
+        "status":{"state":resource.observed_state}
+    })
+}
+
+fn generic_external_json(resource: &o3k_store::ResourceRecord) -> serde_json::Value {
+    let spec = serde_json::from_str(&resource.desired_state).unwrap_or(serde_json::Value::Null);
+    serde_json::json!({
+        "api_version": "o3k.io/v1",
+        "kind": resource.kind,
+        "metadata": {
+            "id": resource.id,
+            "owner_scope": resource.project_id,
+            "generation": resource.generation
+        },
+        "spec": spec,
+        "status": {"state": resource.observed_state}
+    })
 }
 
 #[async_trait::async_trait]
@@ -447,6 +482,20 @@ impl ResourceApplication for GenericResourceApplication {
         descriptor: &ResourceDescriptor,
         auth: &o3k_kernel::AuthContext,
     ) -> Result<Vec<serde_json::Value>, ResourceApplicationError> {
+        if self
+            .external_controllers
+            .contains_key(&descriptor.owning_service)
+        {
+            return self
+                .store
+                .list_resources(
+                    auth.effective_scope().id().as_str(),
+                    &descriptor.resource_type.to_string(),
+                )
+                .await
+                .map(|resources| resources.iter().map(generic_external_json).collect())
+                .map_err(|_| ResourceApplicationError::Internal);
+        }
         match descriptor.resource_type.to_string().as_str() {
             "compute:server" => self
                 .server
@@ -460,12 +509,18 @@ impl ResourceApplication for GenericResourceApplication {
                 .await
                 .map(|items| items.into_iter().map(realm_json).collect())
                 .map_err(generic_read_error),
-            "volume:volume" => self
-                .volume
-                .list_volumes(auth)
+            "network:network" => self
+                .network_service
+                .list_networks(auth)
                 .await
-                .map(|items| items.into_iter().map(volume_json).collect())
-                .map_err(generic_read_error),
+                .map(|items| items.into_iter().map(network_json).collect())
+                .map_err(|_| ResourceApplicationError::Internal),
+            "volume:volume" => self
+                .store
+                .list_resources(auth.effective_scope().id().as_str(), "volume")
+                .await
+                .map(|items| items.iter().map(generic_volume_json).collect())
+                .map_err(|_| ResourceApplicationError::Internal),
             _ => Err(ResourceApplicationError::NotFound),
         }
     }
@@ -476,6 +531,25 @@ impl ResourceApplication for GenericResourceApplication {
         auth: &o3k_kernel::AuthContext,
         id: &str,
     ) -> Result<serde_json::Value, ResourceApplicationError> {
+        if self
+            .external_controllers
+            .contains_key(&descriptor.owning_service)
+        {
+            let resource_id = id
+                .parse::<Uuid>()
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            let resource = self
+                .store
+                .get_resource(resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            if resource.kind != descriptor.resource_type.to_string()
+                || resource.project_id != auth.effective_scope().id().as_str()
+            {
+                return Err(ResourceApplicationError::NotFound);
+            }
+            return Ok(generic_external_json(&resource));
+        }
         let id = id
             .parse::<Uuid>()
             .map_err(|_| ResourceApplicationError::NotFound)?;
@@ -492,12 +566,26 @@ impl ResourceApplication for GenericResourceApplication {
                 .await
                 .map(realm_json)
                 .map_err(generic_read_error),
-            "volume:volume" => self
-                .volume
-                .show_volume(auth, id)
+            "network:network" => self
+                .network_service
+                .get_network(auth, id)
                 .await
-                .map(volume_json)
-                .map_err(generic_read_error),
+                .map(network_json)
+                .map_err(|_| ResourceApplicationError::NotFound),
+            "volume:volume" => self
+                .store
+                .get_resource(id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotFound)
+                .and_then(|resource| {
+                    if resource.kind == "volume"
+                        && resource.project_id == auth.effective_scope().id().as_str()
+                    {
+                        Ok(generic_volume_json(&resource))
+                    } else {
+                        Err(ResourceApplicationError::NotFound)
+                    }
+                }),
             _ => Err(ResourceApplicationError::NotFound),
         }
     }
@@ -509,6 +597,346 @@ impl ResourceApplication for GenericResourceApplication {
         request: CreateRequest,
         idempotency_key: Option<&str>,
     ) -> Result<MutationResult, ResourceApplicationError> {
+        if let Some(controller) = self.external_controllers.get(&descriptor.owning_service) {
+            if !controller.health().await.healthy {
+                return Err(ResourceApplicationError::NotReady);
+            }
+            // The descriptor is derived at startup and cannot reflect a later
+            // controller outage.  Re-check readiness at the mutation boundary
+            // so a Ready -> NotReady transition cannot accept new work.
+            let action = descriptor
+                .lifecycle_actions
+                .get(&o3k_native_api::resource::LifecycleOperation::Create)
+                .cloned()
+                .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+            let key = idempotency_key
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
+            let resource_identity = format!(
+                "{}:{}:{}:{}",
+                auth.effective_scope().id(),
+                descriptor.resource_type,
+                action,
+                key
+            );
+            let resource_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, resource_identity.as_bytes());
+            let operation_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("{}:create:{resource_id}", descriptor.resource_type).as_bytes(),
+            );
+            let desired_state = serde_json::to_string(&request.spec)
+                .map_err(|_| ResourceApplicationError::Validation)?;
+            let resource = o3k_store::ResourceRecord {
+                id: resource_id,
+                kind: descriptor.resource_type.to_string(),
+                project_id: auth.effective_scope().id().as_str().to_owned(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state,
+                observed_state: "PROVISIONING".to_owned(),
+                provider_id: None,
+            };
+            let operation = o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id,
+                kind: "lifecycle:create".into(),
+                state: o3k_store::OperationState::Pending,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            };
+            let canonical = o3k_store::CanonicalOperationRecord::from_kernel_operation(
+                &o3k_kernel::Operation::new(
+                    operation_id,
+                    descriptor.owning_service.clone(),
+                    action.clone(),
+                    auth.principal().id().to_string(),
+                    auth.effective_scope().clone(),
+                    descriptor.resource_type.clone(),
+                    Some(o3k_kernel::ResourceId::new_unchecked(
+                        resource_id.to_string(),
+                    )),
+                    Some(auth.request_id().to_owned()),
+                ),
+            )
+            .map_err(|_| ResourceApplicationError::Internal)?;
+            let identity = o3k_store::IdempotencyReservationRequest::from_semantics(
+                auth.effective_scope().id().as_str(),
+                action.to_string(),
+                key,
+                &descriptor.resource_type.to_string(),
+                Some(&resource_id.to_string()),
+                &request.spec,
+                operation_id,
+            )
+            .map_err(|_| ResourceApplicationError::Validation)?;
+            let acceptance = self
+                .store
+                .create_or_replay_canonical_resource_operation(
+                    &resource, &operation, &canonical, &identity, None,
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            let (operation_id, resource_id, replayed) = match acceptance {
+                o3k_store::CanonicalAcceptanceOutcome::Created {
+                    operation_id,
+                    resource_id,
+                } => (operation_id, resource_id, false),
+                o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent {
+                    operation_id,
+                    resource_id,
+                } => (operation_id, resource_id, true),
+                o3k_store::CanonicalAcceptanceOutcome::Conflict => {
+                    return Err(ResourceApplicationError::IdempotencyConflict);
+                }
+            };
+            if replayed {
+                let existing = self
+                    .store
+                    .get_resource(resource_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                // An equivalent replay must not redrive an external mutation
+                // while its canonical operation is still converging.  The
+                // durable reconciler owns retry/recovery; this API call only
+                // returns the existing canonical result.
+                return Ok(MutationResult {
+                    operation_id: operation_id.to_string(),
+                    resource_id: Some(resource_id.to_string()),
+                    complete: existing.observed_state == "READY",
+                    resource: Some(generic_external_json(&existing)),
+                });
+            }
+            let session = controller.session();
+            let context = o3k_kernel::OperationContext {
+                request_id: auth
+                    .request_id()
+                    .parse()
+                    .map_err(|_| ResourceApplicationError::Internal)?,
+                operation_id,
+                action,
+                service_id: descriptor.owning_service.clone(),
+                owner_scope: auth.effective_scope().clone(),
+                session_id: session.session_id,
+                session_generation: session.session_generation,
+                deadline_unix_ms: chrono::Utc::now().timestamp_millis() as u64 + 60_000,
+                replay_identity: format!("parent:{operation_id}"),
+                audit_correlation: format!("parent:{operation_id}"),
+            };
+            let parent_reference = o3k_kernel::ResourceReference {
+                resource_type: descriptor.resource_type.clone(),
+                resource_id: o3k_kernel::ResourceId::new_unchecked(resource_id.to_string()),
+                generation: 1,
+            };
+            let delegation = controller
+                .issue_parent_delegation(
+                    &context,
+                    auth.principal().id().to_string(),
+                    &parent_reference,
+                )
+                .map_err(|_| ResourceApplicationError::Unauthorized)?;
+            let outcome = controller
+                .reconcile(o3k_kernel::ReconcileRequest {
+                    context,
+                    resource: o3k_kernel::ResourceSnapshot {
+                        reference: parent_reference,
+                        desired_spec: request.spec,
+                        known_status: None,
+                        owner_scope: auth.effective_scope().clone(),
+                    },
+                    delegation: Some(delegation),
+                })
+                .await;
+            let complete = matches!(outcome, o3k_kernel::ReconcileOutcome::Succeeded { .. });
+            let observed_state = match &outcome {
+                o3k_kernel::ReconcileOutcome::Succeeded { .. } => "READY",
+                o3k_kernel::ReconcileOutcome::Unknown { .. } => "UNKNOWN",
+                o3k_kernel::ReconcileOutcome::Failed { .. }
+                | o3k_kernel::ReconcileOutcome::Retryable { .. } => "ERROR",
+                o3k_kernel::ReconcileOutcome::Accepted { .. } => "PROVISIONING",
+            };
+            let lifecycle_state = match &outcome {
+                o3k_kernel::ReconcileOutcome::Succeeded { .. } => {
+                    o3k_kernel::OperationState::Succeeded
+                }
+                o3k_kernel::ReconcileOutcome::Unknown { .. } => {
+                    o3k_kernel::OperationState::UnknownOutcome
+                }
+                o3k_kernel::ReconcileOutcome::Retryable { .. } => {
+                    o3k_kernel::OperationState::Retryable
+                }
+                o3k_kernel::ReconcileOutcome::Failed { .. } => o3k_kernel::OperationState::Failed,
+                o3k_kernel::ReconcileOutcome::Accepted { .. } => {
+                    o3k_kernel::OperationState::Running
+                }
+            };
+            let now = chrono::Utc::now().to_rfc3339();
+            let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                lifecycle_state,
+                1,
+                Some(now.clone()),
+                matches!(
+                    lifecycle_state,
+                    o3k_kernel::OperationState::Succeeded | o3k_kernel::OperationState::Failed
+                )
+                .then_some(now),
+                None,
+            )
+            .map_err(|_| ResourceApplicationError::Internal)?;
+            self.store
+                .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            self.store
+                .update_resource(
+                    resource_id,
+                    1,
+                    &resource.desired_state,
+                    observed_state,
+                    if complete { 1 } else { 0 },
+                    None,
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id: operation_id.to_string(),
+                resource_id: Some(resource_id.to_string()),
+                complete,
+                resource: Some(serde_json::json!({
+                    "api_version": "o3k.io/v1",
+                    "kind": descriptor.resource_type.to_string(),
+                    "metadata": {"id": resource_id, "generation": 1},
+                    "spec": resource.desired_state,
+                    "status": {"state": if complete {"READY"} else {"PROVISIONING"}}
+                })),
+            });
+        }
+        if descriptor.resource_type.to_string() == "volume:volume" {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct VolumeSpec {
+                size_bytes: u64,
+                volume_type: String,
+            }
+            let spec: VolumeSpec = serde_json::from_value(request.spec.clone())
+                .map_err(|_| ResourceApplicationError::Validation)?;
+            if spec.size_bytes == 0 || spec.volume_type.trim().is_empty() {
+                return Err(ResourceApplicationError::Validation);
+            }
+            let action = descriptor
+                .lifecycle_actions
+                .get(&o3k_native_api::resource::LifecycleOperation::Create)
+                .cloned()
+                .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+            let key = idempotency_key
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
+            let resource_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, key.as_bytes());
+            let operation_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("volume:create:{resource_id}").as_bytes(),
+            );
+            let desired_state = serde_json::to_string(&request.spec)
+                .map_err(|_| ResourceApplicationError::Validation)?;
+            let resource = o3k_store::ResourceRecord {
+                id: resource_id,
+                kind: "volume".to_owned(),
+                project_id: auth.effective_scope().id().as_str().to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state,
+                observed_state: "AVAILABLE".to_owned(),
+                provider_id: None,
+            };
+            let operation = o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id,
+                kind: "lifecycle:create".to_owned(),
+                state: o3k_store::OperationState::Pending,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            };
+            let canonical = o3k_store::CanonicalOperationRecord::from_kernel_operation(
+                &o3k_kernel::Operation::new(
+                    operation_id,
+                    "volume",
+                    action.clone(),
+                    auth.principal().id().to_string(),
+                    auth.effective_scope().clone(),
+                    o3k_kernel::ResourceType::new_unchecked("volume", "volume"),
+                    Some(o3k_kernel::ResourceId::new_unchecked(
+                        resource_id.to_string(),
+                    )),
+                    Some(auth.request_id().to_owned()),
+                ),
+            )
+            .map_err(|_| ResourceApplicationError::Internal)?;
+            let request_identity = o3k_store::IdempotencyReservationRequest::from_semantics(
+                auth.effective_scope().id().as_str(),
+                action.to_string(),
+                key,
+                "volume:volume",
+                Some(&resource_id.to_string()),
+                &request.spec,
+                operation_id,
+            )
+            .map_err(|_| ResourceApplicationError::Validation)?;
+            let outcome = self
+                .store
+                .create_or_replay_canonical_resource_operation(
+                    &resource,
+                    &operation,
+                    &canonical,
+                    &request_identity,
+                    None,
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            let (operation_id, resource_id) = match outcome {
+                o3k_store::CanonicalAcceptanceOutcome::Created {
+                    operation_id,
+                    resource_id,
+                }
+                | o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent {
+                    operation_id,
+                    resource_id,
+                } => (operation_id, resource_id),
+                o3k_store::CanonicalAcceptanceOutcome::Conflict => {
+                    return Err(ResourceApplicationError::IdempotencyConflict);
+                }
+            };
+            return Ok(MutationResult {
+                operation_id: operation_id.to_string(),
+                resource_id: Some(resource_id.to_string()),
+                complete: true,
+                resource: Some(generic_volume_json(&resource)),
+            });
+        }
+        if descriptor.resource_type.to_string() == "network:network" {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct NetworkSpec {
+                name: String,
+            }
+            let spec: NetworkSpec = serde_json::from_value(request.spec)
+                .map_err(|_| ResourceApplicationError::Validation)?;
+            let network = self
+                .network_service
+                .create_network(auth, spec.name)
+                .await
+                .map_err(|_| ResourceApplicationError::Conflict)?;
+            return Ok(MutationResult {
+                operation_id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("network:create:{}", network.id).as_bytes(),
+                )
+                .to_string(),
+                resource_id: Some(network.id.to_string()),
+                complete: true,
+                resource: Some(network_json(network)),
+            });
+        }
         if descriptor.resource_type.to_string() != "compute:server" {
             return Err(ResourceApplicationError::UnsupportedOperation);
         }
@@ -594,6 +1022,241 @@ impl ResourceApplication for GenericResourceApplication {
         id: &str,
         idempotency_key: Option<&str>,
     ) -> Result<MutationResult, ResourceApplicationError> {
+        if let Some(controller) = self.external_controllers.get(&descriptor.owning_service) {
+            if !controller.health().await.healthy {
+                return Err(ResourceApplicationError::NotReady);
+            }
+            let resource_id = id
+                .parse::<Uuid>()
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            let resource = self
+                .store
+                .get_resource(resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            if resource.kind != descriptor.resource_type.to_string()
+                || resource.project_id != auth.effective_scope().id().as_str()
+            {
+                return Err(ResourceApplicationError::NotFound);
+            }
+            let action = descriptor
+                .lifecycle_actions
+                .get(&o3k_native_api::resource::LifecycleOperation::Delete)
+                .cloned()
+                .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+            let key = idempotency_key
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("native:delete:{id}"));
+            let operation_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("{}:delete:{id}:{key}", descriptor.resource_type).as_bytes(),
+            );
+            let operation = o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id,
+                kind: "lifecycle:delete".into(),
+                state: o3k_store::OperationState::Pending,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            };
+            let canonical = o3k_store::CanonicalOperationRecord::from_kernel_operation(
+                &o3k_kernel::Operation::new(
+                    operation_id,
+                    descriptor.owning_service.clone(),
+                    action.clone(),
+                    auth.principal().id().to_string(),
+                    auth.effective_scope().clone(),
+                    descriptor.resource_type.clone(),
+                    Some(o3k_kernel::ResourceId::new_unchecked(id)),
+                    Some(auth.request_id().to_owned()),
+                ),
+            )
+            .map_err(|_| ResourceApplicationError::Internal)?;
+            let identity = o3k_store::IdempotencyReservationRequest::from_semantics(
+                auth.effective_scope().id().as_str(),
+                action.to_string(),
+                key,
+                &descriptor.resource_type.to_string(),
+                Some(id),
+                &serde_json::json!({"resource_id": id}),
+                operation_id,
+            )
+            .map_err(|_| ResourceApplicationError::Validation)?;
+            if self
+                .store
+                .create_or_replay_canonical_lifecycle_operation(&operation, &canonical, &identity)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?
+                == o3k_store::CanonicalAcceptanceOutcome::Conflict
+            {
+                return Err(ResourceApplicationError::IdempotencyConflict);
+            }
+            let session = controller.session();
+            let context = o3k_kernel::OperationContext {
+                request_id: auth
+                    .request_id()
+                    .parse()
+                    .map_err(|_| ResourceApplicationError::Internal)?,
+                operation_id,
+                action,
+                service_id: descriptor.owning_service.clone(),
+                owner_scope: auth.effective_scope().clone(),
+                session_id: session.session_id,
+                session_generation: session.session_generation,
+                deadline_unix_ms: chrono::Utc::now().timestamp_millis() as u64 + 60_000,
+                replay_identity: format!("delete:{operation_id}"),
+                audit_correlation: format!("delete:{operation_id}"),
+            };
+            let parent_reference = o3k_kernel::ResourceReference {
+                resource_type: descriptor.resource_type.clone(),
+                resource_id: o3k_kernel::ResourceId::new_unchecked(id),
+                generation: resource.generation,
+            };
+            let delegation = controller
+                .issue_parent_delegation(
+                    &context,
+                    auth.principal().id().to_string(),
+                    &parent_reference,
+                )
+                .map_err(|_| ResourceApplicationError::Unauthorized)?;
+            let outcome = controller
+                .delete(o3k_kernel::DeleteRequest {
+                    context,
+                    resource: parent_reference,
+                    owner_scope: auth.effective_scope().clone(),
+                    delegation: Some(delegation),
+                })
+                .await;
+            let complete = matches!(outcome, o3k_kernel::ReconcileOutcome::Succeeded { .. });
+            if complete {
+                self.store
+                    .update_resource(
+                        resource_id,
+                        resource.generation,
+                        "DELETED",
+                        "DELETED",
+                        resource.generation,
+                        None,
+                    )
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+            }
+            return Ok(MutationResult {
+                operation_id: operation_id.to_string(),
+                resource_id: Some(id.to_owned()),
+                complete,
+                resource: None,
+            });
+        }
+        if descriptor.resource_type.to_string() == "volume:volume" {
+            let resource_id = id
+                .parse::<Uuid>()
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            let resource = self
+                .store
+                .get_resource(resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            if resource.kind != "volume"
+                || resource.project_id != auth.effective_scope().id().as_str()
+            {
+                return Err(ResourceApplicationError::NotFound);
+            }
+            let action = descriptor
+                .lifecycle_actions
+                .get(&o3k_native_api::resource::LifecycleOperation::Delete)
+                .cloned()
+                .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+            let key = idempotency_key
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("native:volume-delete:{id}"));
+            let operation_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("volume:delete:{id}:{key}").as_bytes(),
+            );
+            let operation = o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id,
+                kind: "lifecycle:delete".into(),
+                state: o3k_store::OperationState::Pending,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            };
+            let canonical = o3k_store::CanonicalOperationRecord::from_kernel_operation(
+                &o3k_kernel::Operation::new(
+                    operation_id,
+                    "volume",
+                    action.clone(),
+                    auth.principal().id().to_string(),
+                    auth.effective_scope().clone(),
+                    o3k_kernel::ResourceType::new_unchecked("volume", "volume"),
+                    Some(o3k_kernel::ResourceId::new_unchecked(id)),
+                    Some(auth.request_id().to_owned()),
+                ),
+            )
+            .map_err(|_| ResourceApplicationError::Internal)?;
+            let request_identity = o3k_store::IdempotencyReservationRequest::from_semantics(
+                auth.effective_scope().id().as_str(),
+                action.to_string(),
+                key,
+                "volume:volume",
+                Some(id),
+                &serde_json::json!({"resource_id": id}),
+                operation_id,
+            )
+            .map_err(|_| ResourceApplicationError::Validation)?;
+            if self
+                .store
+                .create_or_replay_canonical_lifecycle_operation(
+                    &operation,
+                    &canonical,
+                    &request_identity,
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?
+                == o3k_store::CanonicalAcceptanceOutcome::Conflict
+            {
+                return Err(ResourceApplicationError::IdempotencyConflict);
+            }
+            self.store
+                .update_resource(
+                    resource_id,
+                    resource.generation,
+                    "DELETED",
+                    "DELETED",
+                    resource.generation,
+                    None,
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id: operation_id.to_string(),
+                resource_id: Some(id.to_owned()),
+                complete: true,
+                resource: None,
+            });
+        }
+        if descriptor.resource_type.to_string() == "network:network" {
+            let resource_id = id
+                .parse::<Uuid>()
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            self.network_service
+                .delete_network(auth, resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            return Ok(MutationResult {
+                operation_id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("network:delete:{id}").as_bytes(),
+                )
+                .to_string(),
+                resource_id: Some(id.to_owned()),
+                complete: true,
+                resource: None,
+            });
+        }
         if descriptor.resource_type.to_string() != "compute:server" {
             return Err(ResourceApplicationError::UnsupportedOperation);
         }
@@ -643,6 +1306,564 @@ impl ResourceApplication for GenericResourceApplication {
             ),
             resource: None,
         })
+    }
+}
+
+/// Generic O3K-side composition handler. It is intentionally unaware of the
+/// composing service's business vocabulary: the manifest registry supplies
+/// dependency authority and ResourceApplication supplies child lifecycle.
+pub struct CompositionResourceHandler {
+    pub application: Arc<dyn ResourceApplication>,
+    pub store: Arc<o3k_store::unified::O3kStore>,
+    pub manifests: Arc<o3k_kernel::ManifestRegistry>,
+    pub delegation_keys: std::collections::HashMap<String, ed25519_dalek::VerifyingKey>,
+    pub dispatcher: o3k_native_api::resource::ResourceDispatcher,
+}
+
+impl CompositionResourceHandler {
+    async fn validate_relationship(
+        &self,
+        parent_id: Uuid,
+        request: &o3k_service_sdk::composition::ChildResourceRequest,
+        child: &o3k_kernel::ResourceReference,
+        require_exclusive: bool,
+    ) -> Result<o3k_store::ResourceRelationshipRecord, o3k_service_sdk::composition::CompositionError>
+    {
+        let relationship = self
+            .store
+            .get_relationship(parent_id, &request.slot)
+            .await
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        let child_id = child
+            .resource_id
+            .as_str()
+            .parse::<Uuid>()
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if relationship.parent_resource_type != request.parent.resource_type.to_string()
+            || relationship.expected_child_resource_type != child.resource_type.to_string()
+            || relationship.child_resource_id != Some(child_id)
+            || relationship.parent_operation_id != request.parent_operation_id
+            || relationship.owner_scope != request.owner_scope.id().as_str()
+            || matches!(relationship.state.as_str(), "reserved" | "deleted")
+            || (require_exclusive && relationship.ownership != "exclusive")
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        if let Some(child_operation_id) = request.child_operation_id
+            && relationship.child_operation_id != Some(child_operation_id)
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        Ok(relationship)
+    }
+
+    async fn validate_parent(
+        &self,
+        request: &o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<Uuid, o3k_service_sdk::composition::CompositionError> {
+        let parent_id: Uuid = request
+            .parent
+            .resource_id
+            .as_str()
+            .parse()
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        let parent = self
+            .store
+            .get_resource(parent_id)
+            .await
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if parent.kind != request.parent.resource_type.to_string()
+            || parent.project_id != request.owner_scope.id().as_str()
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        let operation = self
+            .store
+            .get_operation(request.parent_operation_id)
+            .await
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        let canonical = self
+            .store
+            .get_canonical_operation(request.parent_operation_id)
+            .await
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if operation.resource_id != parent_id
+            || canonical.resource_id.as_deref() != Some(parent_id.to_string().as_str())
+            || canonical.service != request.context.service_id
+            || canonical.action != request.context.action.to_string()
+            || canonical.owner_scope != request.owner_scope.id().as_str()
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        Ok(parent_id)
+    }
+
+    fn authenticate(
+        &self,
+        request: &o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<o3k_kernel::AuthContext, o3k_service_sdk::composition::CompositionError> {
+        let claims = o3k_service_sdk::verify_wire_delegation(
+            &request.delegation,
+            &self.delegation_keys,
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?
+                .as_millis() as u64,
+        )
+        .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if claims.original_actor.trim().is_empty()
+            || claims.owner_scope != request.owner_scope.to_string()
+            || claims.operation_id != request.parent_operation_id
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        let (kind, id) = claims
+            .owner_scope
+            .split_once(':')
+            .ok_or(o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if kind != "project" {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        let scope = o3k_kernel::OwnershipScope::project(
+            o3k_kernel::ScopeId::new(id)
+                .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?,
+            None,
+            None,
+        );
+        let request_id = claims.request_id.to_string();
+        Ok(o3k_kernel::AuthContext::new(
+            o3k_kernel::Principal::User(o3k_kernel::UserPrincipal::new(
+                o3k_kernel::PrincipalId::new(claims.original_actor.clone())
+                    .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?,
+                claims.original_actor,
+                None,
+            )),
+            scope,
+            Vec::new(),
+            claims.issued_at_unix_ms / 1000,
+            claims.expires_at_unix_ms / 1000,
+            request.context.audit_correlation.clone(),
+            request_id,
+            Some(o3k_kernel::ServicePrincipal::new(
+                o3k_kernel::PrincipalId::new(request.service_principal.clone())
+                    .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?,
+                request.service_principal.clone(),
+                request.context.service_id.clone(),
+            )),
+        ))
+    }
+
+    fn dependency_allowed(
+        &self,
+        request: &o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<(), o3k_service_sdk::composition::CompositionError> {
+        let Some(manifest) = self.manifests.get(&request.context.service_id) else {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        };
+        let expected_principal = manifest
+            .controller
+            .as_ref()
+            .and_then(|controller| controller.service_principal.as_deref())
+            .ok_or(o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if expected_principal != request.service_principal
+            || request.parent.resource_type.namespace() != manifest.namespace
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        let resource = request.resource_type.to_string();
+        let action = request.action.to_string();
+        let declared = manifest.dependencies.iter().any(|dependency| {
+            (dependency.kind == o3k_kernel::manifest::DependencyKind::ResourceType
+                && dependency.name == resource)
+                || (dependency.kind == o3k_kernel::manifest::DependencyKind::Action
+                    && dependency.name == action)
+        });
+        if declared && self.manifests.has_action(&request.action) {
+            Ok(())
+        } else {
+            Err(o3k_service_sdk::composition::CompositionError::Unauthorized)
+        }
+    }
+
+    fn relationship_record(
+        &self,
+        request: &o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<o3k_store::ResourceRelationshipRecord, o3k_service_sdk::composition::CompositionError>
+    {
+        Ok(o3k_store::ResourceRelationshipRecord {
+            parent_resource_id: request
+                .parent
+                .resource_id
+                .as_str()
+                .parse()
+                .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?,
+            parent_resource_type: request.parent.resource_type.to_string(),
+            slot: request.slot.clone(),
+            expected_child_resource_type: request.resource_type.to_string(),
+            child_resource_id: request
+                .child
+                .as_ref()
+                .and_then(|child| child.resource_id.as_str().parse().ok()),
+            ownership: "exclusive".to_owned(),
+            parent_operation_id: request.parent_operation_id,
+            child_operation_id: request.child_operation_id,
+            owner_scope: request.owner_scope.id().as_str().to_owned(),
+            state: "reserved".to_owned(),
+            fingerprint: request.context.replay_identity.clone(),
+        })
+    }
+
+    fn descriptor_for(
+        &self,
+        resource_type: &o3k_kernel::ResourceType,
+    ) -> Result<
+        o3k_native_api::resource::ResourceDescriptor,
+        o3k_service_sdk::composition::CompositionError,
+    > {
+        self.dispatcher
+            .resolve_resource_type(resource_type)
+            .cloned()
+            .ok_or_else(|| {
+                o3k_service_sdk::composition::CompositionError::Failed(format!(
+                    "child resource is not registered: {resource_type}"
+                ))
+            })
+    }
+}
+
+#[async_trait::async_trait]
+impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHandler {
+    async fn create_child(
+        &self,
+        request: o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<
+        o3k_service_sdk::composition::ChildResourceReceipt,
+        o3k_service_sdk::composition::CompositionError,
+    > {
+        self.dependency_allowed(&request).map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed(format!(
+                "dependency denied for {}",
+                request.action
+            ))
+        })?;
+        let auth = self.authenticate(&request).map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed("delegation denied".into())
+        })?;
+        let parent_id = self.validate_parent(&request).await.map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed("parent denied".into())
+        })?;
+        let descriptor = self.descriptor_for(&request.resource_type)?;
+        let expected_action = descriptor
+            .lifecycle_actions
+            .get(&o3k_native_api::resource::LifecycleOperation::Create)
+            .ok_or(o3k_service_sdk::composition::CompositionError::Failed(
+                "child create operation is not declared".into(),
+            ))?;
+        if expected_action != &request.action {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        let relationship = self
+            .store
+            .reserve_relationship(&self.relationship_record(&request)?)
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed(
+                    "relationship reservation failed".into(),
+                )
+            })?;
+        // A durable relationship intent is not an empty slot. If a previous
+        // create has an operation identity, or the slot is already uncertain
+        // or deleting, recovery must observe the canonical operation before
+        // another mutation can be attempted.
+        if relationship.child_resource_id.is_none()
+            && (relationship.child_operation_id.is_some()
+                || matches!(relationship.state.as_str(), "unknown" | "deleting"))
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::UnknownOutcome);
+        }
+        if let (Some(child), Some(operation_id)) = (
+            relationship.child_resource_id,
+            relationship.child_operation_id,
+        ) {
+            return Ok(o3k_service_sdk::composition::ChildResourceReceipt {
+                resource: o3k_kernel::ResourceReference {
+                    resource_type: request.resource_type,
+                    resource_id: o3k_kernel::ResourceId::new(child.to_string()).map_err(|_| {
+                        o3k_service_sdk::composition::CompositionError::Failed(
+                            "invalid child id".into(),
+                        )
+                    })?,
+                    generation: 1,
+                },
+                operation_id,
+                owner_scope: request.owner_scope,
+                ownership: o3k_kernel::RelationshipOwnership::Exclusive,
+            });
+        }
+        let result = self
+            .application
+            .create(
+                &descriptor,
+                &auth,
+                o3k_native_api::resource::CreateRequest {
+                    api_version: Some("o3k.io/v1".into()),
+                    kind: Some(request.resource_type.to_string()),
+                    spec: request.desired_spec,
+                },
+                Some(&request.idempotency_key),
+            )
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed("child create failed".into())
+            })?;
+        let child_id = result
+            .resource_id
+            .ok_or(o3k_service_sdk::composition::CompositionError::UnknownOutcome)?
+            .parse()
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::UnknownOutcome)?;
+        let child_operation_id = result
+            .operation_id
+            .parse()
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::UnknownOutcome)?;
+        let bound = self
+            .store
+            .bind_relationship(parent_id, &request.slot, child_id, child_operation_id)
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed(
+                    "relationship bind failed".into(),
+                )
+            })?;
+        Ok(o3k_service_sdk::composition::ChildResourceReceipt {
+            resource: o3k_kernel::ResourceReference {
+                resource_type: request.resource_type,
+                resource_id: o3k_kernel::ResourceId::new(child_id.to_string()).map_err(|_| {
+                    o3k_service_sdk::composition::CompositionError::Failed(
+                        "invalid child id".into(),
+                    )
+                })?,
+                generation: 1,
+            },
+            operation_id: bound.child_operation_id.unwrap_or(child_operation_id),
+            owner_scope: request.owner_scope,
+            ownership: o3k_kernel::RelationshipOwnership::Exclusive,
+        })
+    }
+
+    async fn observe_child(
+        &self,
+        request: o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<serde_json::Value, o3k_service_sdk::composition::CompositionError> {
+        let auth = self.authenticate(&request)?;
+        let parent_id = self.validate_parent(&request).await?;
+        let child =
+            request
+                .child
+                .clone()
+                .ok_or(o3k_service_sdk::composition::CompositionError::Failed(
+                    "missing child reference".into(),
+                ))?;
+        let descriptor = self.descriptor_for(&child.resource_type)?;
+        let expected_action = descriptor
+            .lifecycle_actions
+            .get(&o3k_native_api::resource::LifecycleOperation::Show)
+            .ok_or(o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        let manifest = self
+            .manifests
+            .get(&request.context.service_id)
+            .ok_or(o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if !manifest.dependencies.iter().any(|dependency| {
+            dependency.kind == o3k_kernel::manifest::DependencyKind::Action
+                && dependency.name == expected_action.to_string()
+        }) {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        self.validate_relationship(parent_id, &request, &child, false)
+            .await?;
+        self.application
+            .show(&descriptor, &auth, child.resource_id.as_str())
+            .await
+            .map_err(|error| {
+                o3k_service_sdk::composition::CompositionError::Failed(format!(
+                    "child observation failed for {} {}: {error:?}",
+                    child.resource_type, child.resource_id
+                ))
+            })
+    }
+
+    async fn delete_child(
+        &self,
+        request: o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<
+        o3k_service_sdk::composition::ChildResourceReceipt,
+        o3k_service_sdk::composition::CompositionError,
+    > {
+        self.dependency_allowed(&request).map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed(format!(
+                "delete dependency denied for {}",
+                request.action
+            ))
+        })?;
+        let auth = self.authenticate(&request).map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed(
+                "delete delegation denied".into(),
+            )
+        })?;
+        let parent_id = self.validate_parent(&request).await.map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed("delete parent denied".into())
+        })?;
+        let child = request.child.clone().ok_or_else(|| {
+            o3k_service_sdk::composition::CompositionError::Failed("delete child missing".into())
+        })?;
+        self.validate_relationship(parent_id, &request, &child, true)
+            .await?;
+        let descriptor = self.descriptor_for(&child.resource_type)?;
+        let expected_action = descriptor
+            .lifecycle_actions
+            .get(&o3k_native_api::resource::LifecycleOperation::Delete)
+            .ok_or(o3k_service_sdk::composition::CompositionError::Failed(
+                "child delete operation is not declared".into(),
+            ))?;
+        if expected_action != &request.action {
+            return Err(o3k_service_sdk::composition::CompositionError::Failed(
+                format!(
+                    "delete action mismatch expected={} actual={}",
+                    expected_action, request.action
+                ),
+            ));
+        }
+        self.store
+            .set_relationship_state(parent_id, &request.slot, "deleting")
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed(
+                    "relationship state update failed".into(),
+                )
+            })?;
+        let result = self
+            .application
+            .delete(
+                &descriptor,
+                &auth,
+                child.resource_id.as_str(),
+                Some(&request.idempotency_key),
+            )
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed("child delete failed".into())
+            })?;
+        if !result.complete {
+            // An accepted child delete is not proof of absence.  A read that
+            // proves NotFound is the only safe fast path; every other result
+            // remains recoverable as unknown.
+            match self
+                .application
+                .show(&descriptor, &auth, child.resource_id.as_str())
+                .await
+            {
+                Err(ResourceApplicationError::NotFound) => {}
+                _ => {
+                    self.store
+                        .set_relationship_state(parent_id, &request.slot, "unknown")
+                        .await
+                        .map_err(|_| {
+                            o3k_service_sdk::composition::CompositionError::Failed(
+                                "relationship state update failed".into(),
+                            )
+                        })?;
+                    return Err(o3k_service_sdk::composition::CompositionError::UnknownOutcome);
+                }
+            }
+        }
+        self.store
+            .set_relationship_state(parent_id, &request.slot, "deleted")
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed(
+                    "relationship state update failed".into(),
+                )
+            })?;
+        Ok(o3k_service_sdk::composition::ChildResourceReceipt {
+            resource: child,
+            operation_id: result
+                .operation_id
+                .parse()
+                .map_err(|_| o3k_service_sdk::composition::CompositionError::UnknownOutcome)?,
+            owner_scope: request.owner_scope,
+            ownership: o3k_kernel::RelationshipOwnership::Exclusive,
+        })
+    }
+
+    async fn list_relationships(
+        &self,
+        request: o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<
+        Vec<o3k_service_sdk::composition::RelationshipView>,
+        o3k_service_sdk::composition::CompositionError,
+    > {
+        self.authenticate(&request)?;
+        self.validate_parent(&request).await?;
+        let parent = request
+            .parent
+            .resource_id
+            .as_str()
+            .parse()
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        let records = self.store.list_relationships(parent).await.map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed(
+                "relationship listing failed".into(),
+            )
+        })?;
+        records
+            .into_iter()
+            .map(|record| {
+                let (namespace, name) = record
+                    .expected_child_resource_type
+                    .split_once(':')
+                    .ok_or_else(|| {
+                        o3k_service_sdk::composition::CompositionError::Failed(
+                            "invalid relationship resource type".into(),
+                        )
+                    })?;
+                let resource_type =
+                    o3k_kernel::ResourceType::new(namespace, name).map_err(|_| {
+                        o3k_service_sdk::composition::CompositionError::Failed(
+                            "invalid relationship resource type".into(),
+                        )
+                    })?;
+                let resource = record
+                    .child_resource_id
+                    .map(|id| {
+                        Ok::<_, o3k_service_sdk::composition::CompositionError>(
+                            o3k_kernel::ResourceReference {
+                                resource_type: resource_type.clone(),
+                                resource_id: o3k_kernel::ResourceId::new(id.to_string()).map_err(
+                                    |_| {
+                                        o3k_service_sdk::composition::CompositionError::Failed(
+                                            "invalid relationship resource id".into(),
+                                        )
+                                    },
+                                )?,
+                                generation: 1,
+                            },
+                        )
+                    })
+                    .transpose()?;
+                Ok(o3k_service_sdk::composition::RelationshipView {
+                    slot: record.slot,
+                    resource,
+                    resource_type,
+                    ownership: if record.ownership == "referenced" {
+                        o3k_kernel::RelationshipOwnership::Referenced
+                    } else {
+                        o3k_kernel::RelationshipOwnership::Exclusive
+                    },
+                    state: record.state,
+                    parent_operation_id: record.parent_operation_id,
+                    child_operation_id: record.child_operation_id,
+                })
+            })
+            .collect()
     }
 }
 
@@ -1206,21 +2427,27 @@ mod native_compute_tests {
             store.clone(),
             provider.clone(),
         ));
+        let network_service = Arc::new(
+            o3k_network::NetworkService::open(
+                std::env::temp_dir().join(format!("o3k-native-test-{}", Uuid::new_v4())),
+                store.clone(),
+            )
+            .await
+            .expect("network service"),
+        );
 
         let app = GenericResourceApplication {
             compute: compute.clone(),
+            network_service,
             store: store.clone(),
             server: Arc::new(ServerReaderAdapter {
                 service: compute.clone(),
-            }),
-            volume: Arc::new(VolumeReaderAdapter {
-                store: store.clone(),
-                authorizer: Arc::new(o3k_kernel::StaticAuthorizer::empty()),
             }),
             network: Arc::new(NetworkReaderAdapter {
                 store: store.clone(),
                 authorizer: Arc::new(o3k_kernel::StaticAuthorizer::empty()),
             }),
+            external_controllers: Arc::new(BTreeMap::new()),
         };
 
         let native = o3k_native_api::NativeApiState::new(

@@ -40,7 +40,8 @@ pub use controller::{
     Controller, ControllerCapabilities, ControllerFailure, ControllerHealth,
     ControllerRegistration, ControllerSession, ControllerState, DelegationContext, DeleteRequest,
     FailureCategory, Observation, ObserveOutcome, ObserveRequest, OperationContext,
-    ProtocolVersion, ReconcileOutcome, ReconcileRequest, ResourceReference, ResourceSnapshot,
+    ProtocolVersion, ReconcileOutcome, ReconcileRequest, RelationshipOwnership, ResourceReference,
+    ResourceRelationship, ResourceSnapshot,
 };
 pub use envelope::{ResourceEnvelope, ResourceMeta};
 pub use error::KernelError;

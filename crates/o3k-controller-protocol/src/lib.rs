@@ -3,6 +3,10 @@ pub mod proto {
     tonic::include_proto!("o3k.controller.v1");
 }
 
+pub mod composition {
+    tonic::include_proto!("o3k.composition.v1");
+}
+
 pub mod conversion;
 
 pub const PROTOCOL_VERSION: (u16, u16) = (1, 0);
@@ -49,5 +53,16 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn composition_wire_service_is_versioned_and_generic() {
+        let request = composition::ChildRequest {
+            lifecycle: "create".into(),
+            resource_type: "compute:server".into(),
+            ..Default::default()
+        };
+        assert_eq!(request.lifecycle, "create");
+        assert_eq!(request.resource_type, "compute:server");
     }
 }

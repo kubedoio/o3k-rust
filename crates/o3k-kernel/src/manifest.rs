@@ -1208,6 +1208,44 @@ impl ManifestRegistry {
         Self::default()
     }
 
+    /// Load and register one accepted v1 manifest from a JSON artifact.
+    /// Runtime callers use this generic path for every external service; the
+    /// registry never dispatches on a service-specific namespace.
+    pub fn register_json_file(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(), ManifestError> {
+        let bytes =
+            std::fs::read(path).map_err(|_| ManifestError::InvalidField("manifest file"))?;
+        let wire: ServiceManifestV1 = serde_json::from_slice(&bytes)
+            .map_err(|_| ManifestError::InvalidField("manifest JSON"))?;
+        self.register(wire.try_into()?)
+    }
+
+    /// Load all JSON files in a configured manifest directory. Files are
+    /// sorted to make registration and conflict diagnostics deterministic.
+    pub fn register_json_directory(
+        &mut self,
+        directory: impl AsRef<std::path::Path>,
+    ) -> Result<usize, ManifestError> {
+        let mut paths = std::fs::read_dir(directory)
+            .map_err(|_| ManifestError::InvalidField("manifest directory"))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|_| ManifestError::InvalidField("manifest directory entry"))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in &paths {
+            self.register_json_file(path)?;
+        }
+        Ok(paths.len())
+    }
+
     /// Registers or updates a controller session for a registered service.
     ///
     /// The controller starts in `Declared` state. Call `update_controller_health`
@@ -1620,25 +1658,55 @@ impl ManifestRegistry {
                 namespace: "network".to_owned(),
                 service_version: "0.4.0".to_owned(),
                 ownership: ServiceOwnership::O3kImplemented,
-                resource_types: vec![RegisteredResourceType {
-                    resource_type: ResourceType::new_unchecked("network", "address_realm"),
-                    schema_version: "v1".to_owned(),
-                    collection: Some("address-realms".to_owned()),
-                    scope: ResourceScope::Tenant,
-                    operations: std::collections::HashMap::from([
-                        (
-                            "list".to_owned(),
-                            ActionId::new_unchecked("network", "ListAddressRealms"),
-                        ),
-                        (
-                            "show".to_owned(),
-                            ActionId::new_unchecked("network", "ReadAddressRealm"),
-                        ),
-                    ]),
-                }],
+                resource_types: vec![
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("network", "address_realm"),
+                        schema_version: "v1".to_owned(),
+                        collection: Some("address-realms".to_owned()),
+                        scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".to_owned(),
+                                ActionId::new_unchecked("network", "ListAddressRealms"),
+                            ),
+                            (
+                                "show".to_owned(),
+                                ActionId::new_unchecked("network", "ReadAddressRealm"),
+                            ),
+                        ]),
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("network", "network"),
+                        schema_version: "v1".to_owned(),
+                        collection: Some("networks".to_owned()),
+                        scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".to_owned(),
+                                ActionId::new_unchecked("network", "ListNetworks"),
+                            ),
+                            (
+                                "show".to_owned(),
+                                ActionId::new_unchecked("network", "ReadNetwork"),
+                            ),
+                            (
+                                "create".to_owned(),
+                                ActionId::new_unchecked("network", "CreateNetwork"),
+                            ),
+                            (
+                                "delete".to_owned(),
+                                ActionId::new_unchecked("network", "DeleteNetwork"),
+                            ),
+                        ]),
+                    },
+                ],
                 actions: vec![
                     "network:ListAddressRealms".to_owned(),
                     "network:ReadAddressRealm".to_owned(),
+                    "network:ListNetworks".to_owned(),
+                    "network:CreateNetwork".to_owned(),
+                    "network:ReadNetwork".to_owned(),
+                    "network:DeleteNetwork".to_owned(),
                 ],
                 capabilities: vec![],
                 dependencies: vec![],
@@ -1673,11 +1741,21 @@ impl ManifestRegistry {
                             "show".to_owned(),
                             ActionId::new_unchecked("volume", "ReadVolume"),
                         ),
+                        (
+                            "create".to_owned(),
+                            ActionId::new_unchecked("volume", "CreateVolume"),
+                        ),
+                        (
+                            "delete".to_owned(),
+                            ActionId::new_unchecked("volume", "DeleteVolume"),
+                        ),
                     ]),
                 }],
                 actions: vec![
                     "volume:ListVolumes".to_owned(),
+                    "volume:CreateVolume".to_owned(),
                     "volume:ReadVolume".to_owned(),
+                    "volume:DeleteVolume".to_owned(),
                 ],
                 capabilities: vec![],
                 dependencies: vec![],
@@ -1735,6 +1813,45 @@ impl ManifestRegistry {
             }
         }
         types
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod external_loader_tests {
+    use super::*;
+
+    #[test]
+    fn external_manifest_loader_accepts_synthetic_service_without_dispatch_code() {
+        let path =
+            std::env::temp_dir().join(format!("o3k-synthetic-{}.json", uuid::Uuid::new_v4()));
+        let manifest = r#"{
+          "manifest_version":"o3k.io/service-manifest/v1",
+          "service_id":"synthetic-example",
+          "namespace":"synthetic",
+          "service_version":"1.0.0",
+          "ownership_mode":"external-controller",
+          "resource_types":[{"type":"synthetic:item","schema_version":"v1","scope":"tenant","operations":{"show":"synthetic:ReadItem","create":"synthetic:CreateItem","delete":"synthetic:DeleteItem"}}],
+          "actions":["synthetic:ReadItem","synthetic:CreateItem","synthetic:DeleteItem"],
+          "controller":{"mode":"external","protocol":"grpc","protocol_version":"1.0","service_principal":"synthetic-controller"}
+        }"#;
+        std::fs::write(&path, manifest).unwrap();
+        let mut registry = ManifestRegistry::new();
+        registry.register_json_file(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(registry.has_resource_type(&ResourceType::new("synthetic", "item").unwrap()));
+        assert!(registry.has_action(&ActionId::new("synthetic", "CreateItem").unwrap()));
+    }
+
+    #[test]
+    fn external_manifest_directory_loader_fails_closed_on_bad_json() {
+        let directory =
+            std::env::temp_dir().join(format!("o3k-manifests-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("bad.json"), b"not-json").unwrap();
+        let mut registry = ManifestRegistry::new();
+        assert!(registry.register_json_directory(&directory).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
 

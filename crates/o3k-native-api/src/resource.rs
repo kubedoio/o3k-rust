@@ -135,8 +135,32 @@ impl ResourceDispatcher {
         self.descriptors
             .get(&(namespace.to_owned(), collection.to_owned()))
     }
+
+    #[must_use]
+    pub fn resolve_resource_type(
+        &self,
+        resource_type: &ResourceType,
+    ) -> Option<&ResourceDescriptor> {
+        self.descriptors
+            .values()
+            .find(|descriptor| descriptor.resource_type == *resource_type)
+    }
     pub fn all(&self) -> impl Iterator<Item = &ResourceDescriptor> {
         self.descriptors.values()
+    }
+
+    /// Resolve an authoritative lifecycle action from the manifest-derived
+    /// descriptor. Callers must not construct action names from resource
+    /// names; an undeclared lifecycle operation is unsupported.
+    #[must_use]
+    pub fn lifecycle_action(
+        &self,
+        namespace: &str,
+        collection: &str,
+        operation: LifecycleOperation,
+    ) -> Option<&ActionId> {
+        self.resolve(namespace, collection)
+            .and_then(|descriptor| descriptor.lifecycle_actions.get(&operation))
     }
 }
 
@@ -335,6 +359,25 @@ mod tests {
             "endpoint"
         );
         assert!(registry.resolve("unknown", "servers").is_none());
+    }
+
+    #[test]
+    fn lifecycle_actions_are_descriptor_authoritative() {
+        let mut registry = ResourceDispatcher::default();
+        let mut value = descriptor("network", "network_intent", "network-intents");
+        value.lifecycle_actions.remove(&LifecycleOperation::Delete);
+        registry.register(value).unwrap();
+        assert_eq!(
+            registry
+                .lifecycle_action("network", "network-intents", LifecycleOperation::Create)
+                .map(ToString::to_string),
+            Some("network:Create".to_owned())
+        );
+        assert!(
+            registry
+                .lifecycle_action("network", "network-intents", LifecycleOperation::Delete)
+                .is_none()
+        );
     }
 
     #[test]

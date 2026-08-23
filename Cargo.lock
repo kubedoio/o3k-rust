@@ -1666,11 +1666,15 @@ name = "o3k-database-example"
 version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
+ "ed25519-dalek",
+ "o3k-controller-protocol",
  "o3k-kernel",
+ "o3k-service-sdk",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tonic",
  "uuid",
 ]
 
@@ -1894,6 +1898,7 @@ dependencies = [
 name = "o3k-service-sdk"
 version = "0.4.0-alpha.1"
 dependencies = [
+ "async-trait",
  "ed25519-dalek",
  "o3k-controller-protocol",
  "o3k-kernel",
@@ -1950,6 +1955,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "ed25519-dalek",
  "o3k-api",
  "o3k-cellhv",
  "o3k-cinder",
@@ -1958,6 +1964,7 @@ dependencies = [
  "o3k-config",
  "o3k-config-drive",
  "o3k-console",
+ "o3k-database-example",
  "o3k-domain",
  "o3k-identity",
  "o3k-image",
@@ -1970,10 +1977,13 @@ dependencies = [
  "o3k-provider-contract",
  "o3k-reconciler",
  "o3k-scheduler",
+ "o3k-service-sdk",
  "o3k-store",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
+ "tonic",
  "tower",
  "tracing",
  "tracing-subscriber",
