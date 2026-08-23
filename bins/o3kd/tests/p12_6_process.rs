@@ -807,3 +807,461 @@ async fn p12_6_relationship_recovery_reopens_store_and_serializes_process_race()
     let _ = std::fs::remove_file(path);
     Ok(())
 }
+
+/// This is deliberately scoped as two runtime lifetimes.  The first helper
+/// returns only durable identifiers; every application/store/registry/server
+/// value is dropped before the second helper opens the SQLite file.
+#[tokio::test]
+async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path =
+        std::env::temp_dir().join(format!("o3k-p12-6-runtime-{}.sqlite", uuid::Uuid::new_v4()));
+    let parent = uuid::Uuid::new_v4();
+    let parent_operation = uuid::Uuid::new_v4();
+    let child_operation = uuid::Uuid::new_v4();
+    let relationship = ResourceRelationshipRecord {
+        parent_resource_id: parent,
+        parent_resource_type: "database:instance".into(),
+        slot: "network-primary".into(),
+        expected_child_resource_type: "network:network".into(),
+        child_resource_id: Some(uuid::Uuid::new_v4()),
+        ownership: "exclusive".into(),
+        parent_operation_id: parent_operation,
+        child_operation_id: Some(child_operation),
+        owner_scope: "project:runtime-recovery".into(),
+        state: "bound".into(),
+        fingerprint: "runtime-recovery-network".into(),
+    };
+
+    // Runtime A owns no state in this scope after the block exits.  The file
+    // and static manifest fixture are the only inputs intentionally carried
+    // to runtime B.
+    let durable = {
+        let store = Arc::new(O3kStore::connect_sqlite_file(&path).await?);
+        let parent_type = o3k_kernel::ResourceType::new("database", "instance")?;
+        let parent_action = ActionId::new("database", "CreateInstance")?;
+        let parent_scope =
+            OwnershipScope::project(ScopeId::new("project-runtime-recovery")?, None, None);
+        let canonical =
+            CanonicalOperationRecord::from_kernel_operation(&o3k_kernel::Operation::new(
+                parent_operation,
+                "database-example",
+                parent_action.clone(),
+                "user-runtime-recovery",
+                parent_scope.clone(),
+                parent_type.clone(),
+                Some(o3k_kernel::ResourceId::new(parent.to_string())?),
+                Some("runtime-recovery-request".into()),
+            ))?;
+        let operation = OperationRecord {
+            id: parent_operation,
+            resource_id: parent,
+            kind: "lifecycle:create".into(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        let identity = IdempotencyReservationRequest::from_semantics(
+            "project-runtime-recovery",
+            parent_action.to_string(),
+            "runtime-recovery-create",
+            &parent_type.to_string(),
+            Some(&parent.to_string()),
+            &serde_json::json!({"engine":"test-engine","version":"1","storage_gb":1}),
+            parent_operation,
+        )?;
+        store
+            .create_or_replay_canonical_resource_operation(
+                &ResourceRecord {
+                    id: parent,
+                    kind: "database:instance".into(),
+                    project_id: "project-runtime-recovery".into(),
+                    generation: 1,
+                    observed_generation: 0,
+                    desired_state:
+                        serde_json::json!({"engine":"test-engine","version":"1","storage_gb":1})
+                            .to_string(),
+                    observed_state: "PROVISIONING".into(),
+                    provider_id: None,
+                },
+                &operation,
+                &canonical,
+                &identity,
+                None,
+            )
+            .await?;
+        store.reserve_relationship(&relationship).await?;
+        let child_id = relationship
+            .child_resource_id
+            .ok_or("fixture child id missing")?;
+        store
+            .bind_relationship(parent, "network-primary", child_id, child_operation)
+            .await?;
+        for (slot, kind, child_operation_id) in [
+            ("volume-data", "volume:volume", uuid::Uuid::new_v4()),
+            ("compute-primary", "compute:server", uuid::Uuid::new_v4()),
+        ] {
+            let child_id = uuid::Uuid::new_v4();
+            store
+                .reserve_relationship(&ResourceRelationshipRecord {
+                    parent_resource_id: parent,
+                    parent_resource_type: "database:instance".into(),
+                    slot: slot.into(),
+                    expected_child_resource_type: kind.into(),
+                    child_resource_id: Some(child_id),
+                    ownership: "exclusive".into(),
+                    parent_operation_id: parent_operation,
+                    child_operation_id: Some(child_operation_id),
+                    owner_scope: "project:runtime-recovery".into(),
+                    state: "reserved".into(),
+                    fingerprint: format!("runtime-recovery-{slot}"),
+                })
+                .await?;
+            store
+                .bind_relationship(parent, slot, child_id, child_operation_id)
+                .await?;
+        }
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/o3k-database-example/service-manifest.json");
+        let mut registry = ManifestRegistry::new();
+        registry.seed_core()?;
+        registry.register_json_file(manifest_path)?;
+        let compute = Arc::new(o3k_compute::ComputeService::new(
+            store.clone(),
+            Arc::new(FakeComputeProvider::new()),
+        ));
+        let network = Arc::new(
+            o3k_network::NetworkService::open(
+                std::env::temp_dir().join(format!("o3k-p12-6-runtime-a-{}", uuid::Uuid::new_v4())),
+                store.clone(),
+            )
+            .await?,
+        );
+        let application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
+            Arc::new(o3kd::native_adapters::GenericResourceApplication {
+                compute: compute.clone(),
+                network_service: network.clone(),
+                store: store.clone(),
+                server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
+                    service: compute.clone(),
+                }),
+                network: Arc::new(o3kd::native_adapters::NetworkReaderAdapter {
+                    store: store.clone(),
+                    authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
+                }),
+                external_controllers: Arc::new(Default::default()),
+            });
+        let dispatcher =
+            o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&registry)
+                .map_err(|error| format!("runtime A dispatcher: {error:?}"))?;
+        let _composition_handler = o3kd::native_adapters::CompositionResourceHandler {
+            application,
+            store: store.clone(),
+            manifests: Arc::new(registry.clone()),
+            delegation_keys: HashMap::new(),
+            dispatcher,
+        };
+        let records = store.list_relationships(parent).await?;
+        assert_eq!(records.len(), 3);
+        (parent, parent_operation, records)
+    };
+
+    // Runtime A's store/application/registry/handler are all dropped above.
+    // Runtime B uses new instances and reloads the external manifest through
+    // ManifestRegistry rather than copying the prior registry.
+    let store_b = Arc::new(O3kStore::connect_sqlite_file(&path).await?);
+    let records_b = store_b.list_relationships(durable.0).await?;
+    assert_eq!(records_b, durable.2);
+    assert_eq!(records_b[0].parent_operation_id, durable.1);
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/o3k-database-example/service-manifest.json");
+    let mut registry_b = ManifestRegistry::new();
+    registry_b.seed_core()?;
+    registry_b.register_json_file(manifest_path)?;
+    let session_a = o3k_kernel::ControllerSession {
+        service_id: "database-example".into(),
+        namespace: "database".into(),
+        service_principal: o3k_kernel::ServicePrincipal::new(
+            o3k_kernel::PrincipalId::new_unchecked("database-controller"),
+            "database-controller",
+            "database",
+        ),
+        session_id: uuid::Uuid::new_v4(),
+        session_generation: 1,
+        protocol_version: o3k_kernel::ProtocolVersion { major: 1, minor: 0 },
+        manifest_digest: "p12-6-test-manifest".into(),
+        manifest_generation: 1,
+        started_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let session_b = o3k_kernel::ControllerSession {
+        session_id: uuid::Uuid::new_v4(),
+        session_generation: 2,
+        ..session_a.clone()
+    };
+    registry_b.register_controller("database-example", session_a.clone())?;
+    registry_b.register_controller("database-example", session_b.clone())?;
+    registry_b.activate_controller("database-example")?;
+    assert_ne!(session_a.session_id, session_b.session_id);
+    assert!(
+        registry_b
+            .register_controller("database-example", session_a.clone())
+            .is_err()
+    );
+    let compute_b = Arc::new(o3k_compute::ComputeService::new(
+        store_b.clone(),
+        Arc::new(FakeComputeProvider::new()),
+    ));
+    let network_b = Arc::new(
+        o3k_network::NetworkService::open(
+            std::env::temp_dir().join(format!("o3k-p12-6-runtime-b-{}", uuid::Uuid::new_v4())),
+            store_b.clone(),
+        )
+        .await?,
+    );
+    let application_b: Arc<dyn o3k_native_api::resource::ResourceApplication> =
+        Arc::new(o3kd::native_adapters::GenericResourceApplication {
+            compute: compute_b.clone(),
+            network_service: network_b,
+            store: store_b.clone(),
+            server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
+                service: compute_b.clone(),
+            }),
+            network: Arc::new(o3kd::native_adapters::NetworkReaderAdapter {
+                store: store_b.clone(),
+                authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
+            }),
+            external_controllers: Arc::new(Default::default()),
+        });
+    let dispatcher_b =
+        o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&registry_b)
+            .map_err(|error| format!("runtime B dispatcher: {error:?}"))?;
+    assert!(
+        dispatcher_b
+            .resolve_resource_type(&o3k_kernel::ResourceType::new("database", "instance")?)
+            .is_some()
+    );
+    let verification = SigningKey::from_bytes(&[9; 32]).verifying_key();
+    let composition_service_b = CompositionServiceAdapter::new(
+        Arc::new(o3kd::native_adapters::CompositionResourceHandler {
+            application: application_b.clone(),
+            store: store_b.clone(),
+            manifests: Arc::new(registry_b.clone()),
+            delegation_keys: HashMap::from([(String::from("p12-6-test"), verification)]),
+            dispatcher: dispatcher_b,
+        }),
+        "database-example",
+        "database-controller",
+    )
+    .with_delegation_keys(
+        "o3k-composition",
+        HashMap::from([(String::from("p12-6-test"), verification)]),
+    )
+    .into_server();
+    let composition_listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let composition_address_b = composition_listener_b.local_addr()?;
+    let composition_tls_b = tls_server()?;
+    let composition_task_b = tokio::spawn(async move {
+        let mut builder = Server::builder().tls_config(composition_tls_b)?;
+        builder
+            .add_service(composition_service_b)
+            .serve_with_incoming(TcpListenerStream::new(composition_listener_b))
+            .await
+    });
+    let composition_client_b = Arc::new(
+        GrpcCompositionClient::connect(&format!("https://{composition_address_b}"), tls_client()?)
+            .await?,
+    );
+    let controller_service_b = o3k_service_sdk::ServiceControllerServer::new(
+        DatabaseControllerHandler::new(composition_client_b, lifecycle()?),
+        "database-example",
+        "database",
+        "p12-6-test-manifest",
+        1,
+    )
+    .with_service_principal("database-controller")
+    .with_delegation_recipient("o3k-composition")
+    .with_delegation_keys(HashMap::from([("p12-6-test".to_owned(), verification)]))
+    .into_service();
+    let controller_listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let controller_address_b = controller_listener_b.local_addr()?;
+    let controller_tls_b = tls_server()?;
+    let controller_task_b = tokio::spawn(async move {
+        let mut builder = Server::builder().tls_config(controller_tls_b)?;
+        builder
+            .add_service(controller_service_b)
+            .serve_with_incoming(TcpListenerStream::new(controller_listener_b))
+            .await
+    });
+    let controller_b = GrpcControllerAdapter::connect(
+        &format!("https://{controller_address_b}"),
+        tls_client()?,
+        "database-example",
+        "database",
+        o3k_kernel::ServicePrincipal::new(
+            o3k_kernel::PrincipalId::new_unchecked("database-controller"),
+            "database-controller",
+            "database",
+        ),
+        "p12-6-test-manifest",
+        1,
+    )
+    .await?
+    .with_delegation_signer("p12-6-test", SigningKey::from_bytes(&[9; 32]));
+    assert_eq!(controller_b.session().service_id, "database-example");
+    assert_eq!(controller_b.session().session_generation, 1);
+    let parent_b = store_b.get_resource(durable.0).await?;
+    assert_eq!(parent_b.id, durable.0);
+    assert_eq!(parent_b.generation, 1);
+    drop(controller_b);
+    controller_task_b.abort();
+    composition_task_b.abort();
+    drop(application_b);
+    drop(store_b);
+    let _ = std::fs::remove_file(path);
+    Ok(())
+}
+
+#[tokio::test]
+async fn p12_6_independent_application_instances_converge_durable_slots()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "o3k-p12-6-app-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let parent = uuid::Uuid::new_v4();
+    let record = ResourceRelationshipRecord {
+        parent_resource_id: parent,
+        parent_resource_type: "database:instance".into(),
+        slot: "network-primary".into(),
+        expected_child_resource_type: "network:network".into(),
+        child_resource_id: None,
+        ownership: "exclusive".into(),
+        parent_operation_id: uuid::Uuid::new_v4(),
+        child_operation_id: Some(uuid::Uuid::new_v4()),
+        owner_scope: "project-independent-race".into(),
+        state: "reserved".into(),
+        fingerprint: "independent-application-race".into(),
+    };
+    let records = vec![
+        record.clone(),
+        ResourceRelationshipRecord {
+            slot: "volume-data".into(),
+            expected_child_resource_type: "volume:volume".into(),
+            child_operation_id: Some(uuid::Uuid::new_v4()),
+            fingerprint: "independent-application-volume".into(),
+            ..record.clone()
+        },
+        ResourceRelationshipRecord {
+            slot: "compute-primary".into(),
+            expected_child_resource_type: "compute:server".into(),
+            child_operation_id: Some(uuid::Uuid::new_v4()),
+            fingerprint: "independent-application-compute".into(),
+            ..record.clone()
+        },
+    ];
+    let left_store = Arc::new(O3kStore::connect_sqlite_file(&path).await?);
+    left_store
+        .insert_resource(&ResourceRecord {
+            id: parent,
+            kind: "database:instance".into(),
+            project_id: "project-independent-race".into(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "{}".into(),
+            observed_state: "PROVISIONING".into(),
+            provider_id: None,
+        })
+        .await?;
+    let right_store = Arc::new(O3kStore::connect_sqlite_file(&path).await?);
+    let left_compute = Arc::new(o3k_compute::ComputeService::new(
+        left_store.clone(),
+        Arc::new(FakeComputeProvider::new()),
+    ));
+    let right_compute = Arc::new(o3k_compute::ComputeService::new(
+        right_store.clone(),
+        Arc::new(FakeComputeProvider::new()),
+    ));
+    let left_network = Arc::new(
+        o3k_network::NetworkService::open(
+            std::env::temp_dir().join(format!("o3k-p12-6-app-left-{}", uuid::Uuid::new_v4())),
+            left_store.clone(),
+        )
+        .await?,
+    );
+    let right_network = Arc::new(
+        o3k_network::NetworkService::open(
+            std::env::temp_dir().join(format!("o3k-p12-6-app-right-{}", uuid::Uuid::new_v4())),
+            right_store.clone(),
+        )
+        .await?,
+    );
+    let left_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
+        Arc::new(o3kd::native_adapters::GenericResourceApplication {
+            compute: left_compute.clone(),
+            network_service: left_network,
+            store: left_store.clone(),
+            server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
+                service: left_compute,
+            }),
+            network: Arc::new(o3kd::native_adapters::NetworkReaderAdapter {
+                store: left_store.clone(),
+                authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
+            }),
+            external_controllers: Arc::new(Default::default()),
+        });
+    let right_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
+        Arc::new(o3kd::native_adapters::GenericResourceApplication {
+            compute: right_compute.clone(),
+            network_service: right_network,
+            store: right_store.clone(),
+            server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
+                service: right_compute,
+            }),
+            network: Arc::new(o3kd::native_adapters::NetworkReaderAdapter {
+                store: right_store.clone(),
+                authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
+            }),
+            external_controllers: Arc::new(Default::default()),
+        });
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let left_barrier = barrier.clone();
+    let right_barrier = barrier.clone();
+    let left_records = records.clone();
+    let right_records = records.clone();
+    let left_task = tokio::spawn(async move {
+        let _application = left_application;
+        left_barrier.wait().await;
+        for candidate in &left_records {
+            left_store.reserve_relationship(candidate).await?;
+        }
+        Ok::<(), o3k_store::StoreError>(())
+    });
+    let right_task = tokio::spawn(async move {
+        let _application = right_application;
+        right_barrier.wait().await;
+        for candidate in &right_records {
+            right_store.reserve_relationship(candidate).await?;
+        }
+        Ok::<(), o3k_store::StoreError>(())
+    });
+    barrier.wait().await;
+    let (left, right) = tokio::join!(left_task, right_task);
+    left??;
+    right??;
+    let final_store = O3kStore::connect_sqlite_file(&path).await?;
+    let final_relationships = final_store.list_relationships(parent).await?;
+    assert_eq!(final_relationships.len(), 3);
+    assert_eq!(
+        final_relationships
+            .iter()
+            .map(|relationship| relationship.slot.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["compute-primary", "network-primary", "volume-data"]
+            .into_iter()
+            .collect()
+    );
+    drop(final_store);
+    let _ = std::fs::remove_file(path);
+    Ok(())
+}
