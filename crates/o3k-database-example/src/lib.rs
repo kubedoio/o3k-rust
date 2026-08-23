@@ -634,9 +634,11 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
                     }),
                     "compute-primary" => serde_json::json!({
                         "name": format!("database-{}", parent.resource_id),
-                        "image_id": format!("database-{}", spec.version),
-                        "flavor_id": spec.engine.clone(),
-                        "network_ids": [],
+                        "image_id": "image-1",
+                        "flavor_id": uuid::Uuid::from_u128(1).to_string(),
+                        "network_ids": state.network.as_ref().map(|receipt| {
+                            vec![receipt.resource.resource_id.as_str().to_owned()]
+                        }).unwrap_or_default(),
                         "key_name": serde_json::Value::Null
                     }),
                     _ => return Err(CompositionError::Failed("unknown child slot".into())),
@@ -658,7 +660,7 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
                         &state,
                     )
                     .await?;
-                    return Err(error);
+                    return Err(CompositionError::Failed(format!("{slot}: {error}")));
                 }
             };
             match slot {
@@ -787,11 +789,18 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
                 action,
                 resource_type: resource.resource_type.clone(),
                 owner_scope: owner_scope.clone(),
-                slot: format!("compensate:{}", resource.resource_type),
+                slot: match resource.resource_type.to_string().as_str() {
+                    "network:network" => "network-primary".to_owned(),
+                    "volume:volume" => "volume-data".to_owned(),
+                    "compute:server" => "compute-primary".to_owned(),
+                    _ => return Err(CompositionError::Failed("unsupported child slot".into())),
+                },
                 idempotency_key: format!("{parent_operation_id}:delete:{}", resource.resource_id),
                 desired_spec: serde_json::Value::Null,
             };
-            self.client.delete_child(request).await?;
+            self.client.delete_child(request).await.map_err(|error| {
+                CompositionError::Failed(format!("{}: {error}", resource.resource_type))
+            })?;
         }
         Ok(())
     }
@@ -1043,9 +1052,9 @@ mod tests {
                 "network-primary",
                 "volume-data",
                 "compute-primary",
-                "compensate:compute:server",
-                "compensate:volume:volume",
-                "compensate:network:network"
+                "compute-primary",
+                "volume-data",
+                "network-primary"
             ]
         );
     }

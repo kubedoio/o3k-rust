@@ -46,3 +46,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 tower.workspace = true
+tokio-stream.workspace = true
+o3k-database-example = { path = "../../crates/o3k-database-example" }

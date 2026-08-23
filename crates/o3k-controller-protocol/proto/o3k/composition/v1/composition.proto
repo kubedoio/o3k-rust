@@ -19,7 +19,7 @@ message ParentContext {
   string audit_correlation = 13;
   bytes delegation = 14;
 }
-message ChildRequest { ParentContext parent = 1; string lifecycle = 2; string resource_type = 3; bytes desired_spec = 4; string requested_action = 5; }
+message ChildRequest { ParentContext parent = 1; string lifecycle = 2; string resource_type = 3; bytes desired_spec = 4; string requested_action = 5; ResourceRef child = 6; }
 message ChildResponse {
   ResourceRef resource = 1;
   string operation_id = 2;

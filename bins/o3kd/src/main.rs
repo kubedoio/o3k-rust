@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-mod native_adapters;
+use o3kd::native_adapters;
 
 use o3k_domain::ServerId;
 use o3k_kernel::Controller;

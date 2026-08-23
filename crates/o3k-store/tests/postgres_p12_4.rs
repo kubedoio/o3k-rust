@@ -1,5 +1,6 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use o3k_store::ResourceRelationshipRecord;
 use o3k_store::{
     CanonicalAcceptanceOutcome, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
     DurableStore, IdempotencyReservation, IdempotencyReservationRequest, OperationRecord,
@@ -16,6 +17,56 @@ static TEST_DATABASE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_ne
 fn url() -> String {
     std::env::var("O3K_DATABASE_URL")
         .expect("O3K_DATABASE_URL must be set for PostgreSQL P12.4 conformance")
+}
+
+#[tokio::test]
+#[ignore = "requires the configured PostgreSQL conformance database"]
+async fn postgres_relationship_intent_is_replayable_bindable_and_recoverable() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let store = PostgresStore::connect(&url()).await.expect("connect");
+    store.clean_tables_for_testing().await.expect("clean");
+    let parent = Uuid::now_v7();
+    let operation = Uuid::now_v7();
+    let child_operation = Uuid::now_v7();
+    let child = Uuid::now_v7();
+    store
+        .insert_resource(&resource(parent, "p12-6"))
+        .await
+        .expect("parent resource");
+    let record = ResourceRelationshipRecord {
+        parent_resource_id: parent,
+        parent_resource_type: "database:instance".into(),
+        slot: "network-primary".into(),
+        expected_child_resource_type: "network:network".into(),
+        child_resource_id: None,
+        ownership: "exclusive".into(),
+        parent_operation_id: operation,
+        child_operation_id: None,
+        owner_scope: "project:p12-6".into(),
+        state: "reserved".into(),
+        fingerprint: "same-request".into(),
+    };
+    let first = store.reserve_relationship(&record).await.expect("reserve");
+    assert_eq!(first, record);
+    assert_eq!(
+        store.reserve_relationship(&record).await.expect("replay"),
+        record
+    );
+    let mut conflict = record.clone();
+    conflict.expected_child_resource_type = "volume:volume".into();
+    assert!(store.reserve_relationship(&conflict).await.is_err());
+    store
+        .insert_resource(&resource(child, "p12-6"))
+        .await
+        .expect("child resource");
+    let bound = store
+        .bind_relationship(parent, "network-primary", child, child_operation)
+        .await
+        .expect("bind");
+    assert_eq!(bound.state, "bound");
+    let listed = store.list_relationships(parent).await.expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].child_operation_id, Some(child_operation));
 }
 
 #[tokio::test]

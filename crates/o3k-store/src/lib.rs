@@ -654,11 +654,9 @@ pub(crate) fn validate_canonical_idempotent_operation_identity(
             "canonical operation identity is incomplete".into(),
         ));
     }
-    if kernel.service != kernel.action.namespace()
-        || kernel.service != kernel.resource_type.namespace()
-    {
+    if kernel.action.namespace() != kernel.resource_type.namespace() {
         return Err(StoreError::Corrupt(
-            "operation service, action, and resource namespaces differ".into(),
+            "operation action and resource namespaces differ".into(),
         ));
     }
     if kernel.action.as_str() != request.action {
@@ -736,12 +734,9 @@ pub(crate) fn validate_canonical_operation_read(
     let resource_type = o3k_kernel::ResourceType::new(namespace, name)
         .map_err(|e| StoreError::Corrupt(format!("invalid operation resource type: {e}")))?;
     let expected_resource_type = canonical_resource_type_for_record(resource)?;
-    if canonical.service != action.namespace()
-        || canonical.service != resource_type.namespace()
-        || resource_type != expected_resource_type
-    {
+    if action.namespace() != resource_type.namespace() || resource_type != expected_resource_type {
         return Err(StoreError::Corrupt(
-            "canonical operation namespaces/resource type differ".into(),
+            "canonical operation action/resource namespace or resource type differ".into(),
         ));
     }
     if operation.state != canonical.state {
@@ -802,6 +797,10 @@ async fn insert_sqlite_canonical_acceptance(
 pub(crate) fn canonical_resource_type_for_record(
     resource: &ResourceRecord,
 ) -> Result<o3k_kernel::ResourceType, StoreError> {
+    if let Some((namespace, name)) = resource.kind.split_once(':') {
+        return o3k_kernel::ResourceType::new(namespace, name)
+            .map_err(|e| StoreError::Corrupt(format!("invalid canonical resource type: {e}")));
+    }
     let (namespace, name) = match resource.kind.as_str() {
         "compute_instance" | "compute_server" | "server" | "compute:server" => {
             ("compute", "server")

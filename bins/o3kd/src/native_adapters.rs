@@ -897,7 +897,11 @@ impl ResourceApplication for GenericResourceApplication {
                 .await
                 .map_err(|_| ResourceApplicationError::Conflict)?;
             return Ok(MutationResult {
-                operation_id: format!("network:create:{}", network.id),
+                operation_id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("network:create:{}", network.id).as_bytes(),
+                )
+                .to_string(),
                 resource_id: Some(network.id.to_string()),
                 complete: true,
                 resource: Some(network_json(network)),
@@ -1210,7 +1214,11 @@ impl ResourceApplication for GenericResourceApplication {
                 .await
                 .map_err(|_| ResourceApplicationError::NotFound)?;
             return Ok(MutationResult {
-                operation_id: format!("network:delete:{id}"),
+                operation_id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("network:delete:{id}").as_bytes(),
+                )
+                .to_string(),
                 resource_id: Some(id.to_owned()),
                 complete: true,
                 resource: None,
@@ -1444,11 +1452,13 @@ impl CompositionResourceHandler {
         o3k_service_sdk::composition::CompositionError,
     > {
         self.dispatcher
-            .resolve(resource_type.namespace(), resource_type.name())
+            .resolve_resource_type(resource_type)
             .cloned()
-            .ok_or(o3k_service_sdk::composition::CompositionError::Failed(
-                "child resource is not registered".into(),
-            ))
+            .ok_or_else(|| {
+                o3k_service_sdk::composition::CompositionError::Failed(format!(
+                    "child resource is not registered: {resource_type}"
+                ))
+            })
     }
 }
 
@@ -1461,9 +1471,18 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
         o3k_service_sdk::composition::ChildResourceReceipt,
         o3k_service_sdk::composition::CompositionError,
     > {
-        self.dependency_allowed(&request)?;
-        let auth = self.authenticate(&request)?;
-        let parent_id = self.validate_parent(&request).await?;
+        self.dependency_allowed(&request).map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed(format!(
+                "dependency denied for {}",
+                request.action
+            ))
+        })?;
+        let auth = self.authenticate(&request).map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed("delegation denied".into())
+        })?;
+        let parent_id = self.validate_parent(&request).await.map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed("parent denied".into())
+        })?;
         let descriptor = self.descriptor_for(&request.resource_type)?;
         let expected_action = descriptor
             .lifecycle_actions
@@ -1581,13 +1600,23 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
         o3k_service_sdk::composition::ChildResourceReceipt,
         o3k_service_sdk::composition::CompositionError,
     > {
-        self.dependency_allowed(&request)?;
-        let auth = self.authenticate(&request)?;
-        let parent_id = self.validate_parent(&request).await?;
-        let child = request
-            .child
-            .clone()
-            .ok_or(o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        self.dependency_allowed(&request).map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed(format!(
+                "delete dependency denied for {}",
+                request.action
+            ))
+        })?;
+        let auth = self.authenticate(&request).map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed(
+                "delete delegation denied".into(),
+            )
+        })?;
+        let parent_id = self.validate_parent(&request).await.map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed("delete parent denied".into())
+        })?;
+        let child = request.child.clone().ok_or_else(|| {
+            o3k_service_sdk::composition::CompositionError::Failed("delete child missing".into())
+        })?;
         let descriptor = self.descriptor_for(&child.resource_type)?;
         let expected_action = descriptor
             .lifecycle_actions
@@ -1596,7 +1625,12 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
                 "child delete operation is not declared".into(),
             ))?;
         if expected_action != &request.action {
-            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+            return Err(o3k_service_sdk::composition::CompositionError::Failed(
+                format!(
+                    "delete action mismatch expected={} actual={}",
+                    expected_action, request.action
+                ),
+            ));
         }
         self.store
             .set_relationship_state(parent_id, &request.slot, "deleting")

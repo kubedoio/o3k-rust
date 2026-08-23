@@ -166,6 +166,7 @@ pub mod composition {
             desired_spec: serde_json::to_vec(&request.desired_spec)
                 .map_err(|_| CompositionError::Failed("invalid child spec".into()))?,
             requested_action: request.action.to_string(),
+            child: request.child.as_ref().map(resource_to_wire),
         })
     }
 
@@ -239,6 +240,7 @@ pub mod composition {
             .map_err(|_| CompositionError::Failed("invalid child desired spec".into()))?;
         let child_action = ActionId::parse(&request.requested_action)
             .map_err(|_| CompositionError::Failed("invalid child action".into()))?;
+        let child = request.child.map(resource_from_wire).transpose()?;
         Ok(ChildResourceRequest {
             parent: parent_ref,
             parent_operation_id: operation_id,
@@ -257,7 +259,7 @@ pub mod composition {
             },
             service_principal: parent.service_principal,
             delegation: parent.delegation,
-            child: None,
+            child,
             action: child_action,
             resource_type,
             owner_scope,
@@ -492,7 +494,7 @@ pub mod composition {
             )?;
             bind_parent_delegation(
                 &parent,
-                request.resource.as_ref(),
+                parent.parent.as_ref(),
                 &self.expected_recipient_service,
                 &self.delegation_keys,
             )
@@ -506,8 +508,9 @@ pub mod composition {
                 parent: Some(parent.clone()),
                 lifecycle: "observe".into(),
                 resource_type: resource.resource_type.to_string(),
-                desired_spec: Vec::new(),
+                desired_spec: b"null".to_vec(),
                 requested_action: parent.parent_action.clone(),
+                child: Some(resource_to_wire(&resource)),
             })
             .map_err(composition_status)?;
             child_request.child = Some(resource.clone());
@@ -602,8 +605,9 @@ pub mod composition {
                 parent: Some(parent),
                 lifecycle: "list".into(),
                 resource_type: "relationship:record".into(),
-                desired_spec: Vec::new(),
+                desired_spec: b"null".to_vec(),
                 requested_action: "relationship:List".into(),
+                child: None,
             })
             .map_err(composition_status)?;
             let relationships = self
@@ -1037,7 +1041,11 @@ impl GrpcControllerAdapter {
             credential_id: claims.credential_id,
             original_actor: claims.original_actor,
             original_scope: context.owner_scope.clone(),
-            calling_service: self.session.service_principal.clone(),
+            calling_service: o3k_kernel::ServicePrincipal::new(
+                o3k_kernel::PrincipalId::new_unchecked(self.service_id.clone()),
+                self.service_id.clone(),
+                self.session.namespace.clone(),
+            ),
             recipient_service: o3k_kernel::ServicePrincipal::new(
                 o3k_kernel::PrincipalId::new_unchecked("o3k-composition"),
                 "o3k-composition",

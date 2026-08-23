@@ -135,6 +135,16 @@ impl ResourceDispatcher {
         self.descriptors
             .get(&(namespace.to_owned(), collection.to_owned()))
     }
+
+    #[must_use]
+    pub fn resolve_resource_type(
+        &self,
+        resource_type: &ResourceType,
+    ) -> Option<&ResourceDescriptor> {
+        self.descriptors
+            .values()
+            .find(|descriptor| descriptor.resource_type == *resource_type)
+    }
     pub fn all(&self) -> impl Iterator<Item = &ResourceDescriptor> {
         self.descriptors.values()
     }
