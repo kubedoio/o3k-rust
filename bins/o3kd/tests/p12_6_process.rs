@@ -39,6 +39,31 @@ fn process_auth_context(project: &str) -> o3k_kernel::AuthContext {
     )
 }
 
+async fn await_bound_relationship(
+    store: &O3kStore,
+    parent: uuid::Uuid,
+    slot: &str,
+    expected_child_type: &str,
+) -> Result<ResourceRelationshipRecord, Box<dyn std::error::Error + Send + Sync>> {
+    let wait = async {
+        loop {
+            let record = store.get_relationship(parent, slot).await?;
+            if record.state == "bound"
+                && record.expected_child_resource_type == expected_child_type
+                && record.child_resource_id.is_some()
+                && record.child_operation_id.is_some()
+            {
+                return Ok::<_, o3k_store::StoreError>(record);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+        .await
+        .map_err(|_| format!("{slot} did not become durably bound before its dependent stage"))?
+        .map_err(|error| format!("failed waiting for {slot} durable binding: {error:?}").into())
+}
+
 #[async_trait::async_trait]
 impl TokenIssuer for ProcessTokenIssuer {
     async fn issue_native(
@@ -1476,13 +1501,14 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
         })
         .await?;
     let right_store = Arc::new(O3kStore::connect_sqlite_file(&path).await?);
+    let shared_compute_provider = Arc::new(FakeComputeProvider::new());
     let left_compute = Arc::new(o3k_compute::ComputeService::new(
         left_store.clone(),
-        Arc::new(FakeComputeProvider::new()),
+        shared_compute_provider.clone(),
     ));
     let right_compute = Arc::new(o3k_compute::ComputeService::new(
         right_store.clone(),
-        Arc::new(FakeComputeProvider::new()),
+        shared_compute_provider,
     ));
     let left_network = Arc::new(
         o3k_network::NetworkService::open(
@@ -1543,12 +1569,8 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
         left_barrier.wait().await;
         for candidate in &left_records {
             if left_store.reserve_relationship(candidate).await.is_ok() {
-                if left_store
-                    .get_relationship(parent, &candidate.slot)
-                    .await?
-                    .child_resource_id
-                    .is_some()
-                {
+                let current = left_store.get_relationship(parent, &candidate.slot).await?;
+                if current.state == "bound" && current.child_resource_id.is_some() {
                     continue;
                 }
                 let (namespace, name) = candidate
@@ -1560,20 +1582,20 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
                     .resolve_resource_type(&child_type)
                     .ok_or("missing child descriptor")?
                     .clone();
-                let mut network_id = String::new();
-                if candidate.slot == "compute-primary" {
-                    for _ in 0..100 {
-                        if let Some(id) = left_store
-                            .get_relationship(parent, "network-primary")
-                            .await?
-                            .child_resource_id
-                        {
-                            network_id = id.to_string();
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                    }
-                }
+                let network_id = if candidate.slot == "compute-primary" {
+                    await_bound_relationship(
+                        &left_store,
+                        parent,
+                        "network-primary",
+                        "network:network",
+                    )
+                    .await?
+                    .child_resource_id
+                    .ok_or("network-primary was bound without a child ID")?
+                    .to_string()
+                } else {
+                    String::new()
+                };
                 let spec = match candidate.slot.as_str() {
                     "network-primary" => serde_json::json!({"name": "independent-race-network"}),
                     "volume-data" => {
@@ -1603,17 +1625,13 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
                 let child = match child_result {
                     Ok(child) => child,
                     Err(o3k_native_api::resource::ResourceApplicationError::Conflict) => {
-                        for _ in 0..100 {
-                            if left_store
-                                .get_relationship(parent, &candidate.slot)
-                                .await?
-                                .child_resource_id
-                                .is_some()
-                            {
-                                continue;
-                            }
-                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                        }
+                        let _ = await_bound_relationship(
+                            &left_store,
+                            parent,
+                            &candidate.slot,
+                            &candidate.expected_child_resource_type,
+                        )
+                        .await?;
                         continue;
                     }
                     Err(error) => {
@@ -1643,26 +1661,20 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
             // still exercised by both applications for every slot below.
             if candidate.slot == "network-primary" {
                 let _ = right_store.reserve_relationship(candidate).await;
-                for _ in 0..100 {
-                    if right_store
-                        .get_relationship(parent, &candidate.slot)
-                        .await?
-                        .child_resource_id
-                        .is_some()
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                }
+                let _ = await_bound_relationship(
+                    &right_store,
+                    parent,
+                    "network-primary",
+                    "network:network",
+                )
+                .await?;
                 continue;
             }
             if right_store.reserve_relationship(candidate).await.is_ok() {
-                if right_store
+                let current = right_store
                     .get_relationship(parent, &candidate.slot)
-                    .await?
-                    .child_resource_id
-                    .is_some()
-                {
+                    .await?;
+                if current.state == "bound" && current.child_resource_id.is_some() {
                     continue;
                 }
                 let (namespace, name) = candidate
@@ -1674,20 +1686,20 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
                     .resolve_resource_type(&child_type)
                     .ok_or("missing child descriptor")?
                     .clone();
-                let mut network_id = String::new();
-                if candidate.slot == "compute-primary" {
-                    for _ in 0..100 {
-                        if let Some(id) = right_store
-                            .get_relationship(parent, "network-primary")
-                            .await?
-                            .child_resource_id
-                        {
-                            network_id = id.to_string();
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                    }
-                }
+                let network_id = if candidate.slot == "compute-primary" {
+                    await_bound_relationship(
+                        &right_store,
+                        parent,
+                        "network-primary",
+                        "network:network",
+                    )
+                    .await?
+                    .child_resource_id
+                    .ok_or("network-primary was bound without a child ID")?
+                    .to_string()
+                } else {
+                    String::new()
+                };
                 let spec = match candidate.slot.as_str() {
                     "network-primary" => serde_json::json!({"name": "independent-race-network"}),
                     "volume-data" => {
@@ -1717,17 +1729,13 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
                 let child = match child_result {
                     Ok(child) => child,
                     Err(o3k_native_api::resource::ResourceApplicationError::Conflict) => {
-                        for _ in 0..100 {
-                            if right_store
-                                .get_relationship(parent, &candidate.slot)
-                                .await?
-                                .child_resource_id
-                                .is_some()
-                            {
-                                continue;
-                            }
-                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                        }
+                        let _ = await_bound_relationship(
+                            &right_store,
+                            parent,
+                            &candidate.slot,
+                            &candidate.expected_child_resource_type,
+                        )
+                        .await?;
                         continue;
                     }
                     Err(error) => {
