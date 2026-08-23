@@ -215,6 +215,36 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         .resource_id
         .clone()
         .ok_or("generic create omitted id")?;
+    let replay = api_application
+        .create(
+            descriptor,
+            &api_auth,
+            o3k_native_api::resource::CreateRequest {
+                api_version: Some("o3k.io/v1".into()),
+                kind: Some("database:instance".into()),
+                spec: serde_json::json!({"engine":"test-engine","version":"1","storage_gb":1}),
+            },
+            Some("api-create-1"),
+        )
+        .await
+        .map_err(|error| format!("equivalent replay: {error:?}"))?;
+    assert_eq!(replay.resource_id.as_deref(), Some(api_id.as_str()));
+    let conflict = api_application
+        .create(
+            descriptor,
+            &api_auth,
+            o3k_native_api::resource::CreateRequest {
+                api_version: Some("o3k.io/v1".into()),
+                kind: Some("database:instance".into()),
+                spec: serde_json::json!({"engine":"test-engine","version":"2","storage_gb":1}),
+            },
+            Some("api-create-1"),
+        )
+        .await;
+    assert!(matches!(
+        conflict,
+        Err(o3k_native_api::resource::ResourceApplicationError::IdempotencyConflict)
+    ));
     let api_show = api_application
         .show(descriptor, &api_auth, &api_id)
         .await

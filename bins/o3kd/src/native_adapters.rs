@@ -664,19 +664,34 @@ impl ResourceApplication for GenericResourceApplication {
                 )
                 .await
                 .map_err(|_| ResourceApplicationError::Internal)?;
-            let (operation_id, resource_id) = match acceptance {
+            let (operation_id, resource_id, replayed) = match acceptance {
                 o3k_store::CanonicalAcceptanceOutcome::Created {
                     operation_id,
                     resource_id,
-                }
-                | o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent {
+                } => (operation_id, resource_id, false),
+                o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent {
                     operation_id,
                     resource_id,
-                } => (operation_id, resource_id),
+                } => (operation_id, resource_id, true),
                 o3k_store::CanonicalAcceptanceOutcome::Conflict => {
                     return Err(ResourceApplicationError::IdempotencyConflict);
                 }
             };
+            if replayed {
+                let existing = self
+                    .store
+                    .get_resource(resource_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                if existing.observed_state == "READY" {
+                    return Ok(MutationResult {
+                        operation_id: operation_id.to_string(),
+                        resource_id: Some(resource_id.to_string()),
+                        complete: true,
+                        resource: Some(generic_external_json(&existing)),
+                    });
+                }
+            }
             let session = controller.session();
             let context = o3k_kernel::OperationContext {
                 request_id: auth
