@@ -73,6 +73,7 @@ pub mod composition {
         pub context: OperationContext,
         pub service_principal: String,
         pub delegation: Vec<u8>,
+        pub child: Option<ResourceReference>,
         pub action: ActionId,
         pub resource_type: o3k_kernel::ResourceType,
         pub owner_scope: OwnershipScope,
@@ -178,6 +179,84 @@ pub mod composition {
         })
     }
 
+    fn parse_uuid(value: &str, field: &str) -> Result<Uuid, CompositionError> {
+        Uuid::parse_str(value).map_err(|_| CompositionError::Failed(format!("invalid {field}")))
+    }
+
+    fn response_to_receipt(
+        request: &ChildResourceRequest,
+        response: wire::ChildResponse,
+    ) -> Result<ChildResourceReceipt, CompositionError> {
+        let expected_request = request.context.request_id.to_string();
+        if response.request_id != expected_request
+            || response.service_id != request.context.service_id
+            || response.session_id != request.context.session_id.to_string()
+            || response.session_generation != request.context.session_generation
+            || response.parent_operation_id != request.parent_operation_id.to_string()
+            || response.slot != request.slot
+        {
+            return Err(CompositionError::Failed(
+                "composition response correlation mismatch".into(),
+            ));
+        }
+        let resource = response
+            .resource
+            .ok_or_else(|| CompositionError::Failed("composition response omitted resource".into()))
+            .and_then(resource_from_wire)?;
+        if resource.resource_type != request.resource_type {
+            return Err(CompositionError::Failed(
+                "composition response resource mismatch".into(),
+            ));
+        }
+        let operation_id = parse_uuid(&response.operation_id, "child operation id")?;
+        let owner_scope = request.owner_scope.clone();
+        let ownership = match response.ownership.as_str() {
+            "exclusive" => RelationshipOwnership::Exclusive,
+            "referenced" => RelationshipOwnership::Referenced,
+            _ => {
+                return Err(CompositionError::Failed(
+                    "invalid relationship ownership".into(),
+                ));
+            }
+        };
+        Ok(ChildResourceReceipt {
+            resource,
+            operation_id,
+            owner_scope,
+            ownership,
+        })
+    }
+
+    /// Real generic controller-to-O3K composition client. It contains only
+    /// the versioned composition transport and typed conversions; the O3K
+    /// server remains responsible for authorization, descriptor resolution,
+    /// delegation verification, and durable relationship writes.
+    pub struct GrpcCompositionClient {
+        client: tokio::sync::Mutex<
+            wire::composition_service_client::CompositionServiceClient<tonic::transport::Channel>,
+        >,
+    }
+
+    impl GrpcCompositionClient {
+        pub async fn connect(
+            endpoint: &str,
+            tls: tonic::transport::ClientTlsConfig,
+        ) -> Result<Self, CompositionError> {
+            let channel = tonic::transport::Endpoint::from_shared(endpoint.to_owned())
+                .map_err(|error| CompositionError::Failed(error.to_string()))?
+                .tls_config(tls)
+                .map_err(|error| CompositionError::Failed(error.to_string()))?
+                .connect()
+                .await
+                .map_err(|error| CompositionError::Failed(error.to_string()))?;
+            Ok(Self {
+                client: tokio::sync::Mutex::new(
+                    wire::composition_service_client::CompositionServiceClient::new(channel),
+                ),
+            })
+        }
+    }
+
     #[tonic::async_trait]
     pub trait ServiceCompositionClient: Send + Sync {
         async fn create_child(
@@ -186,11 +265,84 @@ pub mod composition {
         ) -> Result<ChildResourceReceipt, CompositionError>;
         async fn observe_child(
             &self,
-            resource: ResourceReference,
-            operation_id: Uuid,
+            request: ChildResourceRequest,
         ) -> Result<serde_json::Value, CompositionError>;
         async fn delete_child(&self, request: ChildResourceRequest)
         -> Result<(), CompositionError>;
+    }
+
+    #[tonic::async_trait]
+    impl ServiceCompositionClient for GrpcCompositionClient {
+        async fn create_child(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<ChildResourceReceipt, CompositionError> {
+            let wire_request = child_request_to_wire(&request, "create")?;
+            let response = self
+                .client
+                .lock()
+                .await
+                .create_child(wire_request)
+                .await
+                .map_err(|error| CompositionError::Failed(error.to_string()))?
+                .into_inner();
+            response_to_receipt(&request, response)
+        }
+
+        async fn observe_child(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<serde_json::Value, CompositionError> {
+            let child = request
+                .child
+                .clone()
+                .ok_or_else(|| CompositionError::Failed("missing child reference".into()))?;
+            let mut client = self.client.lock().await;
+            let response = client
+                .observe_child(wire::ObserveRequest {
+                    parent: Some(
+                        child_request_to_wire(&request, "observe")?
+                            .parent
+                            .ok_or_else(|| CompositionError::Failed("missing parent".into()))?,
+                    ),
+                    resource: Some(resource_to_wire(&child)),
+                    child_operation_id: request.parent_operation_id.to_string(),
+                })
+                .await
+                .map_err(|error| CompositionError::Failed(error.to_string()))?
+                .into_inner();
+            if response.request_id != request.context.request_id.to_string()
+                || response.session_id != request.context.session_id.to_string()
+                || response.session_generation != request.context.session_generation
+                || response.parent_operation_id != request.parent_operation_id.to_string()
+                || response.slot != request.slot
+            {
+                return Err(CompositionError::Failed(
+                    "composition observation correlation mismatch".into(),
+                ));
+            }
+            serde_json::from_slice(&response.observed_status)
+                .map_err(|_| CompositionError::Failed("invalid child observation".into()))
+        }
+
+        async fn delete_child(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<(), CompositionError> {
+            let wire_request = child_request_to_wire(&request, "delete")?;
+            let response = self
+                .client
+                .lock()
+                .await
+                .delete_child(wire::DeleteRequest {
+                    child: Some(wire_request),
+                })
+                .await
+                .map_err(|error| CompositionError::Failed(error.to_string()))?
+                .into_inner();
+            let _ = response_to_receipt(&request, response)?;
+            Ok(())
+        }
     }
 }
 

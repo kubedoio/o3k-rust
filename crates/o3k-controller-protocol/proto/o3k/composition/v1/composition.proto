@@ -20,7 +20,20 @@ message ParentContext {
   bytes delegation = 14;
 }
 message ChildRequest { ParentContext parent = 1; string lifecycle = 2; string resource_type = 3; bytes desired_spec = 4; }
-message ChildResponse { ResourceRef resource = 1; string operation_id = 2; string state = 3; bytes observed_status = 4; string diagnostic = 5; }
+message ChildResponse {
+  ResourceRef resource = 1;
+  string operation_id = 2;
+  string state = 3;
+  bytes observed_status = 4;
+  string diagnostic = 5;
+  string request_id = 6;
+  string service_id = 7;
+  string session_id = 8;
+  uint64 session_generation = 9;
+  string parent_operation_id = 10;
+  string slot = 11;
+  string ownership = 12;
+}
 message ObserveRequest { ParentContext parent = 1; ResourceRef resource = 2; string child_operation_id = 3; }
 message DeleteRequest { ChildRequest child = 1; }
 message Relationship { string slot = 1; string resource_type = 2; ResourceRef resource = 3; string ownership = 4; string state = 5; string parent_operation_id = 6; string child_operation_id = 7; }

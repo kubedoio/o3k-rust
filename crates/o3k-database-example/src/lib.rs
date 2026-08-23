@@ -227,6 +227,7 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
                 context: context.clone(),
                 service_principal: service_principal.clone(),
                 delegation: Vec::new(),
+                child: None,
                 action,
                 resource_type: o3k_kernel::ResourceType::new(namespace, name)
                     .map_err(|e| CompositionError::Failed(e.to_string()))?,
@@ -308,6 +309,7 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
                 context: context.clone(),
                 service_principal: service_principal.clone(),
                 delegation: Vec::new(),
+                child: Some(resource.clone()),
                 action,
                 resource_type: resource.resource_type.clone(),
                 owner_scope: owner_scope.clone(),
@@ -461,8 +463,7 @@ mod tests {
         }
         async fn observe_child(
             &self,
-            _resource: o3k_kernel::ResourceReference,
-            _operation_id: uuid::Uuid,
+            _request: ChildResourceRequest,
         ) -> Result<serde_json::Value, CompositionError> {
             Ok(serde_json::json!({"state":"active"}))
         }
