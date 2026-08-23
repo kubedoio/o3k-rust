@@ -209,6 +209,8 @@ impl<H: ControllerHandler> ServiceControllerServer<H> {
     fn validate_delegation(
         &self,
         delegation: Option<&proto::Delegation>,
+        context: &proto::Context,
+        resource: Option<&proto::ResourceRef>,
         now: u64,
     ) -> Result<(), tonic::Status> {
         let Some(delegation) = delegation else {
@@ -219,7 +221,9 @@ impl<H: ControllerHandler> ServiceControllerServer<H> {
                 "delegation verification keys are not configured",
             ));
         }
-        verify_wire_delegation(&delegation.credential, &self.delegation_keys, now)
+        let claims = verify_wire_delegation(&delegation.credential, &self.delegation_keys, now)
+            .map_err(|_| tonic::Status::permission_denied("invalid delegation"))?;
+        bind_delegation(&claims, context, resource, &self.service_id)
             .map(|_| ())
             .map_err(|_| tonic::Status::permission_denied("invalid delegation"))
     }
@@ -306,11 +310,16 @@ impl<H: ControllerHandler> ControllerService for ServiceControllerServer<H> {
     ) -> Result<tonic::Response<proto::ReconcileResponse>, tonic::Status> {
         let input = request.into_inner();
         let now = self.check_context(input.context.as_ref()).await?;
-        self.validate_delegation(input.delegation.as_ref(), now)?;
         let context = input
             .context
             .as_ref()
             .ok_or_else(|| tonic::Status::invalid_argument("context is required"))?;
+        self.validate_delegation(
+            input.delegation.as_ref(),
+            context,
+            input.resource.as_ref().and_then(|s| s.resource.as_ref()),
+            now,
+        )?;
         self.replay
             .reserve(&context.replay_identity, &input.encode_to_vec())
             .await
@@ -323,7 +332,16 @@ impl<H: ControllerHandler> ControllerService for ServiceControllerServer<H> {
     ) -> Result<tonic::Response<proto::ObserveResponse>, tonic::Status> {
         let input = request.into_inner();
         let now = self.check_context(input.context.as_ref()).await?;
-        self.validate_delegation(input.delegation.as_ref(), now)?;
+        let context = input
+            .context
+            .as_ref()
+            .ok_or_else(|| tonic::Status::invalid_argument("context is required"))?;
+        self.validate_delegation(
+            input.delegation.as_ref(),
+            context,
+            input.resource.as_ref(),
+            now,
+        )?;
         Ok(tonic::Response::new(self.handler.observe(input).await?))
     }
     async fn delete(
@@ -332,11 +350,16 @@ impl<H: ControllerHandler> ControllerService for ServiceControllerServer<H> {
     ) -> Result<tonic::Response<proto::DeleteResponse>, tonic::Status> {
         let input = request.into_inner();
         let now = self.check_context(input.context.as_ref()).await?;
-        self.validate_delegation(input.delegation.as_ref(), now)?;
         let context = input
             .context
             .as_ref()
             .ok_or_else(|| tonic::Status::invalid_argument("context is required"))?;
+        self.validate_delegation(
+            input.delegation.as_ref(),
+            context,
+            input.resource.as_ref(),
+            now,
+        )?;
         self.replay
             .reserve(&context.replay_identity, &input.encode_to_vec())
             .await
@@ -399,6 +422,58 @@ pub fn verify_wire_delegation(
     let credential: SignedDelegation =
         serde_json::from_slice(bytes).map_err(|_| SdkError::InvalidDelegation)?;
     Ok(credential.verify(keys, now_unix_ms)?.clone())
+}
+
+/// Bind an already cryptographically verified credential to the exact wire
+/// request. Signature validity alone never grants authority for a different
+/// action, scope, operation, resource, or controller session.
+pub fn bind_delegation(
+    claims: &DelegationClaims,
+    context: &proto::Context,
+    resource: Option<&proto::ResourceRef>,
+    recipient_service: &str,
+) -> Result<(), SdkError> {
+    let request_id =
+        Uuid::parse_str(&context.request_id).map_err(|_| SdkError::InvalidDelegation)?;
+    let operation_id =
+        Uuid::parse_str(&context.operation_id).map_err(|_| SdkError::InvalidDelegation)?;
+    let session_id =
+        Uuid::parse_str(&context.session_id).map_err(|_| SdkError::InvalidDelegation)?;
+    if claims.request_id != request_id
+        || claims.operation_id != operation_id
+        || claims.session_id != session_id
+        || claims.session_generation != context.session_generation
+        || claims.calling_service != context.service_id
+        || claims.recipient_service != recipient_service
+        || claims.action != context.action
+    {
+        return Err(SdkError::InvalidDelegation);
+    }
+    let scope = context
+        .owner_scope
+        .as_ref()
+        .ok_or(SdkError::InvalidDelegation)?;
+    let kind = proto::scope::Kind::try_from(scope.kind).map_err(|_| SdkError::InvalidDelegation)?;
+    let kind = match kind {
+        proto::scope::Kind::Project => "project",
+        proto::scope::Kind::Domain => "domain",
+        proto::scope::Kind::System => "system",
+        proto::scope::Kind::Unspecified => return Err(SdkError::InvalidDelegation),
+    };
+    if claims.owner_scope != format!("{kind}:{}", scope.id) {
+        return Err(SdkError::InvalidDelegation);
+    }
+    if let Some(resource) = resource {
+        let resource_name = format!("{}:{}", resource.namespace, resource.r#type);
+        if claims.resource_type != resource_name
+            || claims.resource_id != resource.id
+            || claims.resource_id.is_empty()
+            || resource.generation < 0
+        {
+            return Err(SdkError::InvalidDelegation);
+        }
+    }
+    Ok(())
 }
 
 impl SignedDelegation {

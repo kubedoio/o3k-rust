@@ -1653,10 +1653,12 @@ dependencies = [
 name = "o3k-controller-protocol"
 version = "0.4.0-alpha.1"
 dependencies = [
+ "o3k-kernel",
  "prost",
  "thiserror",
  "tonic",
  "tonic-build",
+ "uuid",
 ]
 
 [[package]]

@@ -7,9 +7,11 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+o3k-kernel = { path = "../o3k-kernel" }
 prost.workspace = true
 tonic.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

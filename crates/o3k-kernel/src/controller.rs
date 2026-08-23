@@ -198,13 +198,27 @@ pub struct ControllerFailure {
 impl ControllerFailure {
     #[must_use]
     pub fn new(category: FailureCategory, diagnostic: impl Into<String>) -> Self {
-        let mut diagnostic = diagnostic.into();
-        diagnostic.truncate(MAX_DIAGNOSTIC_BYTES);
+        let diagnostic = bounded_utf8(diagnostic.into(), MAX_DIAGNOSTIC_BYTES);
         Self {
             category,
             diagnostic,
         }
     }
+}
+
+/// Bound externally visible diagnostics by UTF-8 bytes without splitting a
+/// code point. This is deliberately centralized because diagnostics cross the
+/// protobuf boundary and are attacker-controlled at that boundary.
+pub fn bounded_utf8(mut value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -371,5 +385,16 @@ mod tests {
         let reg = ControllerRegistration::declared("database-example", "database");
         assert_eq!(reg.state, ControllerState::Declared);
         assert!(reg.session.is_none());
+    }
+
+    #[test]
+    fn diagnostic_bound_never_splits_utf8() {
+        let output = bounded_utf8("🙂🙂🙂".to_string(), 5);
+        assert!(output.len() <= 5);
+        assert_eq!(output, "🙂");
+        assert_eq!(
+            ControllerFailure::new(FailureCategory::InvalidRequest, "🙂🙂🙂").diagnostic,
+            "🙂🙂🙂"
+        );
     }
 }

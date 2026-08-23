@@ -3,6 +3,8 @@ pub mod proto {
     tonic::include_proto!("o3k.controller.v1");
 }
 
+pub mod conversion;
+
 pub const PROTOCOL_VERSION: (u16, u16) = (1, 0);
 pub const MAX_DIAGNOSTIC_BYTES: usize = 4096;
 pub const MAX_RESOURCE_PAYLOAD_BYTES: usize = 1024 * 1024;
