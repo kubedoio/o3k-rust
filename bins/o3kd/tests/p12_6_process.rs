@@ -552,6 +552,65 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     assert!(foreign_child.is_err());
     assert!(store.list_relationships(parent_id).await?.is_empty());
 
+    // Two independent composition clients race the same real child mutation
+    // over gRPC+mTLS. The relationship uniqueness and canonical child
+    // idempotency layers, not a process-local mutex, decide the winner.
+    let wire_delegation = serde_json::to_vec(&SignedDelegation {
+        claims: DelegationClaims {
+            version: 1,
+            credential_id: delegation.credential_id,
+            issuer: "o3k-control-plane".into(),
+            key_id: delegation.key_id.clone(),
+            original_actor: delegation.original_actor.clone(),
+            owner_scope: delegation.original_scope.to_string(),
+            calling_service: delegation.calling_service.name().into(),
+            recipient_service: delegation.recipient_service.name().into(),
+            action: delegation.delegated_action.to_string(),
+            resource_type: delegation.resource.resource_type.to_string(),
+            resource_id: delegation.resource.resource_id.as_str().into(),
+            request_id: delegation.request_id,
+            operation_id: delegation.operation_id,
+            session_id: delegation.session_id,
+            session_generation: delegation.session_generation,
+            issued_at_unix_ms: delegation.issued_at_unix_ms,
+            expires_at_unix_ms: delegation.expires_at_unix_ms,
+        },
+        signature: delegation.signature.clone(),
+    })?;
+    let child_request = ChildResourceRequest {
+        parent: resource_reference.clone(),
+        parent_operation_id: operation_id,
+        child_operation_id: None,
+        context: context.clone(),
+        service_principal: "database-controller".into(),
+        delegation: wire_delegation.clone(),
+        child: None,
+        action: ActionId::new("network", "CreateNetwork")?,
+        resource_type: o3k_kernel::ResourceType::new("network", "network")?,
+        owner_scope: scope.clone(),
+        slot: "network-primary".into(),
+        idempotency_key: format!("{operation_id}:network-primary"),
+        desired_spec: serde_json::json!({"name": format!("database-network-{parent_id}")}),
+    };
+    let race_left = composition_client.clone();
+    let race_right =
+        GrpcCompositionClient::connect(&format!("https://{composition_address}"), tls_client()?)
+            .await?;
+    let (race_left_result, race_right_result) = tokio::join!(
+        race_left.create_child(child_request.clone()),
+        race_right.create_child(child_request),
+    );
+    let successful_results = [race_left_result, race_right_result]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    assert!(!successful_results.is_empty());
+    assert!(successful_results.windows(2).all(|results| {
+        results[0].resource.resource_id == results[1].resource.resource_id
+            && results[0].operation_id == results[1].operation_id
+    }));
+    assert_eq!(store.list_relationships(parent_id).await?.len(), 1);
+
     let reconcile_request = o3k_kernel::ReconcileRequest {
         context,
         resource: o3k_kernel::ResourceSnapshot {
