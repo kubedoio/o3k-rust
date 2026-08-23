@@ -1,6 +1,7 @@
 use ed25519_dalek::SigningKey;
 use o3k_database_example::{ChildLifecycleActions, DatabaseControllerHandler, InstanceSpec};
 use o3k_kernel::{ActionId, Controller, ManifestRegistry, OwnershipScope, ScopeId};
+use o3k_native_api::resource::ResourceApplication;
 use o3k_provider::FakeComputeProvider;
 use o3k_service_sdk::{
     GrpcControllerAdapter,
@@ -55,7 +56,9 @@ fn lifecycle() -> Result<ChildLifecycleActions, Box<dyn std::error::Error>> {
 #[tokio::test]
 async fn database_controller_and_composition_cross_real_mtls_boundaries()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(O3kStore::connect_sqlite_memory().await?);
+    let store_path =
+        std::env::temp_dir().join(format!("o3k-p12-6-store-{}.sqlite", uuid::Uuid::new_v4()));
+    let store = Arc::new(O3kStore::connect_sqlite_file(&store_path).await?);
     let compute = Arc::new(o3k_compute::ComputeService::new(
         store.clone(),
         Arc::new(FakeComputeProvider::new()),
@@ -70,7 +73,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     let application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: compute.clone(),
-            network_service,
+            network_service: network_service.clone(),
             store: store.clone(),
             server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
                 service: compute.clone(),
@@ -141,21 +144,86 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             .serve_with_incoming(TcpListenerStream::new(controller_listener))
             .await
     });
-    let controller = GrpcControllerAdapter::connect(
-        &format!("https://{controller_address}"),
-        tls_client()?,
-        "database-example",
-        "database",
-        o3k_kernel::ServicePrincipal::new(
-            o3k_kernel::PrincipalId::new_unchecked("database-controller"),
-            "database-controller",
+    let controller = Arc::new(
+        GrpcControllerAdapter::connect(
+            &format!("https://{controller_address}"),
+            tls_client()?,
+            "database-example",
             "database",
-        ),
-        "p12-6-test-manifest",
+            o3k_kernel::ServicePrincipal::new(
+                o3k_kernel::PrincipalId::new_unchecked("database-controller"),
+                "database-controller",
+                "database",
+            ),
+            "p12-6-test-manifest",
+            1,
+        )
+        .await?
+        .with_delegation_signer("p12-6-test", SigningKey::from_bytes(&[9; 32])),
+    );
+    let api_application = o3kd::native_adapters::GenericResourceApplication {
+        compute: compute.clone(),
+        network_service: network_service.clone(),
+        store: store.clone(),
+        server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
+            service: compute.clone(),
+        }),
+        network: Arc::new(o3kd::native_adapters::NetworkReaderAdapter {
+            store: store.clone(),
+            authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
+        }),
+        external_controllers: Arc::new(std::collections::BTreeMap::from([(
+            "database-example".to_owned(),
+            controller.clone(),
+        )])),
+    };
+    let dispatcher =
+        o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&manifests)
+            .map_err(|error| format!("dispatcher: {error:?}"))?;
+    let descriptor = dispatcher
+        .resolve_resource_type(&o3k_kernel::ResourceType::new("database", "instance")?)
+        .ok_or("database descriptor missing")?;
+    let api_auth = o3k_kernel::AuthContext::new(
+        o3k_kernel::Principal::User(o3k_kernel::UserPrincipal::new(
+            o3k_kernel::PrincipalId::new("user-api")?,
+            "user-api",
+            None,
+        )),
+        OwnershipScope::project(ScopeId::new("project-api")?, None, None),
+        Vec::new(),
         1,
-    )
-    .await?
-    .with_delegation_signer("p12-6-test", SigningKey::from_bytes(&[9; 32]));
+        u64::MAX,
+        "api-audit",
+        uuid::Uuid::new_v4().to_string(),
+        None,
+    );
+    let api_result = api_application
+        .create(
+            descriptor,
+            &api_auth,
+            o3k_native_api::resource::CreateRequest {
+                api_version: Some("o3k.io/v1".into()),
+                kind: Some("database:instance".into()),
+                spec: serde_json::json!({"engine":"test-engine","version":"1","storage_gb":1}),
+            },
+            Some("api-create-1"),
+        )
+        .await
+        .map_err(|error| format!("generic create: {error:?}"))?;
+    let api_id = api_result
+        .resource_id
+        .clone()
+        .ok_or("generic create omitted id")?;
+    let api_show = api_application
+        .show(descriptor, &api_auth, &api_id)
+        .await
+        .map_err(|error| format!("generic show: {error:?}"))?;
+    assert!(api_show.get("status").is_some());
+    let api_delete = api_application
+        .delete(descriptor, &api_auth, &api_id, Some("api-delete-1"))
+        .await
+        .map_err(|error| format!("generic delete: {error:?}"))?;
+    assert!(api_delete.complete);
     let scope = OwnershipScope::project(ScopeId::new("project-a")?, None, None);
     let parent_id = uuid::Uuid::new_v4();
     let operation_id = uuid::Uuid::new_v4();
@@ -258,5 +326,6 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     }));
     controller_task.abort();
     composition_task.abort();
+    let _ = std::fs::remove_file(store_path);
     Ok(())
 }
