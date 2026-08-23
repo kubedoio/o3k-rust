@@ -160,6 +160,7 @@ pub mod composition {
             resource_type: request.resource_type.to_string(),
             desired_spec: serde_json::to_vec(&request.desired_spec)
                 .map_err(|_| CompositionError::Failed("invalid child spec".into()))?,
+            requested_action: request.action.to_string(),
         })
     }
 
@@ -225,6 +226,22 @@ pub mod composition {
             owner_scope,
             ownership,
         })
+    }
+
+    #[tonic::async_trait]
+    pub trait CompositionHandler: Send + Sync + 'static {
+        async fn create_child(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<ChildResourceReceipt, CompositionError>;
+        async fn observe_child(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<serde_json::Value, CompositionError>;
+        async fn delete_child(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<ChildResourceReceipt, CompositionError>;
     }
 
     /// Real generic controller-to-O3K composition client. It contains only
