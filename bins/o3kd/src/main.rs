@@ -1153,9 +1153,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             server: server_reader
                 .clone()
                 .ok_or("generic native application requires compute reader")?,
-            volume: volume_reader
-                .clone()
-                .ok_or("generic native application requires volume reader")?,
             network: network_reader
                 .clone()
                 .ok_or("generic native application requires network reader")?,

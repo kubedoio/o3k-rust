@@ -204,7 +204,9 @@ impl StaticAuthorizer {
         );
         // P12.2 — Native volume read actions
         reg("volume", "ListVolumes", "volume", "volume", true);
+        reg("volume", "CreateVolume", "volume", "volume", true);
         reg("volume", "ReadVolume", "volume", "volume", true);
+        reg("volume", "DeleteVolume", "volume", "volume", true);
         // P12.2 — Native network read actions (canonical O3K resources)
         reg(
             "network",

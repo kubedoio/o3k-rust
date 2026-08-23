@@ -1741,11 +1741,21 @@ impl ManifestRegistry {
                             "show".to_owned(),
                             ActionId::new_unchecked("volume", "ReadVolume"),
                         ),
+                        (
+                            "create".to_owned(),
+                            ActionId::new_unchecked("volume", "CreateVolume"),
+                        ),
+                        (
+                            "delete".to_owned(),
+                            ActionId::new_unchecked("volume", "DeleteVolume"),
+                        ),
                     ]),
                 }],
                 actions: vec![
                     "volume:ListVolumes".to_owned(),
+                    "volume:CreateVolume".to_owned(),
                     "volume:ReadVolume".to_owned(),
+                    "volume:DeleteVolume".to_owned(),
                 ],
                 capabilities: vec![],
                 dependencies: vec![],
