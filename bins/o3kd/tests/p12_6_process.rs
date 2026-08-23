@@ -122,7 +122,8 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         GrpcCompositionClient::connect(&format!("https://{composition_address}"), tls_client()?)
             .await?,
     );
-    let controller_handler = DatabaseControllerHandler::new(composition_client, lifecycle()?);
+    let controller_handler =
+        DatabaseControllerHandler::new(composition_client.clone(), lifecycle()?);
     let controller_service = o3k_service_sdk::ServiceControllerServer::new(
         controller_handler,
         "database-example",
@@ -307,7 +308,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
                 },
                 desired_spec: serde_json::from_str(&resource.desired_state)?,
                 known_status: None,
-                owner_scope: scope,
+                owner_scope: scope.clone(),
             },
             delegation: Some(delegation),
         })
@@ -325,6 +326,101 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             && relationship.child_resource_id.is_some()
     }));
     controller_task.abort();
+    let restarted_handler =
+        DatabaseControllerHandler::new(composition_client.clone(), lifecycle()?);
+    let restarted_service = o3k_service_sdk::ServiceControllerServer::new(
+        restarted_handler,
+        "database-example",
+        "database",
+        "p12-6-test-manifest",
+        1,
+    )
+    .with_service_principal("database-controller")
+    .with_delegation_recipient("o3k-composition")
+    .with_delegation_keys(HashMap::from([("p12-6-test".to_owned(), verification)]))
+    .into_service();
+    let restarted_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let restarted_address = restarted_listener.local_addr()?;
+    let restarted_tls = tls_server()?;
+    let restarted_task = tokio::spawn(async move {
+        let mut builder = Server::builder().tls_config(restarted_tls)?;
+        builder
+            .add_service(restarted_service)
+            .serve_with_incoming(TcpListenerStream::new(restarted_listener))
+            .await
+    });
+    let restarted_controller = Arc::new(
+        GrpcControllerAdapter::connect(
+            &format!("https://{restarted_address}"),
+            tls_client()?,
+            "database-example",
+            "database",
+            o3k_kernel::ServicePrincipal::new(
+                o3k_kernel::PrincipalId::new_unchecked("database-controller"),
+                "database-controller",
+                "database",
+            ),
+            "p12-6-test-manifest",
+            1,
+        )
+        .await?
+        .with_delegation_signer("p12-6-test", SigningKey::from_bytes(&[9; 32])),
+    );
+    let restarted_session = restarted_controller.session().clone();
+    let restarted_context = o3k_kernel::OperationContext {
+        request_id,
+        operation_id,
+        action: ActionId::new("database", "CreateInstance")?,
+        service_id: "database-example".into(),
+        owner_scope: scope.clone(),
+        session_id: restarted_session.session_id,
+        session_generation: restarted_session.session_generation,
+        deadline_unix_ms: chrono::Utc::now().timestamp_millis() as u64 + 60_000,
+        replay_identity: "database-create-1".into(),
+        audit_correlation: "p12-6-process-restart".into(),
+    };
+    let restarted_delegation = restarted_controller.issue_parent_delegation(
+        &restarted_context,
+        "user-a",
+        &o3k_kernel::ResourceReference {
+            resource_type: o3k_kernel::ResourceType::new("database", "instance")?,
+            resource_id: o3k_kernel::ResourceId::new(parent_id.to_string())?,
+            generation: 1,
+        },
+    )?;
+    let restarted_outcome = restarted_controller
+        .reconcile(o3k_kernel::ReconcileRequest {
+            context: restarted_context,
+            resource: o3k_kernel::ResourceSnapshot {
+                reference: o3k_kernel::ResourceReference {
+                    resource_type: o3k_kernel::ResourceType::new("database", "instance")?,
+                    resource_id: o3k_kernel::ResourceId::new(parent_id.to_string())?,
+                    generation: 1,
+                },
+                desired_spec: serde_json::from_str(&resource.desired_state)?,
+                known_status: None,
+                owner_scope: scope,
+            },
+            delegation: Some(restarted_delegation),
+        })
+        .await;
+    assert!(matches!(
+        restarted_outcome,
+        o3k_kernel::ReconcileOutcome::Succeeded { .. }
+    ));
+    let after_restart = store.list_relationships(parent_id).await?;
+    assert_eq!(after_restart.len(), 3);
+    assert_eq!(
+        after_restart
+            .iter()
+            .filter_map(|relationship| relationship.child_resource_id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        relationships
+            .iter()
+            .filter_map(|relationship| relationship.child_resource_id)
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+    restarted_task.abort();
     composition_task.abort();
     let _ = std::fs::remove_file(store_path);
     Ok(())
