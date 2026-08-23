@@ -187,16 +187,6 @@ async fn native_and_openstack_http_surfaces_share_compute_and_network_authority(
             .with_network((*network).clone())
             .with_native_api(native.clone()),
     );
-    // The compute compatibility test intentionally omits the Neutron
-    // validation dependency: its input is an opaque network reference, while
-    // the canonical ComputeService remains shared with the network-enabled
-    // router above.
-    let compute_app = o3k_api::router_with_state(
-        o3k_api::AppState::new()
-            .with_identity(identity.clone())
-            .with_compute(compute_service)
-            .with_native_api(native),
-    );
     let token = issue_token(&app).await?;
 
     // Direction A: OpenStack create -> native read.  The ID and owner are
@@ -221,6 +211,55 @@ async fn native_and_openstack_http_surfaces_share_compute_and_network_authority(
     let project_id = openstack_network_json["network"]["project_id"]
         .as_str()
         .ok_or("OpenStack network project ID")?;
+    let openstack_subnet = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/subnets")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                    "subnet": {
+                        "network_id": network_id,
+                        "name": "p12-7-subnet",
+                        "cidr": "192.0.2.0/24",
+                        "gateway_ip": "192.0.2.1",
+                        "allocation_pools": [{"start": "192.0.2.10", "end": "192.0.2.200"}]
+                    }
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(openstack_subnet.status(), StatusCode::CREATED);
+    let openstack_subnet_json = response_json(openstack_subnet).await;
+    let subnet_id = openstack_subnet_json["subnet"]["id"]
+        .as_str()
+        .ok_or("OpenStack subnet ID")?;
+    let openstack_port = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/ports")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                    "port": {"network_id": network_id, "name": "p12-7-port"}
+                }))?))?,
+        )
+        .await?;
+    let openstack_port_status = openstack_port.status();
+    if openstack_port_status != StatusCode::CREATED {
+        let body = axum::body::to_bytes(openstack_port.into_body(), 64 * 1024).await?;
+        panic!(
+            "OpenStack port create failed: {openstack_port_status} {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let openstack_port_json = response_json(openstack_port).await;
+    let port_id = openstack_port_json["port"]["id"]
+        .as_str()
+        .ok_or("OpenStack port ID")?;
     let native_network = get_json(
         &app,
         &format!("/o3k/v1/network/networks/{network_id}"),
@@ -260,6 +299,170 @@ async fn native_and_openstack_http_surfaces_share_compute_and_network_authority(
         get_json(&app, &format!("/v2.0/networks/{native_network_id}"), &token).await?;
     assert_eq!(openstack_network_read["network"]["id"], native_network_id);
 
+    // Compute uses the same shared authority.  The fake provider is only an
+    // execution dependency; neither adapter owns a second public record.
+    let flavor_id = "00000000-0000-0000-0000-000000000001";
+    let openstack_server_body = serde_json::json!({
+        "server": {
+            "name": "p12-7-openstack-server",
+            "image": {"id": "image-a"},
+            "flavor": {"id": flavor_id},
+            "networks": [{"port": port_id}]
+        }
+    });
+    let openstack_server = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v2.1/{project_id}/servers"))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-openstack-request-id", "p12-7-openstack-create")
+                .body(Body::from(serde_json::to_vec(&openstack_server_body)?))?,
+        )
+        .await?;
+    let openstack_server_status = openstack_server.status();
+    if openstack_server_status != StatusCode::ACCEPTED {
+        let body = axum::body::to_bytes(openstack_server.into_body(), 64 * 1024).await?;
+        panic!(
+            "OpenStack Compute create failed: {openstack_server_status} {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let openstack_server_json = response_json(openstack_server).await;
+    let openstack_server_id = openstack_server_json["server"]["id"]
+        .as_str()
+        .ok_or("OpenStack server ID")?;
+    let native_server = get_json(
+        &app,
+        &format!("/o3k/v1/compute/servers/{openstack_server_id}"),
+        &token,
+    )
+    .await?;
+    assert_eq!(native_server["metadata"]["id"], openstack_server_id);
+    assert_eq!(native_server["metadata"]["owner_scope"], project_id);
+
+    let native_server_create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/o3k/v1/compute/servers")
+                .header("authorization", format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "p12-7-native-create")
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                    "kind": "compute:server",
+                    "spec": {
+                        "name": "p12-7-native-server",
+                        "image_id": "image-b",
+                        "flavor_id": flavor_id,
+                        "network_ids": [port_id]
+                    }
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(native_server_create.status(), StatusCode::CREATED);
+    let native_server_json = response_json(native_server_create).await;
+    let native_server_id = native_server_json["resource_id"]
+        .as_str()
+        .ok_or("native server ID")?;
+
+    // Native collection pagination is exercised through HTTP, including its
+    // opaque authenticated cursor rather than the cursor codec directly.
+    let first_page = get_json(&app, "/o3k/v1/compute/servers?limit=1", &token).await?;
+    assert_eq!(first_page["items"].as_array().map(Vec::len), Some(1));
+    let next_cursor = first_page["next_cursor"]
+        .as_str()
+        .ok_or("native next cursor")?;
+    let second_page = get_json(
+        &app,
+        &format!("/o3k/v1/compute/servers?limit=1&cursor={next_cursor}"),
+        &token,
+    )
+    .await?;
+    assert_eq!(second_page["items"].as_array().map(Vec::len), Some(1));
+    let tampered_cursor = format!("{next_cursor}x");
+    assert_eq!(
+        status_for(
+            &app,
+            Method::GET,
+            &format!("/o3k/v1/compute/servers?limit=1&cursor={tampered_cursor}"),
+            &token,
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    let openstack_server_read = get_json(
+        &app,
+        &format!("/v2.1/{project_id}/servers/{native_server_id}"),
+        &token,
+    )
+    .await?;
+    assert_eq!(openstack_server_read["server"]["id"], native_server_id);
+
+    assert_eq!(
+        status_for(
+            &app,
+            Method::DELETE,
+            &format!("/o3k/v1/compute/servers/{native_server_id}"),
+            &token,
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        status_for(
+            &app,
+            Method::GET,
+            &format!("/v2.1/{project_id}/servers/{native_server_id}"),
+            &token,
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        status_for(
+            &app,
+            Method::DELETE,
+            &format!("/v2.1/{project_id}/servers/{openstack_server_id}"),
+            &token,
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        status_for(
+            &app,
+            Method::GET,
+            &format!("/o3k/v1/compute/servers/{openstack_server_id}"),
+            &token,
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+
+    assert_eq!(
+        status_for(
+            &app,
+            Method::DELETE,
+            &format!("/v2.0/ports/{port_id}"),
+            &token,
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        status_for(
+            &app,
+            Method::DELETE,
+            &format!("/v2.0/subnets/{subnet_id}"),
+            &token,
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
     assert_eq!(
         status_for(
             &app,
@@ -281,118 +484,8 @@ async fn native_and_openstack_http_surfaces_share_compute_and_network_authority(
         StatusCode::NOT_FOUND
     );
 
-    // Compute uses the same shared authority.  The fake provider is only an
-    // execution dependency; neither adapter owns a second public record.
-    let flavor_id = "00000000-0000-0000-0000-000000000001";
-    let openstack_server_body = serde_json::json!({
-        "server": {
-            "name": "p12-7-openstack-server",
-            "image": {"id": "image-a"},
-            "flavor": {"id": flavor_id},
-            "networks": [{"uuid": network_id}]
-        }
-    });
-    let openstack_server = compute_app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri(format!("/v2.1/{project_id}/servers"))
-                .header("x-auth-token", &token)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header("x-openstack-request-id", "p12-7-openstack-create")
-                .body(Body::from(serde_json::to_vec(&openstack_server_body)?))?,
-        )
-        .await?;
-    assert_eq!(openstack_server.status(), StatusCode::ACCEPTED);
-    let openstack_server_json = response_json(openstack_server).await;
-    let openstack_server_id = openstack_server_json["server"]["id"]
-        .as_str()
-        .ok_or("OpenStack server ID")?;
-    let native_server = get_json(
-        &compute_app,
-        &format!("/o3k/v1/compute/servers/{openstack_server_id}"),
-        &token,
-    )
-    .await?;
-    assert_eq!(native_server["metadata"]["id"], openstack_server_id);
-    assert_eq!(native_server["metadata"]["owner_scope"], project_id);
-
-    let native_server_create = compute_app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/o3k/v1/compute/servers")
-                .header("authorization", format!("Bearer {token}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .header("idempotency-key", "p12-7-native-create")
-                .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                    "kind": "compute:server",
-                    "spec": {
-                        "name": "p12-7-native-server",
-                        "image_id": "image-b",
-                        "flavor_id": flavor_id,
-                        "network_ids": [network_id]
-                    }
-                }))?))?,
-        )
-        .await?;
-    assert_eq!(native_server_create.status(), StatusCode::CREATED);
-    let native_server_json = response_json(native_server_create).await;
-    let native_server_id = native_server_json["resource_id"]
-        .as_str()
-        .ok_or("native server ID")?;
-    let openstack_server_read = get_json(
-        &compute_app,
-        &format!("/v2.1/{project_id}/servers/{native_server_id}"),
-        &token,
-    )
-    .await?;
-    assert_eq!(openstack_server_read["server"]["id"], native_server_id);
-
-    assert_eq!(
-        status_for(
-            &compute_app,
-            Method::DELETE,
-            &format!("/o3k/v1/compute/servers/{native_server_id}"),
-            &token,
-        )
-        .await,
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(
-        status_for(
-            &compute_app,
-            Method::GET,
-            &format!("/v2.1/{project_id}/servers/{native_server_id}"),
-            &token,
-        )
-        .await,
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        status_for(
-            &compute_app,
-            Method::DELETE,
-            &format!("/v2.1/{project_id}/servers/{openstack_server_id}"),
-            &token,
-        )
-        .await,
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(
-        status_for(
-            &compute_app,
-            Method::GET,
-            &format!("/o3k/v1/compute/servers/{openstack_server_id}"),
-            &token,
-        )
-        .await,
-        StatusCode::NOT_FOUND
-    );
-
-    // A restart/reconstruction of the shared store must preserve both links.
+    // The durable store is the canonical authority; the provider is only an
+    // execution dependency and owns no public resource identity.
     assert_eq!(
         store
             .get_resource(uuid::Uuid::parse_str(native_server_id)?)

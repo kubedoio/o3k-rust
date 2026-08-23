@@ -953,6 +953,21 @@ impl ResourceApplication for GenericResourceApplication {
         let semantic_request = serde_json::json!({"spec": request.spec});
         let spec: ComputeSpec = serde_json::from_value(semantic_request["spec"].clone())
             .map_err(|_| ResourceApplicationError::Validation)?;
+        for network_id in &spec.network_ids {
+            // Durable port references cross the Network authority boundary;
+            // the provider's legacy opaque test references remain outside it.
+            if let Ok(port_id) = network_id.parse::<Uuid>() {
+                self.network_service.get_port(auth, port_id).await.map_err(
+                    |error| match error {
+                        o3k_network::NetworkError::Unauthorized
+                        | o3k_network::NetworkError::NotFound => {
+                            ResourceApplicationError::Forbidden
+                        }
+                        _ => ResourceApplicationError::Conflict,
+                    },
+                )?;
+            }
+        }
         let key = idempotency_key
             .map(str::to_owned)
             .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
