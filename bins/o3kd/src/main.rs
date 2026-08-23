@@ -1109,6 +1109,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     native_manifest_registry
         .seed_core()
         .map_err(|e| format!("native manifest seed_core failed: {e}"))?;
+    if let Ok(manifest_directory) = std::env::var("O3K_MANIFEST_DIR") {
+        let path = std::path::Path::new(&manifest_directory);
+        native_manifest_registry
+            .register_json_directory(path)
+            .map_err(|e| format!("external manifest directory failed: {e}"))?;
+        info!(directory = %path.display(), "external service manifests loaded");
+    }
 
     // Wire native API service adapters.
     let server_reader: Option<std::sync::Arc<dyn o3k_native_api::compute::ServerReader>> =

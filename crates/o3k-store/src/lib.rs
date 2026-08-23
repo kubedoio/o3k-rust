@@ -1895,10 +1895,10 @@ impl SqliteStore {
             .bind(&record.owner_scope).bind(RELATIONSHIP_RESERVED).bind(&record.fingerprint)
             .execute(&self.pool).await;
         let result = result.map_err(|error| {
-            if let sqlx::Error::Database(db) = &error {
-                if db.is_unique_violation() {
-                    return StoreError::IdempotencyConflict;
-                }
+            if let sqlx::Error::Database(db) = &error
+                && db.is_unique_violation()
+            {
+                return StoreError::IdempotencyConflict;
             }
             StoreError::Database(error)
         });
