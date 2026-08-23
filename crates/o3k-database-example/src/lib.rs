@@ -158,11 +158,24 @@ pub struct CompositionState {
 
 pub struct DatabaseComposition<C> {
     client: Arc<C>,
+    lifecycle: ChildLifecycleActions,
+}
+
+/// Canonical lifecycle actions resolved from the ManifestRegistry by the
+/// control plane. The example never derives an ActionId from a resource name.
+#[derive(Debug, Clone)]
+pub struct ChildLifecycleActions {
+    pub network_create: o3k_kernel::ActionId,
+    pub network_delete: o3k_kernel::ActionId,
+    pub volume_create: o3k_kernel::ActionId,
+    pub volume_delete: o3k_kernel::ActionId,
+    pub compute_create: o3k_kernel::ActionId,
+    pub compute_delete: o3k_kernel::ActionId,
 }
 
 impl<C: ServiceCompositionClient> DatabaseComposition<C> {
-    pub fn new(client: Arc<C>) -> Self {
-        Self { client }
+    pub fn new(client: Arc<C>, lifecycle: ChildLifecycleActions) -> Self {
+        Self { client, lifecycle }
     }
 
     /// Creates deterministic child slots in dependency order. Each request
@@ -180,12 +193,22 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
                 "network-primary",
                 "network",
                 "address_realm",
-                "CreateAddressRealm",
+                self.lifecycle.network_create.clone(),
             ),
-            ("volume-data", "volume", "volume", "CreateVolume"),
-            ("compute-primary", "compute", "server", "CreateServer"),
+            (
+                "volume-data",
+                "volume",
+                "volume",
+                self.lifecycle.volume_create.clone(),
+            ),
+            (
+                "compute-primary",
+                "compute",
+                "server",
+                self.lifecycle.compute_create.clone(),
+            ),
         ];
-        for (slot, namespace, name, action_name) in slots {
+        for (slot, namespace, name, action) in slots {
             let exists = match slot {
                 "network-primary" => state.network.is_some(),
                 "volume-data" => state.volume.is_some(),
@@ -198,15 +221,31 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
             let request = ChildResourceRequest {
                 parent: parent.clone(),
                 parent_operation_id,
-                action: o3k_kernel::ActionId::new(namespace, action_name)
-                    .map_err(|e| CompositionError::Failed(e.to_string()))?,
+                action,
                 resource_type: o3k_kernel::ResourceType::new(namespace, name)
                     .map_err(|e| CompositionError::Failed(e.to_string()))?,
                 owner_scope: owner_scope.clone(),
                 slot: slot.to_owned(),
                 idempotency_key: format!("{parent_operation_id}:{slot}"),
-                desired_spec: serde_json::to_value(spec)
-                    .map_err(|e| CompositionError::Failed(e.to_string()))?,
+                desired_spec: match slot {
+                    // Child APIs receive only fields from their own schema.
+                    "network-primary" => serde_json::json!({
+                        "prefix": format!("10.0.{}.0/24", spec.storage_gb % 250 + 1),
+                        "overlapping_prefixes": false
+                    }),
+                    "volume-data" => serde_json::json!({
+                        "size_bytes": spec.storage_gb.saturating_mul(1024 * 1024 * 1024),
+                        "volume_type": "standard"
+                    }),
+                    "compute-primary" => serde_json::json!({
+                        "name": format!("database-{}", parent.resource_id),
+                        "image_id": format!("database-{}", spec.version),
+                        "flavor_id": spec.engine.clone(),
+                        "network_ids": [],
+                        "key_name": serde_json::Value::Null
+                    }),
+                    _ => return Err(CompositionError::Failed("unknown child slot".into())),
+                },
             };
             let receipt = self.client.create_child(request).await?;
             match slot {
@@ -244,14 +283,20 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
             {
                 return Err(CompositionError::Unauthorized);
             }
+            let action = match resource.resource_type.to_string().as_str() {
+                "network:address_realm" => self.lifecycle.network_delete.clone(),
+                "volume:volume" => self.lifecycle.volume_delete.clone(),
+                "compute:server" => self.lifecycle.compute_delete.clone(),
+                _ => {
+                    return Err(CompositionError::Failed(
+                        "unsupported child resource".into(),
+                    ));
+                }
+            };
             let request = ChildResourceRequest {
                 parent: parent.clone(),
                 parent_operation_id,
-                action: o3k_kernel::ActionId::new(
-                    resource.resource_type.namespace(),
-                    format!("Delete{}", resource.resource_type.name()),
-                )
-                .map_err(|e| CompositionError::Failed(e.to_string()))?,
+                action,
                 resource_type: resource.resource_type.clone(),
                 owner_scope: owner_scope.clone(),
                 slot: format!("compensate:{}", resource.resource_type),
@@ -423,7 +468,15 @@ mod tests {
         let client = Arc::new(FakeComposition {
             calls: Mutex::new(Vec::new()),
         });
-        let composition = DatabaseComposition::new(client.clone());
+        let lifecycle = ChildLifecycleActions {
+            network_create: ActionId::new("network", "CreateAddressRealm").unwrap(),
+            network_delete: ActionId::new("network", "DeleteAddressRealm").unwrap(),
+            volume_create: ActionId::new("volume", "CreateVolume").unwrap(),
+            volume_delete: ActionId::new("volume", "DeleteVolume").unwrap(),
+            compute_create: ActionId::new("compute", "CreateServer").unwrap(),
+            compute_delete: ActionId::new("compute", "DeleteServer").unwrap(),
+        };
+        let composition = DatabaseComposition::new(client.clone(), lifecycle);
         let parent = o3k_kernel::ResourceReference {
             resource_type: o3k_kernel::ResourceType::new("database", "instance").unwrap(),
             resource_id: o3k_kernel::ResourceId::new("parent-1").unwrap(),
