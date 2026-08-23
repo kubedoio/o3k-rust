@@ -1683,10 +1683,11 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
         self.application
             .show(&descriptor, &auth, child.resource_id.as_str())
             .await
-            .map_err(|_| {
-                o3k_service_sdk::composition::CompositionError::Failed(
-                    "child observation failed".into(),
-                )
+            .map_err(|error| {
+                o3k_service_sdk::composition::CompositionError::Failed(format!(
+                    "child observation failed for {} {}: {error:?}",
+                    child.resource_type, child.resource_id
+                ))
             })
     }
 

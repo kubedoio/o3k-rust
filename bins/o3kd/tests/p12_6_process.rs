@@ -11,11 +11,11 @@ use o3k_service_sdk::{
     DelegationClaims, GrpcControllerAdapter, SignedDelegation,
     composition::{CompositionServiceAdapter, GrpcCompositionClient},
 };
-use o3k_store::QuotaRepository;
 use o3k_store::{
     CanonicalOperationRecord, DurableStore, IdempotencyReservationRequest, O3kStore,
     OperationRecord, OperationState, ResourceRecord, ResourceRelationshipRecord,
 };
+use o3k_store::{NetworkRepository, QuotaRepository};
 use std::{collections::HashMap, sync::Arc};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
@@ -1075,7 +1075,7 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
         // application before runtime A is destroyed.  Runtime B must later
         // observe these real child records, not merely reload synthetic
         // relationship IDs.
-        let runtime_auth = process_auth_context("runtime-recovery");
+        let runtime_auth = process_auth_context("project-runtime-recovery");
         let runtime_dispatcher =
             o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&registry)
                 .map_err(|error| format!("runtime A child dispatcher: {error:?}"))?;
@@ -1120,6 +1120,26 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
                 .bind_relationship(parent, slot, child_id, child_operation_id)
                 .await?;
         }
+        // Force the simulated provider observations to become durable before
+        // the control-plane teardown.  Runtime B must recover observable
+        // canonical children, not merely relationship receipts.
+        for record in store.list_relationships(parent).await? {
+            let Some(child_id) = record.child_resource_id else {
+                continue;
+            };
+            let (namespace, name) = record
+                .expected_child_resource_type
+                .split_once(':')
+                .ok_or("invalid runtime child type")?;
+            let child_type = o3k_kernel::ResourceType::new(namespace, name)?;
+            let child_descriptor = runtime_dispatcher
+                .resolve_resource_type(&child_type)
+                .ok_or_else(|| format!("missing runtime observer descriptor {child_type}"))?;
+            application
+                .show(child_descriptor, &runtime_auth, &child_id.to_string())
+                .await
+                .map_err(|error| format!("runtime A child observe {}: {error:?}", record.slot))?;
+        }
         let network_id = store
             .get_relationship(parent, "network-primary")
             .await?
@@ -1159,6 +1179,21 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
                 compute.operation_id.parse()?,
             )
             .await?;
+        let compute_id = store
+            .get_relationship(parent, "compute-primary")
+            .await?
+            .child_resource_id
+            .ok_or("runtime A compute child missing")?;
+        application
+            .show(
+                runtime_dispatcher
+                    .resolve_resource_type(&compute_type)
+                    .ok_or("missing runtime compute observer descriptor")?,
+                &runtime_auth,
+                &compute_id.to_string(),
+            )
+            .await
+            .map_err(|error| format!("runtime A child observe compute-primary: {error:?}"))?;
         let records = store.list_relationships(parent).await?;
         assert_eq!(records.len(), 3);
         (parent, parent_operation, records)
@@ -1228,6 +1263,25 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
     let dispatcher_b =
         o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&registry_b)
             .map_err(|error| format!("runtime B dispatcher: {error:?}"))?;
+    let runtime_auth_b = process_auth_context("project-runtime-recovery");
+    for record in &records_b {
+        if let Some(child_id) = record.child_resource_id {
+            let (namespace, name) = record
+                .expected_child_resource_type
+                .split_once(':')
+                .ok_or("invalid runtime B child type")?;
+            let child_type = o3k_kernel::ResourceType::new(namespace, name)?;
+            let descriptor = dispatcher_b
+                .resolve_resource_type(&child_type)
+                .ok_or("missing runtime B child descriptor")?;
+            application_b
+                .show(descriptor, &runtime_auth_b, &child_id.to_string())
+                .await
+                .map_err(|error| {
+                    format!("runtime B direct child observe {}: {error:?}", record.slot)
+                })?;
+        }
+    }
     assert!(
         dispatcher_b
             .resolve_resource_type(&o3k_kernel::ResourceType::new("database", "instance")?)
@@ -1347,7 +1401,6 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
         matches!(
             &recovered_outcome,
             o3k_kernel::ReconcileOutcome::Succeeded { .. }
-                | o3k_kernel::ReconcileOutcome::Unknown { .. }
         ),
         "recovered runtime outcome: {recovered_outcome:?}"
     );
@@ -1373,7 +1426,7 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
 
 #[tokio::test]
 async fn p12_6_independent_application_instances_converge_durable_slots()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = std::env::temp_dir().join(format!(
         "o3k-p12-6-app-race-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -1473,26 +1526,225 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
             }),
             external_controllers: Arc::new(Default::default()),
         });
+    let mut child_registry = ManifestRegistry::new();
+    child_registry.seed_core()?;
+    let child_dispatcher = Arc::new(
+        o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&child_registry)
+            .map_err(|error| format!("child dispatcher: {error:?}"))?,
+    );
     let barrier = Arc::new(tokio::sync::Barrier::new(3));
     let left_barrier = barrier.clone();
     let right_barrier = barrier.clone();
     let left_records = records.clone();
     let right_records = records.clone();
+    let left_dispatcher = child_dispatcher.clone();
+    let right_dispatcher = child_dispatcher;
     let left_task = tokio::spawn(async move {
-        let _application = left_application;
         left_barrier.wait().await;
         for candidate in &left_records {
-            left_store.reserve_relationship(candidate).await?;
+            if left_store.reserve_relationship(candidate).await.is_ok() {
+                if left_store
+                    .get_relationship(parent, &candidate.slot)
+                    .await?
+                    .child_resource_id
+                    .is_some()
+                {
+                    continue;
+                }
+                let (namespace, name) = candidate
+                    .expected_child_resource_type
+                    .split_once(':')
+                    .ok_or("invalid child type")?;
+                let child_type = o3k_kernel::ResourceType::new(namespace, name)?;
+                let descriptor = left_dispatcher
+                    .resolve_resource_type(&child_type)
+                    .ok_or("missing child descriptor")?
+                    .clone();
+                let mut network_id = String::new();
+                if candidate.slot == "compute-primary" {
+                    for _ in 0..100 {
+                        if let Some(id) = left_store
+                            .get_relationship(parent, "network-primary")
+                            .await?
+                            .child_resource_id
+                        {
+                            network_id = id.to_string();
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                }
+                let spec = match candidate.slot.as_str() {
+                    "network-primary" => serde_json::json!({"name": "independent-race-network"}),
+                    "volume-data" => {
+                        serde_json::json!({"size_bytes": 1, "volume_type": "standard"})
+                    }
+                    "compute-primary" => serde_json::json!({
+                        "name": "independent-race-compute",
+                        "image_id": "image-1",
+                        "flavor_id": uuid::Uuid::from_u128(1),
+                        "network_ids": [network_id],
+                        "key_name": null
+                    }),
+                    _ => return Err("unknown child slot".into()),
+                };
+                let child_result = left_application
+                    .create(
+                        &descriptor,
+                        &process_auth_context("project-independent-race"),
+                        o3k_native_api::resource::CreateRequest {
+                            api_version: Some("o3k.io/v1".into()),
+                            kind: Some(candidate.expected_child_resource_type.clone()),
+                            spec,
+                        },
+                        Some(&format!("independent-race:{}", candidate.slot)),
+                    )
+                    .await;
+                let child = match child_result {
+                    Ok(child) => child,
+                    Err(o3k_native_api::resource::ResourceApplicationError::Conflict) => {
+                        for _ in 0..100 {
+                            if left_store
+                                .get_relationship(parent, &candidate.slot)
+                                .await?
+                                .child_resource_id
+                                .is_some()
+                            {
+                                continue;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(format!("child create {}: {error:?}", candidate.slot).into());
+                    }
+                };
+                left_store
+                    .bind_relationship(
+                        parent,
+                        &candidate.slot,
+                        child.resource_id.ok_or("missing child id")?.parse()?,
+                        child.operation_id.parse()?,
+                    )
+                    .await?;
+            }
         }
-        Ok::<(), o3k_store::StoreError>(())
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let right_task = tokio::spawn(async move {
-        let _application = right_application;
         right_barrier.wait().await;
         for candidate in &right_records {
-            right_store.reserve_relationship(candidate).await?;
+            // NetworkService's canonical lifecycle currently rejects a
+            // duplicate name rather than returning an equivalent receipt.
+            // Let the other independent application establish this slot,
+            // then recover it from the durable relationship before continuing
+            // with the remaining slots.  The relationship uniqueness race is
+            // still exercised by both applications for every slot below.
+            if candidate.slot == "network-primary" {
+                let _ = right_store.reserve_relationship(candidate).await;
+                for _ in 0..100 {
+                    if right_store
+                        .get_relationship(parent, &candidate.slot)
+                        .await?
+                        .child_resource_id
+                        .is_some()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                continue;
+            }
+            if right_store.reserve_relationship(candidate).await.is_ok() {
+                if right_store
+                    .get_relationship(parent, &candidate.slot)
+                    .await?
+                    .child_resource_id
+                    .is_some()
+                {
+                    continue;
+                }
+                let (namespace, name) = candidate
+                    .expected_child_resource_type
+                    .split_once(':')
+                    .ok_or("invalid child type")?;
+                let child_type = o3k_kernel::ResourceType::new(namespace, name)?;
+                let descriptor = right_dispatcher
+                    .resolve_resource_type(&child_type)
+                    .ok_or("missing child descriptor")?
+                    .clone();
+                let mut network_id = String::new();
+                if candidate.slot == "compute-primary" {
+                    for _ in 0..100 {
+                        if let Some(id) = right_store
+                            .get_relationship(parent, "network-primary")
+                            .await?
+                            .child_resource_id
+                        {
+                            network_id = id.to_string();
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                }
+                let spec = match candidate.slot.as_str() {
+                    "network-primary" => serde_json::json!({"name": "independent-race-network"}),
+                    "volume-data" => {
+                        serde_json::json!({"size_bytes": 1, "volume_type": "standard"})
+                    }
+                    "compute-primary" => serde_json::json!({
+                        "name": "independent-race-compute",
+                        "image_id": "image-1",
+                        "flavor_id": uuid::Uuid::from_u128(1),
+                        "network_ids": [network_id],
+                        "key_name": null
+                    }),
+                    _ => return Err("unknown child slot".into()),
+                };
+                let child_result = right_application
+                    .create(
+                        &descriptor,
+                        &process_auth_context("project-independent-race"),
+                        o3k_native_api::resource::CreateRequest {
+                            api_version: Some("o3k.io/v1".into()),
+                            kind: Some(candidate.expected_child_resource_type.clone()),
+                            spec,
+                        },
+                        Some(&format!("independent-race:{}", candidate.slot)),
+                    )
+                    .await;
+                let child = match child_result {
+                    Ok(child) => child,
+                    Err(o3k_native_api::resource::ResourceApplicationError::Conflict) => {
+                        for _ in 0..100 {
+                            if right_store
+                                .get_relationship(parent, &candidate.slot)
+                                .await?
+                                .child_resource_id
+                                .is_some()
+                            {
+                                continue;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(format!("child create {}: {error:?}", candidate.slot).into());
+                    }
+                };
+                right_store
+                    .bind_relationship(
+                        parent,
+                        &candidate.slot,
+                        child.resource_id.ok_or("missing child id")?.parse()?,
+                        child.operation_id.parse()?,
+                    )
+                    .await?;
+            }
         }
-        Ok::<(), o3k_store::StoreError>(())
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     barrier.wait().await;
     let (left, right) = tokio::join!(left_task, right_task);
@@ -1509,6 +1761,44 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
         ["compute-primary", "network-primary", "volume-data"]
             .into_iter()
             .collect()
+    );
+    assert!(final_relationships.iter().all(|relationship| {
+        relationship.child_resource_id.is_some()
+            && relationship.child_operation_id.is_some()
+            && relationship.state == "bound"
+    }));
+    assert_eq!(
+        final_store
+            .list_networks("project-independent-race")
+            .await?
+            .len(),
+        1,
+        "one canonical Network child per workflow"
+    );
+    assert_eq!(
+        final_store
+            .list_resources("project-independent-race", "volume")
+            .await?
+            .len(),
+        1,
+        "one canonical Volume child per workflow"
+    );
+    assert_eq!(
+        final_store
+            .list_resources("project-independent-race", "compute_instance")
+            .await?
+            .len(),
+        1,
+        "one canonical Compute child per workflow"
+    );
+    assert_eq!(
+        final_relationships
+            .iter()
+            .filter_map(|relationship| relationship.child_operation_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3,
+        "one stable child Operation per slot"
     );
     drop(final_store);
     let _ = std::fs::remove_file(path);
