@@ -59,12 +59,15 @@ pub mod tls {
 /// by the O3K control plane; external services receive only bounded child
 /// authority and never provider/store access.
 pub mod composition {
+    use ed25519_dalek::VerifyingKey;
     use o3k_controller_protocol::composition as wire;
     use o3k_kernel::{
         ActionId, OperationContext, OwnershipScope, RelationshipOwnership, ResourceId,
         ResourceReference, ResourceType,
     };
+    use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use uuid::Uuid;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,6 +267,50 @@ pub mod composition {
         })
     }
 
+    fn bind_parent_delegation(
+        parent: &wire::ParentContext,
+        resource: Option<&wire::ResourceRef>,
+        expected_recipient: &str,
+        keys: &HashMap<String, VerifyingKey>,
+    ) -> Result<(), CompositionError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| CompositionError::Unauthorized)?
+            .as_millis() as u64;
+        let claims = super::verify_wire_delegation(&parent.delegation, keys, now)
+            .map_err(|_| CompositionError::Unauthorized)?;
+        let request_id = parse_uuid(&parent.request_id, "request id")?;
+        let operation_id = parse_uuid(&parent.operation_id, "operation id")?;
+        let session_id = parse_uuid(&parent.session_id, "session id")?;
+        let scope = parent
+            .owner_scope
+            .as_ref()
+            .ok_or(CompositionError::Unauthorized)?;
+        let scope_kind = match scope.kind.as_str() {
+            "project" | "domain" | "system" => scope.kind.as_str(),
+            _ => return Err(CompositionError::Unauthorized),
+        };
+        if claims.request_id != request_id
+            || claims.operation_id != operation_id
+            || claims.session_id != session_id
+            || claims.session_generation != parent.session_generation
+            || claims.calling_service != parent.service_id
+            || claims.recipient_service != expected_recipient
+            || claims.action != parent.parent_action
+            || claims.owner_scope != format!("{scope_kind}:{}", scope.id)
+        {
+            return Err(CompositionError::Unauthorized);
+        }
+        if let Some(resource) = resource
+            && (claims.resource_type != format!("{}:{}", resource.namespace, resource.r#type)
+                || claims.resource_id != resource.id
+                || resource.generation < 0)
+        {
+            return Err(CompositionError::Unauthorized);
+        }
+        Ok(())
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct RelationshipView {
         pub slot: String,
@@ -353,6 +400,8 @@ pub mod composition {
         handler: Arc<H>,
         expected_service_id: String,
         expected_service_principal: String,
+        expected_recipient_service: String,
+        delegation_keys: Arc<HashMap<String, VerifyingKey>>,
     }
 
     impl<H> CompositionServiceAdapter<H> {
@@ -365,7 +414,20 @@ pub mod composition {
                 handler,
                 expected_service_id: expected_service_id.into(),
                 expected_service_principal: expected_service_principal.into(),
+                expected_recipient_service: "o3k-composition".into(),
+                delegation_keys: Arc::new(HashMap::new()),
             }
+        }
+
+        #[must_use]
+        pub fn with_delegation_keys(
+            mut self,
+            expected_recipient_service: impl Into<String>,
+            keys: HashMap<String, VerifyingKey>,
+        ) -> Self {
+            self.expected_recipient_service = expected_recipient_service.into();
+            self.delegation_keys = Arc::new(keys);
+            self
         }
 
         pub fn into_server(
@@ -393,6 +455,13 @@ pub mod composition {
                 &self.expected_service_id,
                 &self.expected_service_principal,
             )?;
+            bind_parent_delegation(
+                &parent,
+                parent.parent.as_ref(),
+                &self.expected_recipient_service,
+                &self.delegation_keys,
+            )
+            .map_err(composition_status)?;
             let domain = child_request_from_wire(wire_request).map_err(composition_status)?;
             let receipt = self
                 .handler
@@ -421,6 +490,13 @@ pub mod composition {
                 &self.expected_service_id,
                 &self.expected_service_principal,
             )?;
+            bind_parent_delegation(
+                &parent,
+                request.resource.as_ref(),
+                &self.expected_recipient_service,
+                &self.delegation_keys,
+            )
+            .map_err(composition_status)?;
             let resource = request
                 .resource
                 .clone()
@@ -478,6 +554,16 @@ pub mod composition {
                 &self.expected_service_id,
                 &self.expected_service_principal,
             )?;
+            bind_parent_delegation(
+                &parent,
+                child
+                    .parent
+                    .as_ref()
+                    .and_then(|value| value.parent.as_ref()),
+                &self.expected_recipient_service,
+                &self.delegation_keys,
+            )
+            .map_err(composition_status)?;
             let domain = child_request_from_wire(child).map_err(composition_status)?;
             let receipt = self
                 .handler
@@ -505,6 +591,13 @@ pub mod composition {
                 &self.expected_service_id,
                 &self.expected_service_principal,
             )?;
+            bind_parent_delegation(
+                &parent,
+                parent.parent.as_ref(),
+                &self.expected_recipient_service,
+                &self.delegation_keys,
+            )
+            .map_err(composition_status)?;
             let domain = child_request_from_wire(wire::ChildRequest {
                 parent: Some(parent),
                 lifecycle: "list".into(),
