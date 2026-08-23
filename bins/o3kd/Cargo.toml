@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+ed25519-dalek.workspace = true
 axum.workspace = true
 o3k-api = { path = "../../crates/o3k-api" }
 o3k-cinder = { path = "../../crates/o3k-cinder" }
@@ -32,8 +33,10 @@ o3k-network = { path = "../../crates/o3k-network" }
 o3k-network-protocol = { path = "../../crates/o3k-network-protocol" }
 o3k-placement = { path = "../../crates/o3k-placement" }
 o3k-scheduler = { path = "../../crates/o3k-scheduler" }
+o3k-service-sdk = { path = "../../crates/o3k-service-sdk" }
 o3k-store = { path = "../../crates/o3k-store" }
 tokio.workspace = true
+tonic.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 chrono.workspace = true

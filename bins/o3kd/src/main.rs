@@ -1158,6 +1158,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("generic native application requires network reader")?,
         });
 
+    let composition_task = if let Ok(listen_addr) = std::env::var("O3K_COMPOSITION_LISTEN_ADDR") {
+        let address: std::net::SocketAddr = listen_addr
+            .parse()
+            .map_err(|_| "invalid O3K_COMPOSITION_LISTEN_ADDR")?;
+        let ca = std::env::var("O3K_COMPOSITION_CLIENT_CA")
+            .map_err(|_| "O3K_COMPOSITION_CLIENT_CA is required")?;
+        let certificate = std::env::var("O3K_COMPOSITION_SERVER_CERT")
+            .map_err(|_| "O3K_COMPOSITION_SERVER_CERT is required")?;
+        let key = std::env::var("O3K_COMPOSITION_SERVER_KEY")
+            .map_err(|_| "O3K_COMPOSITION_SERVER_KEY is required")?;
+        let service_id = std::env::var("O3K_COMPOSITION_SERVICE_ID")
+            .map_err(|_| "O3K_COMPOSITION_SERVICE_ID is required")?;
+        let service_principal = std::env::var("O3K_COMPOSITION_SERVICE_PRINCIPAL")
+            .map_err(|_| "O3K_COMPOSITION_SERVICE_PRINCIPAL is required")?;
+        let key_id = std::env::var("O3K_COMPOSITION_DELEGATION_KEY_ID")
+            .map_err(|_| "O3K_COMPOSITION_DELEGATION_KEY_ID is required")?;
+        let key_path = std::env::var("O3K_COMPOSITION_DELEGATION_KEY")
+            .map_err(|_| "O3K_COMPOSITION_DELEGATION_KEY is required")?;
+        let key_bytes = std::fs::read(key_path)?;
+        let key_bytes: [u8; 32] = key_bytes
+            .try_into()
+            .map_err(|_| "delegation verification key must be 32 bytes")?;
+        let verification_key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|_| "invalid delegation verification key")?;
+        let tls = o3k_service_sdk::tls::server(&ca, &certificate, &key)
+            .map_err(|error| format!("composition TLS configuration failed: {error}"))?;
+        let handler = std::sync::Arc::new(native_adapters::CompositionResourceHandler {
+            application: generic_application.clone(),
+            store: native_api_store.clone(),
+            manifests: std::sync::Arc::new(native_manifest_registry.clone()),
+            delegation_keys: std::collections::HashMap::from([(key_id.clone(), verification_key)]),
+            dispatcher: o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(
+                &native_manifest_registry,
+            )
+            .map_err(|_| "failed to build composition resource descriptors")?,
+        });
+        let service = o3k_service_sdk::composition::CompositionServiceAdapter::new(
+            handler,
+            service_id,
+            service_principal,
+        )
+        .with_delegation_keys(
+            "o3k-composition",
+            std::collections::HashMap::from([(key_id, verification_key)]),
+        );
+        info!(address = %address, "generic composition service enabled");
+        Some(tokio::spawn(async move {
+            let mut builder = match tonic::transport::Server::builder().tls_config(tls) {
+                Ok(builder) => builder,
+                Err(error) => {
+                    tracing::error!(%error, "composition server configuration failed");
+                    return;
+                }
+            };
+            if let Err(error) = builder
+                .add_service(service.into_server())
+                .serve(address)
+                .await
+            {
+                tracing::error!(%error, "composition service stopped");
+            }
+        }))
+    } else {
+        None
+    };
+
     let inspect_compute_service = compute_service.clone();
     let volume_attachments_enabled = compute_service.cinder_configured();
     let mut state = if let Some(identity) = identity {
@@ -1252,6 +1318,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, o3k_api::router_with_state(state))
         .with_graceful_shutdown(shutdown_signal(shutdown_state))
         .await?;
+    if let Some(task) = composition_task {
+        task.abort();
+        let _ = task.await;
+    }
     if let Some(mut task) = control_task
         && tokio::time::timeout(std::time::Duration::from_secs(5), &mut task)
             .await

@@ -910,6 +910,383 @@ impl ResourceApplication for GenericResourceApplication {
     }
 }
 
+/// Generic O3K-side composition handler. It is intentionally unaware of the
+/// composing service's business vocabulary: the manifest registry supplies
+/// dependency authority and ResourceApplication supplies child lifecycle.
+pub struct CompositionResourceHandler {
+    pub application: Arc<dyn ResourceApplication>,
+    pub store: Arc<o3k_store::unified::O3kStore>,
+    pub manifests: Arc<o3k_kernel::ManifestRegistry>,
+    pub delegation_keys: std::collections::HashMap<String, ed25519_dalek::VerifyingKey>,
+    pub dispatcher: o3k_native_api::resource::ResourceDispatcher,
+}
+
+impl CompositionResourceHandler {
+    fn authenticate(
+        &self,
+        request: &o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<o3k_kernel::AuthContext, o3k_service_sdk::composition::CompositionError> {
+        let claims = o3k_service_sdk::verify_wire_delegation(
+            &request.delegation,
+            &self.delegation_keys,
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?
+                .as_millis() as u64,
+        )
+        .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if claims.original_actor.trim().is_empty()
+            || claims.owner_scope != request.owner_scope.to_string()
+            || claims.operation_id != request.parent_operation_id
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        let (kind, id) = claims
+            .owner_scope
+            .split_once(':')
+            .ok_or(o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if kind != "project" {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        let scope = o3k_kernel::OwnershipScope::project(
+            o3k_kernel::ScopeId::new(id)
+                .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?,
+            None,
+            None,
+        );
+        let request_id = claims.request_id.to_string();
+        Ok(o3k_kernel::AuthContext::new(
+            o3k_kernel::Principal::User(o3k_kernel::UserPrincipal::new(
+                o3k_kernel::PrincipalId::new(claims.original_actor.clone())
+                    .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?,
+                claims.original_actor,
+                None,
+            )),
+            scope,
+            Vec::new(),
+            claims.issued_at_unix_ms / 1000,
+            claims.expires_at_unix_ms / 1000,
+            request.context.audit_correlation.clone(),
+            request_id,
+            Some(o3k_kernel::ServicePrincipal::new(
+                o3k_kernel::PrincipalId::new(request.service_principal.clone())
+                    .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?,
+                request.service_principal.clone(),
+                request.context.service_id.clone(),
+            )),
+        ))
+    }
+
+    fn dependency_allowed(
+        &self,
+        request: &o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<(), o3k_service_sdk::composition::CompositionError> {
+        let Some(manifest) = self.manifests.get(&request.context.service_id) else {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        };
+        let resource = request.resource_type.to_string();
+        let action = request.action.to_string();
+        let declared = manifest.dependencies.iter().any(|dependency| {
+            (dependency.kind == o3k_kernel::manifest::DependencyKind::ResourceType
+                && dependency.name == resource)
+                || (dependency.kind == o3k_kernel::manifest::DependencyKind::Action
+                    && dependency.name == action)
+        });
+        if declared && self.manifests.has_action(&request.action) {
+            Ok(())
+        } else {
+            Err(o3k_service_sdk::composition::CompositionError::Unauthorized)
+        }
+    }
+
+    fn relationship_record(
+        &self,
+        request: &o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<o3k_store::ResourceRelationshipRecord, o3k_service_sdk::composition::CompositionError>
+    {
+        Ok(o3k_store::ResourceRelationshipRecord {
+            parent_resource_id: request
+                .parent
+                .resource_id
+                .as_str()
+                .parse()
+                .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?,
+            parent_resource_type: request.parent.resource_type.to_string(),
+            slot: request.slot.clone(),
+            expected_child_resource_type: request.resource_type.to_string(),
+            child_resource_id: request
+                .child
+                .as_ref()
+                .and_then(|child| child.resource_id.as_str().parse().ok()),
+            ownership: "exclusive".to_owned(),
+            parent_operation_id: request.parent_operation_id,
+            child_operation_id: request.child_operation_id,
+            owner_scope: request.owner_scope.id().as_str().to_owned(),
+            state: "reserved".to_owned(),
+            fingerprint: request.context.replay_identity.clone(),
+        })
+    }
+
+    fn descriptor_for(
+        &self,
+        resource_type: &o3k_kernel::ResourceType,
+    ) -> Result<
+        o3k_native_api::resource::ResourceDescriptor,
+        o3k_service_sdk::composition::CompositionError,
+    > {
+        self.dispatcher
+            .resolve(resource_type.namespace(), resource_type.name())
+            .cloned()
+            .ok_or(o3k_service_sdk::composition::CompositionError::Failed(
+                "child resource is not registered".into(),
+            ))
+    }
+}
+
+#[async_trait::async_trait]
+impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHandler {
+    async fn create_child(
+        &self,
+        request: o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<
+        o3k_service_sdk::composition::ChildResourceReceipt,
+        o3k_service_sdk::composition::CompositionError,
+    > {
+        self.dependency_allowed(&request)?;
+        let auth = self.authenticate(&request)?;
+        let descriptor = self.descriptor_for(&request.resource_type)?;
+        let expected_action = descriptor
+            .lifecycle_actions
+            .get(&o3k_native_api::resource::LifecycleOperation::Create)
+            .ok_or(o3k_service_sdk::composition::CompositionError::Failed(
+                "child create operation is not declared".into(),
+            ))?;
+        if expected_action != &request.action {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        let relationship = self
+            .store
+            .reserve_relationship(&self.relationship_record(&request)?)
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed(
+                    "relationship reservation failed".into(),
+                )
+            })?;
+        if let (Some(child), Some(operation_id)) = (
+            relationship.child_resource_id,
+            relationship.child_operation_id,
+        ) {
+            return Ok(o3k_service_sdk::composition::ChildResourceReceipt {
+                resource: o3k_kernel::ResourceReference {
+                    resource_type: request.resource_type,
+                    resource_id: o3k_kernel::ResourceId::new(child.to_string()).map_err(|_| {
+                        o3k_service_sdk::composition::CompositionError::Failed(
+                            "invalid child id".into(),
+                        )
+                    })?,
+                    generation: 1,
+                },
+                operation_id,
+                owner_scope: request.owner_scope,
+                ownership: o3k_kernel::RelationshipOwnership::Exclusive,
+            });
+        }
+        let result = self
+            .application
+            .create(
+                &descriptor,
+                &auth,
+                o3k_native_api::resource::CreateRequest {
+                    api_version: Some("o3k.io/v1".into()),
+                    kind: Some(request.resource_type.to_string()),
+                    spec: request.desired_spec,
+                },
+                Some(&request.idempotency_key),
+            )
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed("child create failed".into())
+            })?;
+        let child_id = result
+            .resource_id
+            .ok_or(o3k_service_sdk::composition::CompositionError::UnknownOutcome)?
+            .parse()
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::UnknownOutcome)?;
+        let child_operation_id = result
+            .operation_id
+            .parse()
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::UnknownOutcome)?;
+        let bound =
+            self.store
+                .bind_relationship(
+                    request.parent.resource_id.as_str().parse().map_err(|_| {
+                        o3k_service_sdk::composition::CompositionError::Unauthorized
+                    })?,
+                    &request.slot,
+                    child_id,
+                    child_operation_id,
+                )
+                .await
+                .map_err(|_| {
+                    o3k_service_sdk::composition::CompositionError::Failed(
+                        "relationship bind failed".into(),
+                    )
+                })?;
+        Ok(o3k_service_sdk::composition::ChildResourceReceipt {
+            resource: o3k_kernel::ResourceReference {
+                resource_type: request.resource_type,
+                resource_id: o3k_kernel::ResourceId::new(child_id.to_string()).map_err(|_| {
+                    o3k_service_sdk::composition::CompositionError::Failed(
+                        "invalid child id".into(),
+                    )
+                })?,
+                generation: 1,
+            },
+            operation_id: bound.child_operation_id.unwrap_or(child_operation_id),
+            owner_scope: request.owner_scope,
+            ownership: o3k_kernel::RelationshipOwnership::Exclusive,
+        })
+    }
+
+    async fn observe_child(
+        &self,
+        request: o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<serde_json::Value, o3k_service_sdk::composition::CompositionError> {
+        let auth = self.authenticate(&request)?;
+        let child = request
+            .child
+            .ok_or(o3k_service_sdk::composition::CompositionError::Failed(
+                "missing child reference".into(),
+            ))?;
+        let descriptor = self.descriptor_for(&child.resource_type)?;
+        self.application
+            .show(&descriptor, &auth, child.resource_id.as_str())
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed(
+                    "child observation failed".into(),
+                )
+            })
+    }
+
+    async fn delete_child(
+        &self,
+        request: o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<
+        o3k_service_sdk::composition::ChildResourceReceipt,
+        o3k_service_sdk::composition::CompositionError,
+    > {
+        self.dependency_allowed(&request)?;
+        let auth = self.authenticate(&request)?;
+        let child = request
+            .child
+            .clone()
+            .ok_or(o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        let descriptor = self.descriptor_for(&child.resource_type)?;
+        let expected_action = descriptor
+            .lifecycle_actions
+            .get(&o3k_native_api::resource::LifecycleOperation::Delete)
+            .ok_or(o3k_service_sdk::composition::CompositionError::Failed(
+                "child delete operation is not declared".into(),
+            ))?;
+        if expected_action != &request.action {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        let result = self
+            .application
+            .delete(
+                &descriptor,
+                &auth,
+                child.resource_id.as_str(),
+                Some(&request.idempotency_key),
+            )
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed("child delete failed".into())
+            })?;
+        Ok(o3k_service_sdk::composition::ChildResourceReceipt {
+            resource: child,
+            operation_id: result
+                .operation_id
+                .parse()
+                .map_err(|_| o3k_service_sdk::composition::CompositionError::UnknownOutcome)?,
+            owner_scope: request.owner_scope,
+            ownership: o3k_kernel::RelationshipOwnership::Exclusive,
+        })
+    }
+
+    async fn list_relationships(
+        &self,
+        request: o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<
+        Vec<o3k_service_sdk::composition::RelationshipView>,
+        o3k_service_sdk::composition::CompositionError,
+    > {
+        let parent = request
+            .parent
+            .resource_id
+            .as_str()
+            .parse()
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        let records = self.store.list_relationships(parent).await.map_err(|_| {
+            o3k_service_sdk::composition::CompositionError::Failed(
+                "relationship listing failed".into(),
+            )
+        })?;
+        records
+            .into_iter()
+            .map(|record| {
+                let (namespace, name) = record
+                    .expected_child_resource_type
+                    .split_once(':')
+                    .ok_or_else(|| {
+                        o3k_service_sdk::composition::CompositionError::Failed(
+                            "invalid relationship resource type".into(),
+                        )
+                    })?;
+                let resource_type =
+                    o3k_kernel::ResourceType::new(namespace, name).map_err(|_| {
+                        o3k_service_sdk::composition::CompositionError::Failed(
+                            "invalid relationship resource type".into(),
+                        )
+                    })?;
+                let resource = record
+                    .child_resource_id
+                    .map(|id| {
+                        Ok::<_, o3k_service_sdk::composition::CompositionError>(
+                            o3k_kernel::ResourceReference {
+                                resource_type: resource_type.clone(),
+                                resource_id: o3k_kernel::ResourceId::new(id.to_string()).map_err(
+                                    |_| {
+                                        o3k_service_sdk::composition::CompositionError::Failed(
+                                            "invalid relationship resource id".into(),
+                                        )
+                                    },
+                                )?,
+                                generation: 1,
+                            },
+                        )
+                    })
+                    .transpose()?;
+                Ok(o3k_service_sdk::composition::RelationshipView {
+                    slot: record.slot,
+                    resource,
+                    resource_type,
+                    ownership: if record.ownership == "referenced" {
+                        o3k_kernel::RelationshipOwnership::Referenced
+                    } else {
+                        o3k_kernel::RelationshipOwnership::Exclusive
+                    },
+                    state: record.state,
+                    parent_operation_id: record.parent_operation_id,
+                    child_operation_id: record.child_operation_id,
+                })
+            })
+            .collect()
+    }
+}
+
 #[async_trait::async_trait]
 impl o3k_native_api::compute::ServerReader for ServerReaderAdapter {
     async fn list_servers(
