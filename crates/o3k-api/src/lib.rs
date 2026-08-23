@@ -368,7 +368,8 @@ pub fn router_with_state(state: AppState) -> Router {
             )
             .route(
                 "/o3k/v1/compute/servers",
-                get(o3k_native_api::compute::list_servers).post(o3k_native_api::resource::create),
+                get(o3k_native_api::compute::list_servers)
+                    .post(o3k_native_api::resource::create_compute),
             )
             .route(
                 "/o3k/v1/compute/servers/{id}",
@@ -377,12 +378,13 @@ pub fn router_with_state(state: AppState) -> Router {
             )
             .route(
                 "/o3k/v1/volume/volumes",
-                get(o3k_native_api::volume::list_volumes).post(o3k_native_api::resource::create),
+                get(o3k_native_api::volume::list_volumes)
+                    .post(o3k_native_api::resource::create_volume),
             )
             .route(
                 "/o3k/v1/volume/volumes/{id}",
                 get(o3k_native_api::volume::show_volume)
-                    .delete(o3k_native_api::resource::delete_fixed),
+                    .delete(o3k_native_api::resource::delete_volume),
             )
             .route(
                 "/o3k/v1/network/address-realms",

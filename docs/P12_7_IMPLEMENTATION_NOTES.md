@@ -13,8 +13,8 @@ database with `O3K_DATABASE_URL`.
 | Native compute idempotent canonical mutation | `o3kd::native_adapters::native_compute_create_replay_equivalent`; `native_compute_create_changed_body_conflict` |
 | Network canonical owner/read path | `p12_7_convergence::native_and_openstack_http_surfaces_share_compute_and_network_authority`; `o3k_api::health::neutron_network_subnet_port_lifecycle_is_deterministic` |
 | Volume canonical owner/read path | `o3kd::native_adapters::volume_reader_tests`; `o3k-store` P12.4 canonical-resource tests |
-| Duplicate authority | PASS by construction and test coverage: both adapters are wired to `ComputeService`, `NetworkService`, and `O3kStore`; no synchronization/copy store exists |
-| Restart relationship | `p12_6_reconstructs_two_independent_control_plane_runtimes`; `p12_6_relationship_recovery_reopens_store_and_serializes_process_race` |
+| Duplicate authority | Executable convergence tests prove shared canonical authority for the exercised Compute/Network paths; architecture inspection confirms no second native/OpenStack synchronization store exists |
+| Restart relationship | `p12_6_reconstructs_two_independent_control_plane_runtimes`; `p12_6_relationship_recovery_reopens_store_and_serializes_process_race`; post-restart HTTP convergence remains NOT PROVEN |
 
 The selected OpenStack compatibility tests exercise the same application
 services used by the native adapters. The process-level convergence test
@@ -30,7 +30,7 @@ remains an explicitly separate authority under the accepted architecture.
 | Missing/malformed/invalid bearer and no mutation | `o3kd::native_adapters::native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation` |
 | Cross-project isolation / IDOR / operation isolation | same test; `operation_visibility_tests::operation_route_is_store_backed_owner_scoped_and_redacts_provider_fields` |
 | Unknown namespace/resource fails closed | `native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation`; `resource::tests::different_resource_types_share_one_registry_resolution_path` |
-| Idempotency replay, conflict, and provider-side-effect bound | `native_compute_create_replay_equivalent`; `native_compute_create_changed_body_conflict` |
+| Idempotency replay, conflict, cross-scope isolation, and provider-side-effect bound | `native_compute_create_replay_equivalent`; `native_compute_create_changed_body_conflict`; `native_compute_idempotency_isolated_between_owner_scopes` |
 | Cursor tampering, wrong key, malformed cursor, page-size bounds | `o3k_native_api::pagination::tests` |
 | Owner scope is derived from authenticated context | `o3k_api::two_tenant_isolation::two_tenant_path_and_resource_isolation`; native security test |
 | Secret-safe public operation errors | `operation_visibility_tests::operation_route_is_store_backed_owner_scoped_and_redacts_provider_fields`; `o3k-store::postgres_ops::test_postgres_error_mapping_and_no_leakage` |
@@ -46,7 +46,7 @@ remains an explicitly separate authority under the accepted architecture.
 | Stale-session fencing / reconnect | `p12_6_process::p12_6_reconstructs_two_independent_control_plane_runtimes`; `unavailable_external_controller_and_composition_endpoints_fail_closed` |
 | Delegated actor, owner scope, action, target, and parent operation | `p12_6_process::database_controller_and_composition_cross_real_mtls_boundaries` |
 | Unknown outcome, replay-safe reconciliation, compensation, cleanup | `p12_6_process::database_controller_and_composition_cross_real_mtls_boundaries`; `p12_6_independent_application_instances_converge_durable_slots` |
-| Unsafe service removal | NOT APPLICABLE to the currently advertised service lifecycle surface; no force-removal policy is added |
+| Unsafe service removal | NOT PROVEN: `ManifestRegistry::remove` exists, but P12.7 has not yet exercised removal with owned resources, in-flight Operations, or dependencies |
 | Separate compatibility projection/evidence gating | compatibility inventory/target validation tests and `docs/compatibility/` manifests; no metadata-only capability is advertised |
 
 ## Database conformance service
@@ -72,11 +72,11 @@ real PostgreSQL harness. The PostgreSQL tests are never replaced by a mock.
 3. Compute/Network/Volume reads — PASS (native adapter and API lifecycle tests)
 4. correct mutation status codes — PASS (native mutation tests and P12.6 process test)
 5. service-neutral Operation — PASS (operation visibility and process tests)
-6. idempotency/generation safety — PASS (native/store P12.4 tests)
-7. opaque pagination scope safety — PASS (cursor unit tests and scoped readers)
-8. SQLite/PostgreSQL conformance — PASS (SQLite suite and all six P12.4 PostgreSQL tests executed)
+6. idempotency/generation safety — NOT PROVEN (native cross-scope idempotency is covered; native generation preconditions are not advertised, and store-only generation tests do not close the API gate)
+7. opaque pagination scope safety — NOT PROVEN (HTTP native traversal and cross-owner cursor tests remain required)
+8. SQLite/PostgreSQL conformance — NOT PROVEN (store-level PostgreSQL tests executed; native API conformance against PostgreSQL remains required)
 9. selected OpenStack regression — PASS (`o3k-api` isolation/lifecycle suites)
-10. one canonical native/OpenStack authority — PASS (shared application/store wiring and lifecycle evidence)
+10. one canonical native/OpenStack authority — PASS for exercised Compute/Network paths (shared application/store wiring and lifecycle evidence)
 
 ## SPEC-0031 §24 final gates
 
@@ -84,7 +84,7 @@ real PostgreSQL harness. The PostgreSQL tests are never replaced by a mock.
 2. namespace/resource/action conflict rejection — PASS
 3. separate compatibility projection — PASS
 4. authenticated/versioned external controller — PASS
-5. bounded actor/scope-preserving delegation — PASS
+5. bounded actor/scope-preserving delegation — NOT PROVEN (the required independent negative delegation cases are not all cited)
 6. generic discovery and CLI — PASS (P12.6 process/CLI coverage)
 7. canonical cross-service composition — PASS
 8. durable operation/audit correlation and unknown outcome — PASS

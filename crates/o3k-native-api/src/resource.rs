@@ -17,7 +17,7 @@ use crate::{
 use async_trait::async_trait;
 use axum::{
     Json,
-    extract::{OriginalUri, Path, Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -408,20 +408,65 @@ mod tests {
 pub async fn create(
     auth: BearerAuth,
     headers: HeaderMap,
-    path: Option<Path<(String, String)>>,
-    OriginalUri(uri): OriginalUri,
+    Path((namespace, collection)): Path<(String, String)>,
     State(state): State<NativeApiState>,
     Json(request): Json<CreateRequest>,
 ) -> Response {
-    let (namespace, collection) = path.map(|Path(value)| value).unwrap_or_else(|| {
-        let mut parts = uri.path().trim_matches('/').split('/');
-        let _root = parts.next();
-        let _version = parts.next();
-        (
-            parts.next().unwrap_or_default().to_owned(),
-            parts.next().unwrap_or_default().to_owned(),
-        )
-    });
+    create_for(
+        auth,
+        headers,
+        namespace,
+        collection,
+        State(state),
+        Json(request),
+    )
+    .await
+}
+
+/// Concrete routes must bind their canonical descriptor explicitly. They do
+/// not derive namespace/collection from the request URI.
+pub async fn create_compute(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    State(state): State<NativeApiState>,
+    Json(request): Json<CreateRequest>,
+) -> Response {
+    create_for(
+        auth,
+        headers,
+        "compute".to_owned(),
+        "servers".to_owned(),
+        State(state),
+        Json(request),
+    )
+    .await
+}
+
+pub async fn create_volume(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    State(state): State<NativeApiState>,
+    Json(request): Json<CreateRequest>,
+) -> Response {
+    create_for(
+        auth,
+        headers,
+        "volume".to_owned(),
+        "volumes".to_owned(),
+        State(state),
+        Json(request),
+    )
+    .await
+}
+
+async fn create_for(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    namespace: String,
+    collection: String,
+    State(state): State<NativeApiState>,
+    Json(request): Json<CreateRequest>,
+) -> Response {
     let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
         return ProblemDetails::with_detail(ErrorCode::ResourceNotFound, "resource type not found")
             .into_response();
@@ -479,15 +524,34 @@ pub async fn delete_fixed(
     auth: BearerAuth,
     headers: HeaderMap,
     Path(id): Path<String>,
-    OriginalUri(uri): OriginalUri,
     State(state): State<NativeApiState>,
 ) -> Response {
-    let mut parts = uri.path().trim_matches('/').split('/');
-    let _root = parts.next();
-    let _version = parts.next();
-    let namespace = parts.next().unwrap_or_default().to_owned();
-    let collection = parts.next().unwrap_or_default().to_owned();
-    delete_for(auth, headers, namespace, collection, id, State(state)).await
+    delete_for(
+        auth,
+        headers,
+        "compute".to_owned(),
+        "servers".to_owned(),
+        id,
+        State(state),
+    )
+    .await
+}
+
+pub async fn delete_volume(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<NativeApiState>,
+) -> Response {
+    delete_for(
+        auth,
+        headers,
+        "volume".to_owned(),
+        "volumes".to_owned(),
+        id,
+        State(state),
+    )
+    .await
 }
 
 async fn delete_for(

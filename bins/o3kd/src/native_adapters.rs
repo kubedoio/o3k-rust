@@ -983,7 +983,9 @@ impl ResourceApplication for GenericResourceApplication {
                     network_ids: spec.network_ids,
                     key_name: spec.key_name,
                     config_drive: None,
-                    idempotency_key: key,
+                    // Keep provider command identity scoped even when the
+                    // client reuses the same canonical key in another tenant.
+                    idempotency_key: format!("{}:{key}", auth.effective_scope().id()),
                 },
                 context,
             )
@@ -2641,6 +2643,83 @@ mod native_compute_tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_compute_idempotency_isolated_between_owner_scopes() {
+        let (router, store, provider) = setup().await;
+        let body_a = serde_json::json!({"spec":{"name":"tenant-a","image_id":"image-a","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":["net-a"]}});
+        let body_b = serde_json::json!({"spec":{"name":"tenant-b","image_id":"image-a","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":["net-a"]}});
+
+        let (status_a, first_a) = exec(
+            &router,
+            authed_post("/compute/servers", "a", "shared-key", body_a.clone()),
+        )
+        .await;
+        assert_eq!(status_a, StatusCode::CREATED);
+        let (_, replay_a) = exec(
+            &router,
+            authed_post("/compute/servers", "a", "shared-key", body_a),
+        )
+        .await;
+        assert_eq!(replay_a["resource_id"], first_a["resource_id"]);
+        assert_eq!(replay_a["operation_id"], first_a["operation_id"]);
+
+        let conflict_a = exec(&router, authed_post("/compute/servers", "a", "shared-key", serde_json::json!({"spec":{"name":"other-a","image_id":"image-b","flavor_id":"00000000-0000-0000-0000-000000000002","network_ids":["net-b"]}}))).await;
+        assert_eq!(conflict_a.0, StatusCode::CONFLICT);
+
+        let (status_b, first_b) = exec(
+            &router,
+            authed_post("/compute/servers", "b", "shared-key", body_b.clone()),
+        )
+        .await;
+        assert_eq!(status_b, StatusCode::CREATED, "tenant B create: {first_b}");
+        assert_ne!(first_b["resource_id"], first_a["resource_id"]);
+        assert_ne!(first_b["operation_id"], first_a["operation_id"]);
+        let b_resource = store
+            .get_resource(uuid::Uuid::parse_str(first_b["resource_id"].as_str().unwrap()).unwrap())
+            .await
+            .expect("tenant B resource");
+        assert_eq!(b_resource.project_id, "project-b");
+
+        let (_, replay_b) = exec(
+            &router,
+            authed_post("/compute/servers", "b", "shared-key", body_b),
+        )
+        .await;
+        assert_eq!(replay_b["resource_id"], first_b["resource_id"]);
+        assert_eq!(replay_b["operation_id"], first_b["operation_id"]);
+        let conflict_b = exec(&router, authed_post("/compute/servers", "b", "shared-key", serde_json::json!({"spec":{"name":"other-b","image_id":"image-b","flavor_id":"00000000-0000-0000-0000-000000000002","network_ids":["net-b"]}}))).await;
+        assert_eq!(conflict_b.0, StatusCode::CONFLICT);
+
+        assert_eq!(
+            exec(
+                &router,
+                authed(
+                    &format!(
+                        "/compute/servers/{}",
+                        first_a["resource_id"].as_str().unwrap()
+                    ),
+                    "b"
+                )
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            exec(
+                &router,
+                authed(
+                    &format!("/operations/{}", first_a["operation_id"].as_str().unwrap()),
+                    "b"
+                )
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(provider.instance_count(), 2);
     }
 
     #[tokio::test]
