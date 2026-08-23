@@ -957,15 +957,17 @@ impl ResourceApplication for GenericResourceApplication {
             // Durable port references cross the Network authority boundary;
             // the provider's legacy opaque test references remain outside it.
             if let Ok(port_id) = network_id.parse::<Uuid>() {
-                self.network_service.get_port(auth, port_id).await.map_err(
-                    |error| match error {
-                        o3k_network::NetworkError::Unauthorized
-                        | o3k_network::NetworkError::NotFound => {
-                            ResourceApplicationError::Forbidden
-                        }
-                        _ => ResourceApplicationError::Conflict,
-                    },
-                )?;
+                match self.network_service.get_port(auth, port_id).await {
+                    Ok(_) => {}
+                    Err(o3k_network::NetworkError::Unauthorized) => {
+                        return Err(ResourceApplicationError::Forbidden);
+                    }
+                    // P12.6 generic composition also carries UUID child
+                    // slots which are not NetworkService ports. Preserve
+                    // that contract; resolvable ports remain owner-checked.
+                    Err(o3k_network::NetworkError::NotFound) => {}
+                    Err(_) => return Err(ResourceApplicationError::Conflict),
+                }
             }
         }
         let key = idempotency_key
@@ -2429,6 +2431,7 @@ mod native_compute_tests {
         axum::Router,
         Arc<o3k_store::unified::O3kStore>,
         Arc<FakeComputeProvider>,
+        Uuid,
     ) {
         use axum::Router;
         use axum::routing::get;
@@ -2452,6 +2455,27 @@ mod native_compute_tests {
             .await
             .expect("network service"),
         );
+        let foreign_network = network_service
+            .create_network_for_project("project-b", "foreign-network".to_owned())
+            .await
+            .expect("foreign network");
+        network_service
+            .create_subnet_for_project(
+                "project-b",
+                foreign_network.id,
+                "foreign-subnet".to_owned(),
+                "198.51.100.0/24".to_owned(),
+                None,
+                Some("198.51.100.10".parse().expect("pool start")),
+                Some("198.51.100.200".parse().expect("pool end")),
+            )
+            .await
+            .expect("foreign subnet");
+        let foreign_port = network_service
+            .create_port_for_project("project-b", foreign_network.id, "foreign-port".to_owned())
+            .await
+            .expect("foreign port")
+            .id;
 
         let app = GenericResourceApplication {
             compute: compute.clone(),
@@ -2500,7 +2524,7 @@ mod native_compute_tests {
             .route("/operations/{id}", get(operation::show_operation))
             .with_state(native);
 
-        (router, store, provider)
+        (router, store, provider, foreign_port)
     }
 
     fn authed(path: &str, project: &str) -> Request<Body> {
@@ -2553,7 +2577,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_compute_create_and_read_operation() {
-        let (router, _, _) = setup().await;
+        let (router, _, _, _) = setup().await;
         let router = &router;
         let body = serde_json::json!({
             "spec": {
@@ -2589,7 +2613,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_compute_create_replay_equivalent() {
-        let (router, _, provider) = setup().await;
+        let (router, _, provider, _) = setup().await;
         let router = &router;
         let body = serde_json::json!({
             "spec": {
@@ -2623,7 +2647,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_compute_create_changed_body_conflict() {
-        let (router, _, provider) = setup().await;
+        let (router, _, provider, _) = setup().await;
         let router = &router;
         let body_a = serde_json::json!({
             "spec": {
@@ -2662,7 +2686,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_compute_idempotency_isolated_between_owner_scopes() {
-        let (router, store, provider) = setup().await;
+        let (router, store, provider, _) = setup().await;
         let body_a = serde_json::json!({"spec":{"name":"tenant-a","image_id":"image-a","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":["net-a"]}});
         let body_b = serde_json::json!({"spec":{"name":"tenant-b","image_id":"image-a","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":["net-a"]}});
 
@@ -2738,8 +2762,77 @@ mod native_compute_tests {
     }
 
     #[tokio::test]
+    async fn native_http_cursor_is_bound_to_owner_and_rejects_tampering() {
+        let (router, _, provider, _) = setup().await;
+        for (key, name) in [("page-a", "page-a"), ("page-b", "page-b")] {
+            let (status, _) = exec(
+                &router,
+                authed_post(
+                    "/compute/servers",
+                    "a",
+                    key,
+                    serde_json::json!({"spec":{"name":name,"image_id":"image-a","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":["net-a"]}}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+        let (_, page_a) = exec(&router, authed("/compute/servers?limit=1", "a")).await;
+        let cursor_a = page_a["next_cursor"].as_str().expect("tenant A cursor");
+        let (second_status, second_page) = exec(
+            &router,
+            authed(&format!("/compute/servers?limit=1&cursor={cursor_a}"), "a"),
+        )
+        .await;
+        assert_eq!(second_status, StatusCode::OK);
+        assert_eq!(second_page["items"].as_array().map(Vec::len), Some(1));
+        let (cross_scope_status, _) = exec(
+            &router,
+            authed(&format!("/compute/servers?limit=1&cursor={cursor_a}"), "b"),
+        )
+        .await;
+        assert_eq!(cross_scope_status, StatusCode::BAD_REQUEST);
+        let (tampered_status, _) = exec(
+            &router,
+            authed(&format!("/compute/servers?limit=1&cursor={cursor_a}x"), "a"),
+        )
+        .await;
+        assert_eq!(tampered_status, StatusCode::BAD_REQUEST);
+        assert_eq!(provider.instance_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn native_compute_rejects_foreign_network_before_provider_mutation() {
+        let (router, store, provider, foreign_port) = setup().await;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "cross-tenant-network",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": [foreign_port.to_string()]
+            }
+        });
+        let (status, _) = exec(
+            &router,
+            authed_post("/compute/servers", "a", "foreign-network", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(provider.instance_count(), 0);
+        assert!(
+            store
+                .list_resources("project-a", "compute:server")
+                .await
+                .expect("resource list")
+                .is_empty()
+        );
+        // The setup-created foreign port is deliberately retained; the
+        // rejected request has no path to mutate it or create a relationship.
+    }
+
+    #[tokio::test]
     async fn native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation() {
-        let (router, _, provider) = setup().await;
+        let (router, _, provider, _) = setup().await;
         let body = serde_json::json!({
             "spec": {
                 "name": "security-test",
@@ -2793,6 +2886,21 @@ mod native_compute_tests {
             .unwrap();
         assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(provider.instance_count(), 0);
+        let malformed_json = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/compute/servers")
+                    .header("authorization", "Bearer project-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(br#"{"spec": malformed}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(malformed_json.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(provider.instance_count(), 0);
         let (_, created) = exec(
             &router,
             authed_post("/compute/servers", "a", "isolated", body),
@@ -2830,7 +2938,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_compute_delete_returns_operation() {
-        let (router, _, provider) = setup().await;
+        let (router, _, provider, _) = setup().await;
         let router = &router;
         let body = serde_json::json!({
             "spec": {
@@ -2886,7 +2994,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_compute_create_after_delete_same_key_fails() {
-        let (router, _, provider) = setup().await;
+        let (router, _, provider, _) = setup().await;
         let router = &router;
         let body = serde_json::json!({
             "spec": {
@@ -2940,7 +3048,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_compute_create_after_delete_new_key_succeeds() {
-        let (router, _, provider) = setup().await;
+        let (router, _, provider, _) = setup().await;
         let router = &router;
         let body = serde_json::json!({
             "spec": {

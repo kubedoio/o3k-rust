@@ -23,18 +23,26 @@ Native Volume has no supported OpenStack-compatible endpoint in the advertised
 profile, so a Volume native/OpenStack pair is NOT APPLICABLE; external Cinder
 remains an explicitly separate authority under the accepted architecture.
 
+Generation applicability: native Compute's advertised manifest operations are
+`list`, `show`, `create`, and `delete`; no native update or compare-and-set
+route/header/request field is advertised in SPEC-0030 v1. Resources expose
+generation metadata and the store has CAS semantics, but API-level stale
+generation testing is not applicable until a mutation precondition is
+advertised.
+
 ## Native API security (SPEC-0030 §17)
 
 | Property | Executable evidence |
 | --- | --- |
 | Missing/malformed/invalid bearer and no mutation | `o3kd::native_adapters::native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation` |
-| Cross-project isolation / IDOR / operation isolation | same test; `operation_visibility_tests::operation_route_is_store_backed_owner_scoped_and_redacts_provider_fields` |
+| Cross-project isolation / IDOR / operation isolation | same test; `operation_visibility_tests::operation_route_is_store_backed_owner_scoped_and_redacts_provider_fields`; `native_compute_rejects_foreign_network_before_provider_mutation` |
 | Unknown namespace/resource fails closed | `native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation`; `resource::tests::different_resource_types_share_one_registry_resolution_path` |
 | Idempotency replay, conflict, cross-scope isolation, and provider-side-effect bound | `native_compute_create_replay_equivalent`; `native_compute_create_changed_body_conflict`; `native_compute_idempotency_isolated_between_owner_scopes` |
-| Cursor traversal and tampering | `p12_7_convergence::native_and_openstack_http_surfaces_share_compute_and_network_authority`; codec boundary tests in `o3k_native_api::pagination::tests` |
+| Cursor traversal and tampering | `p12_7_convergence::native_and_openstack_http_surfaces_share_compute_and_network_authority`; `native_adapters::native_http_cursor_is_bound_to_owner_and_rejects_tampering`; codec boundary tests in `o3k_native_api::pagination::tests` |
 | Owner scope is derived from authenticated context | `o3k_api::two_tenant_isolation::two_tenant_path_and_resource_isolation`; native security test |
 | Secret-safe public operation errors | `operation_visibility_tests::operation_route_is_store_backed_owner_scoped_and_redacts_provider_fields`; `o3k-store::postgres_ops::test_postgres_error_mapping_and_no_leakage` |
-| Generation/CAS and authorization-before-side-effect | `o3k-store` SQLite/PostgreSQL P12.4 lifecycle and race tests; native rejected-request provider count assertion; durable UUID Network references are owner-checked before native Compute mutation |
+| Generation/CAS and authorization-before-side-effect | `o3k-store` SQLite/PostgreSQL P12.4 lifecycle and race tests; `native_compute_rejects_foreign_network_before_provider_mutation`; resolvable durable UUID port references are owner-checked before native Compute mutation |
+| Malformed JSON | `native_adapters::native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation` |
 | Update semantics | NOT APPLICABLE: no native generic update route is advertised in SPEC-0030 v1 |
 
 ## Controller and extension security (SPEC-0031 §22)
@@ -46,7 +54,7 @@ remains an explicitly separate authority under the accepted architecture.
 | Stale-session fencing / reconnect | `p12_6_process::p12_6_reconstructs_two_independent_control_plane_runtimes`; `unavailable_external_controller_and_composition_endpoints_fail_closed` |
 | Delegated actor, owner scope, action, target, and parent operation | `p12_6_process::database_controller_and_composition_cross_real_mtls_boundaries` |
 | Unknown outcome, replay-safe reconciliation, compensation, cleanup | `p12_6_process::database_controller_and_composition_cross_real_mtls_boundaries`; `p12_6_independent_application_instances_converge_durable_slots` |
-| Unsafe service removal | NOT PROVEN: `ManifestRegistry::remove` exists, but P12.7 has not yet exercised removal with owned resources, in-flight Operations, or dependencies |
+| Unsafe service removal | `manifest::tests::service_authority_cannot_be_forgotten_by_registry_removal`; registry removal fails closed and controller removal retains the manifest |
 | Separate compatibility projection/evidence gating | compatibility inventory/target validation tests and `docs/compatibility/` manifests; no metadata-only capability is advertised |
 
 ## Database conformance service
@@ -72,8 +80,8 @@ real PostgreSQL harness. The PostgreSQL tests are never replaced by a mock.
 3. Compute/Network/Volume reads — PASS (native adapter and API lifecycle tests)
 4. correct mutation status codes — PASS (native mutation tests and P12.6 process test)
 5. service-neutral Operation — PASS (operation visibility and process tests)
-6. idempotency/generation safety — NOT PROVEN (native cross-scope idempotency is covered; native generation preconditions are not advertised, and store-only generation tests do not close the API gate)
-7. opaque pagination scope safety — NOT PROVEN (HTTP traversal and tampering are covered; cross-owner and incompatible-filter cursor binding remain unproven)
+6. idempotency/generation safety — NOT PROVEN (native cross-scope idempotency is covered; generation metadata and store CAS exist, but no advertised native mutation exposes a compare-and-set precondition)
+7. opaque pagination scope safety — PASS (`p12_7_convergence` HTTP traversal/tampering and `native_http_cursor_is_bound_to_owner_and_rejects_tampering` cross-owner binding)
 8. SQLite/PostgreSQL conformance — NOT PROVEN (store-level PostgreSQL tests executed; native API conformance against PostgreSQL remains required)
 9. selected OpenStack regression — PASS (`o3k-api` isolation/lifecycle suites)
 10. one canonical native/OpenStack authority — PASS for exercised Compute/Network paths (fully wired HTTP convergence, deletion, shared application/store wiring, and lifecycle evidence)
@@ -84,7 +92,7 @@ real PostgreSQL harness. The PostgreSQL tests are never replaced by a mock.
 2. namespace/resource/action conflict rejection — PASS
 3. separate compatibility projection — PASS
 4. authenticated/versioned external controller — PASS
-5. bounded actor/scope-preserving delegation — NOT PROVEN (the required independent negative delegation cases are not all cited)
+5. bounded actor/scope-preserving delegation — NOT PROVEN (positive composition and SDK tampering/expiry evidence exist; the complete independent negative matrix remains required)
 6. generic discovery and CLI — PASS (P12.6 process/CLI coverage)
 7. canonical cross-service composition — PASS
 8. durable operation/audit correlation and unknown outcome — PASS
