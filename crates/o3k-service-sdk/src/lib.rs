@@ -904,6 +904,7 @@ pub struct ServiceControllerServer<H> {
     replay: ReplayLedger,
     delegation_keys: Arc<HashMap<String, VerifyingKey>>,
     expected_service_principal: Option<String>,
+    expected_delegation_recipient: String,
 }
 
 #[derive(Clone)]
@@ -918,6 +919,8 @@ pub struct GrpcControllerAdapter {
     client: Mutex<ExternalControllerClient>,
     service_id: String,
     session: o3k_kernel::ControllerSession,
+    delegation_key_id: Option<String>,
+    delegation_signing_key: Option<SigningKey>,
 }
 
 impl GrpcControllerAdapter {
@@ -980,6 +983,78 @@ impl GrpcControllerAdapter {
                 manifest_generation,
                 started_at: String::new(),
             },
+            delegation_key_id: None,
+            delegation_signing_key: None,
+        })
+    }
+
+    #[must_use]
+    pub fn with_delegation_signer(mut self, key_id: impl Into<String>, key: SigningKey) -> Self {
+        self.delegation_key_id = Some(key_id.into());
+        self.delegation_signing_key = Some(key);
+        self
+    }
+
+    pub fn issue_parent_delegation(
+        &self,
+        context: &OperationContext,
+        original_actor: impl Into<String>,
+        resource: &o3k_kernel::ResourceReference,
+    ) -> Result<o3k_kernel::DelegationContext, SdkError> {
+        let key_id = self
+            .delegation_key_id
+            .clone()
+            .ok_or_else(|| SdkError::Invalid("delegation signer is not configured".into()))?;
+        let key = self
+            .delegation_signing_key
+            .as_ref()
+            .ok_or_else(|| SdkError::Invalid("delegation signer is not configured".into()))?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| SdkError::Invalid("clock error".into()))?
+            .as_millis() as u64;
+        let claims = DelegationClaims {
+            version: 1,
+            credential_id: Uuid::new_v4(),
+            issuer: "o3k-control-plane".into(),
+            key_id: key_id.clone(),
+            original_actor: original_actor.into(),
+            owner_scope: context.owner_scope.to_string(),
+            calling_service: self.service_id.clone(),
+            recipient_service: "o3k-composition".into(),
+            action: context.action.to_string(),
+            resource_type: resource.resource_type.to_string(),
+            resource_id: resource.resource_id.as_str().to_owned(),
+            request_id: context.request_id,
+            operation_id: context.operation_id,
+            session_id: context.session_id,
+            session_generation: context.session_generation,
+            issued_at_unix_ms: now,
+            expires_at_unix_ms: context.deadline_unix_ms,
+        };
+        let signed = SignedDelegation::sign(claims.clone(), key)?;
+        Ok(o3k_kernel::DelegationContext {
+            credential_id: claims.credential_id,
+            original_actor: claims.original_actor,
+            original_scope: context.owner_scope.clone(),
+            calling_service: self.session.service_principal.clone(),
+            recipient_service: o3k_kernel::ServicePrincipal::new(
+                o3k_kernel::PrincipalId::new_unchecked("o3k-composition"),
+                "o3k-composition",
+                "o3k",
+            ),
+            parent_action: context.action.clone(),
+            delegated_action: context.action.clone(),
+            resource: resource.clone(),
+            operation_id: context.operation_id,
+            request_id: context.request_id,
+            audit_correlation: context.audit_correlation.clone(),
+            session_id: context.session_id,
+            session_generation: context.session_generation,
+            issued_at_unix_ms: claims.issued_at_unix_ms,
+            expires_at_unix_ms: claims.expires_at_unix_ms,
+            key_id,
+            signature: signed.signature,
         })
     }
 
@@ -1397,9 +1472,10 @@ impl<H: ControllerHandler> ServiceControllerServer<H> {
         manifest_digest: impl Into<String>,
         generation: u64,
     ) -> Self {
+        let service_id = service_id.into();
         Self {
             handler: Arc::new(handler),
-            service_id: service_id.into(),
+            service_id: service_id.clone(),
             namespace: namespace.into(),
             manifest_digest: manifest_digest.into(),
             generation,
@@ -1407,6 +1483,7 @@ impl<H: ControllerHandler> ServiceControllerServer<H> {
             replay: ReplayLedger::default(),
             delegation_keys: Arc::new(HashMap::new()),
             expected_service_principal: None,
+            expected_delegation_recipient: service_id,
         }
     }
     pub fn into_service(self) -> ControllerServiceServer<Self> {
@@ -1420,6 +1497,12 @@ impl<H: ControllerHandler> ServiceControllerServer<H> {
     #[must_use]
     pub fn with_service_principal(mut self, principal: impl Into<String>) -> Self {
         self.expected_service_principal = Some(principal.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_delegation_recipient(mut self, recipient: impl Into<String>) -> Self {
+        self.expected_delegation_recipient = recipient.into();
         self
     }
     #[allow(clippy::result_large_err)]
@@ -1440,9 +1523,14 @@ impl<H: ControllerHandler> ServiceControllerServer<H> {
         }
         let claims = verify_wire_delegation(&delegation.credential, &self.delegation_keys, now)
             .map_err(|_| tonic::Status::permission_denied("invalid delegation"))?;
-        bind_delegation(&claims, context, resource, &self.service_id)
-            .map(|_| ())
-            .map_err(|_| tonic::Status::permission_denied("invalid delegation"))
+        bind_delegation(
+            &claims,
+            context,
+            resource,
+            &self.expected_delegation_recipient,
+        )
+        .map(|_| ())
+        .map_err(|_| tonic::Status::permission_denied("invalid delegation"))
     }
     async fn check_context(&self, context: Option<&proto::Context>) -> Result<u64, tonic::Status> {
         let context =

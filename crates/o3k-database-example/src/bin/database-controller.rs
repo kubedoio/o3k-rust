@@ -62,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         required("O3K_DATABASE_MANIFEST_GENERATION")?.parse()?,
     )
     .with_service_principal("database-controller")
+    .with_delegation_recipient("o3k-composition")
     .with_delegation_keys(std::collections::HashMap::from([(
         required("O3K_DATABASE_DELEGATION_KEY_ID")?,
         verification_key()?,

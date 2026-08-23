@@ -693,25 +693,81 @@ impl ResourceApplication for GenericResourceApplication {
                 replay_identity: format!("parent:{operation_id}"),
                 audit_correlation: format!("parent:{operation_id}"),
             };
+            let parent_reference = o3k_kernel::ResourceReference {
+                resource_type: descriptor.resource_type.clone(),
+                resource_id: o3k_kernel::ResourceId::new_unchecked(resource_id.to_string()),
+                generation: 1,
+            };
+            let delegation = controller
+                .issue_parent_delegation(
+                    &context,
+                    auth.principal().id().to_string(),
+                    &parent_reference,
+                )
+                .map_err(|_| ResourceApplicationError::Unauthorized)?;
             let outcome = controller
                 .reconcile(o3k_kernel::ReconcileRequest {
                     context,
                     resource: o3k_kernel::ResourceSnapshot {
-                        reference: o3k_kernel::ResourceReference {
-                            resource_type: descriptor.resource_type.clone(),
-                            resource_id: o3k_kernel::ResourceId::new_unchecked(
-                                resource_id.to_string(),
-                            ),
-                            generation: 1,
-                        },
+                        reference: parent_reference,
                         desired_spec: request.spec,
                         known_status: None,
                         owner_scope: auth.effective_scope().clone(),
                     },
-                    delegation: None,
+                    delegation: Some(delegation),
                 })
                 .await;
             let complete = matches!(outcome, o3k_kernel::ReconcileOutcome::Succeeded { .. });
+            let observed_state = match &outcome {
+                o3k_kernel::ReconcileOutcome::Succeeded { .. } => "READY",
+                o3k_kernel::ReconcileOutcome::Unknown { .. } => "UNKNOWN",
+                o3k_kernel::ReconcileOutcome::Failed { .. }
+                | o3k_kernel::ReconcileOutcome::Retryable { .. } => "ERROR",
+                o3k_kernel::ReconcileOutcome::Accepted { .. } => "PROVISIONING",
+            };
+            let lifecycle_state = match &outcome {
+                o3k_kernel::ReconcileOutcome::Succeeded { .. } => {
+                    o3k_kernel::OperationState::Succeeded
+                }
+                o3k_kernel::ReconcileOutcome::Unknown { .. } => {
+                    o3k_kernel::OperationState::UnknownOutcome
+                }
+                o3k_kernel::ReconcileOutcome::Retryable { .. } => {
+                    o3k_kernel::OperationState::Retryable
+                }
+                o3k_kernel::ReconcileOutcome::Failed { .. } => o3k_kernel::OperationState::Failed,
+                o3k_kernel::ReconcileOutcome::Accepted { .. } => {
+                    o3k_kernel::OperationState::Running
+                }
+            };
+            let now = chrono::Utc::now().to_rfc3339();
+            let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                lifecycle_state,
+                1,
+                Some(now.clone()),
+                matches!(
+                    lifecycle_state,
+                    o3k_kernel::OperationState::Succeeded | o3k_kernel::OperationState::Failed
+                )
+                .then_some(now),
+                None,
+            )
+            .map_err(|_| ResourceApplicationError::Internal)?;
+            self.store
+                .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            self.store
+                .update_resource(
+                    resource_id,
+                    1,
+                    &resource.desired_state,
+                    observed_state,
+                    if complete { 1 } else { 0 },
+                    None,
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
             return Ok(MutationResult {
                 operation_id: operation_id.to_string(),
                 resource_id: Some(resource_id.to_string()),
@@ -1015,16 +1071,24 @@ impl ResourceApplication for GenericResourceApplication {
                 replay_identity: format!("delete:{operation_id}"),
                 audit_correlation: format!("delete:{operation_id}"),
             };
+            let parent_reference = o3k_kernel::ResourceReference {
+                resource_type: descriptor.resource_type.clone(),
+                resource_id: o3k_kernel::ResourceId::new_unchecked(id),
+                generation: resource.generation,
+            };
+            let delegation = controller
+                .issue_parent_delegation(
+                    &context,
+                    auth.principal().id().to_string(),
+                    &parent_reference,
+                )
+                .map_err(|_| ResourceApplicationError::Unauthorized)?;
             let outcome = controller
                 .delete(o3k_kernel::DeleteRequest {
                     context,
-                    resource: o3k_kernel::ResourceReference {
-                        resource_type: descriptor.resource_type.clone(),
-                        resource_id: o3k_kernel::ResourceId::new_unchecked(id),
-                        generation: resource.generation,
-                    },
+                    resource: parent_reference,
                     owner_scope: auth.effective_scope().clone(),
-                    delegation: None,
+                    delegation: Some(delegation),
                 })
                 .await;
             let complete = matches!(outcome, o3k_kernel::ReconcileOutcome::Succeeded { .. });

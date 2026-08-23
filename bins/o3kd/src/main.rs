@@ -9,7 +9,7 @@ use o3k_provider::{
     ResolvedCreateInputs, ResolvedCreateResolver,
 };
 use o3k_store::ComputeRepository;
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -33,6 +33,10 @@ struct ExternalControllerConfig {
     principal_name: String,
     manifest_digest: String,
     manifest_generation: u64,
+    #[serde(default)]
+    delegation_key_id: Option<String>,
+    #[serde(default)]
+    delegation_signing_key_file: Option<PathBuf>,
 }
 
 async fn external_controllers_from_config() -> Result<
@@ -66,6 +70,18 @@ async fn external_controllers_from_config() -> Result<
             entry.manifest_generation,
         )
         .await?;
+        let controller = match (entry.delegation_key_id, entry.delegation_signing_key_file) {
+            (Some(key_id), Some(path)) => controller.with_delegation_signer(
+                key_id,
+                ed25519_dalek::SigningKey::from_bytes(
+                    &fs::read(path)?
+                        .try_into()
+                        .map_err(|_| "delegation signing key must be 32 bytes")?,
+                ),
+            ),
+            (None, None) => controller,
+            _ => return Err("delegation key id and key file must be configured together".into()),
+        };
         controllers.insert(entry.service_id, std::sync::Arc::new(controller));
     }
     Ok(controllers)
