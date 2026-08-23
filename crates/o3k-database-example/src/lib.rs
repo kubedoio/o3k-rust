@@ -1164,4 +1164,131 @@ mod tests {
             ["network-primary", "volume-data", "network-primary"]
         );
     }
+
+    #[tokio::test]
+    async fn network_failure_stops_before_later_child_side_effects() {
+        let client = Arc::new(FakeComposition {
+            calls: Mutex::new(Vec::new()),
+            fail_create: Some("network-primary".into()),
+        });
+        let lifecycle = ChildLifecycleActions {
+            network_create: ActionId::new("network", "CreateNetwork").unwrap(),
+            network_observe: ActionId::new("network", "ReadNetwork").unwrap(),
+            network_delete: ActionId::new("network", "DeleteNetwork").unwrap(),
+            volume_create: ActionId::new("volume", "CreateVolume").unwrap(),
+            volume_observe: ActionId::new("volume", "ReadVolume").unwrap(),
+            volume_delete: ActionId::new("volume", "DeleteVolume").unwrap(),
+            compute_create: ActionId::new("compute", "CreateServer").unwrap(),
+            compute_observe: ActionId::new("compute", "ReadServer").unwrap(),
+            compute_delete: ActionId::new("compute", "DeleteServer").unwrap(),
+        };
+        let composition = DatabaseComposition::new(client.clone(), lifecycle);
+        let scope = o3k_kernel::OwnershipScope::project(
+            o3k_kernel::ScopeId::new("project-network-failure").unwrap(),
+            None,
+            None,
+        );
+        let operation = uuid::Uuid::new_v4();
+        let context = o3k_kernel::OperationContext {
+            request_id: uuid::Uuid::new_v4(),
+            operation_id: operation,
+            action: ActionId::new("database", "CreateInstance").unwrap(),
+            service_id: "database-example".into(),
+            owner_scope: scope.clone(),
+            session_id: uuid::Uuid::new_v4(),
+            session_generation: 1,
+            deadline_unix_ms: 300_000,
+            replay_identity: format!("parent:{operation}"),
+            audit_correlation: "network-failure-test".into(),
+        };
+        let result = composition
+            .reconcile(
+                o3k_kernel::ResourceReference {
+                    resource_type: o3k_kernel::ResourceType::new("database", "instance").unwrap(),
+                    resource_id: o3k_kernel::ResourceId::new("parent-network-failure").unwrap(),
+                    generation: 1,
+                },
+                operation,
+                context,
+                "database-controller".into(),
+                scope,
+                &InstanceSpec {
+                    engine: "test".into(),
+                    version: "1".into(),
+                    storage_gb: 1,
+                },
+                CompositionState::default(),
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(client.calls.lock().unwrap().as_slice(), ["network-primary"]);
+    }
+
+    #[tokio::test]
+    async fn compute_failure_compensates_network_and_volume_in_reverse_order() {
+        let client = Arc::new(FakeComposition {
+            calls: Mutex::new(Vec::new()),
+            fail_create: Some("compute-primary".into()),
+        });
+        let lifecycle = ChildLifecycleActions {
+            network_create: ActionId::new("network", "CreateNetwork").unwrap(),
+            network_observe: ActionId::new("network", "ReadNetwork").unwrap(),
+            network_delete: ActionId::new("network", "DeleteNetwork").unwrap(),
+            volume_create: ActionId::new("volume", "CreateVolume").unwrap(),
+            volume_observe: ActionId::new("volume", "ReadVolume").unwrap(),
+            volume_delete: ActionId::new("volume", "DeleteVolume").unwrap(),
+            compute_create: ActionId::new("compute", "CreateServer").unwrap(),
+            compute_observe: ActionId::new("compute", "ReadServer").unwrap(),
+            compute_delete: ActionId::new("compute", "DeleteServer").unwrap(),
+        };
+        let composition = DatabaseComposition::new(client.clone(), lifecycle);
+        let scope = o3k_kernel::OwnershipScope::project(
+            o3k_kernel::ScopeId::new("project-compute-failure").unwrap(),
+            None,
+            None,
+        );
+        let operation = uuid::Uuid::new_v4();
+        let context = o3k_kernel::OperationContext {
+            request_id: uuid::Uuid::new_v4(),
+            operation_id: operation,
+            action: ActionId::new("database", "CreateInstance").unwrap(),
+            service_id: "database-example".into(),
+            owner_scope: scope.clone(),
+            session_id: uuid::Uuid::new_v4(),
+            session_generation: 1,
+            deadline_unix_ms: 300_000,
+            replay_identity: format!("parent:{operation}"),
+            audit_correlation: "compute-failure-test".into(),
+        };
+        let result = composition
+            .reconcile(
+                o3k_kernel::ResourceReference {
+                    resource_type: o3k_kernel::ResourceType::new("database", "instance").unwrap(),
+                    resource_id: o3k_kernel::ResourceId::new("parent-compute-failure").unwrap(),
+                    generation: 1,
+                },
+                operation,
+                context,
+                "database-controller".into(),
+                scope,
+                &InstanceSpec {
+                    engine: "test".into(),
+                    version: "1".into(),
+                    storage_gb: 1,
+                },
+                CompositionState::default(),
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            client.calls.lock().unwrap().as_slice(),
+            [
+                "network-primary",
+                "volume-data",
+                "compute-primary",
+                "volume-data",
+                "network-primary"
+            ]
+        );
+    }
 }
