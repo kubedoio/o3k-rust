@@ -965,7 +965,17 @@ impl ResourceApplication for GenericResourceApplication {
                     // P12.6 generic composition also carries UUID child
                     // slots which are not NetworkService ports. Preserve
                     // that contract; resolvable ports remain owner-checked.
-                    Err(o3k_network::NetworkError::NotFound) => {}
+                    Err(o3k_network::NetworkError::NotFound) => {
+                        if let Some(port) = self
+                            .network_service
+                            .find_port_by_id(port_id)
+                            .await
+                            .map_err(|_| ResourceApplicationError::Conflict)?
+                            && port.project_id != auth.effective_scope().id().as_str()
+                        {
+                            return Err(ResourceApplicationError::Forbidden);
+                        }
+                    }
                     Err(_) => return Err(ResourceApplicationError::Conflict),
                 }
             }

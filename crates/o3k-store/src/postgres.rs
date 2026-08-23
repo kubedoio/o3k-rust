@@ -3539,6 +3539,16 @@ impl NetworkRepository for PostgresStore {
         row.map(|r| parse_pg_port(&r)).transpose()
     }
 
+    async fn get_port_by_id(&self, id: &Uuid) -> Result<Option<PortRecord>, StoreError> {
+        let id_str = id.to_string();
+        let row = sqlx::query("SELECT * FROM network_ports WHERE id = $1")
+            .bind(&id_str)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        row.map(|r| parse_pg_port(&r)).transpose()
+    }
+
     async fn delete_port(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
         let id_str = id.to_string();
         sqlx::query("DELETE FROM network_security_group_bindings WHERE project_id = $1 AND endpoint_id = $2")

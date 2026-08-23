@@ -5817,6 +5817,17 @@ impl NetworkService {
             .ok_or(NetworkError::NotFound)
     }
 
+    /// Internal owner lookup used by canonical dependency authorization. It
+    /// is not exposed as a tenant-facing read path and carries no metadata to
+    /// the caller beyond the durable owner record.
+    pub async fn find_port_by_id(&self, id: Uuid) -> Result<Option<PortRecord>, NetworkError> {
+        self.inner
+            .repository
+            .get_port_by_id(&id)
+            .await
+            .map_err(map_store_error)
+    }
+
     pub async fn delete_port(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
         let ns = ServiceNamespace::new("network")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
