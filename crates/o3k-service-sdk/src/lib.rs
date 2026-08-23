@@ -55,6 +55,57 @@ pub mod tls {
     }
 }
 
+/// Generic service-to-service composition port. Implementations are supplied
+/// by the O3K control plane; external services receive only bounded child
+/// authority and never provider/store access.
+pub mod composition {
+    use o3k_kernel::{ActionId, OwnershipScope, ResourceReference};
+    use uuid::Uuid;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ChildResourceRequest {
+        pub parent: ResourceReference,
+        pub parent_operation_id: Uuid,
+        pub action: ActionId,
+        pub resource_type: o3k_kernel::ResourceType,
+        pub owner_scope: OwnershipScope,
+        pub slot: String,
+        pub idempotency_key: String,
+        pub desired_spec: serde_json::Value,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ChildResourceReceipt {
+        pub resource: ResourceReference,
+        pub operation_id: Uuid,
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    pub enum CompositionError {
+        #[error("child request is not authorized")]
+        Unauthorized,
+        #[error("child operation outcome is unknown")]
+        UnknownOutcome,
+        #[error("child operation failed: {0}")]
+        Failed(String),
+    }
+
+    #[tonic::async_trait]
+    pub trait ServiceCompositionClient: Send + Sync {
+        async fn create_child(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<ChildResourceReceipt, CompositionError>;
+        async fn observe_child(
+            &self,
+            resource: ResourceReference,
+            operation_id: Uuid,
+        ) -> Result<serde_json::Value, CompositionError>;
+        async fn delete_child(&self, request: ChildResourceRequest)
+        -> Result<(), CompositionError>;
+    }
+}
+
 use o3k_controller_protocol::proto::{
     self,
     controller_service_server::{ControllerService, ControllerServiceServer},

@@ -1208,6 +1208,39 @@ impl ManifestRegistry {
         Self::default()
     }
 
+    /// Load and register one accepted v1 manifest from a JSON artifact.
+    /// Runtime callers use this generic path for every external service; the
+    /// registry never dispatches on a service-specific namespace.
+    pub fn register_json_file(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(), ManifestError> {
+        let bytes =
+            std::fs::read(path).map_err(|_| ManifestError::InvalidField("manifest file"))?;
+        let wire: ServiceManifestV1 = serde_json::from_slice(&bytes)
+            .map_err(|_| ManifestError::InvalidField("manifest JSON"))?;
+        self.register(wire.try_into()?)
+    }
+
+    /// Load all JSON files in a configured manifest directory. Files are
+    /// sorted to make registration and conflict diagnostics deterministic.
+    pub fn register_json_directory(
+        &mut self,
+        directory: impl AsRef<std::path::Path>,
+    ) -> Result<usize, ManifestError> {
+        let mut paths = std::fs::read_dir(directory)
+            .map_err(|_| ManifestError::InvalidField("manifest directory"))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in &paths {
+            self.register_json_file(path)?;
+        }
+        Ok(paths.len())
+    }
+
     /// Registers or updates a controller session for a registered service.
     ///
     /// The controller starts in `Declared` state. Call `update_controller_health`
@@ -1735,6 +1768,34 @@ impl ManifestRegistry {
             }
         }
         types
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod external_loader_tests {
+    use super::*;
+
+    #[test]
+    fn external_manifest_loader_accepts_synthetic_service_without_dispatch_code() {
+        let path =
+            std::env::temp_dir().join(format!("o3k-synthetic-{}.json", uuid::Uuid::new_v4()));
+        let manifest = r#"{
+          "manifest_version":"o3k.io/service-manifest/v1",
+          "service_id":"synthetic-example",
+          "namespace":"synthetic",
+          "service_version":"1.0.0",
+          "ownership_mode":"external-controller",
+          "resource_types":[{"type":"synthetic:item","schema_version":"v1","scope":"tenant","operations":{"show":"synthetic:ReadItem","create":"synthetic:CreateItem","delete":"synthetic:DeleteItem"}}],
+          "actions":["synthetic:ReadItem","synthetic:CreateItem","synthetic:DeleteItem"],
+          "controller":{"mode":"external","protocol":"grpc","protocol_version":"1.0","service_principal":"synthetic-controller"}
+        }"#;
+        std::fs::write(&path, manifest).unwrap();
+        let mut registry = ManifestRegistry::new();
+        registry.register_json_file(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(registry.has_resource_type(&ResourceType::new("synthetic", "item").unwrap()));
+        assert!(registry.has_action(&ActionId::new("synthetic", "CreateItem").unwrap()));
     }
 }
 

@@ -12,8 +12,6 @@
 //! This is NOT a production managed PostgreSQL service. See SPEC-0031 §21
 //! and ADR-0174 §15 for the acceptance criteria.
 
-use o3k_kernel::manifest::{RegisteredResourceType, ResourceScope};
-use o3k_kernel::resource::ResourceType;
 use o3k_kernel::{
     ManifestRegistry, ServiceManifest,
     controller::{
@@ -22,56 +20,19 @@ use o3k_kernel::{
         ObserveRequest, ProtocolVersion, ReconcileOutcome, ReconcileRequest,
     },
 };
+use o3k_service_sdk::composition::{
+    ChildResourceReceipt, ChildResourceRequest, CompositionError, ServiceCompositionClient,
+};
+use std::sync::Arc;
 
 /// Returns the canonical ServiceManifest for the database example service.
 #[must_use]
+#[allow(clippy::expect_used)]
 pub fn manifest() -> ServiceManifest {
-    ServiceManifest {
-        manifest_version: 1,
-        service_id: "database-example".to_owned(),
-        namespace: "database".to_owned(),
-        service_version: "0.1.0".to_owned(),
-        ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
-        resource_types: vec![RegisteredResourceType {
-            resource_type: ResourceType::new_unchecked("database", "instance"),
-            schema_version: "v1".to_owned(),
-            collection: None,
-            scope: ResourceScope::Tenant,
-            operations: [
-                (
-                    "show".to_owned(),
-                    o3k_kernel::ActionId::new_unchecked("database", "ReadInstance"),
-                ),
-                (
-                    "create".to_owned(),
-                    o3k_kernel::ActionId::new_unchecked("database", "CreateInstance"),
-                ),
-                (
-                    "delete".to_owned(),
-                    o3k_kernel::ActionId::new_unchecked("database", "DeleteInstance"),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        }],
-        actions: vec![
-            "database:CreateInstance".to_owned(),
-            "database:ReadInstance".to_owned(),
-            "database:DeleteInstance".to_owned(),
-        ],
-        capabilities: vec!["conformance".to_owned()],
-        dependencies: vec![],
-        quota_dimensions: vec![],
-        regions: vec![],
-        availability_domains: vec![],
-        controller: Some(o3k_kernel::ManifestController {
-            mode: "in-process".to_owned(),
-            protocol: "in-process".to_owned(),
-            protocol_version: "1.0".to_owned(),
-            service_principal: None,
-        }),
-        health: None,
-    }
+    let wire: o3k_kernel::ServiceManifestV1 =
+        serde_json::from_str(include_str!("../service-manifest.json"))
+            .expect("database example manifest is valid JSON");
+    wire.try_into().expect("database example manifest is valid")
 }
 
 /// Registers the database example service into a ManifestRegistry.
@@ -185,11 +146,125 @@ pub struct InstanceSpec {
     pub storage_gb: u64,
 }
 
+/// Service-owned composition state. The control plane owns the parent and
+/// operation; this state contains only generic child references and is
+/// reconstructible from durable parent relationship records.
+#[derive(Debug, Clone, Default)]
+pub struct CompositionState {
+    pub network: Option<ChildResourceReceipt>,
+    pub volume: Option<ChildResourceReceipt>,
+    pub compute: Option<ChildResourceReceipt>,
+}
+
+pub struct DatabaseComposition<C> {
+    client: Arc<C>,
+}
+
+impl<C: ServiceCompositionClient> DatabaseComposition<C> {
+    pub fn new(client: Arc<C>) -> Self {
+        Self { client }
+    }
+
+    /// Creates deterministic child slots in dependency order. Each request
+    /// carries the same parent/scope/operation and a stable idempotency key.
+    pub async fn reconcile(
+        &self,
+        parent: o3k_kernel::ResourceReference,
+        parent_operation_id: uuid::Uuid,
+        owner_scope: o3k_kernel::OwnershipScope,
+        spec: &InstanceSpec,
+        mut state: CompositionState,
+    ) -> Result<CompositionState, CompositionError> {
+        let slots = [
+            (
+                "network-primary",
+                "network",
+                "address_realm",
+                "CreateAddressRealm",
+            ),
+            ("volume-data", "volume", "volume", "CreateVolume"),
+            ("compute-primary", "compute", "server", "CreateServer"),
+        ];
+        for (slot, namespace, name, action_name) in slots {
+            let exists = match slot {
+                "network-primary" => state.network.is_some(),
+                "volume-data" => state.volume.is_some(),
+                "compute-primary" => state.compute.is_some(),
+                _ => false,
+            };
+            if exists {
+                continue;
+            }
+            let request = ChildResourceRequest {
+                parent: parent.clone(),
+                parent_operation_id,
+                action: o3k_kernel::ActionId::new(namespace, action_name)
+                    .map_err(|e| CompositionError::Failed(e.to_string()))?,
+                resource_type: o3k_kernel::ResourceType::new(namespace, name)
+                    .map_err(|e| CompositionError::Failed(e.to_string()))?,
+                owner_scope: owner_scope.clone(),
+                slot: slot.to_owned(),
+                idempotency_key: format!("{parent_operation_id}:{slot}"),
+                desired_spec: serde_json::to_value(spec)
+                    .map_err(|e| CompositionError::Failed(e.to_string()))?,
+            };
+            let receipt = self.client.create_child(request).await?;
+            match slot {
+                "network-primary" => state.network = Some(receipt),
+                "volume-data" => state.volume = Some(receipt),
+                "compute-primary" => state.compute = Some(receipt),
+                _ => unreachable!(),
+            }
+        }
+        Ok(state)
+    }
+
+    /// Compensate only the exclusive children known in durable state, in
+    /// reverse dependency order. Missing/unknown outcomes are returned to the
+    /// caller so the parent operation remains recoverable rather than being
+    /// reported as cleanly deleted.
+    pub async fn compensate(
+        &self,
+        parent: o3k_kernel::ResourceReference,
+        parent_operation_id: uuid::Uuid,
+        owner_scope: o3k_kernel::OwnershipScope,
+        state: &CompositionState,
+    ) -> Result<(), CompositionError> {
+        for receipt in [
+            state.compute.as_ref(),
+            state.volume.as_ref(),
+            state.network.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let resource = receipt.resource.clone();
+            let request = ChildResourceRequest {
+                parent: parent.clone(),
+                parent_operation_id,
+                action: o3k_kernel::ActionId::new(
+                    resource.resource_type.namespace(),
+                    format!("Delete{}", resource.resource_type.name()),
+                )
+                .map_err(|e| CompositionError::Failed(e.to_string()))?,
+                resource_type: resource.resource_type.clone(),
+                owner_scope: owner_scope.clone(),
+                slot: format!("compensate:{}", resource.resource_type),
+                idempotency_key: format!("{parent_operation_id}:delete:{}", resource.resource_id),
+                desired_spec: serde_json::Value::Null,
+            };
+            self.client.delete_child(request).await?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use o3k_kernel::{ActionId, ManifestRegistry, ResourceType};
+    use std::sync::Mutex;
 
     #[test]
     fn manifest_registers_and_displays() -> Result<(), Box<dyn std::error::Error>> {
@@ -294,5 +369,111 @@ mod tests {
         assert!(registry.has_resource_type(&ResourceType::new("database", "instance")?));
         assert!(registry.has_action(&ActionId::new("database", "CreateInstance")?));
         Ok(())
+    }
+
+    struct FakeComposition {
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ServiceCompositionClient for FakeComposition {
+        async fn create_child(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<ChildResourceReceipt, CompositionError> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(request.slot.clone());
+            Ok(ChildResourceReceipt {
+                resource: o3k_kernel::ResourceReference {
+                    resource_type: request.resource_type,
+                    resource_id: o3k_kernel::ResourceId::new(request.slot.clone())
+                        .map_err(|e| CompositionError::Failed(e.to_string()))?,
+                    generation: 1,
+                },
+                operation_id: request.parent_operation_id,
+            })
+        }
+        async fn observe_child(
+            &self,
+            _resource: o3k_kernel::ResourceReference,
+            _operation_id: uuid::Uuid,
+        ) -> Result<serde_json::Value, CompositionError> {
+            Ok(serde_json::json!({"state":"active"}))
+        }
+        async fn delete_child(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<(), CompositionError> {
+            self.calls.lock().expect("calls lock").push(request.slot);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn composition_uses_generic_deterministic_child_slots() {
+        let client = Arc::new(FakeComposition {
+            calls: Mutex::new(Vec::new()),
+        });
+        let composition = DatabaseComposition::new(client.clone());
+        let parent = o3k_kernel::ResourceReference {
+            resource_type: o3k_kernel::ResourceType::new("database", "instance").unwrap(),
+            resource_id: o3k_kernel::ResourceId::new("parent-1").unwrap(),
+            generation: 1,
+        };
+        let scope = o3k_kernel::OwnershipScope::project(
+            o3k_kernel::ScopeId::new("project-1").unwrap(),
+            None,
+            None,
+        );
+        let operation = uuid::Uuid::new_v4();
+        let state = composition
+            .reconcile(
+                parent,
+                operation,
+                scope,
+                &InstanceSpec {
+                    engine: "test".into(),
+                    version: "1".into(),
+                    storage_gb: 1,
+                },
+                CompositionState::default(),
+            )
+            .await
+            .unwrap();
+        assert!(state.network.is_some() && state.volume.is_some() && state.compute.is_some());
+        assert_eq!(
+            client.calls.lock().unwrap().as_slice(),
+            ["network-primary", "volume-data", "compute-primary"]
+        );
+        composition
+            .compensate(
+                o3k_kernel::ResourceReference {
+                    resource_type: o3k_kernel::ResourceType::new("database", "instance").unwrap(),
+                    resource_id: o3k_kernel::ResourceId::new("parent-1").unwrap(),
+                    generation: 1,
+                },
+                operation,
+                o3k_kernel::OwnershipScope::project(
+                    o3k_kernel::ScopeId::new("project-1").unwrap(),
+                    None,
+                    None,
+                ),
+                &state,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            client.calls.lock().unwrap().as_slice(),
+            [
+                "network-primary",
+                "volume-data",
+                "compute-primary",
+                "compensate:compute:server",
+                "compensate:volume:volume",
+                "compensate:network:address_realm"
+            ]
+        );
     }
 }

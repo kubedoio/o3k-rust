@@ -1,0 +1,40 @@
+{
+  "manifest_version": "o3k.io/service-manifest/v1",
+  "service_id": "database-example",
+  "namespace": "database",
+  "service_version": "0.2.0",
+  "ownership_mode": "external-controller",
+  "resource_types": [
+    {
+      "type": "database:instance",
+      "schema_version": "v1",
+      "collection": "instances",
+      "scope": "tenant",
+      "operations": {
+        "show": "database:ReadInstance",
+        "create": "database:CreateInstance",
+        "delete": "database:DeleteInstance"
+      }
+    }
+  ],
+  "actions": [
+    "database:CreateInstance",
+    "database:ReadInstance",
+    "database:DeleteInstance"
+  ],
+  "capabilities": ["conformance", "composition"],
+  "dependencies": [
+    {"kind": "resource_type", "name": "compute:server", "required": true},
+    {"kind": "resource_type", "name": "network:address_realm", "required": true},
+    {"kind": "resource_type", "name": "volume:volume", "required": true},
+    {"kind": "action", "name": "compute:CreateServer", "required": true},
+    {"kind": "action", "name": "network:CreateAddressRealm", "required": true},
+    {"kind": "action", "name": "volume:CreateVolume", "required": true}
+  ],
+  "controller": {
+    "mode": "external",
+    "protocol": "grpc",
+    "protocol_version": "1.0",
+    "service_principal": "database-controller"
+  }
+}
