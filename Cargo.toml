@@ -28,6 +28,8 @@ members = [
     "crates/o3k-console",
     "crates/o3k-store",
     "crates/o3k-kernel",
+    "crates/o3k-controller-protocol",
+    "crates/o3k-service-sdk",
     "crates/o3k-storage",
 ]
 resolver = "2"

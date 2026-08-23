@@ -37,9 +37,10 @@ pub use authorization::{
     StaticAuthorizer,
 };
 pub use controller::{
-    Controller, ControllerCapabilities, ControllerHealth, ControllerRegistration,
-    ControllerSession, ControllerState, DelegationContext, ProtocolVersion, ReconcileOutcome,
-    ReconcileRequest,
+    Controller, ControllerCapabilities, ControllerFailure, ControllerHealth,
+    ControllerRegistration, ControllerSession, ControllerState, DelegationContext, DeleteRequest,
+    FailureCategory, Observation, ObserveOutcome, ObserveRequest, OperationContext,
+    ProtocolVersion, ReconcileOutcome, ReconcileRequest, ResourceReference, ResourceSnapshot,
 };
 pub use envelope::{ResourceEnvelope, ResourceMeta};
 pub use error::KernelError;

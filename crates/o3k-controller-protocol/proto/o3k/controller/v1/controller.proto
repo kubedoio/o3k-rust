@@ -1,0 +1,32 @@
+syntax = "proto3";
+package o3k.controller.v1;
+
+message Version { uint32 major = 1; uint32 minor = 2; }
+message Scope { enum Kind { KIND_UNSPECIFIED = 0; PROJECT = 1; DOMAIN = 2; SYSTEM = 3; } string id = 1; Kind kind = 2; string name = 3; string domain_id = 4; }
+message ResourceRef { string namespace = 1; string type = 2; string id = 3; int64 generation = 4; }
+message Context { string request_id = 1; string operation_id = 2; string action = 3; string service_id = 4; Scope owner_scope = 5; string session_id = 6; uint64 session_generation = 7; uint64 deadline_unix_ms = 8; string replay_identity = 9; string audit_correlation = 10; }
+message Delegation { bytes credential = 1; }
+message Snapshot { ResourceRef resource = 1; bytes desired_spec = 2; bytes known_status = 3; Scope owner_scope = 4; }
+message Failure { enum Category { CATEGORY_UNSPECIFIED = 0; INVALID_REQUEST = 1; UNAUTHORIZED = 2; FORBIDDEN = 3; CONFLICT = 4; STALE_GENERATION = 5; NOT_FOUND = 6; NOT_READY = 7; RETRYABLE = 8; NON_RETRYABLE = 9; UNKNOWN_OUTCOME = 10; INCOMPATIBLE = 11; STALE_SESSION = 12; REPLAY_CONFLICT = 13; DELEGATION_INVALID = 14; RESOURCE_EXHAUSTED = 15; DEADLINE_EXCEEDED = 16; } Category category = 1; string diagnostic = 2; }
+message Observation { ResourceRef resource = 1; bool exists = 2; string observed_revision = 3; bytes status = 4; string diagnostics = 5; }
+message RegisterRequest { string service_id = 1; string namespace = 2; string service_principal_id = 3; string manifest_digest = 4; uint64 manifest_generation = 5; repeated Version supported_versions = 6; repeated string capabilities = 7; }
+message RegisterResponse { Version negotiated_version = 1; string session_id = 2; uint64 session_generation = 3; }
+message HealthRequest { Context context = 1; }
+message HealthResponse { bool healthy = 1; string detail = 2; Version protocol_version = 3; }
+message CapabilitiesRequest { Context context = 1; }
+message CapabilitiesResponse { Version protocol_version = 1; repeated string resource_types = 2; repeated string actions = 3; }
+message ReconcileRequest { Context context = 1; Snapshot resource = 2; Delegation delegation = 3; }
+message ReconcileResponse { Observation observation = 1; Failure failure = 2; bool accepted = 3; }
+message ObserveRequest { Context context = 1; ResourceRef resource = 2; Scope owner_scope = 3; Delegation delegation = 4; }
+message ObserveResponse { Observation observation = 1; Failure failure = 2; }
+message DeleteRequest { Context context = 1; ResourceRef resource = 2; Scope owner_scope = 3; Delegation delegation = 4; }
+message DeleteResponse { Observation observation = 1; Failure failure = 2; bool accepted = 3; }
+
+service ControllerService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
+  rpc Reconcile(ReconcileRequest) returns (ReconcileResponse);
+  rpc Observe(ObserveRequest) returns (ObserveResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+}

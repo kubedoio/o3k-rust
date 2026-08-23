@@ -1592,6 +1592,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "o3k-controller-protocol"
+version = "0.4.0-alpha.1"
+dependencies = [
+ "prost",
+ "thiserror",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
 name = "o3k-database-example"
 version = "0.4.0-alpha.1"
 dependencies = [
@@ -1817,6 +1827,19 @@ dependencies = [
  "o3k-store",
  "thiserror",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "o3k-service-sdk"
+version = "0.4.0-alpha.1"
+dependencies = [
+ "o3k-controller-protocol",
+ "o3k-kernel",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tonic",
  "uuid",
 ]
 
