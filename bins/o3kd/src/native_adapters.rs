@@ -922,6 +922,39 @@ pub struct CompositionResourceHandler {
 }
 
 impl CompositionResourceHandler {
+    async fn validate_parent(
+        &self,
+        request: &o3k_service_sdk::composition::ChildResourceRequest,
+    ) -> Result<Uuid, o3k_service_sdk::composition::CompositionError> {
+        let parent_id: Uuid = request
+            .parent
+            .resource_id
+            .as_str()
+            .parse()
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        let parent = self
+            .store
+            .get_resource(parent_id)
+            .await
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if parent.kind != request.parent.resource_type.to_string()
+            || parent.project_id != request.owner_scope.id().as_str()
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        let operation = self
+            .store
+            .get_operation(request.parent_operation_id)
+            .await
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if operation.resource_id != parent_id
+            || operation.kind != request.context.action.to_string()
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        Ok(parent_id)
+    }
+
     fn authenticate(
         &self,
         request: &o3k_service_sdk::composition::ChildResourceRequest,
@@ -1054,6 +1087,7 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
     > {
         self.dependency_allowed(&request)?;
         let auth = self.authenticate(&request)?;
+        let parent_id = self.validate_parent(&request).await?;
         let descriptor = self.descriptor_for(&request.resource_type)?;
         let expected_action = descriptor
             .lifecycle_actions
@@ -1117,22 +1151,15 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
             .operation_id
             .parse()
             .map_err(|_| o3k_service_sdk::composition::CompositionError::UnknownOutcome)?;
-        let bound =
-            self.store
-                .bind_relationship(
-                    request.parent.resource_id.as_str().parse().map_err(|_| {
-                        o3k_service_sdk::composition::CompositionError::Unauthorized
-                    })?,
-                    &request.slot,
-                    child_id,
-                    child_operation_id,
+        let bound = self
+            .store
+            .bind_relationship(parent_id, &request.slot, child_id, child_operation_id)
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed(
+                    "relationship bind failed".into(),
                 )
-                .await
-                .map_err(|_| {
-                    o3k_service_sdk::composition::CompositionError::Failed(
-                        "relationship bind failed".into(),
-                    )
-                })?;
+            })?;
         Ok(o3k_service_sdk::composition::ChildResourceReceipt {
             resource: o3k_kernel::ResourceReference {
                 resource_type: request.resource_type,
@@ -1154,6 +1181,7 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
         request: o3k_service_sdk::composition::ChildResourceRequest,
     ) -> Result<serde_json::Value, o3k_service_sdk::composition::CompositionError> {
         let auth = self.authenticate(&request)?;
+        let _ = self.validate_parent(&request).await?;
         let child = request
             .child
             .ok_or(o3k_service_sdk::composition::CompositionError::Failed(
@@ -1179,6 +1207,7 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
     > {
         self.dependency_allowed(&request)?;
         let auth = self.authenticate(&request)?;
+        let parent_id = self.validate_parent(&request).await?;
         let child = request
             .child
             .clone()
@@ -1193,6 +1222,14 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
         if expected_action != &request.action {
             return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
         }
+        self.store
+            .set_relationship_state(parent_id, &request.slot, "deleting")
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed(
+                    "relationship state update failed".into(),
+                )
+            })?;
         let result = self
             .application
             .delete(
@@ -1204,6 +1241,14 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
             .await
             .map_err(|_| {
                 o3k_service_sdk::composition::CompositionError::Failed("child delete failed".into())
+            })?;
+        self.store
+            .set_relationship_state(parent_id, &request.slot, "deleted")
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed(
+                    "relationship state update failed".into(),
+                )
             })?;
         Ok(o3k_service_sdk::composition::ChildResourceReceipt {
             resource: child,
