@@ -12,12 +12,16 @@ workspace = true
 
 [dependencies]
 o3k-kernel = { path = "../o3k-kernel" }
+o3k-controller-protocol = { path = "../o3k-controller-protocol" }
 o3k-service-sdk = { path = "../o3k-service-sdk" }
+ed25519-dalek.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 async-trait.workspace = true
+tonic.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 
 [dev-dependencies]
 serde_json.workspace = true

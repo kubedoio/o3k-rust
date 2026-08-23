@@ -720,6 +720,10 @@ pub mod composition {
         ) -> Result<serde_json::Value, CompositionError>;
         async fn delete_child(&self, request: ChildResourceRequest)
         -> Result<(), CompositionError>;
+        async fn list_relationships(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<Vec<RelationshipView>, CompositionError>;
     }
 
     #[tonic::async_trait]
@@ -794,6 +798,69 @@ pub mod composition {
             let _ = response_to_receipt(&request, response)?;
             Ok(())
         }
+
+        async fn list_relationships(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<Vec<RelationshipView>, CompositionError> {
+            let parent = child_request_to_wire(&request, "list")?
+                .parent
+                .ok_or_else(|| CompositionError::Failed("missing parent".into()))?;
+            let response = self
+                .client
+                .lock()
+                .await
+                .list_relationships(wire::RelationshipRequest {
+                    parent: Some(parent),
+                })
+                .await
+                .map_err(|error| CompositionError::Failed(error.to_string()))?
+                .into_inner();
+            response
+                .relationships
+                .into_iter()
+                .map(|relationship| {
+                    let (namespace, name) =
+                        relationship.resource_type.split_once(':').ok_or_else(|| {
+                            CompositionError::Failed("invalid relationship resource type".into())
+                        })?;
+                    let resource_type = ResourceType::new(namespace, name).map_err(|_| {
+                        CompositionError::Failed("invalid relationship resource type".into())
+                    })?;
+                    let resource = relationship.resource.map(resource_from_wire).transpose()?;
+                    let parent_operation_id = Uuid::parse_str(&relationship.parent_operation_id)
+                        .map_err(|_| {
+                            CompositionError::Failed("invalid parent operation id".into())
+                        })?;
+                    let child_operation_id =
+                        if relationship.child_operation_id.is_empty() {
+                            None
+                        } else {
+                            Some(Uuid::parse_str(&relationship.child_operation_id).map_err(
+                                |_| CompositionError::Failed("invalid child operation id".into()),
+                            )?)
+                        };
+                    let ownership = match relationship.ownership.as_str() {
+                        "exclusive" => RelationshipOwnership::Exclusive,
+                        "referenced" => RelationshipOwnership::Referenced,
+                        _ => {
+                            return Err(CompositionError::Failed(
+                                "invalid relationship ownership".into(),
+                            ));
+                        }
+                    };
+                    Ok(RelationshipView {
+                        slot: relationship.slot,
+                        resource,
+                        resource_type,
+                        ownership,
+                        state: relationship.state,
+                        parent_operation_id,
+                        child_operation_id,
+                    })
+                })
+                .collect()
+        }
     }
 }
 
@@ -836,6 +903,7 @@ pub struct ServiceControllerServer<H> {
     fence: SessionFence,
     replay: ReplayLedger,
     delegation_keys: Arc<HashMap<String, VerifyingKey>>,
+    expected_service_principal: Option<String>,
 }
 
 #[derive(Clone)]
@@ -938,6 +1006,7 @@ impl<H: ControllerHandler> ServiceControllerServer<H> {
             fence: SessionFence::default(),
             replay: ReplayLedger::default(),
             delegation_keys: Arc::new(HashMap::new()),
+            expected_service_principal: None,
         }
     }
     pub fn into_service(self) -> ControllerServiceServer<Self> {
@@ -945,6 +1014,12 @@ impl<H: ControllerHandler> ServiceControllerServer<H> {
     }
     pub fn with_delegation_keys(mut self, keys: HashMap<String, VerifyingKey>) -> Self {
         self.delegation_keys = Arc::new(keys);
+        self
+    }
+
+    #[must_use]
+    pub fn with_service_principal(mut self, principal: impl Into<String>) -> Self {
+        self.expected_service_principal = Some(principal.into());
         self
     }
     #[allow(clippy::result_large_err)]
@@ -1007,6 +1082,13 @@ impl<H: ControllerHandler> ControllerService for ServiceControllerServer<H> {
         {
             return Err(tonic::Status::permission_denied(
                 "manifest identity mismatch",
+            ));
+        }
+        if let Some(expected) = &self.expected_service_principal
+            && input.service_principal_id != *expected
+        {
+            return Err(tonic::Status::permission_denied(
+                "service principal identity mismatch",
             ));
         }
         let negotiated = input
