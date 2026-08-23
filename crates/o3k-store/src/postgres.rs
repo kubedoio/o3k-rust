@@ -39,11 +39,27 @@ impl PostgresStore {
         &self,
         record: &ResourceRelationshipRecord,
     ) -> Result<ResourceRelationshipRecord, StoreError> {
-        sqlx::query("INSERT INTO resource_relationships (parent_resource_id,parent_resource_type,slot,expected_child_resource_type,child_resource_id,ownership,parent_operation_id,child_operation_id,owner_scope,state,fingerprint) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+        let result = sqlx::query("INSERT INTO resource_relationships (parent_resource_id,parent_resource_type,slot,expected_child_resource_type,child_resource_id,ownership,parent_operation_id,child_operation_id,owner_scope,state,fingerprint) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
             .bind(record.parent_resource_id.to_string()).bind(&record.parent_resource_type).bind(&record.slot).bind(&record.expected_child_resource_type)
             .bind(record.child_resource_id.map(|id| id.to_string())).bind(&record.ownership).bind(record.parent_operation_id.to_string()).bind(record.child_operation_id.map(|id| id.to_string()))
-            .bind(&record.owner_scope).bind("reserved").bind(&record.fingerprint).execute(&self.pool).await
-            .map_err(|error| if let sqlx::Error::Database(db)=&error { if db.is_unique_violation() { StoreError::IdempotencyConflict } else { StoreError::Database(error) } } else { StoreError::Database(error) })?;
+            .bind(&record.owner_scope).bind("reserved").bind(&record.fingerprint).execute(&self.pool).await;
+        if let Err(error) = result {
+            let conflict = matches!(&error, sqlx::Error::Database(db) if db.is_unique_violation());
+            if !conflict {
+                return Err(StoreError::Database(error));
+            }
+            let existing = self
+                .get_relationship(record.parent_resource_id, &record.slot)
+                .await?;
+            if existing.fingerprint == record.fingerprint
+                && existing.expected_child_resource_type == record.expected_child_resource_type
+                && existing.ownership == record.ownership
+                && existing.owner_scope == record.owner_scope
+            {
+                return Ok(existing);
+            }
+            return Err(StoreError::IdempotencyConflict);
+        }
         self.get_relationship(record.parent_resource_id, &record.slot)
             .await
     }
