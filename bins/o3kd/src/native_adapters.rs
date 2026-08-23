@@ -2644,6 +2644,97 @@ mod native_compute_tests {
     }
 
     #[tokio::test]
+    async fn native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation() {
+        let (router, _, provider) = setup().await;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "security-test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+
+        let missing = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/compute/servers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let malformed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/compute/servers")
+                    .header("authorization", "Basic not-a-bearer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), StatusCode::UNAUTHORIZED);
+
+        let invalid = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/compute/servers")
+                    .header("authorization", "Bearer invalid-token-is-not-used")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(provider.instance_count(), 0);
+        let (_, created) = exec(
+            &router,
+            authed_post("/compute/servers", "a", "isolated", body),
+        )
+        .await;
+        let resource_id = created["resource_id"].as_str().unwrap();
+        let operation_id = created["operation_id"].as_str().unwrap();
+
+        let foreign_show = exec(
+            &router,
+            authed(&format!("/compute/servers/{resource_id}"), "b"),
+        )
+        .await;
+        assert_eq!(foreign_show.0, StatusCode::FORBIDDEN);
+        let foreign_operation =
+            exec(&router, authed(&format!("/operations/{operation_id}"), "b")).await;
+        assert_eq!(foreign_operation.0, StatusCode::NOT_FOUND);
+
+        let unknown = exec(&router, authed("/unknown/servers", "a")).await;
+        assert_eq!(unknown.0, StatusCode::NOT_FOUND);
+
+        let cross_scope_replay = exec(
+            &router,
+            authed_post(
+                "/compute/servers",
+                "b",
+                "isolated",
+                serde_json::json!({"spec":{"name":"different"}}),
+            ),
+        )
+        .await;
+        assert_eq!(cross_scope_replay.0, StatusCode::BAD_REQUEST);
+        assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
     async fn native_compute_delete_returns_operation() {
         let (router, _, provider) = setup().await;
         let router = &router;
