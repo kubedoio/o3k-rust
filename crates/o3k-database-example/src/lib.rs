@@ -224,6 +224,7 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
             let request = ChildResourceRequest {
                 parent: parent.clone(),
                 parent_operation_id,
+                child_operation_id: None,
                 context: context.clone(),
                 service_principal: service_principal.clone(),
                 delegation: Vec::new(),
@@ -306,6 +307,7 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
             let request = ChildResourceRequest {
                 parent: parent.clone(),
                 parent_operation_id,
+                child_operation_id: Some(receipt.operation_id),
                 context: context.clone(),
                 service_principal: service_principal.clone(),
                 delegation: Vec::new(),

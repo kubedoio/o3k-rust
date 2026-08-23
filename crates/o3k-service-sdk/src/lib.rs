@@ -71,6 +71,7 @@ pub mod composition {
     pub struct ChildResourceRequest {
         pub parent: ResourceReference,
         pub parent_operation_id: Uuid,
+        pub child_operation_id: Option<Uuid>,
         pub context: OperationContext,
         pub service_principal: String,
         pub delegation: Vec<u8>,
@@ -238,6 +239,7 @@ pub mod composition {
         Ok(ChildResourceRequest {
             parent: parent_ref,
             parent_operation_id: operation_id,
+            child_operation_id: None,
             context: OperationContext {
                 request_id,
                 operation_id,
@@ -424,7 +426,7 @@ pub mod composition {
                 .clone()
                 .ok_or_else(|| tonic::Status::invalid_argument("missing child resource"))?;
             let resource = resource_from_wire(resource).map_err(composition_status)?;
-            let child_request = child_request_from_wire(wire::ChildRequest {
+            let mut child_request = child_request_from_wire(wire::ChildRequest {
                 parent: Some(parent.clone()),
                 lifecycle: "observe".into(),
                 resource_type: resource.resource_type.to_string(),
@@ -432,6 +434,11 @@ pub mod composition {
                 requested_action: parent.parent_action.clone(),
             })
             .map_err(composition_status)?;
+            child_request.child = Some(resource.clone());
+            child_request.child_operation_id = Some(
+                parse_uuid(&request.child_operation_id, "child operation id")
+                    .map_err(composition_status)?,
+            );
             let status = self
                 .handler
                 .observe_child(child_request)
