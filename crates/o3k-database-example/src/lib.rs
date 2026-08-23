@@ -754,20 +754,31 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
         owner_scope: o3k_kernel::OwnershipScope,
         state: &CompositionState,
     ) -> Result<(), CompositionError> {
-        for receipt in [
+        let receipts = [
             state.compute.as_ref(),
             state.volume.as_ref(),
             state.network.as_ref(),
         ]
         .into_iter()
         .flatten()
-        {
-            let resource = receipt.resource.clone();
+        .collect::<Vec<_>>();
+        for receipt in &receipts {
             if receipt.ownership != o3k_kernel::RelationshipOwnership::Exclusive
                 || receipt.owner_scope != owner_scope
             {
                 return Err(CompositionError::Unauthorized);
             }
+            if !matches!(
+                receipt.resource.resource_type.to_string().as_str(),
+                "network:network" | "volume:volume" | "compute:server"
+            ) {
+                return Err(CompositionError::Failed(
+                    "unsupported child resource".into(),
+                ));
+            }
+        }
+        for receipt in receipts {
+            let resource = receipt.resource.clone();
             let action = match resource.resource_type.to_string().as_str() {
                 "network:network" => self.lifecycle.network_delete.clone(),
                 "volume:volume" => self.lifecycle.volume_delete.clone(),
@@ -1040,7 +1051,7 @@ mod tests {
                     generation: 1,
                 },
                 operation,
-                context,
+                context.clone(),
                 "database-controller".into(),
                 o3k_kernel::OwnershipScope::project(
                     o3k_kernel::ScopeId::new("project-1").unwrap(),
@@ -1062,6 +1073,33 @@ mod tests {
                 "network-primary"
             ]
         );
+        client.calls.lock().unwrap().clear();
+        let mut referenced_state = state.clone();
+        referenced_state.network.as_mut().unwrap().ownership =
+            o3k_kernel::RelationshipOwnership::Referenced;
+        assert!(
+            composition
+                .compensate(
+                    o3k_kernel::ResourceReference {
+                        resource_type: o3k_kernel::ResourceType::new("database", "instance")
+                            .unwrap(),
+                        resource_id: o3k_kernel::ResourceId::new("parent-1").unwrap(),
+                        generation: 1,
+                    },
+                    operation,
+                    context,
+                    "database-controller".into(),
+                    o3k_kernel::OwnershipScope::project(
+                        o3k_kernel::ScopeId::new("project-1").unwrap(),
+                        None,
+                        None,
+                    ),
+                    &referenced_state,
+                )
+                .await
+                .is_err()
+        );
+        assert!(client.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
