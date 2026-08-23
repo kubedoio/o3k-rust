@@ -11,20 +11,32 @@ actions. It is not production DBaaS and does not install or manage PostgreSQL.
 loading paths. They parse the accepted ServiceManifest v1 wire shape and
 perform normal registry validation; no service namespace is special-cased.
 
-The SDK exposes a generic `ServiceCompositionClient`. The database example
-uses it to create deterministic child slots (`network-primary`, `volume-data`,
-and `compute-primary`) using the parent resource and operation identity. Child
-references use canonical typed resource references, and compensation traverses
-known exclusive children in reverse order. The composition port is an
-integration boundary; a production control-plane implementation must provide
-authorization, delegation issuance, durable relationship persistence, and
-transport. The example service does not access provider implementations or
-private stores.
+The SDK exposes a generic `ServiceCompositionClient` and the versioned
+`o3k.composition.v1` gRPC service. O3K's composition adapter authenticates the
+configured service principal, verifies the O3K-issued parent delegation, checks
+the manifest dependency surface, resolves lifecycle actions from registered
+resource descriptors, reserves generic relationship slots before child side
+effects, and binds canonical child operation/resource receipts. Relationship
+records are generic and have reserved, bound, deleting, deleted, and unknown
+states in SQLite and PostgreSQL store implementations. The Database example
+does not access provider implementations or private stores.
 
-The current conformance fixture proves manifest loading, generic discovery,
-typed child references, deterministic retry identities, and reverse
-compensation ordering. It does not yet constitute the full process-level
-P12.6 acceptance proof: durable relationship persistence, a live composition
-adapter, and the authenticated end-to-end failure matrix remain required.
+The example also contains a standalone `database-controller` process entry
+point. It uses the P12.5 controller server and a real gRPC/mTLS composition
+client, reconstructs child state from the relationship ledger after process
+loss, derives status by observing children, and compensates exclusive children
+in reverse order. Runtime endpoint, certificate, key, digest, and delegation
+verification configuration remain deployment settings, separate from the
+manifest.
+
+The current automated evidence proves manifest loading, generic discovery,
+typed child references, deterministic retry identities, descriptor-authoritative
+child lifecycle resolution, generic relationship persistence primitives, and
+the standalone controller/client build. The full process-level P12.6
+acceptance proof is still pending: a harness must run O3K and the controller
+against real local mTLS listeners, exercise authenticated generic parent
+create/show/delete, and cover restart, unknown-outcome, quota, compensation,
+and concurrent-reconcile evidence across the complete path. This note must not
+be read as a production support claim.
 A production DBaaS claim, PostgreSQL lifecycle, and P12.7 security/evidence
 convergence remain explicitly out of scope.
