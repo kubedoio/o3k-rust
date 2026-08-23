@@ -23,8 +23,8 @@ use crate::{
     ObservationUpdate, OperationRecord, OperationState, PlacementAllocationRecord,
     PlacementIntentRecord, PlacementInventoryRecord, PlacementProviderRecord,
     PlacementReconcileRecord, PlacementRepository, PlacementResourceRecord, PortRecord,
-    ProviderReference, ResourceRecord, SecurityGroupBindingRecord, SecurityGroupRecord,
-    SecurityGroupRuleRecord, StoreError, SubnetRecord, VolumeAttachmentRecord,
+    ProviderReference, ResourceRecord, ResourceRelationshipRecord, SecurityGroupBindingRecord,
+    SecurityGroupRecord, SecurityGroupRuleRecord, StoreError, SubnetRecord, VolumeAttachmentRecord,
     VolumeAttachmentRepository, quota::QuotaRepository,
     validate_canonical_idempotent_operation_identity,
 };
@@ -35,6 +35,74 @@ pub struct PostgresStore {
 }
 
 impl PostgresStore {
+    pub async fn reserve_relationship(
+        &self,
+        record: &ResourceRelationshipRecord,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        sqlx::query("INSERT INTO resource_relationships (parent_resource_id,parent_resource_type,slot,expected_child_resource_type,child_resource_id,ownership,parent_operation_id,child_operation_id,owner_scope,state,fingerprint) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+            .bind(record.parent_resource_id.to_string()).bind(&record.parent_resource_type).bind(&record.slot).bind(&record.expected_child_resource_type)
+            .bind(record.child_resource_id.map(|id| id.to_string())).bind(&record.ownership).bind(record.parent_operation_id.to_string()).bind(record.child_operation_id.map(|id| id.to_string()))
+            .bind(&record.owner_scope).bind("reserved").bind(&record.fingerprint).execute(&self.pool).await
+            .map_err(|error| if let sqlx::Error::Database(db)=&error { if db.is_unique_violation() { StoreError::IdempotencyConflict } else { StoreError::Database(error) } } else { StoreError::Database(error) })?;
+        self.get_relationship(record.parent_resource_id, &record.slot)
+            .await
+    }
+
+    pub async fn get_relationship(
+        &self,
+        parent: Uuid,
+        slot: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        let row = sqlx::query("SELECT parent_resource_id,parent_resource_type,slot,expected_child_resource_type,child_resource_id,ownership,parent_operation_id,child_operation_id,owner_scope,state,fingerprint FROM resource_relationships WHERE parent_resource_id=$1 AND slot=$2")
+            .bind(parent.to_string()).bind(slot).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.ok_or(StoreError::ResourceNotFound)?;
+        relationship_from_pg_row(&row)
+    }
+
+    pub async fn list_relationships(
+        &self,
+        parent: Uuid,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
+        let rows = sqlx::query("SELECT parent_resource_id,parent_resource_type,slot,expected_child_resource_type,child_resource_id,ownership,parent_operation_id,child_operation_id,owner_scope,state,fingerprint FROM resource_relationships WHERE parent_resource_id=$1 ORDER BY slot")
+            .bind(parent.to_string()).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(relationship_from_pg_row).collect()
+    }
+
+    pub async fn bind_relationship(
+        &self,
+        parent: Uuid,
+        slot: &str,
+        child: Uuid,
+        child_operation: Uuid,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        sqlx::query("UPDATE resource_relationships SET child_resource_id=$1,child_operation_id=$2,state='bound' WHERE parent_resource_id=$3 AND slot=$4 AND state IN ('reserved','unknown')")
+            .bind(child.to_string()).bind(child_operation.to_string()).bind(parent.to_string()).bind(slot).execute(&self.pool).await.map_err(StoreError::Database)?;
+        self.get_relationship(parent, slot).await
+    }
+
+    pub async fn set_relationship_state(
+        &self,
+        parent: Uuid,
+        slot: &str,
+        state: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        if !matches!(
+            state,
+            "reserved" | "bound" | "deleting" | "deleted" | "unknown"
+        ) {
+            return Err(StoreError::Corrupt("invalid relationship state".into()));
+        }
+        sqlx::query(
+            "UPDATE resource_relationships SET state=$1 WHERE parent_resource_id=$2 AND slot=$3",
+        )
+        .bind(state)
+        .bind(parent.to_string())
+        .bind(slot)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        self.get_relationship(parent, slot).await
+    }
+
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
         let options = PgConnectOptions::from_str(database_url).map_err(StoreError::Database)?;
         let pool = PgPoolOptions::new()
@@ -115,6 +183,44 @@ impl PostgresStore {
         .map_err(StoreError::Database)?;
         Ok(())
     }
+}
+
+fn relationship_from_pg_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<ResourceRelationshipRecord, StoreError> {
+    Ok(ResourceRelationshipRecord {
+        parent_resource_id: Uuid::parse_str(
+            &row.try_get::<String, _>("parent_resource_id")
+                .map_err(StoreError::Database)?,
+        )
+        .map_err(StoreError::InvalidUuid)?,
+        parent_resource_type: row
+            .try_get("parent_resource_type")
+            .map_err(StoreError::Database)?,
+        slot: row.try_get("slot").map_err(StoreError::Database)?,
+        expected_child_resource_type: row
+            .try_get("expected_child_resource_type")
+            .map_err(StoreError::Database)?,
+        child_resource_id: row
+            .try_get::<Option<String>, _>("child_resource_id")
+            .map_err(StoreError::Database)?
+            .map(|id| Uuid::parse_str(&id).map_err(StoreError::InvalidUuid))
+            .transpose()?,
+        ownership: row.try_get("ownership").map_err(StoreError::Database)?,
+        parent_operation_id: Uuid::parse_str(
+            &row.try_get::<String, _>("parent_operation_id")
+                .map_err(StoreError::Database)?,
+        )
+        .map_err(StoreError::InvalidUuid)?,
+        child_operation_id: row
+            .try_get::<Option<String>, _>("child_operation_id")
+            .map_err(StoreError::Database)?
+            .map(|id| Uuid::parse_str(&id).map_err(StoreError::InvalidUuid))
+            .transpose()?,
+        owner_scope: row.try_get("owner_scope").map_err(StoreError::Database)?,
+        state: row.try_get("state").map_err(StoreError::Database)?,
+        fingerprint: row.try_get("fingerprint").map_err(StoreError::Database)?,
+    })
 }
 
 fn map_pg_error(error: sqlx::Error) -> StoreError {

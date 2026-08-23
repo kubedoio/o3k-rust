@@ -20,11 +20,11 @@ use crate::{
     NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
     PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository, PortRecord,
-    PostgresStore, ProviderReference, ResourceRecord, SecurityGroupBindingRecord,
-    SecurityGroupRecord, SecurityGroupRuleRecord, SnapshotRecord, SqliteStore,
-    StorageBackendRecord, StorageRepository, StoreError, SubnetRecord, VolumeAttachmentRecord,
-    VolumeAttachmentRecordV1, VolumeAttachmentRepository, VolumeRecord, WorkLease,
-    quota::QuotaRepository,
+    PostgresStore, ProviderReference, ResourceRecord, ResourceRelationshipRecord,
+    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SnapshotRecord,
+    SqliteStore, StorageBackendRecord, StorageRepository, StoreError, SubnetRecord,
+    VolumeAttachmentRecord, VolumeAttachmentRecordV1, VolumeAttachmentRepository, VolumeRecord,
+    WorkLease, quota::QuotaRepository,
 };
 
 #[derive(Clone, Debug)]
@@ -60,6 +60,70 @@ impl O3kStore {
         match self {
             Self::Sqlite(s) => s.readiness_check().await,
             Self::Postgres(s) => s.readiness_check().await,
+        }
+    }
+
+    pub async fn reserve_relationship(
+        &self,
+        record: &ResourceRelationshipRecord,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        match self {
+            Self::Sqlite(store) => store.reserve_relationship(record).await,
+            Self::Postgres(store) => store.reserve_relationship(record).await,
+        }
+    }
+
+    pub async fn get_relationship(
+        &self,
+        parent: Uuid,
+        slot: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        match self {
+            Self::Sqlite(store) => store.get_relationship(parent, slot).await,
+            Self::Postgres(store) => store.get_relationship(parent, slot).await,
+        }
+    }
+
+    pub async fn list_relationships(
+        &self,
+        parent: Uuid,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
+        match self {
+            Self::Sqlite(store) => store.list_relationships(parent).await,
+            Self::Postgres(store) => store.list_relationships(parent).await,
+        }
+    }
+
+    pub async fn bind_relationship(
+        &self,
+        parent: Uuid,
+        slot: &str,
+        child: Uuid,
+        child_operation: Uuid,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        match self {
+            Self::Sqlite(store) => {
+                store
+                    .bind_relationship(parent, slot, child, child_operation)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .bind_relationship(parent, slot, child, child_operation)
+                    .await
+            }
+        }
+    }
+
+    pub async fn set_relationship_state(
+        &self,
+        parent: Uuid,
+        slot: &str,
+        state: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        match self {
+            Self::Sqlite(store) => store.set_relationship_state(parent, slot, state).await,
+            Self::Postgres(store) => store.set_relationship_state(parent, slot, state).await,
         }
     }
 }
