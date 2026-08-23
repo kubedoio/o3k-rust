@@ -195,7 +195,7 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
             (
                 "network-primary",
                 "network",
-                "address_realm",
+                "network",
                 self.lifecycle.network_create.clone(),
             ),
             (
@@ -238,8 +238,7 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
                 desired_spec: match slot {
                     // Child APIs receive only fields from their own schema.
                     "network-primary" => serde_json::json!({
-                        "prefix": format!("10.0.{}.0/24", spec.storage_gb % 250 + 1),
-                        "overlapping_prefixes": false
+                        "name": format!("database-network-{}", parent.resource_id),
                     }),
                     "volume-data" => serde_json::json!({
                         "size_bytes": spec.storage_gb.saturating_mul(1024 * 1024 * 1024),
@@ -295,7 +294,7 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
                 return Err(CompositionError::Unauthorized);
             }
             let action = match resource.resource_type.to_string().as_str() {
-                "network:address_realm" => self.lifecycle.network_delete.clone(),
+                "network:network" => self.lifecycle.network_delete.clone(),
                 "volume:volume" => self.lifecycle.volume_delete.clone(),
                 "compute:server" => self.lifecycle.compute_delete.clone(),
                 _ => {
@@ -484,8 +483,8 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         });
         let lifecycle = ChildLifecycleActions {
-            network_create: ActionId::new("network", "CreateAddressRealm").unwrap(),
-            network_delete: ActionId::new("network", "DeleteAddressRealm").unwrap(),
+            network_create: ActionId::new("network", "CreateNetwork").unwrap(),
+            network_delete: ActionId::new("network", "DeleteNetwork").unwrap(),
             volume_create: ActionId::new("volume", "CreateVolume").unwrap(),
             volume_delete: ActionId::new("volume", "DeleteVolume").unwrap(),
             compute_create: ActionId::new("compute", "CreateServer").unwrap(),
@@ -563,7 +562,7 @@ mod tests {
                 "compute-primary",
                 "compensate:compute:server",
                 "compensate:volume:volume",
-                "compensate:network:address_realm"
+                "compensate:network:network"
             ]
         );
     }
