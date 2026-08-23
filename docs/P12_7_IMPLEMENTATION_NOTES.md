@@ -1,26 +1,27 @@
 # P12.7 / #735 implementation evidence
 
-This note records executable evidence for the final P12 convergence stage.  A
-line is marked PASS only when the named test executes the behavior.  Tests that
-require an optional PostgreSQL service remain conditional and are not claimed
-as real-host evidence when the service is unavailable.
+This note records executable evidence for the final P12 convergence stage. A
+line is marked PASS only when the named test executes the behavior. The real
+PostgreSQL P12.3/P12.4 suite was executed against the dedicated `o3k_p12_7`
+database with `O3K_DATABASE_URL`.
 
 ## Native/OpenStack authority convergence
 
 | Property | Executable evidence |
 | --- | --- |
-| Compute canonical identity and owner | `o3kd::native_adapters::native_compute_create_and_read_operation`; `o3k_api::health::nova_server_lifecycle_uses_project_scoped_envelopes` |
+| Compute canonical identity and owner | `p12_7_convergence::native_and_openstack_http_surfaces_share_compute_and_network_authority`; `o3kd::native_adapters::native_compute_create_and_read_operation` |
 | Native compute idempotent canonical mutation | `o3kd::native_adapters::native_compute_create_replay_equivalent`; `native_compute_create_changed_body_conflict` |
-| Network canonical owner/read path | `o3k_api::health::neutron_network_subnet_port_lifecycle_is_deterministic`; `o3kd::native_adapters::network_reader_tests` |
+| Network canonical owner/read path | `p12_7_convergence::native_and_openstack_http_surfaces_share_compute_and_network_authority`; `o3k_api::health::neutron_network_subnet_port_lifecycle_is_deterministic` |
 | Volume canonical owner/read path | `o3kd::native_adapters::volume_reader_tests`; `o3k-store` P12.4 canonical-resource tests |
 | Duplicate authority | PASS by construction and test coverage: both adapters are wired to `ComputeService`, `NetworkService`, and `O3kStore`; no synchronization/copy store exists |
 | Restart relationship | `p12_6_reconstructs_two_independent_control_plane_runtimes`; `p12_6_relationship_recovery_reopens_store_and_serializes_process_race` |
 
 The selected OpenStack compatibility tests exercise the same application
-services used by the native adapters.  Native create-through-OpenStack and
-OpenStack-read-through-native HTTP pair tests are not advertised beyond the
-currently supported overlap; the direct shared-authority tests above are the
-portable evidence for this profile.
+services used by the native adapters. The process-level convergence test
+exercises both HTTP directions for Compute and Network, including deletion.
+Native Volume has no supported OpenStack-compatible endpoint in the advertised
+profile, so a Volume native/OpenStack pair is NOT APPLICABLE; external Cinder
+remains an explicitly separate authority under the accepted architecture.
 
 ## Native API security (SPEC-0030 §17)
 
@@ -61,9 +62,8 @@ operation correlation, restart/reconnect fencing, compensation, and cleanup.
 
 SQLite evidence is provided by the P12.4 lifecycle tests and P12.6 process
 tests. PostgreSQL evidence is provided by
-`crates/o3k-store/tests/postgres_p12_4.rs` and `postgres_ops.rs` when the real
-PostgreSQL harness is available. The PostgreSQL tests are never replaced by a
-mock; an unavailable service is reported as skipped rather than PASS.
+`crates/o3k-store/tests/postgres_p12_4.rs` and `postgres_ops.rs` against the
+real PostgreSQL harness. The PostgreSQL tests are never replaced by a mock.
 
 ## SPEC-0030 §20 final gates
 
@@ -74,7 +74,7 @@ mock; an unavailable service is reported as skipped rather than PASS.
 5. service-neutral Operation — PASS (operation visibility and process tests)
 6. idempotency/generation safety — PASS (native/store P12.4 tests)
 7. opaque pagination scope safety — PASS (cursor unit tests and scoped readers)
-8. SQLite/PostgreSQL conformance — PASS only for each backend test that executes
+8. SQLite/PostgreSQL conformance — PASS (SQLite suite and all six P12.4 PostgreSQL tests executed)
 9. selected OpenStack regression — PASS (`o3k-api` isolation/lifecycle suites)
 10. one canonical native/OpenStack authority — PASS (shared application/store wiring and lifecycle evidence)
 

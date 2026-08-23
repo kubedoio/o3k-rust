@@ -17,7 +17,7 @@ use crate::{
 use async_trait::async_trait;
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{OriginalUri, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -408,10 +408,20 @@ mod tests {
 pub async fn create(
     auth: BearerAuth,
     headers: HeaderMap,
-    Path((namespace, collection)): Path<(String, String)>,
+    path: Option<Path<(String, String)>>,
+    OriginalUri(uri): OriginalUri,
     State(state): State<NativeApiState>,
     Json(request): Json<CreateRequest>,
 ) -> Response {
+    let (namespace, collection) = path.map(|Path(value)| value).unwrap_or_else(|| {
+        let mut parts = uri.path().trim_matches('/').split('/');
+        let _root = parts.next();
+        let _version = parts.next();
+        (
+            parts.next().unwrap_or_default().to_owned(),
+            parts.next().unwrap_or_default().to_owned(),
+        )
+    });
     let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
         return ProblemDetails::with_detail(ErrorCode::ResourceNotFound, "resource type not found")
             .into_response();
@@ -457,6 +467,35 @@ pub async fn delete(
     auth: BearerAuth,
     headers: HeaderMap,
     Path((namespace, collection, id)): Path<(String, String, String)>,
+    State(state): State<NativeApiState>,
+) -> Response {
+    delete_for(auth, headers, namespace, collection, id, State(state)).await
+}
+
+/// DELETE handler for concrete native collection routes. Concrete routes
+/// retain their specialized GET representations, while mutations use the
+/// same manifest-derived application path as the generic route.
+pub async fn delete_fixed(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    OriginalUri(uri): OriginalUri,
+    State(state): State<NativeApiState>,
+) -> Response {
+    let mut parts = uri.path().trim_matches('/').split('/');
+    let _root = parts.next();
+    let _version = parts.next();
+    let namespace = parts.next().unwrap_or_default().to_owned();
+    let collection = parts.next().unwrap_or_default().to_owned();
+    delete_for(auth, headers, namespace, collection, id, State(state)).await
+}
+
+async fn delete_for(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    namespace: String,
+    collection: String,
+    id: String,
     State(state): State<NativeApiState>,
 ) -> Response {
     let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
