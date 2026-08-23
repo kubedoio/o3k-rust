@@ -64,6 +64,7 @@ pub mod composition {
         ActionId, OperationContext, OwnershipScope, RelationshipOwnership, ResourceId,
         ResourceReference, ResourceType,
     };
+    use std::sync::Arc;
     use uuid::Uuid;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +185,355 @@ pub mod composition {
         Uuid::parse_str(value).map_err(|_| CompositionError::Failed(format!("invalid {field}")))
     }
 
+    fn scope_from_wire(value: wire::Scope) -> Result<OwnershipScope, CompositionError> {
+        let id = o3k_kernel::ScopeId::new(value.id)
+            .map_err(|_| CompositionError::Failed("invalid owner scope id".into()))?;
+        match value.kind.as_str() {
+            "project" => Ok(OwnershipScope::project(id, None, None)),
+            "domain" => Ok(OwnershipScope::new(
+                id,
+                o3k_kernel::ScopeKind::Domain,
+                None,
+                None,
+            )),
+            "system" => Ok(OwnershipScope::new(
+                id,
+                o3k_kernel::ScopeKind::System,
+                None,
+                None,
+            )),
+            _ => Err(CompositionError::Failed("invalid owner scope kind".into())),
+        }
+    }
+
+    fn child_request_from_wire(
+        request: wire::ChildRequest,
+    ) -> Result<ChildResourceRequest, CompositionError> {
+        let parent = request
+            .parent
+            .ok_or_else(|| CompositionError::Failed("missing parent context".into()))?;
+        let parent_ref = parent
+            .parent
+            .ok_or_else(|| CompositionError::Failed("missing parent resource".into()))
+            .and_then(resource_from_wire)?;
+        let owner_scope = parent
+            .owner_scope
+            .ok_or_else(|| CompositionError::Failed("missing owner scope".into()))
+            .and_then(scope_from_wire)?;
+        let operation_id = parse_uuid(&parent.operation_id, "operation id")?;
+        let request_id = parse_uuid(&parent.request_id, "request id")?;
+        let session_id = parse_uuid(&parent.session_id, "session id")?;
+        let parent_action = ActionId::parse(&parent.parent_action)
+            .map_err(|_| CompositionError::Failed("invalid parent action".into()))?;
+        let (namespace, name) = request
+            .resource_type
+            .split_once(':')
+            .ok_or_else(|| CompositionError::Failed("invalid child resource type".into()))?;
+        let resource_type = ResourceType::new(namespace, name)
+            .map_err(|_| CompositionError::Failed("invalid child resource type".into()))?;
+        let desired_spec: serde_json::Value = serde_json::from_slice(&request.desired_spec)
+            .map_err(|_| CompositionError::Failed("invalid child desired spec".into()))?;
+        let child_action = ActionId::parse(&request.requested_action)
+            .map_err(|_| CompositionError::Failed("invalid child action".into()))?;
+        Ok(ChildResourceRequest {
+            parent: parent_ref,
+            parent_operation_id: operation_id,
+            context: OperationContext {
+                request_id,
+                operation_id,
+                action: parent_action,
+                service_id: parent.service_id.clone(),
+                owner_scope: owner_scope.clone(),
+                session_id,
+                session_generation: parent.session_generation,
+                deadline_unix_ms: 0,
+                replay_identity: parent.replay_identity.clone(),
+                audit_correlation: parent.audit_correlation.clone(),
+            },
+            service_principal: parent.service_principal,
+            delegation: parent.delegation,
+            child: None,
+            action: child_action,
+            resource_type,
+            owner_scope,
+            slot: parent.slot,
+            idempotency_key: parent.replay_identity,
+            desired_spec,
+        })
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RelationshipView {
+        pub slot: String,
+        pub resource: Option<ResourceReference>,
+        pub resource_type: ResourceType,
+        pub ownership: RelationshipOwnership,
+        pub state: String,
+        pub parent_operation_id: Uuid,
+        pub child_operation_id: Option<Uuid>,
+    }
+
+    #[tonic::async_trait]
+    pub trait CompositionHandler: Send + Sync + 'static {
+        async fn create_child(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<ChildResourceReceipt, CompositionError>;
+        async fn observe_child(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<serde_json::Value, CompositionError>;
+        async fn delete_child(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<ChildResourceReceipt, CompositionError>;
+        async fn list_relationships(
+            &self,
+            request: ChildResourceRequest,
+        ) -> Result<Vec<RelationshipView>, CompositionError>;
+    }
+
+    fn composition_status(error: CompositionError) -> tonic::Status {
+        match error {
+            CompositionError::Unauthorized => {
+                tonic::Status::permission_denied("composition request denied")
+            }
+            CompositionError::UnknownOutcome => {
+                tonic::Status::unknown("composition outcome is unknown")
+            }
+            CompositionError::Failed(detail) => tonic::Status::invalid_argument(detail),
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn validate_binding(
+        parent: &wire::ParentContext,
+        expected_service_id: &str,
+        expected_service_principal: &str,
+    ) -> Result<(), tonic::Status> {
+        if parent.service_id != expected_service_id
+            || parent.service_principal != expected_service_principal
+        {
+            return Err(tonic::Status::permission_denied(
+                "composition service identity mismatch",
+            ));
+        }
+        Ok(())
+    }
+
+    fn receipt_response(
+        parent: &wire::ParentContext,
+        receipt: ChildResourceReceipt,
+        state: &str,
+        observed_status: Vec<u8>,
+    ) -> wire::ChildResponse {
+        wire::ChildResponse {
+            resource: Some(resource_to_wire(&receipt.resource)),
+            operation_id: receipt.operation_id.to_string(),
+            state: state.to_owned(),
+            observed_status,
+            diagnostic: String::new(),
+            request_id: parent.request_id.clone(),
+            service_id: parent.service_id.clone(),
+            session_id: parent.session_id.clone(),
+            session_generation: parent.session_generation,
+            parent_operation_id: parent.operation_id.clone(),
+            slot: parent.slot.clone(),
+            ownership: match receipt.ownership {
+                RelationshipOwnership::Exclusive => "exclusive",
+                RelationshipOwnership::Referenced => "referenced",
+            }
+            .to_owned(),
+        }
+    }
+
+    pub struct CompositionServiceAdapter<H> {
+        handler: Arc<H>,
+        expected_service_id: String,
+        expected_service_principal: String,
+    }
+
+    impl<H> CompositionServiceAdapter<H> {
+        pub fn new(
+            handler: Arc<H>,
+            expected_service_id: impl Into<String>,
+            expected_service_principal: impl Into<String>,
+        ) -> Self {
+            Self {
+                handler,
+                expected_service_id: expected_service_id.into(),
+                expected_service_principal: expected_service_principal.into(),
+            }
+        }
+
+        pub fn into_server(
+            self,
+        ) -> wire::composition_service_server::CompositionServiceServer<Self> {
+            wire::composition_service_server::CompositionServiceServer::new(self)
+        }
+    }
+
+    #[tonic::async_trait]
+    impl<H: CompositionHandler> wire::composition_service_server::CompositionService
+        for CompositionServiceAdapter<H>
+    {
+        async fn create_child(
+            &self,
+            request: tonic::Request<wire::ChildRequest>,
+        ) -> Result<tonic::Response<wire::ChildResponse>, tonic::Status> {
+            let wire_request = request.into_inner();
+            let parent = wire_request
+                .parent
+                .clone()
+                .ok_or_else(|| tonic::Status::invalid_argument("missing parent context"))?;
+            validate_binding(
+                &parent,
+                &self.expected_service_id,
+                &self.expected_service_principal,
+            )?;
+            let domain = child_request_from_wire(wire_request).map_err(composition_status)?;
+            let receipt = self
+                .handler
+                .create_child(domain)
+                .await
+                .map_err(composition_status)?;
+            Ok(tonic::Response::new(receipt_response(
+                &parent,
+                receipt,
+                "accepted",
+                Vec::new(),
+            )))
+        }
+
+        async fn observe_child(
+            &self,
+            request: tonic::Request<wire::ObserveRequest>,
+        ) -> Result<tonic::Response<wire::ChildResponse>, tonic::Status> {
+            let request = request.into_inner();
+            let parent = request
+                .parent
+                .clone()
+                .ok_or_else(|| tonic::Status::invalid_argument("missing parent context"))?;
+            validate_binding(
+                &parent,
+                &self.expected_service_id,
+                &self.expected_service_principal,
+            )?;
+            let resource = request
+                .resource
+                .clone()
+                .ok_or_else(|| tonic::Status::invalid_argument("missing child resource"))?;
+            let resource = resource_from_wire(resource).map_err(composition_status)?;
+            let child_request = child_request_from_wire(wire::ChildRequest {
+                parent: Some(parent.clone()),
+                lifecycle: "observe".into(),
+                resource_type: resource.resource_type.to_string(),
+                desired_spec: Vec::new(),
+                requested_action: parent.parent_action.clone(),
+            })
+            .map_err(composition_status)?;
+            let status = self
+                .handler
+                .observe_child(child_request)
+                .await
+                .map_err(composition_status)?;
+            Ok(tonic::Response::new(wire::ChildResponse {
+                resource: Some(resource_to_wire(&resource)),
+                operation_id: request.child_operation_id,
+                state: "observed".into(),
+                observed_status: serde_json::to_vec(&status)
+                    .map_err(|_| tonic::Status::internal("cannot encode observation"))?,
+                diagnostic: String::new(),
+                request_id: parent.request_id,
+                service_id: parent.service_id,
+                session_id: parent.session_id,
+                session_generation: parent.session_generation,
+                parent_operation_id: parent.operation_id,
+                slot: parent.slot,
+                ownership: String::new(),
+            }))
+        }
+
+        async fn delete_child(
+            &self,
+            request: tonic::Request<wire::DeleteRequest>,
+        ) -> Result<tonic::Response<wire::ChildResponse>, tonic::Status> {
+            let child = request
+                .into_inner()
+                .child
+                .ok_or_else(|| tonic::Status::invalid_argument("missing child request"))?;
+            let parent = child
+                .parent
+                .clone()
+                .ok_or_else(|| tonic::Status::invalid_argument("missing parent context"))?;
+            validate_binding(
+                &parent,
+                &self.expected_service_id,
+                &self.expected_service_principal,
+            )?;
+            let domain = child_request_from_wire(child).map_err(composition_status)?;
+            let receipt = self
+                .handler
+                .delete_child(domain)
+                .await
+                .map_err(composition_status)?;
+            Ok(tonic::Response::new(receipt_response(
+                &parent,
+                receipt,
+                "accepted",
+                Vec::new(),
+            )))
+        }
+
+        async fn list_relationships(
+            &self,
+            request: tonic::Request<wire::RelationshipRequest>,
+        ) -> Result<tonic::Response<wire::RelationshipResponse>, tonic::Status> {
+            let parent = request
+                .into_inner()
+                .parent
+                .ok_or_else(|| tonic::Status::invalid_argument("missing parent context"))?;
+            validate_binding(
+                &parent,
+                &self.expected_service_id,
+                &self.expected_service_principal,
+            )?;
+            let domain = child_request_from_wire(wire::ChildRequest {
+                parent: Some(parent),
+                lifecycle: "list".into(),
+                resource_type: "relationship:record".into(),
+                desired_spec: Vec::new(),
+                requested_action: "relationship:List".into(),
+            })
+            .map_err(composition_status)?;
+            let relationships = self
+                .handler
+                .list_relationships(domain)
+                .await
+                .map_err(composition_status)?;
+            Ok(tonic::Response::new(wire::RelationshipResponse {
+                relationships: relationships
+                    .into_iter()
+                    .map(|relationship| wire::Relationship {
+                        slot: relationship.slot,
+                        resource_type: relationship.resource_type.to_string(),
+                        resource: relationship.resource.map(|value| resource_to_wire(&value)),
+                        ownership: match relationship.ownership {
+                            RelationshipOwnership::Exclusive => "exclusive".into(),
+                            RelationshipOwnership::Referenced => "referenced".into(),
+                        },
+                        state: relationship.state,
+                        parent_operation_id: relationship.parent_operation_id.to_string(),
+                        child_operation_id: relationship
+                            .child_operation_id
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                    })
+                    .collect(),
+            }))
+        }
+    }
+
     fn response_to_receipt(
         request: &ChildResourceRequest,
         response: wire::ChildResponse,
@@ -226,22 +576,6 @@ pub mod composition {
             owner_scope,
             ownership,
         })
-    }
-
-    #[tonic::async_trait]
-    pub trait CompositionHandler: Send + Sync + 'static {
-        async fn create_child(
-            &self,
-            request: ChildResourceRequest,
-        ) -> Result<ChildResourceReceipt, CompositionError>;
-        async fn observe_child(
-            &self,
-            request: ChildResourceRequest,
-        ) -> Result<serde_json::Value, CompositionError>;
-        async fn delete_child(
-            &self,
-            request: ChildResourceRequest,
-        ) -> Result<ChildResourceReceipt, CompositionError>;
     }
 
     /// Real generic controller-to-O3K composition client. It contains only
