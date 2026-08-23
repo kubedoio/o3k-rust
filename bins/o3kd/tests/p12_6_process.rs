@@ -592,12 +592,40 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         idempotency_key: format!("{operation_id}:network-primary"),
         desired_spec: serde_json::json!({"name": format!("database-network-{parent_id}")}),
     };
+    // Build a second application object over the same durable store.  The
+    // race below must exercise independent application state; two handlers
+    // around one application would only prove transport concurrency.
+    let independent_compute = Arc::new(o3k_compute::ComputeService::new(
+        store.clone(),
+        Arc::new(FakeComputeProvider::new()),
+    ));
+    let independent_network = Arc::new(
+        o3k_network::NetworkService::open(
+            std::env::temp_dir().join(format!("o3k-p12-6-independent-{}", uuid::Uuid::new_v4())),
+            store.clone(),
+        )
+        .await?,
+    );
+    let independent_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
+        Arc::new(o3kd::native_adapters::GenericResourceApplication {
+            compute: independent_compute.clone(),
+            network_service: independent_network,
+            store: store.clone(),
+            server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
+                service: independent_compute,
+            }),
+            network: Arc::new(o3kd::native_adapters::NetworkReaderAdapter {
+                store: store.clone(),
+                authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
+            }),
+            external_controllers: Arc::new(Default::default()),
+        });
     let independent_dispatcher =
         o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&manifests)
             .map_err(|error| format!("independent dispatcher: {error:?}"))?;
     let independent_service = CompositionServiceAdapter::new(
         Arc::new(o3kd::native_adapters::CompositionResourceHandler {
-            application: api_application.clone(),
+            application: independent_application,
             store: store.clone(),
             manifests: Arc::new(manifests.clone()),
             delegation_keys: HashMap::from([(String::from("p12-6-test"), verification)]),
@@ -905,19 +933,26 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
 -> Result<(), Box<dyn std::error::Error>> {
     let path =
         std::env::temp_dir().join(format!("o3k-p12-6-runtime-{}.sqlite", uuid::Uuid::new_v4()));
+    let network_path = std::env::temp_dir().join(format!(
+        "o3k-p12-6-runtime-network-{}",
+        uuid::Uuid::new_v4()
+    ));
+    // The provider is an external execution fixture, not control-plane
+    // state.  It survives the control-plane restart while every O3K
+    // application/service object is rebuilt.
+    let compute_provider = Arc::new(FakeComputeProvider::new());
     let parent = uuid::Uuid::new_v4();
     let parent_operation = uuid::Uuid::new_v4();
-    let child_operation = uuid::Uuid::new_v4();
     let relationship = ResourceRelationshipRecord {
         parent_resource_id: parent,
         parent_resource_type: "database:instance".into(),
         slot: "network-primary".into(),
         expected_child_resource_type: "network:network".into(),
-        child_resource_id: Some(uuid::Uuid::new_v4()),
+        child_resource_id: None,
         ownership: "exclusive".into(),
         parent_operation_id: parent_operation,
-        child_operation_id: Some(child_operation),
-        owner_scope: "project:runtime-recovery".into(),
+        child_operation_id: None,
+        owner_scope: "project-runtime-recovery".into(),
         state: "bound".into(),
         fingerprint: "runtime-recovery-network".into(),
     };
@@ -981,34 +1016,24 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
             )
             .await?;
         store.reserve_relationship(&relationship).await?;
-        let child_id = relationship
-            .child_resource_id
-            .ok_or("fixture child id missing")?;
-        store
-            .bind_relationship(parent, "network-primary", child_id, child_operation)
-            .await?;
-        for (slot, kind, child_operation_id) in [
-            ("volume-data", "volume:volume", uuid::Uuid::new_v4()),
-            ("compute-primary", "compute:server", uuid::Uuid::new_v4()),
+        for (slot, kind) in [
+            ("volume-data", "volume:volume"),
+            ("compute-primary", "compute:server"),
         ] {
-            let child_id = uuid::Uuid::new_v4();
             store
                 .reserve_relationship(&ResourceRelationshipRecord {
                     parent_resource_id: parent,
                     parent_resource_type: "database:instance".into(),
                     slot: slot.into(),
                     expected_child_resource_type: kind.into(),
-                    child_resource_id: Some(child_id),
+                    child_resource_id: None,
                     ownership: "exclusive".into(),
                     parent_operation_id: parent_operation,
-                    child_operation_id: Some(child_operation_id),
-                    owner_scope: "project:runtime-recovery".into(),
+                    child_operation_id: None,
+                    owner_scope: "project-runtime-recovery".into(),
                     state: "reserved".into(),
                     fingerprint: format!("runtime-recovery-{slot}"),
                 })
-                .await?;
-            store
-                .bind_relationship(parent, slot, child_id, child_operation_id)
                 .await?;
         }
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1018,15 +1043,10 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
         registry.register_json_file(manifest_path)?;
         let compute = Arc::new(o3k_compute::ComputeService::new(
             store.clone(),
-            Arc::new(FakeComputeProvider::new()),
+            compute_provider.clone(),
         ));
-        let network = Arc::new(
-            o3k_network::NetworkService::open(
-                std::env::temp_dir().join(format!("o3k-p12-6-runtime-a-{}", uuid::Uuid::new_v4())),
-                store.clone(),
-            )
-            .await?,
-        );
+        let network =
+            Arc::new(o3k_network::NetworkService::open(network_path.clone(), store.clone()).await?);
         let application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
             Arc::new(o3kd::native_adapters::GenericResourceApplication {
                 compute: compute.clone(),
@@ -1045,12 +1065,100 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
             o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&registry)
                 .map_err(|error| format!("runtime A dispatcher: {error:?}"))?;
         let _composition_handler = o3kd::native_adapters::CompositionResourceHandler {
-            application,
+            application: application.clone(),
             store: store.clone(),
             manifests: Arc::new(registry.clone()),
             delegation_keys: HashMap::new(),
             dispatcher,
         };
+        // Populate the durable fixture through the canonical generic
+        // application before runtime A is destroyed.  Runtime B must later
+        // observe these real child records, not merely reload synthetic
+        // relationship IDs.
+        let runtime_auth = process_auth_context("runtime-recovery");
+        let runtime_dispatcher =
+            o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&registry)
+                .map_err(|error| format!("runtime A child dispatcher: {error:?}"))?;
+        for (slot, kind, spec) in [
+            (
+                "network-primary",
+                "network:network",
+                serde_json::json!({"name": "runtime-recovery-network"}),
+            ),
+            (
+                "volume-data",
+                "volume:volume",
+                serde_json::json!({"size_bytes": 1, "volume_type": "standard"}),
+            ),
+        ] {
+            let (namespace, name) = kind
+                .split_once(':')
+                .ok_or_else(|| format!("invalid runtime child type {kind}"))?;
+            let child_type = o3k_kernel::ResourceType::new(namespace, name)?;
+            let child_descriptor = runtime_dispatcher
+                .resolve_resource_type(&child_type)
+                .ok_or_else(|| format!("missing runtime child descriptor {kind}"))?;
+            let child = application
+                .create(
+                    child_descriptor,
+                    &runtime_auth,
+                    o3k_native_api::resource::CreateRequest {
+                        api_version: Some("o3k.io/v1".into()),
+                        kind: Some(kind.into()),
+                        spec,
+                    },
+                    Some(&format!("runtime-recovery:{slot}")),
+                )
+                .await
+                .map_err(|error| format!("runtime A child create {slot}: {error:?}"))?;
+            let child_id = child
+                .resource_id
+                .ok_or_else(|| format!("runtime A child {slot} omitted resource"))?
+                .parse()?;
+            let child_operation_id = child.operation_id.parse()?;
+            store
+                .bind_relationship(parent, slot, child_id, child_operation_id)
+                .await?;
+        }
+        let network_id = store
+            .get_relationship(parent, "network-primary")
+            .await?
+            .child_resource_id
+            .ok_or("runtime A network child missing")?;
+        let compute_type = o3k_kernel::ResourceType::new("compute", "server")?;
+        let compute_descriptor = runtime_dispatcher
+            .resolve_resource_type(&compute_type)
+            .ok_or("missing runtime compute descriptor")?;
+        let compute = application
+            .create(
+                compute_descriptor,
+                &runtime_auth,
+                o3k_native_api::resource::CreateRequest {
+                    api_version: Some("o3k.io/v1".into()),
+                    kind: Some("compute:server".into()),
+                    spec: serde_json::json!({
+                        "name": "runtime-recovery-compute",
+                        "image_id": "image-1",
+                        "flavor_id": uuid::Uuid::from_u128(1).to_string(),
+                        "network_ids": [network_id.to_string()],
+                        "key_name": null
+                    }),
+                },
+                Some("runtime-recovery:compute-primary"),
+            )
+            .await
+            .map_err(|error| format!("runtime A child create compute-primary: {error:?}"))?;
+        store
+            .bind_relationship(
+                parent,
+                "compute-primary",
+                compute
+                    .resource_id
+                    .ok_or("runtime A compute child omitted resource")?
+                    .parse()?,
+                compute.operation_id.parse()?,
+            )
+            .await?;
         let records = store.list_relationships(parent).await?;
         assert_eq!(records.len(), 3);
         (parent, parent_operation, records)
@@ -1099,15 +1207,10 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
     );
     let compute_b = Arc::new(o3k_compute::ComputeService::new(
         store_b.clone(),
-        Arc::new(FakeComputeProvider::new()),
+        compute_provider,
     ));
-    let network_b = Arc::new(
-        o3k_network::NetworkService::open(
-            std::env::temp_dir().join(format!("o3k-p12-6-runtime-b-{}", uuid::Uuid::new_v4())),
-            store_b.clone(),
-        )
-        .await?,
-    );
+    let network_b =
+        Arc::new(o3k_network::NetworkService::open(network_path.clone(), store_b.clone()).await?);
     let application_b: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: compute_b.clone(),
@@ -1199,15 +1302,72 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
     .with_delegation_signer("p12-6-test", SigningKey::from_bytes(&[9; 32]));
     assert_eq!(controller_b.session().service_id, "database-example");
     assert_eq!(controller_b.session().session_generation, 1);
+    let recovered_scope =
+        OwnershipScope::project(ScopeId::new("project-runtime-recovery")?, None, None);
+    let recovered_resource_type = o3k_kernel::ResourceType::new("database", "instance")?;
+    let recovered_reference = o3k_kernel::ResourceReference {
+        resource_type: recovered_resource_type.clone(),
+        resource_id: o3k_kernel::ResourceId::new(durable.0.to_string())?,
+        generation: 1,
+    };
+    let recovered_context = o3k_kernel::OperationContext {
+        request_id: uuid::Uuid::new_v4(),
+        operation_id: durable.1,
+        action: ActionId::new("database", "CreateInstance")?,
+        service_id: "database-example".into(),
+        owner_scope: recovered_scope.clone(),
+        session_id: controller_b.session().session_id,
+        session_generation: controller_b.session().session_generation,
+        deadline_unix_ms: chrono::Utc::now().timestamp_millis() as u64 + 60_000,
+        replay_identity: "runtime-recovery-create".into(),
+        audit_correlation: "p12-6-runtime-recovery".into(),
+    };
+    let recovered_delegation = controller_b.issue_parent_delegation(
+        &recovered_context,
+        "user-runtime-recovery",
+        &recovered_reference,
+    )?;
+    let recovered_outcome = controller_b
+        .reconcile(o3k_kernel::ReconcileRequest {
+            context: recovered_context,
+            resource: o3k_kernel::ResourceSnapshot {
+                reference: recovered_reference,
+                desired_spec: serde_json::json!({
+                    "engine": "test-engine",
+                    "version": "1",
+                    "storage_gb": 1
+                }),
+                known_status: None,
+                owner_scope: recovered_scope,
+            },
+            delegation: Some(recovered_delegation),
+        })
+        .await;
+    assert!(
+        matches!(
+            &recovered_outcome,
+            o3k_kernel::ReconcileOutcome::Succeeded { .. }
+                | o3k_kernel::ReconcileOutcome::Unknown { .. }
+        ),
+        "recovered runtime outcome: {recovered_outcome:?}"
+    );
     let parent_b = store_b.get_resource(durable.0).await?;
     assert_eq!(parent_b.id, durable.0);
     assert_eq!(parent_b.generation, 1);
+    let records_after_reconcile = store_b.list_relationships(durable.0).await?;
+    assert_eq!(records_after_reconcile, durable.2);
+    assert!(records_after_reconcile.iter().all(|record| {
+        record.child_resource_id.is_some()
+            && record.child_operation_id.is_some()
+            && record.state == "bound"
+    }));
     drop(controller_b);
     controller_task_b.abort();
     composition_task_b.abort();
     drop(application_b);
     drop(store_b);
     let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_dir_all(network_path);
     Ok(())
 }
 
