@@ -1,12 +1,14 @@
 use ed25519_dalek::SigningKey;
 use o3k_database_example::{ChildLifecycleActions, DatabaseControllerHandler, InstanceSpec};
 use o3k_kernel::{ActionId, Controller, ManifestRegistry, OwnershipScope, ScopeId};
+use o3k_kernel::{LimitKey, LimitValue};
 use o3k_native_api::resource::ResourceApplication;
 use o3k_provider::FakeComputeProvider;
 use o3k_service_sdk::{
     GrpcControllerAdapter,
     composition::{CompositionServiceAdapter, GrpcCompositionClient},
 };
+use o3k_store::QuotaRepository;
 use o3k_store::{
     CanonicalOperationRecord, DurableStore, IdempotencyReservationRequest, O3kStore,
     OperationRecord, OperationState, ResourceRecord,
@@ -255,6 +257,53 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         .await
         .map_err(|error| format!("generic delete: {error:?}"))?;
     assert!(api_delete.complete);
+    let quota_scope = OwnershipScope::project(ScopeId::new("project-quota")?, None, None);
+    store
+        .set_limit(
+            &quota_scope,
+            &LimitKey::compute_servers(),
+            LimitValue::Maximum(0),
+        )
+        .await?;
+    let quota_auth = o3k_kernel::AuthContext::new(
+        o3k_kernel::Principal::User(o3k_kernel::UserPrincipal::new(
+            o3k_kernel::PrincipalId::new("user-quota")?,
+            "user-quota",
+            None,
+        )),
+        quota_scope,
+        Vec::new(),
+        1,
+        u64::MAX,
+        "quota-audit",
+        uuid::Uuid::new_v4().to_string(),
+        None,
+    );
+    let quota_result = api_application
+        .create(
+            descriptor,
+            &quota_auth,
+            o3k_native_api::resource::CreateRequest {
+                api_version: Some("o3k.io/v1".into()),
+                kind: Some("database:instance".into()),
+                spec: serde_json::json!({"engine":"test-engine","version":"1","storage_gb":1}),
+            },
+            Some("quota-create-1"),
+        )
+        .await
+        .map_err(|error| format!("quota create: {error:?}"))?;
+    assert!(!quota_result.complete);
+    let quota_parent = quota_result
+        .resource_id
+        .as_deref()
+        .ok_or("quota result omitted parent id")?
+        .parse::<uuid::Uuid>()?;
+    let quota_relationships = store.list_relationships(quota_parent).await?;
+    assert!(
+        quota_relationships
+            .iter()
+            .all(|relationship| relationship.state != "bound")
+    );
     let scope = OwnershipScope::project(ScopeId::new("project-a")?, None, None);
     let parent_id = uuid::Uuid::new_v4();
     let operation_id = uuid::Uuid::new_v4();
