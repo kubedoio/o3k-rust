@@ -504,3 +504,27 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     let _ = std::fs::remove_file(store_path);
     Ok(())
 }
+
+#[tokio::test]
+async fn unavailable_external_controller_and_composition_endpoints_fail_closed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let composition = GrpcCompositionClient::connect("https://127.0.0.1:1", tls_client()?).await;
+    assert!(composition.is_err());
+
+    let controller = GrpcControllerAdapter::connect(
+        "https://127.0.0.1:1",
+        tls_client()?,
+        "database-example",
+        "database",
+        o3k_kernel::ServicePrincipal::new(
+            o3k_kernel::PrincipalId::new_unchecked("database-controller"),
+            "database-controller",
+            "database",
+        ),
+        "unavailable-test-manifest",
+        1,
+    )
+    .await;
+    assert!(controller.is_err());
+    Ok(())
+}
