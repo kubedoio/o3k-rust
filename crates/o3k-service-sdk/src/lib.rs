@@ -921,6 +921,11 @@ pub struct GrpcControllerAdapter {
 }
 
 impl GrpcControllerAdapter {
+    #[must_use]
+    pub fn session(&self) -> &o3k_kernel::ControllerSession {
+        &self.session
+    }
+
     fn health_deadline() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1125,6 +1130,12 @@ fn delegation_wire(
         .map_err(|_| SdkError::Invalid("delegation serialization failed".into()))
 }
 
+fn optional_delegation(
+    delegation: Option<&o3k_kernel::DelegationContext>,
+) -> Result<Option<proto::Delegation>, SdkError> {
+    delegation.map(delegation_wire).transpose()
+}
+
 fn failure_from_wire(failure: proto::Failure) -> o3k_kernel::ControllerFailure {
     let category = match proto::failure::Category::try_from(failure.category) {
         Ok(proto::failure::Category::InvalidRequest) => FailureCategory::InvalidRequest,
@@ -1234,10 +1245,17 @@ impl o3k_kernel::Controller for GrpcControllerAdapter {
         &self,
         request: o3k_kernel::ReconcileRequest,
     ) -> o3k_kernel::ReconcileOutcome {
-        let delegation = request
-            .delegation
-            .as_ref()
-            .and_then(|value| delegation_wire(value).ok());
+        let delegation = match optional_delegation(request.delegation.as_ref()) {
+            Ok(value) => value,
+            Err(error) => {
+                return o3k_kernel::ReconcileOutcome::Failed {
+                    failure: o3k_kernel::ControllerFailure::new(
+                        FailureCategory::DelegationInvalid,
+                        error.to_string(),
+                    ),
+                };
+            }
+        };
         let wire = proto::ReconcileRequest {
             context: Some(self.context(&request.context)),
             resource: Some(proto::Snapshot {
@@ -1287,10 +1305,18 @@ impl o3k_kernel::Controller for GrpcControllerAdapter {
     }
 
     async fn observe(&self, request: o3k_kernel::ObserveRequest) -> o3k_kernel::ObserveOutcome {
-        let delegation = request
-            .delegation
-            .as_ref()
-            .and_then(|value| delegation_wire(value).ok());
+        let delegation = match optional_delegation(request.delegation.as_ref()) {
+            Ok(value) => value,
+            Err(error) => {
+                return o3k_kernel::ObserveOutcome {
+                    observation: None,
+                    failure: Some(o3k_kernel::ControllerFailure::new(
+                        FailureCategory::DelegationInvalid,
+                        error.to_string(),
+                    )),
+                };
+            }
+        };
         let mut client = self.client.lock().await;
         match client
             .observe(proto::ObserveRequest {
@@ -1320,10 +1346,17 @@ impl o3k_kernel::Controller for GrpcControllerAdapter {
     }
 
     async fn delete(&self, request: o3k_kernel::DeleteRequest) -> o3k_kernel::ReconcileOutcome {
-        let delegation = request
-            .delegation
-            .as_ref()
-            .and_then(|value| delegation_wire(value).ok());
+        let delegation = match optional_delegation(request.delegation.as_ref()) {
+            Ok(value) => value,
+            Err(error) => {
+                return o3k_kernel::ReconcileOutcome::Failed {
+                    failure: o3k_kernel::ControllerFailure::new(
+                        FailureCategory::DelegationInvalid,
+                        error.to_string(),
+                    ),
+                };
+            }
+        };
         let mut client = self.client.lock().await;
         match client
             .delete(proto::DeleteRequest {

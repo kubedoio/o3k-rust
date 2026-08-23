@@ -1898,6 +1898,7 @@ dependencies = [
 name = "o3k-service-sdk"
 version = "0.4.0-alpha.1"
 dependencies = [
+ "async-trait",
  "ed25519-dalek",
  "o3k-controller-protocol",
  "o3k-kernel",

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 mod native_adapters;
 
 use o3k_domain::ServerId;
+use o3k_kernel::Controller;
 use o3k_provider::{
     AgentNodeSnapshot, ArtifactKind, ComputeProvider, ConfigDriveRequest, CreateArtifactResolver,
     CreateInstanceRequest, OperationState, ProviderError, ResolvedCreateArtifact,
@@ -13,6 +14,62 @@ use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+#[derive(Debug, serde::Deserialize)]
+struct ExternalControllerConfigFile {
+    controllers: Vec<ExternalControllerConfig>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ExternalControllerConfig {
+    service_id: String,
+    namespace: String,
+    endpoint: String,
+    server_name: String,
+    ca: PathBuf,
+    client_certificate: PathBuf,
+    client_key: PathBuf,
+    principal_id: String,
+    principal_name: String,
+    manifest_digest: String,
+    manifest_generation: u64,
+}
+
+async fn external_controllers_from_config() -> Result<
+    std::collections::BTreeMap<String, std::sync::Arc<o3k_service_sdk::GrpcControllerAdapter>>,
+    Box<dyn std::error::Error>,
+> {
+    let Some(path) = std::env::var_os("O3K_EXTERNAL_CONTROLLER_CONFIG") else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let config: ExternalControllerConfigFile = serde_json::from_slice(&std::fs::read(path)?)?;
+    let mut controllers = std::collections::BTreeMap::new();
+    for entry in config.controllers {
+        let tls = o3k_service_sdk::tls::client(
+            &entry.ca,
+            &entry.client_certificate,
+            &entry.client_key,
+            &entry.server_name,
+        )?;
+        let principal = o3k_kernel::ServicePrincipal::new(
+            o3k_kernel::PrincipalId::new(entry.principal_id)?,
+            entry.principal_name,
+            entry.namespace.clone(),
+        );
+        let controller = o3k_service_sdk::GrpcControllerAdapter::connect(
+            &entry.endpoint,
+            tls,
+            entry.service_id.clone(),
+            entry.namespace,
+            principal,
+            entry.manifest_digest,
+            entry.manifest_generation,
+        )
+        .await?;
+        controllers.insert(entry.service_id, std::sync::Arc::new(controller));
+    }
+    Ok(controllers)
+}
 
 #[derive(Clone)]
 struct DaemonCreateResolver {
@@ -1145,6 +1202,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 service: std::sync::Arc::new(id_service.clone()),
             }) as std::sync::Arc<dyn o3k_native_api::auth::TokenIssuer>
         });
+    let external_controllers = external_controllers_from_config().await?;
+    for (service_id, controller) in &external_controllers {
+        let manifest = native_manifest_registry
+            .get(service_id)
+            .ok_or_else(|| format!("external controller has no manifest: {service_id}"))?;
+        let capabilities = controller.capabilities().await;
+        let declared_types = manifest
+            .resource_types
+            .iter()
+            .map(|resource| resource.resource_type.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let required_actions = manifest
+            .resource_types
+            .iter()
+            .flat_map(|resource| resource.operations.values().map(ToString::to_string))
+            .collect::<std::collections::BTreeSet<_>>();
+        if !capabilities
+            .resource_types
+            .iter()
+            .all(|resource| declared_types.contains(resource))
+            || !capabilities
+                .actions
+                .iter()
+                .all(|action| manifest.actions.iter().any(|declared| declared == action))
+            || !required_actions.iter().all(|action| {
+                capabilities
+                    .actions
+                    .iter()
+                    .any(|advertised| advertised == action)
+            })
+        {
+            return Err(
+                format!("external controller capabilities exceed manifest: {service_id}").into(),
+            );
+        }
+        native_manifest_registry.register_controller(service_id, controller.session().clone())?;
+        let health = controller.health().await;
+        native_manifest_registry.update_controller_health(service_id, health)?;
+    }
     let generic_application: std::sync::Arc<dyn o3k_native_api::resource::ResourceApplication> =
         std::sync::Arc::new(native_adapters::GenericResourceApplication {
             compute: std::sync::Arc::new(compute_service.clone()),
@@ -1156,6 +1252,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             network: network_reader
                 .clone()
                 .ok_or("generic native application requires network reader")?,
+            external_controllers: std::sync::Arc::new(external_controllers),
         });
 
     let composition_task = if let Ok(listen_addr) = std::env::var("O3K_COMPOSITION_LISTEN_ADDR") {
