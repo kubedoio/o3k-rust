@@ -844,7 +844,7 @@ async fn postgres_p12_4_canonical_lifecycle_delete_race() {
     let mut canonical_b = canonical(oid_b, rid, "project-delete-race", "user-b");
     canonical_b.action = "compute:DeleteServer".into();
 
-    let delete_request = IdempotencyReservationRequest::from_semantics(
+    let delete_request_a = IdempotencyReservationRequest::from_semantics(
         "project-delete-race",
         "compute:DeleteServer",
         "delete-race-key",
@@ -853,12 +853,23 @@ async fn postgres_p12_4_canonical_lifecycle_delete_race() {
         &json!({}),
         oid_a,
     )
-    .expect("delete request");
+    .expect("delete request a");
+
+    let delete_request_b = IdempotencyReservationRequest::from_semantics(
+        "project-delete-race",
+        "compute:DeleteServer",
+        "delete-race-key",
+        "compute:server",
+        Some(&rid.to_string()),
+        &json!({}),
+        oid_b,
+    )
+    .expect("delete request b");
 
     let (outcome_a, outcome_b) = race_lifecycle_delete(
         &store,
-        (op_a, canonical_a, delete_request.clone()),
-        (op_b, canonical_b, delete_request),
+        (op_a, canonical_a, delete_request_a),
+        (op_b, canonical_b, delete_request_b),
     )
     .await;
 
