@@ -1172,6 +1172,41 @@ pub struct ResourceRelationshipRecord {
     pub fingerprint: String,
 }
 
+/// Generic durable parent/child relationship port.
+///
+/// This deliberately contains no service-specific vocabulary.  External
+/// controllers use it through the composition boundary so recovery does not
+/// depend on controller-local memory.
+#[async_trait]
+pub trait RelationshipRepository: Send + Sync {
+    async fn reserve_relationship(
+        &self,
+        record: &ResourceRelationshipRecord,
+    ) -> Result<ResourceRelationshipRecord, StoreError>;
+    async fn get_relationship(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError>;
+    async fn list_relationships(
+        &self,
+        parent_resource_id: Uuid,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError>;
+    async fn bind_relationship(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+        child_resource_id: Uuid,
+        child_operation_id: Uuid,
+    ) -> Result<ResourceRelationshipRecord, StoreError>;
+    async fn set_relationship_state(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+        state: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError>;
+}
+
 fn relationship_from_row(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<ResourceRelationshipRecord, StoreError> {
@@ -5076,6 +5111,57 @@ impl SqliteStore {
             .map_err(StoreError::Database)?;
         let updated = resource_from_row(&updated_row)?;
         Ok(updated)
+    }
+}
+
+#[async_trait]
+impl RelationshipRepository for SqliteStore {
+    async fn reserve_relationship(
+        &self,
+        record: &ResourceRelationshipRecord,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        Self::reserve_relationship(self, record).await
+    }
+
+    async fn get_relationship(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        Self::get_relationship(self, parent_resource_id, slot).await
+    }
+
+    async fn list_relationships(
+        &self,
+        parent_resource_id: Uuid,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
+        Self::list_relationships(self, parent_resource_id).await
+    }
+
+    async fn bind_relationship(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+        child_resource_id: Uuid,
+        child_operation_id: Uuid,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        Self::bind_relationship(
+            self,
+            parent_resource_id,
+            slot,
+            child_resource_id,
+            child_operation_id,
+        )
+        .await
+    }
+
+    async fn set_relationship_state(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+        state: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        Self::set_relationship_state(self, parent_resource_id, slot, state).await
     }
 }
 

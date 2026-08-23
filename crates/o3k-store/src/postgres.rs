@@ -185,6 +185,57 @@ impl PostgresStore {
     }
 }
 
+#[async_trait]
+impl crate::RelationshipRepository for PostgresStore {
+    async fn reserve_relationship(
+        &self,
+        record: &ResourceRelationshipRecord,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        Self::reserve_relationship(self, record).await
+    }
+
+    async fn get_relationship(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        Self::get_relationship(self, parent_resource_id, slot).await
+    }
+
+    async fn list_relationships(
+        &self,
+        parent_resource_id: Uuid,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
+        Self::list_relationships(self, parent_resource_id).await
+    }
+
+    async fn bind_relationship(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+        child_resource_id: Uuid,
+        child_operation_id: Uuid,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        Self::bind_relationship(
+            self,
+            parent_resource_id,
+            slot,
+            child_resource_id,
+            child_operation_id,
+        )
+        .await
+    }
+
+    async fn set_relationship_state(
+        &self,
+        parent_resource_id: Uuid,
+        slot: &str,
+        state: &str,
+    ) -> Result<ResourceRelationshipRecord, StoreError> {
+        Self::set_relationship_state(self, parent_resource_id, slot, state).await
+    }
+}
+
 fn relationship_from_pg_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<ResourceRelationshipRecord, StoreError> {
