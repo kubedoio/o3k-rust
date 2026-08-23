@@ -4,8 +4,9 @@ use o3k_kernel::{ActionId, Controller, ManifestRegistry, OwnershipScope, ScopeId
 use o3k_kernel::{LimitKey, LimitValue};
 use o3k_native_api::resource::ResourceApplication;
 use o3k_provider::FakeComputeProvider;
+use o3k_service_sdk::composition::{ChildResourceRequest, ServiceCompositionClient};
 use o3k_service_sdk::{
-    GrpcControllerAdapter,
+    DelegationClaims, GrpcControllerAdapter, SignedDelegation,
     composition::{CompositionServiceAdapter, GrpcCompositionClient},
 };
 use o3k_store::QuotaRepository;
@@ -376,6 +377,63 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         generation: 1,
     };
     let delegation = controller.issue_parent_delegation(&context, "user-a", &resource_reference)?;
+
+    // A correctly signed delegation for another owner scope must still fail
+    // parent ownership validation before the generic composition service can
+    // reserve a relationship or invoke a child application.
+    let foreign_scope = OwnershipScope::project(ScopeId::new("project-foreign")?, None, None);
+    let foreign_context = o3k_kernel::OperationContext {
+        owner_scope: foreign_scope.clone(),
+        audit_correlation: "p12-6-foreign-scope".into(),
+        ..context.clone()
+    };
+    let foreign_delegation = controller.issue_parent_delegation(
+        &foreign_context,
+        "user-foreign",
+        &resource_reference,
+    )?;
+    let foreign_credential = serde_json::to_vec(&SignedDelegation {
+        claims: DelegationClaims {
+            version: 1,
+            credential_id: foreign_delegation.credential_id,
+            issuer: "o3k-control-plane".into(),
+            key_id: foreign_delegation.key_id.clone(),
+            original_actor: foreign_delegation.original_actor.clone(),
+            owner_scope: foreign_delegation.original_scope.to_string(),
+            calling_service: foreign_delegation.calling_service.name().into(),
+            recipient_service: foreign_delegation.recipient_service.name().into(),
+            action: foreign_delegation.delegated_action.to_string(),
+            resource_type: foreign_delegation.resource.resource_type.to_string(),
+            resource_id: foreign_delegation.resource.resource_id.as_str().into(),
+            request_id: foreign_delegation.request_id,
+            operation_id: foreign_delegation.operation_id,
+            session_id: foreign_delegation.session_id,
+            session_generation: foreign_delegation.session_generation,
+            issued_at_unix_ms: foreign_delegation.issued_at_unix_ms,
+            expires_at_unix_ms: foreign_delegation.expires_at_unix_ms,
+        },
+        signature: foreign_delegation.signature.clone(),
+    })?;
+    let foreign_child = composition_client
+        .create_child(ChildResourceRequest {
+            parent: resource_reference.clone(),
+            parent_operation_id: operation_id,
+            child_operation_id: Some(uuid::Uuid::new_v4()),
+            context: foreign_context,
+            service_principal: "database-controller".into(),
+            delegation: foreign_credential,
+            child: None,
+            action: ActionId::new("network", "CreateNetwork")?,
+            resource_type: o3k_kernel::ResourceType::new("network", "network")?,
+            owner_scope: foreign_scope,
+            slot: "foreign-scope".into(),
+            idempotency_key: "foreign-scope-child".into(),
+            desired_spec: serde_json::json!({"name":"foreign"}),
+        })
+        .await;
+    assert!(foreign_child.is_err());
+    assert!(store.list_relationships(parent_id).await?.is_empty());
+
     let outcome = controller
         .reconcile(o3k_kernel::ReconcileRequest {
             context,
