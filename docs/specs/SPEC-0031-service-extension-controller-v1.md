@@ -109,6 +109,12 @@ volume:volume
 database:instance
 ```
 
+Each resource type may explicitly declare a bounded `operations` object mapping
+supported generic lifecycle names (`list`, `show`, `create`, `update`,
+`delete`) to canonical ActionIds owned by the service. Omitted operations are
+unsupported capabilities; they do not invalidate an otherwise valid resource.
+Every mapped ActionId must also appear in the service manifest action inventory.
+
 A manifest may declare only resource types in its own namespace unless an explicit accepted shared-ownership contract exists.
 
 ### 3.4 Action

@@ -1138,6 +1138,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 service: std::sync::Arc::new(id_service.clone()),
             }) as std::sync::Arc<dyn o3k_native_api::auth::TokenIssuer>
         });
+    let generic_application: std::sync::Arc<dyn o3k_native_api::resource::ResourceApplication> =
+        std::sync::Arc::new(native_adapters::GenericResourceApplication {
+            compute: std::sync::Arc::new(compute_service.clone()),
+            store: native_api_store.clone(),
+            server: server_reader
+                .clone()
+                .ok_or("generic native application requires compute reader")?,
+            volume: volume_reader
+                .clone()
+                .ok_or("generic native application requires volume reader")?,
+            network: network_reader
+                .clone()
+                .ok_or("generic native application requires network reader")?,
+        });
 
     let inspect_compute_service = compute_service.clone();
     let volume_attachments_enabled = compute_service.cinder_configured();
@@ -1176,8 +1190,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             server_reader,
             volume_reader,
             network_reader,
-        )
-        .with_operation_reader(operation_reader),
+        )?
+        .with_operation_reader(operation_reader)
+        .with_resource_application(generic_application)
+        .with_authorizer(std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard())),
     );
     if let Some(allocator) = public_allocator {
         state = state.with_public_allocator(allocator);

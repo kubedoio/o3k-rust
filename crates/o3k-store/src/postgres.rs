@@ -271,6 +271,145 @@ async fn validate_existing_canonical_reservation(
     Ok(())
 }
 
+async fn postgres_existing_acceptance(
+    pool: &sqlx::PgPool,
+    request: &IdempotencyReservationRequest,
+) -> Result<Option<crate::CanonicalAcceptanceOutcome>, StoreError> {
+    let Some(row) = sqlx::query("SELECT fingerprint,operation_id FROM idempotency_reservations WHERE owner_scope=$1 AND action=$2 AND idempotency_key=$3")
+        .bind(&request.owner_scope).bind(&request.action).bind(&request.key)
+        .fetch_optional(pool).await.map_err(StoreError::Database)? else { return Ok(None); };
+    if row
+        .try_get::<String, _>("fingerprint")
+        .map_err(StoreError::Database)?
+        != request.fingerprint
+    {
+        return Ok(Some(crate::CanonicalAcceptanceOutcome::Conflict));
+    }
+    let operation_id = Uuid::parse_str(
+        &row.try_get::<String, _>("operation_id")
+            .map_err(StoreError::Database)?,
+    )
+    .map_err(StoreError::InvalidUuid)?;
+    let durable = row_to_operation(
+        &sqlx::query("SELECT * FROM operations WHERE id=$1")
+            .bind(operation_id.to_string())
+            .fetch_one(pool)
+            .await
+            .map_err(StoreError::Database)?,
+    )?;
+    let metadata = sqlx::query("SELECT * FROM canonical_operation_metadata WHERE operation_id=$1")
+        .bind(operation_id.to_string())
+        .fetch_one(pool)
+        .await
+        .map_err(StoreError::Database)?;
+    let canonical = CanonicalOperationRecord {
+        id: operation_id,
+        service: metadata.try_get("service").map_err(StoreError::Database)?,
+        action: metadata.try_get("action").map_err(StoreError::Database)?,
+        actor: metadata.try_get("actor").map_err(StoreError::Database)?,
+        owner_scope: metadata
+            .try_get("owner_scope")
+            .map_err(StoreError::Database)?,
+        resource_type: metadata
+            .try_get("resource_type")
+            .map_err(StoreError::Database)?,
+        resource_id: metadata
+            .try_get("resource_id")
+            .map_err(StoreError::Database)?,
+        state: durable.state,
+        attempt: u32::try_from(
+            metadata
+                .try_get::<i32, _>("attempt")
+                .map_err(StoreError::Database)?,
+        )
+        .map_err(|_| StoreError::Corrupt("invalid operation attempt".into()))?,
+        created_at: metadata
+            .try_get("created_at")
+            .map_err(StoreError::Database)?,
+        started_at: metadata
+            .try_get("started_at")
+            .map_err(StoreError::Database)?,
+        finished_at: metadata
+            .try_get("finished_at")
+            .map_err(StoreError::Database)?,
+        error: metadata.try_get("error").map_err(StoreError::Database)?,
+        request_id: metadata
+            .try_get("request_id")
+            .map_err(StoreError::Database)?,
+    };
+    let resource = row_to_resource(
+        &sqlx::query("SELECT * FROM resources WHERE id=$1")
+            .bind(durable.resource_id.to_string())
+            .fetch_one(pool)
+            .await
+            .map_err(StoreError::Database)?,
+    )?;
+    let mut replay = request.clone();
+    replay.operation_id = operation_id;
+    crate::validate_canonical_resource_acceptance(&resource, &durable, &canonical, &replay)?;
+    Ok(Some(
+        crate::CanonicalAcceptanceOutcome::ExistingEquivalent {
+            operation_id,
+            resource_id: resource.id,
+        },
+    ))
+}
+
+async fn postgres_existing_acceptance_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    request: &IdempotencyReservationRequest,
+) -> Result<Option<crate::CanonicalAcceptanceOutcome>, StoreError> {
+    let Some(row) = sqlx::query("SELECT fingerprint,operation_id FROM idempotency_reservations WHERE owner_scope=$1 AND action=$2 AND idempotency_key=$3")
+        .bind(&request.owner_scope).bind(&request.action).bind(&request.key)
+        .fetch_optional(&mut **tx).await.map_err(StoreError::Database)? else { return Ok(None); };
+    if row
+        .try_get::<String, _>("fingerprint")
+        .map_err(StoreError::Database)?
+        != request.fingerprint
+    {
+        return Ok(Some(crate::CanonicalAcceptanceOutcome::Conflict));
+    }
+    let operation_id = Uuid::parse_str(
+        &row.try_get::<String, _>("operation_id")
+            .map_err(StoreError::Database)?,
+    )
+    .map_err(StoreError::InvalidUuid)?;
+    validate_existing_canonical_reservation(tx, operation_id, request).await?;
+    let resource_id = Uuid::parse_str(
+        &sqlx::query("SELECT resource_id FROM operations WHERE id=$1")
+            .bind(operation_id.to_string())
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(StoreError::Database)?
+            .try_get::<String, _>("resource_id")
+            .map_err(StoreError::Database)?,
+    )
+    .map_err(StoreError::InvalidUuid)?;
+    Ok(Some(
+        crate::CanonicalAcceptanceOutcome::ExistingEquivalent {
+            operation_id,
+            resource_id,
+        },
+    ))
+}
+
+async fn insert_postgres_canonical_acceptance(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    operation: &OperationRecord,
+    canonical: &CanonicalOperationRecord,
+) -> Result<(), StoreError> {
+    sqlx::query("INSERT INTO operations (id,resource_id,kind,state,provider_operation_id,error_category,error_message) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+        .bind(operation.id.to_string()).bind(operation.resource_id.to_string()).bind(&operation.kind).bind(operation.state.as_str())
+        .bind(&operation.provider_operation_id).bind(&operation.error_category).bind(&operation.error_message)
+        .execute(&mut **tx).await.map_err(map_pg_error)?;
+    sqlx::query("INSERT INTO canonical_operation_metadata (operation_id,service,action,actor,owner_scope,resource_type,resource_id,attempt,created_at,started_at,finished_at,error,request_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
+        .bind(canonical.id.to_string()).bind(&canonical.service).bind(&canonical.action).bind(&canonical.actor).bind(&canonical.owner_scope)
+        .bind(&canonical.resource_type).bind(&canonical.resource_id).bind(i32::try_from(canonical.attempt).map_err(|_| StoreError::Corrupt("operation attempt exceeds storage range".into()))?)
+        .bind(&canonical.created_at).bind(&canonical.started_at).bind(&canonical.finished_at).bind(&canonical.error).bind(&canonical.request_id)
+        .execute(&mut **tx).await.map_err(map_pg_error)?;
+    Ok(())
+}
+
 #[async_trait]
 impl DurableStore for PostgresStore {
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError> {
@@ -713,6 +852,111 @@ impl DurableStore for PostgresStore {
         Ok(IdempotencyReservation::ExistingEquivalent(winning_id))
     }
 
+    async fn create_or_replay_canonical_resource_operation(
+        &self,
+        resource: &ResourceRecord,
+        operation: &OperationRecord,
+        canonical: &CanonicalOperationRecord,
+        request: &IdempotencyReservationRequest,
+        expected_placement_allocation_id: Option<&str>,
+    ) -> Result<crate::CanonicalAcceptanceOutcome, StoreError> {
+        crate::validate_canonical_resource_acceptance(resource, operation, canonical, request)?;
+        if let Some(outcome) = postgres_existing_acceptance(&self.pool, request).await? {
+            return Ok(outcome);
+        }
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let lock_identity = format!(
+            "{}\n{}\n{}",
+            request.owner_scope, request.action, request.key
+        );
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(lock_identity)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        if let Some(outcome) = postgres_existing_acceptance_tx(&mut tx, request).await? {
+            tx.commit().await.map_err(StoreError::Database)?;
+            return Ok(outcome);
+        }
+        if let Some(allocation_id) = expected_placement_allocation_id
+            && sqlx::query("SELECT 1 FROM placement_allocations WHERE id=$1 FOR SHARE")
+                .bind(allocation_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?
+                .is_none()
+        {
+            return Err(StoreError::PlacementAllocationNotFound);
+        }
+        sqlx::query("INSERT INTO resources (id,kind,project_id,generation,observed_generation,desired_state,observed_state,provider_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
+            .bind(resource.id.to_string()).bind(&resource.kind).bind(&resource.project_id).bind(resource.generation)
+            .bind(resource.observed_generation).bind(&resource.desired_state).bind(&resource.observed_state).bind(&resource.provider_id)
+            .execute(&mut *tx).await.map_err(map_pg_error)?;
+        insert_postgres_canonical_acceptance(&mut tx, operation, canonical).await?;
+        let inserted = sqlx::query("INSERT INTO idempotency_reservations (owner_scope,action,idempotency_key,fingerprint,operation_id) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (owner_scope,action,idempotency_key) DO NOTHING RETURNING operation_id")
+            .bind(&request.owner_scope).bind(&request.action).bind(&request.key).bind(&request.fingerprint)
+            .bind(request.operation_id.to_string()).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?.is_some();
+        if !inserted {
+            tx.rollback().await.map_err(StoreError::Database)?;
+            return postgres_existing_acceptance(&self.pool, request)
+                .await?
+                .ok_or(StoreError::IdempotencyConflict);
+        }
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(crate::CanonicalAcceptanceOutcome::Created {
+            operation_id: operation.id,
+            resource_id: resource.id,
+        })
+    }
+
+    async fn create_or_replay_canonical_lifecycle_operation(
+        &self,
+        operation: &OperationRecord,
+        canonical: &CanonicalOperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<crate::CanonicalAcceptanceOutcome, StoreError> {
+        if let Some(outcome) = postgres_existing_acceptance(&self.pool, request).await? {
+            return Ok(outcome);
+        }
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let lock_identity = format!(
+            "{}\n{}\n{}",
+            request.owner_scope, request.action, request.key
+        );
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(lock_identity)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        if let Some(outcome) = postgres_existing_acceptance_tx(&mut tx, request).await? {
+            tx.commit().await.map_err(StoreError::Database)?;
+            return Ok(outcome);
+        }
+        let row = sqlx::query("SELECT * FROM resources WHERE id=$1 FOR SHARE")
+            .bind(operation.resource_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::ResourceNotFound)?;
+        let resource = row_to_resource(&row)?;
+        crate::validate_canonical_resource_acceptance(&resource, operation, canonical, request)?;
+        insert_postgres_canonical_acceptance(&mut tx, operation, canonical).await?;
+        let inserted = sqlx::query("INSERT INTO idempotency_reservations (owner_scope,action,idempotency_key,fingerprint,operation_id) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (owner_scope,action,idempotency_key) DO NOTHING RETURNING operation_id")
+            .bind(&request.owner_scope).bind(&request.action).bind(&request.key).bind(&request.fingerprint)
+            .bind(request.operation_id.to_string()).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?.is_some();
+        if !inserted {
+            tx.rollback().await.map_err(StoreError::Database)?;
+            return postgres_existing_acceptance(&self.pool, request)
+                .await?
+                .ok_or(StoreError::IdempotencyConflict);
+        }
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(crate::CanonicalAcceptanceOutcome::Created {
+            operation_id: operation.id,
+            resource_id: operation.resource_id,
+        })
+    }
+
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError> {
         let id_str = id.to_string();
         let row = sqlx::query("SELECT * FROM operations WHERE id = $1")
@@ -830,6 +1074,13 @@ impl DurableStore for PostgresStore {
             .execute(&mut *tx)
             .await
             .map_err(StoreError::Database)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let started_at = (!matches!(state, OperationState::Pending)).then_some(now.clone());
+        let finished_at =
+            matches!(state, OperationState::Succeeded | OperationState::Failed).then_some(now);
+        sqlx::query("UPDATE canonical_operation_metadata SET started_at=COALESCE(started_at,$1), finished_at=$2, error=$3 WHERE operation_id=$4")
+            .bind(started_at).bind(finished_at).bind(error_category).bind(&id_str)
+            .execute(&mut *tx).await.map_err(StoreError::Database)?;
 
         tx.commit().await.map_err(StoreError::Database)?;
         self.get_operation(id).await
@@ -1572,6 +1823,15 @@ impl DurableStore for PostgresStore {
         .execute(&mut *tx)
         .await
         .map_err(StoreError::Database)?;
+
+        // Synchronise canonical operation attempt when canonical metadata
+        // exists; a no-op for legacy operations without metadata.
+        sqlx::query("UPDATE canonical_operation_metadata SET attempt = $1 WHERE operation_id = $2")
+            .bind(attempts)
+            .bind(&op_id_str)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
 
         tx.commit().await.map_err(StoreError::Database)?;
         u8::try_from(attempts)

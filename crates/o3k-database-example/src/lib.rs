@@ -36,6 +36,22 @@ pub fn manifest() -> ServiceManifest {
             schema_version: "v1".to_owned(),
             collection: None,
             scope: ResourceScope::Tenant,
+            operations: [
+                (
+                    "show".to_owned(),
+                    o3k_kernel::ActionId::new_unchecked("database", "ReadInstance"),
+                ),
+                (
+                    "create".to_owned(),
+                    o3k_kernel::ActionId::new_unchecked("database", "CreateInstance"),
+                ),
+                (
+                    "delete".to_owned(),
+                    o3k_kernel::ActionId::new_unchecked("database", "DeleteInstance"),
+                ),
+            ]
+            .into_iter()
+            .collect(),
         }],
         actions: vec![
             "database:CreateInstance".to_owned(),

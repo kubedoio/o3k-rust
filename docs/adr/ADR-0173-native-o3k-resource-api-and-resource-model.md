@@ -227,6 +227,11 @@ Internal refactoring of `o3k-api` is allowed when necessary to converge adapters
 
 ### 14. CLI provides both ergonomic core commands and generic resource discovery
 
+Resource lifecycle capabilities are explicit manifest data: each resource may
+map a supported operation to its canonical ActionId. Generic dispatch uses
+only those mappings and permits partial capability sets, including read-only
+resources; it never derives actions from names.
+
 The `o3k` CLI may add rich first-class commands for core resources, for example `o3k server list` or `o3k volume create`.
 
 It also MUST support generic discovery/operation sufficient for a newly installed service to become usable without a CLI release specifically hard-coding that service. The model includes:

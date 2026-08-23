@@ -15,6 +15,10 @@ use o3k_native_api::{
     compute::ServerItem,
     error::{NativeReadError, ProblemDetails},
     network::AddressRealmItem,
+    resource::{
+        CreateRequest, MutationResult, ResourceApplication, ResourceApplicationError,
+        ResourceDescriptor,
+    },
     volume::VolumeItem,
 };
 use o3k_store::{DurableStore, NetworkRepository, storage::StorageRepository};
@@ -243,6 +247,7 @@ mod operation_visibility_tests {
             None,
             None,
         )
+        .expect("test manifest registry is valid")
         .with_operation_reader(reader);
         let app = o3k_api::router_with_state(o3k_api::AppState::new().with_native_api(native));
 
@@ -391,6 +396,254 @@ impl TokenIssuer for TokenIssuerAdapter {
 
 pub struct ServerReaderAdapter {
     pub service: Arc<o3k_compute::ComputeService>,
+}
+
+/// Composition-root application adapter for generic native reads. It delegates
+/// only to canonical native application/read ports; it never reaches a
+/// provider or controller directly. Mutations remain unsupported until a
+/// canonical mutation service is wired for the resource.
+pub struct GenericResourceApplication {
+    pub compute: Arc<o3k_compute::ComputeService>,
+    pub store: Arc<o3k_store::unified::O3kStore>,
+    pub server: Arc<dyn o3k_native_api::compute::ServerReader>,
+    pub volume: Arc<dyn o3k_native_api::volume::VolumeReader>,
+    pub network: Arc<dyn o3k_native_api::network::NetworkReader>,
+}
+
+fn compute_error(error: o3k_compute::ComputeError) -> ResourceApplicationError {
+    match error {
+        o3k_compute::ComputeError::Unauthorized => ResourceApplicationError::Forbidden,
+        o3k_compute::ComputeError::NotFound => ResourceApplicationError::NotFound,
+        o3k_compute::ComputeError::InvalidRequest => ResourceApplicationError::Validation,
+        o3k_compute::ComputeError::Conflict => ResourceApplicationError::Conflict,
+        _ => ResourceApplicationError::Internal,
+    }
+}
+
+fn generic_read_error(error: o3k_native_api::error::NativeReadError) -> ResourceApplicationError {
+    match error {
+        o3k_native_api::error::NativeReadError::NotFound => ResourceApplicationError::NotFound,
+        o3k_native_api::error::NativeReadError::Forbidden => ResourceApplicationError::Forbidden,
+        o3k_native_api::error::NativeReadError::Internal => ResourceApplicationError::Internal,
+    }
+}
+
+fn server_json(item: ServerItem) -> serde_json::Value {
+    serde_json::json!({"api_version":"o3k.io/v1","kind":"compute:server","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"name":item.name,"flavor_id":item.flavor_id,"image_id":item.image_id},"status":{"state":item.state}})
+}
+
+fn volume_json(item: VolumeItem) -> serde_json::Value {
+    serde_json::json!({"api_version":"o3k.io/v1","kind":"volume:volume","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"size_bytes":item.size_bytes,"volume_type":item.volume_type},"status":{"state":item.state}})
+}
+
+fn realm_json(item: AddressRealmItem) -> serde_json::Value {
+    serde_json::json!({"api_version":"o3k.io/v1","kind":"network:address_realm","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"prefix":item.prefix,"overlapping_prefixes":item.overlapping_prefixes},"status":{"state":item.state}})
+}
+
+#[async_trait::async_trait]
+impl ResourceApplication for GenericResourceApplication {
+    async fn list(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+    ) -> Result<Vec<serde_json::Value>, ResourceApplicationError> {
+        match descriptor.resource_type.to_string().as_str() {
+            "compute:server" => self
+                .server
+                .list_servers(auth)
+                .await
+                .map(|items| items.into_iter().map(server_json).collect())
+                .map_err(generic_read_error),
+            "network:address_realm" => self
+                .network
+                .list_address_realms(auth)
+                .await
+                .map(|items| items.into_iter().map(realm_json).collect())
+                .map_err(generic_read_error),
+            "volume:volume" => self
+                .volume
+                .list_volumes(auth)
+                .await
+                .map(|items| items.into_iter().map(volume_json).collect())
+                .map_err(generic_read_error),
+            _ => Err(ResourceApplicationError::NotFound),
+        }
+    }
+
+    async fn show(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+        id: &str,
+    ) -> Result<serde_json::Value, ResourceApplicationError> {
+        let id = id
+            .parse::<Uuid>()
+            .map_err(|_| ResourceApplicationError::NotFound)?;
+        match descriptor.resource_type.to_string().as_str() {
+            "compute:server" => self
+                .server
+                .show_server(auth, id)
+                .await
+                .map(server_json)
+                .map_err(generic_read_error),
+            "network:address_realm" => self
+                .network
+                .show_address_realm(auth, id)
+                .await
+                .map(realm_json)
+                .map_err(generic_read_error),
+            "volume:volume" => self
+                .volume
+                .show_volume(auth, id)
+                .await
+                .map(volume_json)
+                .map_err(generic_read_error),
+            _ => Err(ResourceApplicationError::NotFound),
+        }
+    }
+
+    async fn create(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+        request: CreateRequest,
+        idempotency_key: Option<&str>,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        if descriptor.resource_type.to_string() != "compute:server" {
+            return Err(ResourceApplicationError::UnsupportedOperation);
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ComputeSpec {
+            name: String,
+            image_id: String,
+            flavor_id: Uuid,
+            network_ids: Vec<String>,
+            #[serde(default)]
+            key_name: Option<String>,
+        }
+        let semantic_request = serde_json::json!({"spec": request.spec});
+        let spec: ComputeSpec = serde_json::from_value(semantic_request["spec"].clone())
+            .map_err(|_| ResourceApplicationError::Validation)?;
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
+        let action = descriptor
+            .lifecycle_actions
+            .get(&o3k_native_api::resource::LifecycleOperation::Create)
+            .cloned()
+            .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+        let context = o3k_reconciler::CanonicalMutationContext::new(
+            action,
+            auth.principal().id().to_string(),
+            auth.effective_scope().clone(),
+            None,
+            key.clone(),
+            semantic_request,
+        )
+        .map_err(|_| ResourceApplicationError::Validation)?;
+        let receipt = self
+            .compute
+            .create_server_for_auth_canonical(
+                auth,
+                o3k_compute::ServerCreateInput {
+                    user_id: auth.principal().id().to_string(),
+                    project_id: auth.effective_scope().id().as_str().to_owned(),
+                    name: spec.name,
+                    image_id: spec.image_id,
+                    flavor_id: spec.flavor_id,
+                    network_ids: spec.network_ids,
+                    key_name: spec.key_name,
+                    config_drive: None,
+                    idempotency_key: key,
+                },
+                context,
+            )
+            .await
+            .map_err(compute_error)?;
+        let server = receipt.resource;
+        let resource = self
+            .store
+            .get_resource(server.id.as_uuid())
+            .await
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        Ok(MutationResult {
+            operation_id: receipt.operation_id.to_string(),
+            resource_id: Some(server.id.as_uuid().to_string()),
+            complete: matches!(
+                receipt.operation_state,
+                o3k_store::OperationState::Succeeded
+            ),
+            resource: Some(server_json(ServerItem {
+                id: server.id.as_uuid().to_string(),
+                project_id: server.project_id,
+                name: server.name,
+                flavor_id: server.flavor_id.to_string(),
+                image_id: server.image_id,
+                state: format!("{:?}", server.state),
+                generation: resource.generation,
+                created_at: None,
+            })),
+        })
+    }
+
+    async fn delete(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+        id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        if descriptor.resource_type.to_string() != "compute:server" {
+            return Err(ResourceApplicationError::UnsupportedOperation);
+        }
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
+        let resource_id = id
+            .parse::<Uuid>()
+            .map_err(|_| ResourceApplicationError::NotFound)?;
+        let existing = self
+            .store
+            .get_resource(resource_id)
+            .await
+            .map_err(|_| ResourceApplicationError::NotFound)?;
+        if existing.project_id != auth.effective_scope().id().as_str() {
+            return Err(ResourceApplicationError::NotFound);
+        }
+        let action = descriptor
+            .lifecycle_actions
+            .get(&o3k_native_api::resource::LifecycleOperation::Delete)
+            .cloned()
+            .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+        let context = o3k_reconciler::CanonicalMutationContext::new(
+            action,
+            auth.principal().id().to_string(),
+            auth.effective_scope().clone(),
+            None,
+            key,
+            serde_json::json!({"resource_id": id}),
+        )
+        .map_err(|_| ResourceApplicationError::Validation)?;
+        let receipt = self
+            .compute
+            .delete_server_for_auth_canonical(
+                auth,
+                o3k_domain::ServerId::from_uuid(resource_id),
+                context,
+            )
+            .await
+            .map_err(compute_error)?;
+        Ok(MutationResult {
+            operation_id: receipt.operation_id.to_string(),
+            resource_id: Some(id.to_owned()),
+            complete: matches!(
+                receipt.operation_state,
+                o3k_store::OperationState::Succeeded
+            ),
+            resource: None,
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -804,5 +1057,513 @@ impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
             }
             Err(_) => Err(NativeReadError::Internal),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod native_compute_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use o3k_kernel::{
+        ActionId, AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, UserPrincipal,
+    };
+    use o3k_native_api::auth::{NativeTokenRequestV1, TokenIssuer};
+    use o3k_provider::{FailureInjection, FakeComputeProvider};
+    use std::sync::Arc;
+    use tower::util::ServiceExt;
+
+    struct TestIssuer;
+
+    fn context(project: &str) -> AuthContext {
+        AuthContext::new(
+            Principal::User(UserPrincipal::new(
+                PrincipalId::new_unchecked(format!("user-{project}")),
+                format!("user-{project}"),
+                None,
+            )),
+            OwnershipScope::project(ScopeId::new_unchecked(project), None, None),
+            vec!["member".into()],
+            1,
+            u64::MAX,
+            "audit",
+            "request",
+            None,
+        )
+    }
+
+    #[async_trait::async_trait]
+    impl TokenIssuer for TestIssuer {
+        async fn issue_native(
+            &self,
+            _request: &NativeTokenRequestV1,
+        ) -> Result<(String, serde_json::Value), ProblemDetails> {
+            Err(ProblemDetails::bad_request(
+                "test issuer does not issue tokens",
+            ))
+        }
+
+        async fn auth_context(&self, token: &str) -> Result<AuthContext, ProblemDetails> {
+            token
+                .strip_prefix("project-")
+                .map(|project| context(&format!("project-{project}")))
+                .ok_or_else(ProblemDetails::unauthorized)
+        }
+    }
+
+    fn compute_manifest_registry() -> o3k_kernel::ManifestRegistry {
+        use std::collections::HashMap;
+        let mut reg = o3k_kernel::ManifestRegistry::new();
+        let mut ops = HashMap::new();
+        ops.insert(
+            "create".to_owned(),
+            ActionId::new_unchecked("compute", "CreateServer"),
+        );
+        ops.insert(
+            "delete".to_owned(),
+            ActionId::new_unchecked("compute", "DeleteServer"),
+        );
+        ops.insert(
+            "list".to_owned(),
+            ActionId::new_unchecked("compute", "ListServers"),
+        );
+        ops.insert(
+            "show".to_owned(),
+            ActionId::new_unchecked("compute", "ShowServer"),
+        );
+        let m = o3k_kernel::ServiceManifest {
+            manifest_version: 1,
+            service_id: "compute".to_owned(),
+            namespace: "compute".to_owned(),
+            service_version: "0.4.0".to_owned(),
+            ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
+            resource_types: vec![o3k_kernel::RegisteredResourceType {
+                resource_type: o3k_kernel::ResourceType::new_unchecked("compute", "server"),
+                schema_version: "v1".to_owned(),
+                collection: Some("servers".to_owned()),
+                scope: o3k_kernel::ResourceScope::Tenant,
+                operations: ops,
+            }],
+            actions: vec![
+                "compute:ListServers".to_owned(),
+                "compute:CreateServer".to_owned(),
+                "compute:DeleteServer".to_owned(),
+                "compute:ShowServer".to_owned(),
+            ],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: Some(o3k_kernel::ManifestController {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            }),
+            health: None,
+        };
+        let _ = reg.register(m);
+        let _ = reg.register_controller(
+            "compute",
+            o3k_kernel::controller::ControllerSession {
+                controller_id: "test-controller".to_owned(),
+                session_generation: 1,
+                protocol_version: o3k_kernel::controller::ProtocolVersion::new(1, 0),
+                started_at: "2026-01-01T00:00:00Z".to_owned(),
+            },
+        );
+        let _ = reg.activate_controller("compute");
+        reg
+    }
+
+    async fn setup() -> (
+        axum::Router,
+        Arc<o3k_store::unified::O3kStore>,
+        Arc<FakeComputeProvider>,
+    ) {
+        use axum::Router;
+        use axum::routing::get;
+        use o3k_native_api::{operation, resource};
+
+        let store = Arc::new(
+            o3k_store::unified::O3kStore::connect_sqlite_memory()
+                .await
+                .expect("store"),
+        );
+        let provider = Arc::new(FakeComputeProvider::new());
+        let compute = Arc::new(o3k_compute::ComputeService::new(
+            store.clone(),
+            provider.clone(),
+        ));
+
+        let app = GenericResourceApplication {
+            compute: compute.clone(),
+            store: store.clone(),
+            server: Arc::new(ServerReaderAdapter {
+                service: compute.clone(),
+            }),
+            volume: Arc::new(VolumeReaderAdapter {
+                store: store.clone(),
+                authorizer: Arc::new(o3k_kernel::StaticAuthorizer::empty()),
+            }),
+            network: Arc::new(NetworkReaderAdapter {
+                store: store.clone(),
+                authorizer: Arc::new(o3k_kernel::StaticAuthorizer::empty()),
+            }),
+        };
+
+        let native = o3k_native_api::NativeApiState::new(
+            Some(compute_manifest_registry()),
+            o3k_native_api::pagination::CursorConfig::default(),
+            Some(Arc::new(TestIssuer)),
+            Some(Arc::new(ServerReaderAdapter {
+                service: compute.clone(),
+            })),
+            None,
+            None,
+        )
+        .expect("native state")
+        .with_operation_reader(Arc::new(OperationReaderAdapter {
+            store: store.clone(),
+        }))
+        .with_resource_application(Arc::new(app))
+        .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
+
+        // Build a minimal router that only has generic resource routes and
+        // the operation route — we deliberately omit the concrete
+        // /compute/servers GET-only route so that POST to the generic
+        // {namespace}/{collection} route resolves correctly.
+        let router = Router::new()
+            .route(
+                "/{namespace}/{collection}",
+                get(resource::list).post(resource::create),
+            )
+            .route(
+                "/{namespace}/{collection}/{id}",
+                get(resource::show).delete(resource::delete),
+            )
+            .route("/operations/{id}", get(operation::show_operation))
+            .with_state(native);
+
+        (router, store, provider)
+    }
+
+    fn authed(path: &str, project: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .header("authorization", format!("Bearer project-{project}"))
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    fn authed_post(
+        path: &str,
+        project: &str,
+        idempotency_key: &str,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .method("POST")
+            .header("authorization", format!("Bearer project-{project}"))
+            .header("content-type", "application/json")
+            .header("idempotency-key", idempotency_key)
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .expect("request")
+    }
+
+    fn authed_delete(path: &str, project: &str, idempotency_key: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .method("DELETE")
+            .header("authorization", format!("Bearer project-{project}"))
+            .header("idempotency-key", idempotency_key)
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    /// Helper: send a request through a cloned router and return (status, parsed JSON body).
+    /// Panics if the body is not valid JSON.
+    async fn exec(router: &axum::Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let response = router.clone().oneshot(req).await.expect("request");
+        let status = response.status();
+        let body_bytes = &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(body_bytes).expect("json");
+        (status, json)
+    }
+
+    // ── Tests ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn native_compute_create_and_read_operation() {
+        let (router, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+
+        // POST create
+        let (status, json) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(json["complete"].as_bool().unwrap());
+        let operation_id = json["operation_id"].as_str().unwrap().to_owned();
+        let resource_id = json["resource_id"].as_str().unwrap().to_owned();
+
+        // GET /operations/{id}
+        let (status, op) = exec(router, authed(&format!("/operations/{operation_id}"), "a")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(op["id"], operation_id);
+        assert_eq!(op["action"]["namespace"], "compute");
+        assert_eq!(op["action"]["action"], "CreateServer");
+        assert_eq!(op["resource_type"]["namespace"], "compute");
+        assert_eq!(op["resource_type"]["name"], "server");
+        assert_eq!(op["resource_id"], resource_id);
+        assert_eq!(op["owner_scope"]["id"], "project-a");
+    }
+
+    #[tokio::test]
+    async fn native_compute_create_replay_equivalent() {
+        let (router, _, provider) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+
+        // First create
+        let (status, first) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(first["complete"].as_bool().unwrap());
+
+        // Replay with same key
+        let (status, replay) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(replay["operation_id"], first["operation_id"]);
+        assert_eq!(replay["resource_id"], first["resource_id"]);
+        assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_compute_create_changed_body_conflict() {
+        let (router, _, provider) = setup().await;
+        let router = &router;
+        let body_a = serde_json::json!({
+            "spec": {
+                "name": "test-a",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+        let body_b = serde_json::json!({
+            "spec": {
+                "name": "test-b",
+                "image_id": "image-b",
+                "flavor_id": "00000000-0000-0000-0000-000000000002",
+                "network_ids": ["net-b"]
+            }
+        });
+
+        // First create
+        let (status, _) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body_a),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Replay with DIFFERENT body → 409 Conflict
+        let (status, _) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body_b),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_compute_delete_returns_operation() {
+        let (router, _, provider) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+
+        // Create first
+        let (status, json) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let resource_id = json["resource_id"].as_str().unwrap().to_owned();
+
+        // Set provider timeout so delete becomes async (202)
+        provider
+            .set_failure(FailureInjection::Timeout)
+            .expect("set failure");
+
+        // DELETE → 202 Accepted
+        let (status, delete_json) = exec(
+            router,
+            authed_delete(&format!("/compute/servers/{resource_id}"), "a", "delete-A"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let operation_id = delete_json["operation_id"].as_str().unwrap().to_owned();
+        assert!(!delete_json["complete"].as_bool().unwrap());
+
+        // GET /operations/{id} shows the delete
+        let (status, op) = exec(router, authed(&format!("/operations/{operation_id}"), "a")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(op["id"], operation_id);
+        assert_eq!(op["action"]["namespace"], "compute");
+        assert_eq!(op["action"]["action"], "DeleteServer");
+        assert_eq!(op["resource_id"], resource_id);
+        assert_eq!(op["owner_scope"]["id"], "project-a");
+
+        // Replay delete with same idempotency key — same operation
+        let (status, replay) = exec(
+            router,
+            authed_delete(&format!("/compute/servers/{resource_id}"), "a", "delete-A"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(replay["operation_id"], operation_id);
+    }
+
+    #[tokio::test]
+    async fn native_compute_create_after_delete_same_key_fails() {
+        let (router, _, provider) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+
+        // Create
+        let (status, json) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let resource_id = json["resource_id"].as_str().unwrap().to_owned();
+
+        // Clear failure for synchronous delete
+        provider
+            .set_failure(FailureInjection::None)
+            .expect("clear failure");
+
+        // Delete (synchronous → 204 No Content)
+        let response = router
+            .clone()
+            .oneshot(authed_delete(
+                &format!("/compute/servers/{resource_id}"),
+                "a",
+                "delete-B",
+            ))
+            .await
+            .expect("delete");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Create with SAME key — fail closed: the consumed idempotency key
+        // cannot create a new resource, even after the original was deleted.
+        let (status, _replay) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body),
+        )
+        .await;
+        // After deletion, the idempotency key is still bound to the original
+        // create operation. Replaying returns the original resource (404 not
+        // found is expected for a deleted resource — the system rejects the
+        // request rather than silently creating a new resource with the same
+        // key).
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn native_compute_create_after_delete_new_key_succeeds() {
+        let (router, _, provider) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+
+        // Create
+        let (status, json) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let resource_id = json["resource_id"].as_str().unwrap().to_owned();
+
+        // Clear failure for sync delete
+        provider
+            .set_failure(FailureInjection::None)
+            .expect("clear failure");
+
+        // Delete
+        let response = router
+            .clone()
+            .oneshot(authed_delete(
+                &format!("/compute/servers/{resource_id}"),
+                "a",
+                "delete-A",
+            ))
+            .await
+            .expect("delete");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Create with NEW key — starts a new lifecycle
+        let (status, recreate) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-B", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_ne!(recreate["resource_id"].as_str().unwrap(), resource_id);
+        assert!(recreate["complete"].as_bool().unwrap());
     }
 }

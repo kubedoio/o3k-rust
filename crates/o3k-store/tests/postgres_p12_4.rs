@@ -1,9 +1,9 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use o3k_store::{
-    CanonicalOperationLifecycleUpdate, CanonicalOperationRecord, DurableStore,
-    IdempotencyReservation, IdempotencyReservationRequest, OperationRecord, OperationState,
-    PostgresStore, ResourceRecord, StoreError,
+    CanonicalAcceptanceOutcome, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
+    DurableStore, IdempotencyReservation, IdempotencyReservationRequest, OperationRecord,
+    OperationState, PostgresStore, ResourceRecord, StoreError,
 };
 use serde_json::json;
 use sqlx::Row;
@@ -11,9 +11,109 @@ use std::sync::Arc;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 
+static TEST_DATABASE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn url() -> String {
     std::env::var("O3K_DATABASE_URL")
         .expect("O3K_DATABASE_URL must be set for PostgreSQL P12.4 conformance")
+}
+
+#[tokio::test]
+#[ignore = "requires the mandatory PostgreSQL P12.3/P12.4 CI job"]
+async fn postgres_p12_3_canonical_resource_and_lifecycle_acceptance() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let store = PostgresStore::connect(&url()).await.expect("connect");
+    store.clean_tables_for_testing().await.expect("clean");
+    let rid = Uuid::now_v7();
+    let oid = Uuid::now_v7();
+    let created_resource = resource(rid, "project-native");
+    let created_operation = operation(oid, rid);
+    let created_canonical = canonical(oid, rid, "project-native", "user-native");
+    let request = request("project-native", "create-native", "same", oid);
+    assert!(matches!(
+        store
+            .create_or_replay_canonical_resource_operation(
+                &created_resource,
+                &created_operation,
+                &created_canonical,
+                &request,
+                None,
+            )
+            .await
+            .expect("create"),
+        CanonicalAcceptanceOutcome::Created { .. }
+    ));
+    let replay_oid = Uuid::now_v7();
+    let replay_resource = resource(Uuid::now_v7(), "project-native");
+    let replay_operation = operation(replay_oid, replay_resource.id);
+    let replay_canonical = canonical(
+        replay_oid,
+        replay_resource.id,
+        "project-native",
+        "user-native",
+    );
+    let mut replay_request = request.clone();
+    replay_request.operation_id = replay_oid;
+    assert_eq!(
+        store
+            .create_or_replay_canonical_resource_operation(
+                &replay_resource,
+                &replay_operation,
+                &replay_canonical,
+                &replay_request,
+                None
+            )
+            .await
+            .expect("replay"),
+        CanonicalAcceptanceOutcome::ExistingEquivalent {
+            operation_id: oid,
+            resource_id: rid
+        }
+    );
+    assert_eq!(counts(&store).await, (1, 1, 1));
+
+    let delete_id = Uuid::now_v7();
+    let delete_operation = OperationRecord {
+        id: delete_id,
+        resource_id: rid,
+        kind: "lifecycle:delete".into(),
+        state: OperationState::Pending,
+        provider_operation_id: None,
+        error_category: None,
+        error_message: None,
+    };
+    let mut delete_canonical = canonical(delete_id, rid, "project-native", "user-native");
+    delete_canonical.action = "compute:DeleteServer".into();
+    let delete_request = IdempotencyReservationRequest::from_semantics(
+        "project-native",
+        "compute:DeleteServer",
+        "delete-native",
+        "compute:server",
+        Some(&rid.to_string()),
+        &json!({}),
+        delete_id,
+    )
+    .expect("delete request");
+    assert!(matches!(
+        store
+            .create_or_replay_canonical_lifecycle_operation(
+                &delete_operation,
+                &delete_canonical,
+                &delete_request
+            )
+            .await
+            .expect("delete"),
+        CanonicalAcceptanceOutcome::Created { .. }
+    ));
+    assert!(
+        o3k_kernel::Operation::try_from(
+            store
+                .get_canonical_operation(delete_id)
+                .await
+                .expect("canonical delete")
+        )
+        .is_ok()
+    );
 }
 fn resource(id: Uuid, project: &str) -> ResourceRecord {
     ResourceRecord {
@@ -117,6 +217,7 @@ async fn race(
 #[tokio::test]
 #[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
 async fn postgres_p12_4_atomic_triplet_concurrency_recovery_and_cas() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
     let database_url = url();
     let store = PostgresStore::connect(&database_url)
         .await
@@ -480,4 +581,333 @@ async fn postgres_p12_4_atomic_triplet_concurrency_recovery_and_cas() {
             .generation,
         2
     );
+}
+
+type ResourceProposal = (
+    ResourceRecord,
+    OperationRecord,
+    CanonicalOperationRecord,
+    IdempotencyReservationRequest,
+);
+async fn race_resource_create(
+    store: &PostgresStore,
+    a: ResourceProposal,
+    b: ResourceProposal,
+) -> (CanonicalAcceptanceOutcome, CanonicalAcceptanceOutcome) {
+    let barrier = Arc::new(Barrier::new(3));
+    let sa = store.clone();
+    let ba = barrier.clone();
+    let ta = tokio::spawn(async move {
+        ba.wait().await;
+        sa.create_or_replay_canonical_resource_operation(&a.0, &a.1, &a.2, &a.3, None)
+            .await
+            .expect("race caller a")
+    });
+    let sb = store.clone();
+    let bb = barrier.clone();
+    let tb = tokio::spawn(async move {
+        bb.wait().await;
+        sb.create_or_replay_canonical_resource_operation(&b.0, &b.1, &b.2, &b.3, None)
+            .await
+            .expect("race caller b")
+    });
+    barrier.wait().await;
+    (ta.await.unwrap(), tb.await.unwrap())
+}
+
+#[tokio::test]
+#[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
+async fn postgres_p12_4_canonical_resource_create_race() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let store = PostgresStore::connect(&url()).await.expect("connect");
+    store.clean_tables_for_testing().await.expect("clean");
+
+    let rid = Uuid::now_v7();
+    let oid_a = Uuid::now_v7();
+    let oid_b = Uuid::now_v7();
+    let res = resource(rid, "project-create-race");
+
+    let (outcome_a, outcome_b) = race_resource_create(
+        &store,
+        (
+            res.clone(),
+            operation(oid_a, rid),
+            canonical(oid_a, rid, "project-create-race", "user-a"),
+            request("project-create-race", "create-race-key", "same", oid_a),
+        ),
+        (
+            res.clone(),
+            operation(oid_b, rid),
+            canonical(oid_b, rid, "project-create-race", "user-b"),
+            request("project-create-race", "create-race-key", "same", oid_b),
+        ),
+    )
+    .await;
+
+    let created: Vec<_> = [&outcome_a, &outcome_b]
+        .into_iter()
+        .filter_map(|o| match o {
+            CanonicalAcceptanceOutcome::Created { .. } => Some(()),
+            _ => None,
+        })
+        .collect();
+    let replayed: Vec<_> = [&outcome_a, &outcome_b]
+        .into_iter()
+        .filter_map(|o| match o {
+            CanonicalAcceptanceOutcome::ExistingEquivalent { .. } => Some(()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(created.len(), 1, "exactly one caller must see Created");
+    assert_eq!(
+        replayed.len(),
+        1,
+        "the other caller must see ExistingEquivalent"
+    );
+
+    let winner_id = match (&outcome_a, &outcome_b) {
+        (
+            CanonicalAcceptanceOutcome::Created {
+                operation_id,
+                resource_id,
+            },
+            _,
+        )
+        | (
+            _,
+            CanonicalAcceptanceOutcome::Created {
+                operation_id,
+                resource_id,
+            },
+        ) => (*operation_id, *resource_id),
+        _ => unreachable!("one outcome must be Created"),
+    };
+    let loser_oid = if winner_id.0 == oid_a { oid_b } else { oid_a };
+    for o in [&outcome_a, &outcome_b] {
+        match o {
+            CanonicalAcceptanceOutcome::Created {
+                operation_id,
+                resource_id,
+            }
+            | CanonicalAcceptanceOutcome::ExistingEquivalent {
+                operation_id,
+                resource_id,
+            } => {
+                assert_eq!(*resource_id, rid);
+                assert_eq!(*operation_id, winner_id.0);
+            }
+            _ => {}
+        }
+    }
+    assert!(matches!(
+        store.get_operation(loser_oid).await,
+        Err(StoreError::OperationNotFound)
+    ));
+    assert!(matches!(
+        store.get_canonical_operation(loser_oid).await,
+        Err(StoreError::OperationNotFound)
+    ));
+    assert_eq!(counts(&store).await, (1, 1, 1));
+}
+
+#[tokio::test]
+#[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
+async fn postgres_p12_4_canonical_resource_create_conflict_race() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let store = PostgresStore::connect(&url()).await.expect("connect");
+    store.clean_tables_for_testing().await.expect("clean");
+
+    let rid = Uuid::now_v7();
+    let oid_a = Uuid::now_v7();
+    let oid_b = Uuid::now_v7();
+    let res = resource(rid, "project-conflict");
+
+    let (outcome_a, outcome_b) = race_resource_create(
+        &store,
+        (
+            res.clone(),
+            operation(oid_a, rid),
+            canonical(oid_a, rid, "project-conflict", "user-a"),
+            request("project-conflict", "conflict-key", "first", oid_a),
+        ),
+        (
+            res.clone(),
+            operation(oid_b, rid),
+            canonical(oid_b, rid, "project-conflict", "user-b"),
+            request("project-conflict", "conflict-key", "second", oid_b),
+        ),
+    )
+    .await;
+
+    assert!(
+        matches!(
+            (&outcome_a, &outcome_b),
+            (
+                CanonicalAcceptanceOutcome::Created { .. },
+                CanonicalAcceptanceOutcome::Conflict
+            ) | (
+                CanonicalAcceptanceOutcome::Conflict,
+                CanonicalAcceptanceOutcome::Created { .. }
+            )
+        ),
+        "one must be Created, the other Conflict: {outcome_a:?}, {outcome_b:?}"
+    );
+
+    let conflict_winner_oid = match (&outcome_a, &outcome_b) {
+        (CanonicalAcceptanceOutcome::Created { operation_id, .. }, _) => *operation_id,
+        (_, CanonicalAcceptanceOutcome::Created { operation_id, .. }) => *operation_id,
+        _ => unreachable!("one outcome must be Created"),
+    };
+    let loser_oid = if conflict_winner_oid == oid_a {
+        oid_b
+    } else {
+        oid_a
+    };
+    assert!(matches!(
+        store.get_operation(loser_oid).await,
+        Err(StoreError::OperationNotFound)
+    ));
+    assert!(matches!(
+        store.get_canonical_operation(loser_oid).await,
+        Err(StoreError::OperationNotFound)
+    ));
+    assert_eq!(counts(&store).await, (1, 1, 1));
+}
+
+type LifecycleProposal = (
+    OperationRecord,
+    CanonicalOperationRecord,
+    IdempotencyReservationRequest,
+);
+async fn race_lifecycle_delete(
+    store: &PostgresStore,
+    a: LifecycleProposal,
+    b: LifecycleProposal,
+) -> (CanonicalAcceptanceOutcome, CanonicalAcceptanceOutcome) {
+    let barrier = Arc::new(Barrier::new(3));
+    let sa = store.clone();
+    let ba = barrier.clone();
+    let ta = tokio::spawn(async move {
+        ba.wait().await;
+        sa.create_or_replay_canonical_lifecycle_operation(&a.0, &a.1, &a.2)
+            .await
+            .expect("race lifecycle caller a")
+    });
+    let sb = store.clone();
+    let bb = barrier.clone();
+    let tb = tokio::spawn(async move {
+        bb.wait().await;
+        sb.create_or_replay_canonical_lifecycle_operation(&b.0, &b.1, &b.2)
+            .await
+            .expect("race lifecycle caller b")
+    });
+    barrier.wait().await;
+    (ta.await.unwrap(), tb.await.unwrap())
+}
+
+#[tokio::test]
+#[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
+async fn postgres_p12_4_canonical_lifecycle_delete_race() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let store = PostgresStore::connect(&url()).await.expect("connect");
+    store.clean_tables_for_testing().await.expect("clean");
+
+    let rid = Uuid::now_v7();
+    store
+        .insert_resource(&resource(rid, "project-delete-race"))
+        .await
+        .expect("pre-insert resource");
+
+    let oid_a = Uuid::now_v7();
+    let oid_b = Uuid::now_v7();
+    let op_a = OperationRecord {
+        id: oid_a,
+        resource_id: rid,
+        kind: "lifecycle:delete".into(),
+        state: OperationState::Pending,
+        provider_operation_id: None,
+        error_category: None,
+        error_message: None,
+    };
+    let op_b = OperationRecord {
+        id: oid_b,
+        resource_id: rid,
+        kind: "lifecycle:delete".into(),
+        state: OperationState::Pending,
+        provider_operation_id: None,
+        error_category: None,
+        error_message: None,
+    };
+
+    let mut canonical_a = canonical(oid_a, rid, "project-delete-race", "user-a");
+    canonical_a.action = "compute:DeleteServer".into();
+    let mut canonical_b = canonical(oid_b, rid, "project-delete-race", "user-b");
+    canonical_b.action = "compute:DeleteServer".into();
+
+    let delete_request_a = IdempotencyReservationRequest::from_semantics(
+        "project-delete-race",
+        "compute:DeleteServer",
+        "delete-race-key",
+        "compute:server",
+        Some(&rid.to_string()),
+        &json!({}),
+        oid_a,
+    )
+    .expect("delete request a");
+
+    let delete_request_b = IdempotencyReservationRequest::from_semantics(
+        "project-delete-race",
+        "compute:DeleteServer",
+        "delete-race-key",
+        "compute:server",
+        Some(&rid.to_string()),
+        &json!({}),
+        oid_b,
+    )
+    .expect("delete request b");
+
+    let (outcome_a, outcome_b) = race_lifecycle_delete(
+        &store,
+        (op_a, canonical_a, delete_request_a),
+        (op_b, canonical_b, delete_request_b),
+    )
+    .await;
+
+    let created: Vec<_> = [&outcome_a, &outcome_b]
+        .into_iter()
+        .filter_map(|o| match o {
+            CanonicalAcceptanceOutcome::Created { .. } => Some(()),
+            _ => None,
+        })
+        .collect();
+    let replayed: Vec<_> = [&outcome_a, &outcome_b]
+        .into_iter()
+        .filter_map(|o| match o {
+            CanonicalAcceptanceOutcome::ExistingEquivalent { .. } => Some(()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(created.len(), 1, "exactly one caller must see Created");
+    assert_eq!(
+        replayed.len(),
+        1,
+        "the other caller must see ExistingEquivalent"
+    );
+
+    let winner_oid = match (&outcome_a, &outcome_b) {
+        (CanonicalAcceptanceOutcome::Created { operation_id, .. }, _)
+        | (_, CanonicalAcceptanceOutcome::Created { operation_id, .. }) => *operation_id,
+        _ => unreachable!("one outcome must be Created"),
+    };
+    for o in [&outcome_a, &outcome_b] {
+        if let CanonicalAcceptanceOutcome::ExistingEquivalent { operation_id, .. }
+        | CanonicalAcceptanceOutcome::Created { operation_id, .. } = o
+        {
+            assert_eq!(
+                *operation_id, winner_oid,
+                "both must report the same operation_id"
+            );
+        }
+    }
+    assert_eq!(counts(&store).await, (1, 1, 1));
 }

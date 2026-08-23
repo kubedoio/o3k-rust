@@ -415,6 +415,12 @@ impl HttpClient for FakeHttp {
             .cloned()
             .unwrap_or(Err(format!("unmocked POST {url}")))
     }
+    async fn delete(&self, url: &str) -> Result<HttpResponse, String> {
+        self.responses
+            .get(&format!("DELETE {url}"))
+            .cloned()
+            .unwrap_or(Err(format!("unmocked DELETE {url}")))
+    }
 }
 
 /// Configurable fake for the database seam.
