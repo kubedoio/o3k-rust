@@ -419,11 +419,10 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         .ok_or("quota result omitted parent id")?
         .parse::<uuid::Uuid>()?;
     let quota_relationships = store.list_relationships(quota_parent).await?;
-    assert!(
-        quota_relationships
-            .iter()
-            .all(|relationship| relationship.state != "bound")
-    );
+    assert!(quota_relationships.iter().all(|relationship| {
+        relationship.expected_child_resource_type != "compute:server"
+            || relationship.child_resource_id.is_none()
+    }));
     let scope = OwnershipScope::project(ScopeId::new("project-a")?, None, None);
     let parent_id = uuid::Uuid::new_v4();
     let operation_id = uuid::Uuid::new_v4();

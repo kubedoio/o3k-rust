@@ -356,6 +356,23 @@ pub mod composition {
         }
     }
 
+    pub(crate) fn composition_transport_error(
+        error: tonic::Status,
+        mutation: bool,
+    ) -> CompositionError {
+        match error.code() {
+            tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => {
+                CompositionError::Unauthorized
+            }
+            tonic::Code::Unknown | tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+                if mutation =>
+            {
+                CompositionError::UnknownOutcome
+            }
+            _ => CompositionError::Failed(error.message().to_owned()),
+        }
+    }
+
     #[allow(clippy::result_large_err)]
     fn validate_binding(
         parent: &wire::ParentContext,
@@ -664,6 +681,13 @@ pub mod composition {
             ));
         }
         let operation_id = parse_uuid(&response.operation_id, "child operation id")?;
+        if let Some(expected) = request.child_operation_id
+            && operation_id != expected
+        {
+            return Err(CompositionError::Failed(
+                "composition child operation mismatch".into(),
+            ));
+        }
         let owner_scope = request.owner_scope.clone();
         let ownership = match response.ownership.as_str() {
             "exclusive" => RelationshipOwnership::Exclusive,
@@ -743,7 +767,7 @@ pub mod composition {
                 .await
                 .create_child(wire_request)
                 .await
-                .map_err(|error| CompositionError::Failed(error.to_string()))?
+                .map_err(|error| composition_transport_error(error, true))?
                 .into_inner();
             response_to_receipt(&request, response)
         }
@@ -771,7 +795,7 @@ pub mod composition {
                         .to_string(),
                 })
                 .await
-                .map_err(|error| CompositionError::Failed(error.to_string()))?
+                .map_err(|error| composition_transport_error(error, false))?
                 .into_inner();
             if response.request_id != request.context.request_id.to_string()
                 || response.session_id != request.context.session_id.to_string()
@@ -800,7 +824,7 @@ pub mod composition {
                     child: Some(wire_request),
                 })
                 .await
-                .map_err(|error| CompositionError::Failed(error.to_string()))?
+                .map_err(|error| composition_transport_error(error, true))?
                 .into_inner();
             let _ = response_to_receipt(&request, response)?;
             Ok(())
@@ -821,7 +845,7 @@ pub mod composition {
                     parent: Some(parent),
                 })
                 .await
-                .map_err(|error| CompositionError::Failed(error.to_string()))?
+                .map_err(|error| composition_transport_error(error, false))?
                 .into_inner();
             response
                 .relationships
@@ -1942,6 +1966,27 @@ mod tests {
         assert!(matches!(
             ledger.reserve("op-1", b"changed").await,
             Err(SdkError::ReplayConflict)
+        ));
+    }
+
+    #[test]
+    fn composition_transport_preserves_mutation_uncertainty() {
+        let unknown = tonic::Status::unknown("transport lost after dispatch");
+        assert!(matches!(
+            composition::composition_transport_error(unknown, true),
+            composition::CompositionError::UnknownOutcome
+        ));
+
+        let unavailable = tonic::Status::unavailable("controller unavailable");
+        assert!(matches!(
+            composition::composition_transport_error(unavailable, true),
+            composition::CompositionError::UnknownOutcome
+        ));
+
+        let denied = tonic::Status::permission_denied("denied");
+        assert!(matches!(
+            composition::composition_transport_error(denied, true),
+            composition::CompositionError::Unauthorized
         ));
     }
     #[tokio::test]
