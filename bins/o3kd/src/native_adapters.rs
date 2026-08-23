@@ -404,6 +404,7 @@ pub struct ServerReaderAdapter {
 /// canonical mutation service is wired for the resource.
 pub struct GenericResourceApplication {
     pub compute: Arc<o3k_compute::ComputeService>,
+    pub network_service: Arc<o3k_network::NetworkService>,
     pub store: Arc<o3k_store::unified::O3kStore>,
     pub server: Arc<dyn o3k_native_api::compute::ServerReader>,
     pub volume: Arc<dyn o3k_native_api::volume::VolumeReader>,
@@ -440,6 +441,16 @@ fn realm_json(item: AddressRealmItem) -> serde_json::Value {
     serde_json::json!({"api_version":"o3k.io/v1","kind":"network:address_realm","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"prefix":item.prefix,"overlapping_prefixes":item.overlapping_prefixes},"status":{"state":item.state}})
 }
 
+fn network_json(item: o3k_store::NetworkRecord) -> serde_json::Value {
+    serde_json::json!({
+        "api_version":"o3k.io/v1",
+        "kind":"network:network",
+        "metadata":{"id":item.id,"owner_scope":item.project_id,"generation":1},
+        "spec":{"name":item.name},
+        "status":{"state":item.status}
+    })
+}
+
 #[async_trait::async_trait]
 impl ResourceApplication for GenericResourceApplication {
     async fn list(
@@ -460,6 +471,12 @@ impl ResourceApplication for GenericResourceApplication {
                 .await
                 .map(|items| items.into_iter().map(realm_json).collect())
                 .map_err(generic_read_error),
+            "network:network" => self
+                .network_service
+                .list_networks(auth)
+                .await
+                .map(|items| items.into_iter().map(network_json).collect())
+                .map_err(|_| ResourceApplicationError::Internal),
             "volume:volume" => self
                 .volume
                 .list_volumes(auth)
@@ -492,6 +509,12 @@ impl ResourceApplication for GenericResourceApplication {
                 .await
                 .map(realm_json)
                 .map_err(generic_read_error),
+            "network:network" => self
+                .network_service
+                .get_network(auth, id)
+                .await
+                .map(network_json)
+                .map_err(|_| ResourceApplicationError::NotFound),
             "volume:volume" => self
                 .volume
                 .show_volume(auth, id)
@@ -509,6 +532,26 @@ impl ResourceApplication for GenericResourceApplication {
         request: CreateRequest,
         idempotency_key: Option<&str>,
     ) -> Result<MutationResult, ResourceApplicationError> {
+        if descriptor.resource_type.to_string() == "network:network" {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct NetworkSpec {
+                name: String,
+            }
+            let spec: NetworkSpec = serde_json::from_value(request.spec)
+                .map_err(|_| ResourceApplicationError::Validation)?;
+            let network = self
+                .network_service
+                .create_network(auth, spec.name)
+                .await
+                .map_err(|_| ResourceApplicationError::Conflict)?;
+            return Ok(MutationResult {
+                operation_id: format!("network:create:{}", network.id),
+                resource_id: Some(network.id.to_string()),
+                complete: true,
+                resource: Some(network_json(network)),
+            });
+        }
         if descriptor.resource_type.to_string() != "compute:server" {
             return Err(ResourceApplicationError::UnsupportedOperation);
         }
@@ -594,6 +637,21 @@ impl ResourceApplication for GenericResourceApplication {
         id: &str,
         idempotency_key: Option<&str>,
     ) -> Result<MutationResult, ResourceApplicationError> {
+        if descriptor.resource_type.to_string() == "network:network" {
+            let resource_id = id
+                .parse::<Uuid>()
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            self.network_service
+                .delete_network(auth, resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            return Ok(MutationResult {
+                operation_id: format!("network:delete:{id}"),
+                resource_id: Some(id.to_owned()),
+                complete: true,
+                resource: None,
+            });
+        }
         if descriptor.resource_type.to_string() != "compute:server" {
             return Err(ResourceApplicationError::UnsupportedOperation);
         }
@@ -1206,9 +1264,18 @@ mod native_compute_tests {
             store.clone(),
             provider.clone(),
         ));
+        let network_service = Arc::new(
+            o3k_network::NetworkService::open(
+                std::env::temp_dir().join(format!("o3k-native-test-{}", Uuid::new_v4())),
+                store.clone(),
+            )
+            .await
+            .expect("network service"),
+        );
 
         let app = GenericResourceApplication {
             compute: compute.clone(),
+            network_service,
             store: store.clone(),
             server: Arc::new(ServerReaderAdapter {
                 service: compute.clone(),

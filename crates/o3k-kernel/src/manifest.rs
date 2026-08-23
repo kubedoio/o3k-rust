@@ -1658,25 +1658,55 @@ impl ManifestRegistry {
                 namespace: "network".to_owned(),
                 service_version: "0.4.0".to_owned(),
                 ownership: ServiceOwnership::O3kImplemented,
-                resource_types: vec![RegisteredResourceType {
-                    resource_type: ResourceType::new_unchecked("network", "address_realm"),
-                    schema_version: "v1".to_owned(),
-                    collection: Some("address-realms".to_owned()),
-                    scope: ResourceScope::Tenant,
-                    operations: std::collections::HashMap::from([
-                        (
-                            "list".to_owned(),
-                            ActionId::new_unchecked("network", "ListAddressRealms"),
-                        ),
-                        (
-                            "show".to_owned(),
-                            ActionId::new_unchecked("network", "ReadAddressRealm"),
-                        ),
-                    ]),
-                }],
+                resource_types: vec![
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("network", "address_realm"),
+                        schema_version: "v1".to_owned(),
+                        collection: Some("address-realms".to_owned()),
+                        scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".to_owned(),
+                                ActionId::new_unchecked("network", "ListAddressRealms"),
+                            ),
+                            (
+                                "show".to_owned(),
+                                ActionId::new_unchecked("network", "ReadAddressRealm"),
+                            ),
+                        ]),
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("network", "network"),
+                        schema_version: "v1".to_owned(),
+                        collection: Some("networks".to_owned()),
+                        scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".to_owned(),
+                                ActionId::new_unchecked("network", "ListNetworks"),
+                            ),
+                            (
+                                "show".to_owned(),
+                                ActionId::new_unchecked("network", "ReadNetwork"),
+                            ),
+                            (
+                                "create".to_owned(),
+                                ActionId::new_unchecked("network", "CreateNetwork"),
+                            ),
+                            (
+                                "delete".to_owned(),
+                                ActionId::new_unchecked("network", "DeleteNetwork"),
+                            ),
+                        ]),
+                    },
+                ],
                 actions: vec![
                     "network:ListAddressRealms".to_owned(),
                     "network:ReadAddressRealm".to_owned(),
+                    "network:ListNetworks".to_owned(),
+                    "network:CreateNetwork".to_owned(),
+                    "network:ReadNetwork".to_owned(),
+                    "network:DeleteNetwork".to_owned(),
                 ],
                 capabilities: vec![],
                 dependencies: vec![],

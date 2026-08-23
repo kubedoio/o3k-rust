@@ -1148,6 +1148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let generic_application: std::sync::Arc<dyn o3k_native_api::resource::ResourceApplication> =
         std::sync::Arc::new(native_adapters::GenericResourceApplication {
             compute: std::sync::Arc::new(compute_service.clone()),
+            network_service: std::sync::Arc::new(network_service.clone()),
             store: native_api_store.clone(),
             server: server_reader
                 .clone()
