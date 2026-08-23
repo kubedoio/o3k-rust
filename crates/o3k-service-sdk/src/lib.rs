@@ -59,13 +59,20 @@ pub mod tls {
 /// by the O3K control plane; external services receive only bounded child
 /// authority and never provider/store access.
 pub mod composition {
-    use o3k_kernel::{ActionId, OwnershipScope, RelationshipOwnership, ResourceReference};
+    use o3k_controller_protocol::composition as wire;
+    use o3k_kernel::{
+        ActionId, OperationContext, OwnershipScope, RelationshipOwnership, ResourceId,
+        ResourceReference, ResourceType,
+    };
     use uuid::Uuid;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ChildResourceRequest {
         pub parent: ResourceReference,
         pub parent_operation_id: Uuid,
+        pub context: OperationContext,
+        pub service_principal: String,
+        pub delegation: Vec<u8>,
         pub action: ActionId,
         pub resource_type: o3k_kernel::ResourceType,
         pub owner_scope: OwnershipScope,
@@ -90,6 +97,85 @@ pub mod composition {
         UnknownOutcome,
         #[error("child operation failed: {0}")]
         Failed(String),
+    }
+
+    fn scope_to_wire(scope: &OwnershipScope) -> wire::Scope {
+        wire::Scope {
+            id: scope.id().as_str().to_owned(),
+            kind: match scope.kind() {
+                o3k_kernel::ScopeKind::Project => "project",
+                o3k_kernel::ScopeKind::Domain => "domain",
+                o3k_kernel::ScopeKind::System => "system",
+            }
+            .to_owned(),
+        }
+    }
+
+    fn resource_to_wire(reference: &ResourceReference) -> wire::ResourceRef {
+        wire::ResourceRef {
+            namespace: reference.resource_type.namespace().to_owned(),
+            r#type: reference.resource_type.name().to_owned(),
+            id: reference.resource_id.as_str().to_owned(),
+            generation: reference.generation,
+        }
+    }
+
+    /// Converts the validated domain request into the language-neutral wire
+    /// request. Identity/session/delegation fields are populated from the
+    /// canonical operation context; no caller-supplied strings are inferred.
+    pub fn child_request_to_wire(
+        request: &ChildResourceRequest,
+        lifecycle: &str,
+    ) -> Result<wire::ChildRequest, CompositionError> {
+        if request.context.operation_id != request.parent_operation_id {
+            return Err(CompositionError::Failed(
+                "parent operation does not match request context".into(),
+            ));
+        }
+        if request.context.owner_scope != request.owner_scope {
+            return Err(CompositionError::Failed(
+                "owner scope does not match request context".into(),
+            ));
+        }
+        let parent = wire::ParentContext {
+            request_id: request.context.request_id.to_string(),
+            operation_id: request.context.operation_id.to_string(),
+            service_id: request.context.service_id.clone(),
+            service_principal: request.service_principal.clone(),
+            parent_action: request.context.action.to_string(),
+            parent: Some(resource_to_wire(&request.parent)),
+            parent_generation: request.parent.generation,
+            owner_scope: Some(scope_to_wire(&request.context.owner_scope)),
+            session_id: request.context.session_id.to_string(),
+            session_generation: request.context.session_generation,
+            slot: request.slot.clone(),
+            replay_identity: request.context.replay_identity.clone(),
+            audit_correlation: request.context.audit_correlation.clone(),
+            delegation: request.delegation.clone(),
+        };
+        Ok(wire::ChildRequest {
+            parent: Some(parent),
+            lifecycle: lifecycle.to_owned(),
+            resource_type: request.resource_type.to_string(),
+            desired_spec: serde_json::to_vec(&request.desired_spec)
+                .map_err(|_| CompositionError::Failed("invalid child spec".into()))?,
+        })
+    }
+
+    /// Strictly validates a wire resource reference before it can enter the
+    /// canonical domain model.
+    pub fn resource_from_wire(
+        value: wire::ResourceRef,
+    ) -> Result<ResourceReference, CompositionError> {
+        let resource_type = ResourceType::new(&value.namespace, &value.r#type)
+            .map_err(|_| CompositionError::Failed("invalid resource type".into()))?;
+        let resource_id = ResourceId::new(&value.id)
+            .map_err(|_| CompositionError::Failed("invalid resource id".into()))?;
+        Ok(ResourceReference {
+            resource_type,
+            resource_id,
+            generation: value.generation,
+        })
     }
 
     #[tonic::async_trait]

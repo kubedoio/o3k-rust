@@ -180,10 +180,13 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
 
     /// Creates deterministic child slots in dependency order. Each request
     /// carries the same parent/scope/operation and a stable idempotency key.
+    #[allow(clippy::too_many_arguments)]
     pub async fn reconcile(
         &self,
         parent: o3k_kernel::ResourceReference,
         parent_operation_id: uuid::Uuid,
+        context: o3k_kernel::OperationContext,
+        service_principal: String,
         owner_scope: o3k_kernel::OwnershipScope,
         spec: &InstanceSpec,
         mut state: CompositionState,
@@ -221,6 +224,9 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
             let request = ChildResourceRequest {
                 parent: parent.clone(),
                 parent_operation_id,
+                context: context.clone(),
+                service_principal: service_principal.clone(),
+                delegation: Vec::new(),
                 action,
                 resource_type: o3k_kernel::ResourceType::new(namespace, name)
                     .map_err(|e| CompositionError::Failed(e.to_string()))?,
@@ -262,10 +268,13 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
     /// reverse dependency order. Missing/unknown outcomes are returned to the
     /// caller so the parent operation remains recoverable rather than being
     /// reported as cleanly deleted.
+    #[allow(clippy::too_many_arguments)]
     pub async fn compensate(
         &self,
         parent: o3k_kernel::ResourceReference,
         parent_operation_id: uuid::Uuid,
+        context: o3k_kernel::OperationContext,
+        service_principal: String,
         owner_scope: o3k_kernel::OwnershipScope,
         state: &CompositionState,
     ) -> Result<(), CompositionError> {
@@ -296,6 +305,9 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
             let request = ChildResourceRequest {
                 parent: parent.clone(),
                 parent_operation_id,
+                context: context.clone(),
+                service_principal: service_principal.clone(),
+                delegation: Vec::new(),
                 action,
                 resource_type: resource.resource_type.clone(),
                 owner_scope: owner_scope.clone(),
@@ -488,10 +500,24 @@ mod tests {
             None,
         );
         let operation = uuid::Uuid::new_v4();
+        let context = o3k_kernel::OperationContext {
+            request_id: uuid::Uuid::new_v4(),
+            operation_id: operation,
+            action: ActionId::new("database", "CreateInstance").unwrap(),
+            service_id: "database-example".into(),
+            owner_scope: scope.clone(),
+            session_id: uuid::Uuid::new_v4(),
+            session_generation: 1,
+            deadline_unix_ms: 300_000,
+            replay_identity: format!("parent:{operation}"),
+            audit_correlation: "test-audit".into(),
+        };
         let state = composition
             .reconcile(
                 parent,
                 operation,
+                context.clone(),
+                "database-controller".into(),
                 scope,
                 &InstanceSpec {
                     engine: "test".into(),
@@ -515,6 +541,8 @@ mod tests {
                     generation: 1,
                 },
                 operation,
+                context,
+                "database-controller".into(),
                 o3k_kernel::OwnershipScope::project(
                     o3k_kernel::ScopeId::new("project-1").unwrap(),
                     None,
