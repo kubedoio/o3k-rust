@@ -239,6 +239,11 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
         .flatten()
         {
             let resource = receipt.resource.clone();
+            if receipt.ownership != o3k_kernel::RelationshipOwnership::Exclusive
+                || receipt.owner_scope != owner_scope
+            {
+                return Err(CompositionError::Unauthorized);
+            }
             let request = ChildResourceRequest {
                 parent: parent.clone(),
                 parent_operation_id,
@@ -393,6 +398,8 @@ mod tests {
                     generation: 1,
                 },
                 operation_id: request.parent_operation_id,
+                owner_scope: request.owner_scope,
+                ownership: o3k_kernel::RelationshipOwnership::Exclusive,
             })
         }
         async fn observe_child(

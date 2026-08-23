@@ -59,7 +59,7 @@ pub mod tls {
 /// by the O3K control plane; external services receive only bounded child
 /// authority and never provider/store access.
 pub mod composition {
-    use o3k_kernel::{ActionId, OwnershipScope, ResourceReference};
+    use o3k_kernel::{ActionId, OwnershipScope, RelationshipOwnership, ResourceReference};
     use uuid::Uuid;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +78,8 @@ pub mod composition {
     pub struct ChildResourceReceipt {
         pub resource: ResourceReference,
         pub operation_id: Uuid,
+        pub owner_scope: OwnershipScope,
+        pub ownership: RelationshipOwnership,
     }
 
     #[derive(Debug, thiserror::Error)]

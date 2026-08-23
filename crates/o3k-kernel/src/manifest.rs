@@ -1230,8 +1230,13 @@ impl ManifestRegistry {
     ) -> Result<usize, ManifestError> {
         let mut paths = std::fs::read_dir(directory)
             .map_err(|_| ManifestError::InvalidField("manifest directory"))?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|_| ManifestError::InvalidField("manifest directory entry"))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
             .collect::<Vec<_>>();
         paths.sort();
@@ -1796,6 +1801,17 @@ mod external_loader_tests {
         std::fs::remove_file(path).unwrap();
         assert!(registry.has_resource_type(&ResourceType::new("synthetic", "item").unwrap()));
         assert!(registry.has_action(&ActionId::new("synthetic", "CreateItem").unwrap()));
+    }
+
+    #[test]
+    fn external_manifest_directory_loader_fails_closed_on_bad_json() {
+        let directory =
+            std::env::temp_dir().join(format!("o3k-manifests-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("bad.json"), b"not-json").unwrap();
+        let mut registry = ManifestRegistry::new();
+        assert!(registry.register_json_directory(&directory).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
 

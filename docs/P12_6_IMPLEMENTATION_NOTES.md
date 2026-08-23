@@ -15,11 +15,16 @@ The SDK exposes a generic `ServiceCompositionClient`. The database example
 uses it to create deterministic child slots (`network-primary`, `volume-data`,
 and `compute-primary`) using the parent resource and operation identity. Child
 references use canonical typed resource references, and compensation traverses
-known exclusive children in reverse order. The client boundary owns
-authorization, delegation issuance, persistence, and transport; the example
-service does not access provider implementations or private stores.
+known exclusive children in reverse order. The composition port is an
+integration boundary; a production control-plane implementation must provide
+authorization, delegation issuance, durable relationship persistence, and
+transport. The example service does not access provider implementations or
+private stores.
 
 The current conformance fixture proves manifest loading, generic discovery,
 typed child references, deterministic retry identities, and reverse
-compensation ordering. A production DBaaS claim, PostgreSQL lifecycle, and
-P12.7 security/evidence convergence remain explicitly out of scope.
+compensation ordering. It does not yet constitute the full process-level
+P12.6 acceptance proof: durable relationship persistence, a live composition
+adapter, and the authenticated end-to-end failure matrix remain required.
+A production DBaaS claim, PostgreSQL lifecycle, and P12.7 security/evidence
+convergence remain explicitly out of scope.
