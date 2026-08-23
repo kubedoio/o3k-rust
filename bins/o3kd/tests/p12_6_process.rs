@@ -1,8 +1,10 @@
 use ed25519_dalek::SigningKey;
 use o3k_database_example::{ChildLifecycleActions, DatabaseControllerHandler, InstanceSpec};
 use o3k_kernel::{ActionId, Controller, ManifestRegistry, OwnershipScope, ScopeId};
+use o3k_kernel::{ActionPolicy, PrincipalKind};
 use o3k_kernel::{LimitKey, LimitValue};
-use o3k_native_api::resource::ResourceApplication;
+use o3k_native_api::auth::{NativeTokenRequestV1, TokenIssuer};
+use o3k_native_api::error::ProblemDetails;
 use o3k_provider::FakeComputeProvider;
 use o3k_service_sdk::composition::{ChildResourceRequest, ServiceCompositionClient};
 use o3k_service_sdk::{
@@ -17,6 +19,44 @@ use o3k_store::{
 use std::{collections::HashMap, sync::Arc};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
+
+struct ProcessTokenIssuer;
+
+fn process_auth_context(project: &str) -> o3k_kernel::AuthContext {
+    o3k_kernel::AuthContext::new(
+        o3k_kernel::Principal::User(o3k_kernel::UserPrincipal::new(
+            o3k_kernel::PrincipalId::new_unchecked(format!("user-{project}")),
+            format!("user-{project}"),
+            None,
+        )),
+        OwnershipScope::project(ScopeId::new_unchecked(project), None, None),
+        vec!["member".into()],
+        1,
+        u64::MAX,
+        "p12-6-http-audit",
+        "p12-6-http-request",
+        None,
+    )
+}
+
+#[async_trait::async_trait]
+impl TokenIssuer for ProcessTokenIssuer {
+    async fn issue_native(
+        &self,
+        _request: &NativeTokenRequestV1,
+    ) -> Result<(String, serde_json::Value), ProblemDetails> {
+        Err(ProblemDetails::bad_request(
+            "test issuer does not issue tokens",
+        ))
+    }
+
+    async fn auth_context(&self, token: &str) -> Result<o3k_kernel::AuthContext, ProblemDetails> {
+        token
+            .strip_prefix("project-")
+            .map(process_auth_context)
+            .ok_or_else(ProblemDetails::unauthorized)
+    }
+}
 
 fn fixture(name: &str) -> String {
     format!(
@@ -165,22 +205,96 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         .await?
         .with_delegation_signer("p12-6-test", SigningKey::from_bytes(&[9; 32])),
     );
-    let api_application = o3kd::native_adapters::GenericResourceApplication {
-        compute: compute.clone(),
-        network_service: network_service.clone(),
-        store: store.clone(),
-        server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
-            service: compute.clone(),
-        }),
-        network: Arc::new(o3kd::native_adapters::NetworkReaderAdapter {
+    let api_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
+        Arc::new(o3kd::native_adapters::GenericResourceApplication {
+            compute: compute.clone(),
+            network_service: network_service.clone(),
             store: store.clone(),
-            authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
-        }),
-        external_controllers: Arc::new(std::collections::BTreeMap::from([(
-            "database-example".to_owned(),
-            controller.clone(),
-        )])),
-    };
+            server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
+                service: compute.clone(),
+            }),
+            network: Arc::new(o3kd::native_adapters::NetworkReaderAdapter {
+                store: store.clone(),
+                authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
+            }),
+            external_controllers: Arc::new(std::collections::BTreeMap::from([(
+                "database-example".to_owned(),
+                controller.clone(),
+            )])),
+        });
+    manifests.register_controller("database-example", controller.session().clone())?;
+    manifests.activate_controller("database-example")?;
+    let mut api_authorizer = o3k_kernel::StaticAuthorizer::standard();
+    for action_name in ["CreateInstance", "ReadInstance", "DeleteInstance"] {
+        api_authorizer.register(ActionPolicy {
+            action: ActionId::new("database", action_name)?,
+            expected_resource_type: o3k_kernel::ResourceType::new("database", "instance")?,
+            accepted_principals: vec![PrincipalKind::User, PrincipalKind::Service],
+            require_ownership: true,
+            required_roles: Vec::new(),
+        });
+    }
+    let api_router = o3k_native_api::router(
+        o3k_native_api::NativeApiState::new(
+            Some(manifests.clone()),
+            o3k_native_api::pagination::CursorConfig::default(),
+            Some(Arc::new(ProcessTokenIssuer)),
+            Some(Arc::new(o3kd::native_adapters::ServerReaderAdapter {
+                service: compute.clone(),
+            })),
+            None,
+            Some(Arc::new(o3kd::native_adapters::NetworkReaderAdapter {
+                store: store.clone(),
+                authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
+            })),
+        )?
+        .with_resource_application(api_application.clone())
+        .with_authorizer(Arc::new(api_authorizer)),
+    );
+    let http_create = axum::http::Request::builder()
+        .method("POST")
+        .uri("/database/instances")
+        .header("authorization", "Bearer project-project-http")
+        .header("content-type", "application/json")
+        .header("idempotency-key", "http-create-1")
+        .body(axum::body::Body::from(serde_json::to_vec(
+            &serde_json::json!({
+                "api_version": "o3k.io/v1",
+                "kind": "database:instance",
+                "spec": {"engine":"test-engine","version":"1","storage_gb":1}
+            }),
+        )?))?;
+    let http_response = tower::ServiceExt::oneshot(api_router.clone(), http_create).await?;
+    if !http_response.status().is_success() {
+        let status = http_response.status();
+        let body = axum::body::to_bytes(http_response.into_body(), 1_048_576).await?;
+        return Err(format!(
+            "HTTP create failed: {status} {}",
+            String::from_utf8_lossy(&body)
+        )
+        .into());
+    }
+    let http_body = axum::body::to_bytes(http_response.into_body(), 1_048_576).await?;
+    let http_json: serde_json::Value = serde_json::from_slice(&http_body)?;
+    let http_id = http_json["resource_id"]
+        .as_str()
+        .ok_or_else(|| format!("HTTP create omitted resource id: {http_json}"))?
+        .to_owned();
+    let http_show = axum::http::Request::builder()
+        .uri(format!("/database/instances/{http_id}"))
+        .header("authorization", "Bearer project-project-http")
+        .body(axum::body::Body::empty())?;
+    let http_show_response = tower::ServiceExt::oneshot(api_router.clone(), http_show).await?;
+    assert_eq!(http_show_response.status(), axum::http::StatusCode::OK);
+    let http_delete = axum::http::Request::builder()
+        .method("DELETE")
+        .uri(format!("/database/instances/{http_id}"))
+        .header("authorization", "Bearer project-project-http")
+        .header("idempotency-key", "http-delete-1")
+        .body(axum::body::Body::empty())?;
+    let http_delete_response = tower::ServiceExt::oneshot(api_router, http_delete).await?;
+    assert!(http_delete_response.status().is_success());
+
     let dispatcher =
         o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&manifests)
             .map_err(|error| format!("dispatcher: {error:?}"))?;

@@ -932,6 +932,8 @@ mod tests {
     struct FakeComposition {
         calls: Mutex<Vec<String>>,
         fail_create: Option<String>,
+        fail_observe: Mutex<Option<String>>,
+        fail_delete: Mutex<Option<String>>,
     }
 
     #[async_trait::async_trait]
@@ -961,15 +963,34 @@ mod tests {
         }
         async fn observe_child(
             &self,
-            _request: ChildResourceRequest,
+            request: ChildResourceRequest,
         ) -> Result<serde_json::Value, CompositionError> {
+            if self
+                .fail_observe
+                .lock()
+                .expect("observe failure lock")
+                .as_deref()
+                == Some(request.slot.as_str())
+            {
+                return Err(CompositionError::UnknownOutcome);
+            }
             Ok(serde_json::json!({"state":"active"}))
         }
         async fn delete_child(
             &self,
             request: ChildResourceRequest,
         ) -> Result<(), CompositionError> {
-            self.calls.lock().expect("calls lock").push(request.slot);
+            let slot = request.slot;
+            self.calls.lock().expect("calls lock").push(slot.clone());
+            if self
+                .fail_delete
+                .lock()
+                .expect("delete failure lock")
+                .as_deref()
+                == Some(slot.as_str())
+            {
+                return Err(CompositionError::UnknownOutcome);
+            }
             Ok(())
         }
 
@@ -986,6 +1007,8 @@ mod tests {
         let client = Arc::new(FakeComposition {
             calls: Mutex::new(Vec::new()),
             fail_create: None,
+            fail_observe: Mutex::new(None),
+            fail_delete: Mutex::new(None),
         });
         let lifecycle = ChildLifecycleActions {
             network_create: ActionId::new("network", "CreateNetwork").unwrap(),
@@ -1043,6 +1066,30 @@ mod tests {
             client.calls.lock().unwrap().as_slice(),
             ["network-primary", "volume-data", "compute-primary"]
         );
+        *client.fail_observe.lock().unwrap() = Some("observe:network:network".into());
+        assert!(
+            composition
+                .observe(
+                    o3k_kernel::ResourceReference {
+                        resource_type: o3k_kernel::ResourceType::new("database", "instance")
+                            .unwrap(),
+                        resource_id: o3k_kernel::ResourceId::new("parent-1").unwrap(),
+                        generation: 1,
+                    },
+                    operation,
+                    context.clone(),
+                    "database-controller".into(),
+                    o3k_kernel::OwnershipScope::project(
+                        o3k_kernel::ScopeId::new("project-1").unwrap(),
+                        None,
+                        None,
+                    ),
+                    &state,
+                )
+                .await
+                .is_err()
+        );
+        *client.fail_observe.lock().unwrap() = None;
         composition
             .compensate(
                 o3k_kernel::ResourceReference {
@@ -1073,6 +1120,32 @@ mod tests {
                 "network-primary"
             ]
         );
+        client.calls.lock().unwrap().clear();
+        *client.fail_delete.lock().unwrap() = Some("compute-primary".into());
+        assert!(
+            composition
+                .compensate(
+                    o3k_kernel::ResourceReference {
+                        resource_type: o3k_kernel::ResourceType::new("database", "instance")
+                            .unwrap(),
+                        resource_id: o3k_kernel::ResourceId::new("parent-1").unwrap(),
+                        generation: 1,
+                    },
+                    operation,
+                    context.clone(),
+                    "database-controller".into(),
+                    o3k_kernel::OwnershipScope::project(
+                        o3k_kernel::ScopeId::new("project-1").unwrap(),
+                        None,
+                        None,
+                    ),
+                    &state,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(client.calls.lock().unwrap().as_slice(), ["compute-primary"]);
+        *client.fail_delete.lock().unwrap() = None;
         client.calls.lock().unwrap().clear();
         let mut referenced_state = state.clone();
         referenced_state.network.as_mut().unwrap().ownership =
@@ -1107,6 +1180,8 @@ mod tests {
         let client = Arc::new(FakeComposition {
             calls: Mutex::new(Vec::new()),
             fail_create: Some("volume-data".into()),
+            fail_observe: Mutex::new(None),
+            fail_delete: Mutex::new(None),
         });
         let lifecycle = ChildLifecycleActions {
             network_create: ActionId::new("network", "CreateNetwork").unwrap(),
@@ -1170,6 +1245,8 @@ mod tests {
         let client = Arc::new(FakeComposition {
             calls: Mutex::new(Vec::new()),
             fail_create: Some("network-primary".into()),
+            fail_observe: Mutex::new(None),
+            fail_delete: Mutex::new(None),
         });
         let lifecycle = ChildLifecycleActions {
             network_create: ActionId::new("network", "CreateNetwork").unwrap(),
@@ -1229,6 +1306,8 @@ mod tests {
         let client = Arc::new(FakeComposition {
             calls: Mutex::new(Vec::new()),
             fail_create: Some("compute-primary".into()),
+            fail_observe: Mutex::new(None),
+            fail_delete: Mutex::new(None),
         });
         let lifecycle = ChildLifecycleActions {
             network_create: ActionId::new("network", "CreateNetwork").unwrap(),
