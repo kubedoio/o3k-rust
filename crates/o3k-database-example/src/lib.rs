@@ -472,6 +472,10 @@ pub struct CompositionState {
     pub network: Option<ChildResourceReceipt>,
     pub volume: Option<ChildResourceReceipt>,
     pub compute: Option<ChildResourceReceipt>,
+    /// A durable relationship exists whose child mutation has no bound
+    /// resource yet.  Recovery must not report deletion as clean while this
+    /// intent is unresolved.
+    pub unresolved: bool,
 }
 
 pub struct DatabaseComposition<C> {
@@ -542,10 +546,11 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
         let relationships = self.client.list_relationships(request.clone()).await?;
         let mut state = CompositionState::default();
         for relationship in relationships {
-            if matches!(relationship.state.as_str(), "deleted" | "reserved") {
+            if relationship.state == "deleted" {
                 continue;
             }
             let Some(resource) = relationship.resource else {
+                state.unresolved = true;
                 continue;
             };
             let receipt = ChildResourceReceipt {
@@ -689,15 +694,21 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
             (
                 state.network.as_ref(),
                 self.lifecycle.network_observe.clone(),
+                "network-primary",
             ),
-            (state.volume.as_ref(), self.lifecycle.volume_observe.clone()),
+            (
+                state.volume.as_ref(),
+                self.lifecycle.volume_observe.clone(),
+                "volume-data",
+            ),
             (
                 state.compute.as_ref(),
                 self.lifecycle.compute_observe.clone(),
+                "compute-primary",
             ),
         ];
         let mut ready = true;
-        for (receipt, action) in children {
+        for (receipt, action, slot) in children {
             let Some(receipt) = receipt else {
                 ready = false;
                 continue;
@@ -715,7 +726,7 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
                     action,
                     resource_type: receipt.resource.resource_type.clone(),
                     owner_scope: owner_scope.clone(),
-                    slot: format!("observe:{}", receipt.resource.resource_type),
+                    slot: slot.to_owned(),
                     idempotency_key: format!(
                         "{parent_operation_id}:observe:{}",
                         receipt.resource.resource_id
@@ -762,6 +773,9 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
+        if state.unresolved {
+            return Err(CompositionError::UnknownOutcome);
+        }
         for receipt in &receipts {
             if receipt.ownership != o3k_kernel::RelationshipOwnership::Exclusive
                 || receipt.owner_scope != owner_scope
@@ -1066,7 +1080,7 @@ mod tests {
             client.calls.lock().unwrap().as_slice(),
             ["network-primary", "volume-data", "compute-primary"]
         );
-        *client.fail_observe.lock().unwrap() = Some("observe:network:network".into());
+        *client.fail_observe.lock().unwrap() = Some("network-primary".into());
         assert!(
             composition
                 .observe(

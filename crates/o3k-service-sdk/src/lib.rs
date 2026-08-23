@@ -765,7 +765,10 @@ pub mod composition {
                             .ok_or_else(|| CompositionError::Failed("missing parent".into()))?,
                     ),
                     resource: Some(resource_to_wire(&child)),
-                    child_operation_id: request.parent_operation_id.to_string(),
+                    child_operation_id: request
+                        .child_operation_id
+                        .ok_or_else(|| CompositionError::Failed("missing child operation".into()))?
+                        .to_string(),
                 })
                 .await
                 .map_err(|error| CompositionError::Failed(error.to_string()))?

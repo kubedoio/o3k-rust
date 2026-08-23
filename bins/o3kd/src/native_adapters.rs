@@ -598,6 +598,12 @@ impl ResourceApplication for GenericResourceApplication {
         idempotency_key: Option<&str>,
     ) -> Result<MutationResult, ResourceApplicationError> {
         if let Some(controller) = self.external_controllers.get(&descriptor.owning_service) {
+            if !controller.health().await.healthy {
+                return Err(ResourceApplicationError::NotReady);
+            }
+            // The descriptor is derived at startup and cannot reflect a later
+            // controller outage.  Re-check readiness at the mutation boundary
+            // so a Ready -> NotReady transition cannot accept new work.
             let action = descriptor
                 .lifecycle_actions
                 .get(&o3k_native_api::resource::LifecycleOperation::Create)
@@ -606,7 +612,14 @@ impl ResourceApplication for GenericResourceApplication {
             let key = idempotency_key
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
-            let resource_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, key.as_bytes());
+            let resource_identity = format!(
+                "{}:{}:{}:{}",
+                auth.effective_scope().id(),
+                descriptor.resource_type,
+                action,
+                key
+            );
+            let resource_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, resource_identity.as_bytes());
             let operation_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
                 format!("{}:create:{resource_id}", descriptor.resource_type).as_bytes(),
@@ -683,14 +696,16 @@ impl ResourceApplication for GenericResourceApplication {
                     .get_resource(resource_id)
                     .await
                     .map_err(|_| ResourceApplicationError::Internal)?;
-                if existing.observed_state == "READY" {
-                    return Ok(MutationResult {
-                        operation_id: operation_id.to_string(),
-                        resource_id: Some(resource_id.to_string()),
-                        complete: true,
-                        resource: Some(generic_external_json(&existing)),
-                    });
-                }
+                // An equivalent replay must not redrive an external mutation
+                // while its canonical operation is still converging.  The
+                // durable reconciler owns retry/recovery; this API call only
+                // returns the existing canonical result.
+                return Ok(MutationResult {
+                    operation_id: operation_id.to_string(),
+                    resource_id: Some(resource_id.to_string()),
+                    complete: existing.observed_state == "READY",
+                    resource: Some(generic_external_json(&existing)),
+                });
             }
             let session = controller.session();
             let context = o3k_kernel::OperationContext {
@@ -1008,6 +1023,9 @@ impl ResourceApplication for GenericResourceApplication {
         idempotency_key: Option<&str>,
     ) -> Result<MutationResult, ResourceApplicationError> {
         if let Some(controller) = self.external_controllers.get(&descriptor.owning_service) {
+            if !controller.health().await.healthy {
+                return Err(ResourceApplicationError::NotReady);
+            }
             let resource_id = id
                 .parse::<Uuid>()
                 .map_err(|_| ResourceApplicationError::NotFound)?;
@@ -1303,6 +1321,42 @@ pub struct CompositionResourceHandler {
 }
 
 impl CompositionResourceHandler {
+    async fn validate_relationship(
+        &self,
+        parent_id: Uuid,
+        request: &o3k_service_sdk::composition::ChildResourceRequest,
+        child: &o3k_kernel::ResourceReference,
+        require_exclusive: bool,
+    ) -> Result<o3k_store::ResourceRelationshipRecord, o3k_service_sdk::composition::CompositionError>
+    {
+        let relationship = self
+            .store
+            .get_relationship(parent_id, &request.slot)
+            .await
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        let child_id = child
+            .resource_id
+            .as_str()
+            .parse::<Uuid>()
+            .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if relationship.parent_resource_type != request.parent.resource_type.to_string()
+            || relationship.expected_child_resource_type != child.resource_type.to_string()
+            || relationship.child_resource_id != Some(child_id)
+            || relationship.parent_operation_id != request.parent_operation_id
+            || relationship.owner_scope != request.owner_scope.id().as_str()
+            || matches!(relationship.state.as_str(), "reserved" | "deleted")
+            || (require_exclusive && relationship.ownership != "exclusive")
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        if let Some(child_operation_id) = request.child_operation_id
+            && relationship.child_operation_id != Some(child_operation_id)
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        Ok(relationship)
+    }
+
     async fn validate_parent(
         &self,
         request: &o3k_service_sdk::composition::ChildResourceRequest,
@@ -1591,13 +1645,31 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
         request: o3k_service_sdk::composition::ChildResourceRequest,
     ) -> Result<serde_json::Value, o3k_service_sdk::composition::CompositionError> {
         let auth = self.authenticate(&request)?;
-        let _ = self.validate_parent(&request).await?;
-        let child = request
-            .child
-            .ok_or(o3k_service_sdk::composition::CompositionError::Failed(
-                "missing child reference".into(),
-            ))?;
+        let parent_id = self.validate_parent(&request).await?;
+        let child =
+            request
+                .child
+                .clone()
+                .ok_or(o3k_service_sdk::composition::CompositionError::Failed(
+                    "missing child reference".into(),
+                ))?;
         let descriptor = self.descriptor_for(&child.resource_type)?;
+        let expected_action = descriptor
+            .lifecycle_actions
+            .get(&o3k_native_api::resource::LifecycleOperation::Show)
+            .ok_or(o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        let manifest = self
+            .manifests
+            .get(&request.context.service_id)
+            .ok_or(o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if !manifest.dependencies.iter().any(|dependency| {
+            dependency.kind == o3k_kernel::manifest::DependencyKind::Action
+                && dependency.name == expected_action.to_string()
+        }) {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
+        self.validate_relationship(parent_id, &request, &child, false)
+            .await?;
         self.application
             .show(&descriptor, &auth, child.resource_id.as_str())
             .await
@@ -1632,6 +1704,8 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
         let child = request.child.clone().ok_or_else(|| {
             o3k_service_sdk::composition::CompositionError::Failed("delete child missing".into())
         })?;
+        self.validate_relationship(parent_id, &request, &child, true)
+            .await?;
         let descriptor = self.descriptor_for(&child.resource_type)?;
         let expected_action = descriptor
             .lifecycle_actions
@@ -1667,6 +1741,29 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
             .map_err(|_| {
                 o3k_service_sdk::composition::CompositionError::Failed("child delete failed".into())
             })?;
+        if !result.complete {
+            // An accepted child delete is not proof of absence.  A read that
+            // proves NotFound is the only safe fast path; every other result
+            // remains recoverable as unknown.
+            match self
+                .application
+                .show(&descriptor, &auth, child.resource_id.as_str())
+                .await
+            {
+                Err(ResourceApplicationError::NotFound) => {}
+                _ => {
+                    self.store
+                        .set_relationship_state(parent_id, &request.slot, "unknown")
+                        .await
+                        .map_err(|_| {
+                            o3k_service_sdk::composition::CompositionError::Failed(
+                                "relationship state update failed".into(),
+                            )
+                        })?;
+                    return Err(o3k_service_sdk::composition::CompositionError::UnknownOutcome);
+                }
+            }
+        }
         self.store
             .set_relationship_state(parent_id, &request.slot, "deleted")
             .await
@@ -1693,6 +1790,8 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
         Vec<o3k_service_sdk::composition::RelationshipView>,
         o3k_service_sdk::composition::CompositionError,
     > {
+        self.authenticate(&request)?;
+        self.validate_parent(&request).await?;
         let parent = request
             .parent
             .resource_id

@@ -371,7 +371,12 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         .delete(descriptor, &api_auth, &api_id, Some("api-delete-1"))
         .await
         .map_err(|error| format!("generic delete: {error:?}"))?;
-    assert!(api_delete.complete);
+    if !api_delete.complete {
+        // A child mutation may be accepted without proving absence.  The
+        // parent must remain recoverable rather than being reported deleted.
+        let parent = store.get_resource(api_id.parse()?).await?;
+        assert_ne!(parent.observed_state, "DELETED");
+    }
     let quota_scope = OwnershipScope::project(ScopeId::new("project-quota")?, None, None);
     store
         .set_limit(
