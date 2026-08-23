@@ -1168,9 +1168,18 @@ mod native_compute_tests {
         let _ = reg.register_controller(
             "compute",
             o3k_kernel::controller::ControllerSession {
-                controller_id: "test-controller".to_owned(),
+                service_id: "compute".to_owned(),
+                namespace: "compute".to_owned(),
+                service_principal: o3k_kernel::ServicePrincipal::new(
+                    o3k_kernel::PrincipalId::new_unchecked("test-controller"),
+                    "test-controller",
+                    "compute",
+                ),
+                session_id: uuid::Uuid::new_v4(),
                 session_generation: 1,
                 protocol_version: o3k_kernel::controller::ProtocolVersion::new(1, 0),
+                manifest_digest: "test-digest".to_owned(),
+                manifest_generation: 1,
                 started_at: "2026-01-01T00:00:00Z".to_owned(),
             },
         );

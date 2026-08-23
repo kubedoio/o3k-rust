@@ -1,5 +1,18 @@
 # O3K Controller Protocol v1 — accepted invariants
 
+The P12.5 Rust transport implementation is versioned as protobuf package
+`o3k.controller.v1` in `crates/o3k-controller-protocol`. Its transport is
+tonic gRPC with mandatory mutual TLS; the SDK exposes CA/server-name/client
+certificate configuration and never exposes an insecure default. Registration
+must bind the authenticated service endpoint to the accepted manifest identity,
+negotiate an explicitly supported version, establish a session ID/generation,
+and validate capabilities and health before readiness. Request contexts carry
+operation, owner scope, action, deadline, session, replay, and audit identity.
+The Rust kernel model returns actual `Observation` data for Observe and keeps
+unknown mutation outcomes distinct from failures. The SDK replay ledger is
+bounded and session-fenced; durable operation identity remains a kernel/store
+responsibility. P12.5 does not add Database composition.
+
 Status: Accepted
 Related decision: `docs/adr/ADR-0174-service-manifest-and-resource-provider-controller.md`
 Related spec: `docs/specs/SPEC-0031-service-extension-controller-v1.md`

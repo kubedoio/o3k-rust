@@ -19,8 +19,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::action::ActionId;
+use crate::principal::ServicePrincipal;
 use crate::resource::{ResourceId, ResourceType};
 use crate::scope::OwnershipScope;
+
+pub const MAX_DIAGNOSTIC_BYTES: usize = 4096;
+pub const MAX_DEADLINE_MS: u64 = 300_000;
 
 /// Controller protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -43,6 +47,20 @@ impl ProtocolVersion {
     pub fn is_compatible(&self, supported: &ProtocolVersion) -> bool {
         self.major == supported.major && self.minor <= supported.minor
     }
+
+    /// Select the highest version both peers explicitly support.
+    #[must_use]
+    pub fn negotiate(local: &[Self], remote: &[Self]) -> Option<Self> {
+        local
+            .iter()
+            .filter(|candidate| {
+                remote
+                    .iter()
+                    .any(|peer| peer.major == candidate.major && peer.minor >= candidate.minor)
+            })
+            .max_by_key(|candidate| (candidate.major, candidate.minor))
+            .copied()
+    }
 }
 
 impl std::fmt::Display for ProtocolVersion {
@@ -54,34 +72,70 @@ impl std::fmt::Display for ProtocolVersion {
 /// Controller session identity — authenticates one controller instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControllerSession {
-    /// Controller identity (bound to service_id).
-    pub controller_id: String,
-    /// Monotonic session generation for replay/staleness detection.
+    pub service_id: String,
+    pub namespace: String,
+    pub service_principal: ServicePrincipal,
+    pub session_id: Uuid,
     pub session_generation: u64,
     /// Negotiated protocol version.
     pub protocol_version: ProtocolVersion,
+    pub manifest_digest: String,
+    pub manifest_generation: u64,
     /// RFC3339 session start time.
     pub started_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationContext {
+    pub request_id: Uuid,
+    pub operation_id: Uuid,
+    pub action: ActionId,
+    pub service_id: String,
+    pub owner_scope: OwnershipScope,
+    pub session_id: Uuid,
+    pub session_generation: u64,
+    pub deadline_unix_ms: u64,
+    pub replay_identity: String,
+    pub audit_correlation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceReference {
+    pub resource_type: ResourceType,
+    pub resource_id: ResourceId,
+    pub generation: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceSnapshot {
+    pub reference: ResourceReference,
+    pub desired_spec: serde_json::Value,
+    pub known_status: Option<serde_json::Value>,
+    pub owner_scope: OwnershipScope,
 }
 
 /// Reconcile request — sent by the control plane to a controller for a
 /// specific resource operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconcileRequest {
-    /// Operation ID for idempotency and tracking.
-    pub operation_id: Uuid,
-    /// Target resource type.
-    pub resource_type: ResourceType,
-    /// Target resource ID.
-    pub resource_id: ResourceId,
-    /// Current resource generation.
-    pub generation: i64,
-    /// Desired spec (service-owned JSON).
-    pub spec: serde_json::Value,
-    /// Current status (service-owned JSON).
-    pub status: Option<serde_json::Value>,
-    /// Delegate context for cross-service action.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: OperationContext,
+    pub resource: ResourceSnapshot,
+    pub delegation: Option<DelegationContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObserveRequest {
+    pub context: OperationContext,
+    pub resource: ResourceReference,
+    pub owner_scope: OwnershipScope,
+    pub delegation: Option<DelegationContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteRequest {
+    pub context: OperationContext,
+    pub resource: ResourceReference,
+    pub owner_scope: OwnershipScope,
     pub delegation: Option<DelegationContext>,
 }
 
@@ -89,18 +143,97 @@ pub struct ReconcileRequest {
 /// performs work on behalf of a user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DelegationContext {
+    pub credential_id: Uuid,
     /// Original user principal identity.
     pub original_actor: String,
     /// Original ownership/security scope.
     pub original_scope: OwnershipScope,
     /// Calling service principal identity.
-    pub calling_service: String,
+    pub calling_service: ServicePrincipal,
+    pub recipient_service: ServicePrincipal,
     /// Parent action that triggered the delegation.
     pub parent_action: ActionId,
     /// Allowed delegated action.
     pub delegated_action: ActionId,
     /// Request correlation ID.
-    pub request_id: String,
+    pub resource: ResourceReference,
+    pub operation_id: Uuid,
+    pub request_id: Uuid,
+    pub audit_correlation: String,
+    pub session_id: Uuid,
+    pub session_generation: u64,
+    pub issued_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    pub key_id: String,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCategory {
+    InvalidRequest,
+    Unauthorized,
+    Forbidden,
+    Conflict,
+    StaleGeneration,
+    NotFound,
+    NotReady,
+    Retryable,
+    NonRetryable,
+    UnknownOutcome,
+    Incompatible,
+    StaleSession,
+    ReplayConflict,
+    DelegationInvalid,
+    ResourceExhausted,
+    DeadlineExceeded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerFailure {
+    pub category: FailureCategory,
+    pub diagnostic: String,
+}
+
+impl ControllerFailure {
+    #[must_use]
+    pub fn new(category: FailureCategory, diagnostic: impl Into<String>) -> Self {
+        let diagnostic = bounded_utf8(diagnostic.into(), MAX_DIAGNOSTIC_BYTES);
+        Self {
+            category,
+            diagnostic,
+        }
+    }
+}
+
+/// Bound externally visible diagnostics by UTF-8 bytes without splitting a
+/// code point. This is deliberately centralized because diagnostics cross the
+/// protobuf boundary and are attacker-controlled at that boundary.
+pub fn bounded_utf8(mut value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Observation {
+    pub resource: ResourceReference,
+    pub exists: bool,
+    pub observed_revision: Option<String>,
+    pub status: Option<serde_json::Value>,
+    pub diagnostics: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObserveOutcome {
+    pub observation: Option<Observation>,
+    pub failure: Option<ControllerFailure>,
 }
 
 /// Outcome of a controller reconcile operation.
@@ -108,28 +241,15 @@ pub struct DelegationContext {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ReconcileOutcome {
     /// Resource is now in the desired state.
-    Succeeded,
+    Succeeded { observation: Option<Observation> },
     /// Controller has accepted the work but it is not yet complete.
-    Accepted {
-        /// Human-readable detail.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<String>,
-    },
+    Accepted { observation: Option<Observation> },
     /// Operation failed but may be retried.
-    Retryable {
-        /// Error description.
-        error: String,
-    },
+    Retryable { failure: ControllerFailure },
     /// Operation terminally failed.
-    Failed {
-        /// Error description.
-        error: String,
-    },
+    Failed { failure: ControllerFailure },
     /// Outcome is unknown (timeout, lost connection).
-    Unknown {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<String>,
-    },
+    Unknown { failure: ControllerFailure },
 }
 
 /// Controller health state.
@@ -170,17 +290,9 @@ pub trait Controller: Send + Sync {
     /// Reconcile a resource to its desired state.
     async fn reconcile(&self, request: ReconcileRequest) -> ReconcileOutcome;
     /// Observe a resource (read-only, no side effects).
-    async fn observe(
-        &self,
-        resource_type: ResourceType,
-        resource_id: ResourceId,
-    ) -> ReconcileOutcome;
+    async fn observe(&self, request: ObserveRequest) -> ObserveOutcome;
     /// Delete a resource.
-    async fn delete(
-        &self,
-        resource_type: ResourceType,
-        resource_id: ResourceId,
-    ) -> ReconcileOutcome;
+    async fn delete(&self, request: DeleteRequest) -> ReconcileOutcome;
 }
 
 // ── Registration ───────────────────────────────────────────────────────────
@@ -262,10 +374,10 @@ mod tests {
 
     #[test]
     fn reconcile_outcome_serialization() {
-        let outcome = ReconcileOutcome::Succeeded;
+        let outcome = ReconcileOutcome::Succeeded { observation: None };
         #[allow(clippy::unwrap_used)]
         let json = serde_json::to_string(&outcome).unwrap();
-        assert_eq!(json, r#"{"status":"succeeded"}"#);
+        assert_eq!(json, r#"{"status":"succeeded","observation":null}"#);
     }
 
     #[test]
@@ -273,5 +385,16 @@ mod tests {
         let reg = ControllerRegistration::declared("database-example", "database");
         assert_eq!(reg.state, ControllerState::Declared);
         assert!(reg.session.is_none());
+    }
+
+    #[test]
+    fn diagnostic_bound_never_splits_utf8() {
+        let output = bounded_utf8("🙂🙂🙂".to_string(), 5);
+        assert!(output.len() <= 5);
+        assert_eq!(output, "🙂");
+        assert_eq!(
+            ControllerFailure::new(FailureCategory::InvalidRequest, "🙂🙂🙂").diagnostic,
+            "🙂🙂🙂"
+        );
     }
 }

@@ -13,12 +13,13 @@
 //! and ADR-0174 §15 for the acceptance criteria.
 
 use o3k_kernel::manifest::{RegisteredResourceType, ResourceScope};
-use o3k_kernel::resource::{ResourceId, ResourceType};
+use o3k_kernel::resource::ResourceType;
 use o3k_kernel::{
     ManifestRegistry, ServiceManifest,
     controller::{
         Controller, ControllerCapabilities, ControllerHealth, ControllerRegistration,
-        ControllerSession, ControllerState, ProtocolVersion, ReconcileOutcome, ReconcileRequest,
+        ControllerSession, ControllerState, DeleteRequest, Observation, ObserveOutcome,
+        ObserveRequest, ProtocolVersion, ReconcileOutcome, ReconcileRequest,
     },
 };
 
@@ -147,23 +148,24 @@ impl Controller for DatabaseExampleController {
 
     async fn reconcile(&self, _request: ReconcileRequest) -> ReconcileOutcome {
         // Minimal conformance: accept any resource as successfully reconciled.
-        ReconcileOutcome::Succeeded
+        ReconcileOutcome::Succeeded { observation: None }
     }
 
-    async fn observe(
-        &self,
-        _resource_type: ResourceType,
-        _resource_id: ResourceId,
-    ) -> ReconcileOutcome {
-        ReconcileOutcome::Succeeded
+    async fn observe(&self, request: ObserveRequest) -> ObserveOutcome {
+        ObserveOutcome {
+            observation: Some(Observation {
+                resource: request.resource,
+                exists: false,
+                observed_revision: None,
+                status: None,
+                diagnostics: None,
+            }),
+            failure: None,
+        }
     }
 
-    async fn delete(
-        &self,
-        _resource_type: ResourceType,
-        _resource_id: ResourceId,
-    ) -> ReconcileOutcome {
-        ReconcileOutcome::Succeeded
+    async fn delete(&self, _request: DeleteRequest) -> ReconcileOutcome {
+        ReconcileOutcome::Succeeded { observation: None }
     }
 }
 
@@ -228,9 +230,18 @@ mod tests {
             .unwrap();
 
         let session = o3k_kernel::controller::ControllerSession {
-            controller_id: "db-ctrl-1".to_owned(),
+            service_id: "database-example".to_owned(),
+            namespace: "database".to_owned(),
+            service_principal: o3k_kernel::ServicePrincipal::new(
+                o3k_kernel::PrincipalId::new_unchecked("db-ctrl-1"),
+                "database-controller",
+                "database",
+            ),
+            session_id: uuid::Uuid::new_v4(),
             session_generation: 1,
             protocol_version: ProtocolVersion::V1,
+            manifest_digest: "test-digest".to_owned(),
+            manifest_generation: 1,
             started_at: "2026-08-21T00:00:00Z".to_owned(),
         };
         let ctrl = DatabaseExampleController::new("database-example", session);

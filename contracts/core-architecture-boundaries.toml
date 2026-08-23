@@ -39,6 +39,8 @@ non_application_crates = [
   "o3k-provider",
   "o3k-provider-contract",
   "o3k-network-protocol",
+  "o3k-controller-protocol",
+  "o3k-service-sdk",
   "o3k-store",
 ]
 
