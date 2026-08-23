@@ -9,7 +9,12 @@ repository.workspace = true
 [dependencies]
 o3k-controller-protocol = { path = "../o3k-controller-protocol" }
 o3k-kernel = { path = "../o3k-kernel" }
+prost.workspace = true
+rustls.workspace = true
 sha2.workspace = true
+ed25519-dalek.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tonic.workspace = true
@@ -17,3 +22,6 @@ uuid.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio-stream.workspace = true
