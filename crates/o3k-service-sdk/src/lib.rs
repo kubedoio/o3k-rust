@@ -911,6 +911,111 @@ pub struct ExternalControllerClient {
     client: proto::controller_service_client::ControllerServiceClient<Channel>,
 }
 
+/// Canonical kernel adapter for an authenticated external controller. Wire
+/// types remain private to this transport boundary; callers use the kernel's
+/// `Controller` trait and typed outcomes.
+pub struct GrpcControllerAdapter {
+    client: Mutex<ExternalControllerClient>,
+    service_id: String,
+    session: o3k_kernel::ControllerSession,
+}
+
+impl GrpcControllerAdapter {
+    fn health_deadline() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64 + 60_000)
+            .unwrap_or(60_000)
+    }
+    pub async fn connect(
+        endpoint: &str,
+        tls: tonic::transport::ClientTlsConfig,
+        service_id: impl Into<String>,
+        namespace: impl Into<String>,
+        principal: o3k_kernel::ServicePrincipal,
+        manifest_digest: impl Into<String>,
+        manifest_generation: u64,
+    ) -> Result<Self, SdkError> {
+        let service_id = service_id.into();
+        let namespace = namespace.into();
+        let manifest_digest = manifest_digest.into();
+        let mut client = ExternalControllerClient::connect(endpoint, tls).await?;
+        let registration = client
+            .register(proto::RegisterRequest {
+                service_id: service_id.clone(),
+                namespace: namespace.clone(),
+                service_principal_id: principal.name().to_owned(),
+                manifest_digest: manifest_digest.clone(),
+                manifest_generation,
+                supported_versions: vec![proto::Version { major: 1, minor: 0 }],
+                capabilities: Vec::new(),
+            })
+            .await?;
+        let version = registration
+            .negotiated_version
+            .ok_or_else(|| SdkError::Invalid("controller did not negotiate a version".into()))?;
+        if version.major != 1 || version.minor != 0 {
+            return Err(SdkError::Invalid(
+                "unsupported negotiated controller version".into(),
+            ));
+        }
+        let session_id = Uuid::parse_str(&registration.session_id)
+            .map_err(|_| SdkError::Invalid("controller returned invalid session id".into()))?;
+        Ok(Self {
+            client: Mutex::new(client),
+            service_id: service_id.clone(),
+            session: o3k_kernel::ControllerSession {
+                service_id,
+                namespace,
+                service_principal: principal,
+                session_id,
+                session_generation: registration.session_generation,
+                protocol_version: o3k_kernel::ProtocolVersion::V1,
+                manifest_digest,
+                manifest_generation,
+                started_at: String::new(),
+            },
+        })
+    }
+
+    fn context(&self, context: &OperationContext) -> proto::Context {
+        proto::Context {
+            request_id: context.request_id.to_string(),
+            operation_id: context.operation_id.to_string(),
+            action: context.action.to_string(),
+            service_id: self.service_id.clone(),
+            owner_scope: Some(proto::Scope {
+                id: context.owner_scope.id().as_str().to_owned(),
+                kind: match context.owner_scope.kind() {
+                    o3k_kernel::ScopeKind::Project => proto::scope::Kind::Project as i32,
+                    o3k_kernel::ScopeKind::Domain => proto::scope::Kind::Domain as i32,
+                    o3k_kernel::ScopeKind::System => proto::scope::Kind::System as i32,
+                },
+                name: context.owner_scope.name().unwrap_or_default().to_owned(),
+                domain_id: context
+                    .owner_scope
+                    .domain_id()
+                    .unwrap_or_default()
+                    .to_owned(),
+            }),
+            session_id: self.session.session_id.to_string(),
+            session_generation: self.session.session_generation,
+            deadline_unix_ms: context.deadline_unix_ms,
+            replay_identity: context.replay_identity.clone(),
+            audit_correlation: context.audit_correlation.clone(),
+        }
+    }
+
+    fn resource(reference: &o3k_kernel::ResourceReference) -> proto::ResourceRef {
+        proto::ResourceRef {
+            namespace: reference.resource_type.namespace().to_owned(),
+            r#type: reference.resource_type.name().to_owned(),
+            id: reference.resource_id.as_str().to_owned(),
+            generation: reference.generation,
+        }
+    }
+}
+
 impl ExternalControllerClient {
     pub async fn connect(
         endpoint: &str,
@@ -986,6 +1091,268 @@ impl ExternalControllerClient {
             .await
             .map(|response| response.into_inner())
             .map_err(|error| SdkError::Invalid(error.to_string()))
+    }
+}
+
+fn delegation_wire(
+    delegation: &o3k_kernel::DelegationContext,
+) -> Result<proto::Delegation, SdkError> {
+    let claims = DelegationClaims {
+        version: 1,
+        credential_id: delegation.credential_id,
+        issuer: "o3k-control-plane".into(),
+        key_id: delegation.key_id.clone(),
+        original_actor: delegation.original_actor.clone(),
+        owner_scope: delegation.original_scope.to_string(),
+        calling_service: delegation.calling_service.name().to_owned(),
+        recipient_service: delegation.recipient_service.name().to_owned(),
+        action: delegation.delegated_action.to_string(),
+        resource_type: delegation.resource.resource_type.to_string(),
+        resource_id: delegation.resource.resource_id.as_str().to_owned(),
+        request_id: delegation.request_id,
+        operation_id: delegation.operation_id,
+        session_id: delegation.session_id,
+        session_generation: delegation.session_generation,
+        issued_at_unix_ms: delegation.issued_at_unix_ms,
+        expires_at_unix_ms: delegation.expires_at_unix_ms,
+    };
+    let signed = SignedDelegation {
+        claims,
+        signature: delegation.signature.clone(),
+    };
+    serde_json::to_vec(&signed)
+        .map(|credential| proto::Delegation { credential })
+        .map_err(|_| SdkError::Invalid("delegation serialization failed".into()))
+}
+
+fn failure_from_wire(failure: proto::Failure) -> o3k_kernel::ControllerFailure {
+    let category = match proto::failure::Category::try_from(failure.category) {
+        Ok(proto::failure::Category::InvalidRequest) => FailureCategory::InvalidRequest,
+        Ok(proto::failure::Category::Unauthorized) => FailureCategory::Unauthorized,
+        Ok(proto::failure::Category::Forbidden) => FailureCategory::Forbidden,
+        Ok(proto::failure::Category::Conflict) => FailureCategory::Conflict,
+        Ok(proto::failure::Category::StaleGeneration) => FailureCategory::StaleGeneration,
+        Ok(proto::failure::Category::NotFound) => FailureCategory::NotFound,
+        Ok(proto::failure::Category::NotReady) => FailureCategory::NotReady,
+        Ok(proto::failure::Category::Retryable) => FailureCategory::Retryable,
+        Ok(proto::failure::Category::NonRetryable) => FailureCategory::NonRetryable,
+        Ok(proto::failure::Category::UnknownOutcome) => FailureCategory::UnknownOutcome,
+        Ok(proto::failure::Category::Incompatible) => FailureCategory::Incompatible,
+        Ok(proto::failure::Category::StaleSession) => FailureCategory::StaleSession,
+        Ok(proto::failure::Category::ReplayConflict) => FailureCategory::ReplayConflict,
+        Ok(proto::failure::Category::DelegationInvalid) => FailureCategory::DelegationInvalid,
+        Ok(proto::failure::Category::ResourceExhausted) => FailureCategory::ResourceExhausted,
+        Ok(proto::failure::Category::DeadlineExceeded) => FailureCategory::DeadlineExceeded,
+        _ => FailureCategory::InvalidRequest,
+    };
+    o3k_kernel::ControllerFailure::new(category, failure.diagnostic)
+}
+
+fn observation_from_wire(
+    observation: Option<proto::Observation>,
+) -> Option<o3k_kernel::Observation> {
+    observation.and_then(|value| {
+        let resource = value.resource.as_ref().and_then(|resource| {
+            Some(o3k_kernel::ResourceReference {
+                resource_type: o3k_kernel::ResourceType::new(&resource.namespace, &resource.r#type)
+                    .ok()?,
+                resource_id: o3k_kernel::ResourceId::new(&resource.id).ok()?,
+                generation: resource.generation,
+            })
+        })?;
+        let status = if value.status.is_empty() {
+            None
+        } else {
+            serde_json::from_slice(&value.status).ok()
+        };
+        Some(o3k_kernel::Observation {
+            resource,
+            exists: value.exists,
+            observed_revision: (!value.observed_revision.is_empty())
+                .then_some(value.observed_revision),
+            status,
+            diagnostics: (!value.diagnostics.is_empty()).then_some(value.diagnostics),
+        })
+    })
+}
+
+#[async_trait::async_trait]
+impl o3k_kernel::Controller for GrpcControllerAdapter {
+    async fn health(&self) -> o3k_kernel::ControllerHealth {
+        let mut client = self.client.lock().await;
+        let context = proto::HealthRequest {
+            context: Some(proto::Context {
+                service_id: self.service_id.clone(),
+                session_id: self.session.session_id.to_string(),
+                session_generation: self.session.session_generation,
+                deadline_unix_ms: Self::health_deadline(),
+                ..Default::default()
+            }),
+        };
+        match client.health(context).await {
+            Ok(response) => o3k_kernel::ControllerHealth {
+                healthy: response.healthy,
+                detail: (!response.detail.is_empty()).then_some(response.detail),
+                protocol_version: o3k_kernel::ProtocolVersion::V1,
+            },
+            Err(error) => o3k_kernel::ControllerHealth {
+                healthy: false,
+                detail: Some(error.to_string()),
+                protocol_version: o3k_kernel::ProtocolVersion::V1,
+            },
+        }
+    }
+
+    async fn capabilities(&self) -> o3k_kernel::ControllerCapabilities {
+        let mut client = self.client.lock().await;
+        match client
+            .capabilities(proto::CapabilitiesRequest {
+                context: Some(proto::Context {
+                    service_id: self.service_id.clone(),
+                    session_id: self.session.session_id.to_string(),
+                    session_generation: self.session.session_generation,
+                    deadline_unix_ms: Self::health_deadline(),
+                    ..Default::default()
+                }),
+            })
+            .await
+        {
+            Ok(response) => o3k_kernel::ControllerCapabilities {
+                protocol_version: o3k_kernel::ProtocolVersion::V1,
+                resource_types: response.resource_types,
+                actions: response.actions,
+            },
+            Err(_) => o3k_kernel::ControllerCapabilities {
+                protocol_version: o3k_kernel::ProtocolVersion::V1,
+                resource_types: Vec::new(),
+                actions: Vec::new(),
+            },
+        }
+    }
+
+    async fn reconcile(
+        &self,
+        request: o3k_kernel::ReconcileRequest,
+    ) -> o3k_kernel::ReconcileOutcome {
+        let delegation = request
+            .delegation
+            .as_ref()
+            .and_then(|value| delegation_wire(value).ok());
+        let wire = proto::ReconcileRequest {
+            context: Some(self.context(&request.context)),
+            resource: Some(proto::Snapshot {
+                resource: Some(Self::resource(&request.resource.reference)),
+                desired_spec: serde_json::to_vec(&request.resource.desired_spec)
+                    .unwrap_or_default(),
+                known_status: request
+                    .resource
+                    .known_status
+                    .as_ref()
+                    .map(|value| serde_json::to_vec(value).unwrap_or_default())
+                    .unwrap_or_default(),
+                owner_scope: Some(
+                    self.context(&request.context)
+                        .owner_scope
+                        .unwrap_or_default(),
+                ),
+            }),
+            delegation,
+        };
+        let mut client = self.client.lock().await;
+        match client.reconcile(wire).await {
+            Ok(response) => match response.failure {
+                Some(failure) => {
+                    let failure = failure_from_wire(failure);
+                    match failure.category {
+                        FailureCategory::Retryable => {
+                            o3k_kernel::ReconcileOutcome::Retryable { failure }
+                        }
+                        FailureCategory::UnknownOutcome => {
+                            o3k_kernel::ReconcileOutcome::Unknown { failure }
+                        }
+                        _ => o3k_kernel::ReconcileOutcome::Failed { failure },
+                    }
+                }
+                None => o3k_kernel::ReconcileOutcome::Accepted {
+                    observation: observation_from_wire(response.observation),
+                },
+            },
+            Err(error) => o3k_kernel::ReconcileOutcome::Unknown {
+                failure: o3k_kernel::ControllerFailure::new(
+                    FailureCategory::UnknownOutcome,
+                    error.to_string(),
+                ),
+            },
+        }
+    }
+
+    async fn observe(&self, request: o3k_kernel::ObserveRequest) -> o3k_kernel::ObserveOutcome {
+        let delegation = request
+            .delegation
+            .as_ref()
+            .and_then(|value| delegation_wire(value).ok());
+        let mut client = self.client.lock().await;
+        match client
+            .observe(proto::ObserveRequest {
+                context: Some(self.context(&request.context)),
+                resource: Some(Self::resource(&request.resource)),
+                owner_scope: Some(
+                    self.context(&request.context)
+                        .owner_scope
+                        .unwrap_or_default(),
+                ),
+                delegation,
+            })
+            .await
+        {
+            Ok(response) => o3k_kernel::ObserveOutcome {
+                observation: observation_from_wire(response.observation),
+                failure: response.failure.map(failure_from_wire),
+            },
+            Err(error) => o3k_kernel::ObserveOutcome {
+                observation: None,
+                failure: Some(o3k_kernel::ControllerFailure::new(
+                    FailureCategory::Retryable,
+                    error.to_string(),
+                )),
+            },
+        }
+    }
+
+    async fn delete(&self, request: o3k_kernel::DeleteRequest) -> o3k_kernel::ReconcileOutcome {
+        let delegation = request
+            .delegation
+            .as_ref()
+            .and_then(|value| delegation_wire(value).ok());
+        let mut client = self.client.lock().await;
+        match client
+            .delete(proto::DeleteRequest {
+                context: Some(self.context(&request.context)),
+                resource: Some(Self::resource(&request.resource)),
+                owner_scope: Some(
+                    self.context(&request.context)
+                        .owner_scope
+                        .unwrap_or_default(),
+                ),
+                delegation,
+            })
+            .await
+        {
+            Ok(response) => match response.failure {
+                Some(failure) => o3k_kernel::ReconcileOutcome::Failed {
+                    failure: failure_from_wire(failure),
+                },
+                None => o3k_kernel::ReconcileOutcome::Accepted {
+                    observation: observation_from_wire(response.observation),
+                },
+            },
+            Err(error) => o3k_kernel::ReconcileOutcome::Unknown {
+                failure: o3k_kernel::ControllerFailure::new(
+                    FailureCategory::UnknownOutcome,
+                    error.to_string(),
+                ),
+            },
+        }
     }
 }
 
