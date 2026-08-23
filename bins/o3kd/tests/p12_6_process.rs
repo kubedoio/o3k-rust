@@ -592,9 +592,38 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         idempotency_key: format!("{operation_id}:network-primary"),
         desired_spec: serde_json::json!({"name": format!("database-network-{parent_id}")}),
     };
+    let independent_dispatcher =
+        o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&manifests)
+            .map_err(|error| format!("independent dispatcher: {error:?}"))?;
+    let independent_service = CompositionServiceAdapter::new(
+        Arc::new(o3kd::native_adapters::CompositionResourceHandler {
+            application: api_application.clone(),
+            store: store.clone(),
+            manifests: Arc::new(manifests.clone()),
+            delegation_keys: HashMap::from([(String::from("p12-6-test"), verification)]),
+            dispatcher: independent_dispatcher,
+        }),
+        "database-example",
+        "database-controller",
+    )
+    .with_delegation_keys(
+        "o3k-composition",
+        HashMap::from([(String::from("p12-6-test"), verification)]),
+    )
+    .into_server();
+    let independent_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let independent_address = independent_listener.local_addr()?;
+    let independent_tls = tls_server()?;
+    let independent_task = tokio::spawn(async move {
+        let mut builder = Server::builder().tls_config(independent_tls)?;
+        builder
+            .add_service(independent_service)
+            .serve_with_incoming(TcpListenerStream::new(independent_listener))
+            .await
+    });
     let race_left = composition_client.clone();
     let race_right =
-        GrpcCompositionClient::connect(&format!("https://{composition_address}"), tls_client()?)
+        GrpcCompositionClient::connect(&format!("https://{independent_address}"), tls_client()?)
             .await?;
     let (race_left_result, race_right_result) = tokio::join!(
         race_left.create_child(child_request.clone()),
@@ -755,6 +784,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     );
     restarted_task.abort();
     composition_task.abort();
+    independent_task.abort();
     let _ = std::fs::remove_file(store_path);
     Ok(())
 }
