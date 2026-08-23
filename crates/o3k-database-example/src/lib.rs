@@ -541,6 +541,9 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
         let relationships = self.client.list_relationships(request.clone()).await?;
         let mut state = CompositionState::default();
         for relationship in relationships {
+            if matches!(relationship.state.as_str(), "deleted" | "reserved") {
+                continue;
+            }
             let Some(resource) = relationship.resource else {
                 continue;
             };
@@ -638,7 +641,25 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
                     _ => return Err(CompositionError::Failed("unknown child slot".into())),
                 },
             };
-            let receipt = self.client.create_child(request).await?;
+            let receipt = match self.client.create_child(request).await {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    // A later child failure compensates only the durable
+                    // exclusive children already known in this workflow.
+                    // If compensation itself is uncertain, surface that
+                    // outcome and leave the relationship ledger recoverable.
+                    self.compensate(
+                        parent.clone(),
+                        parent_operation_id,
+                        context.clone(),
+                        service_principal.clone(),
+                        owner_scope.clone(),
+                        &state,
+                    )
+                    .await?;
+                    return Err(error);
+                }
+            };
             match slot {
                 "network-primary" => state.network = Some(receipt),
                 "volume-data" => state.volume = Some(receipt),
