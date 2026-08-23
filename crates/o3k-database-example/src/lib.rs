@@ -464,6 +464,20 @@ pub struct InstanceSpec {
     pub storage_gb: u64,
 }
 
+/// A relationship whose prior child mutation has not been conclusively
+/// resolved.  This is deliberately per-slot: one uncertain child must not be
+/// confused with another slot, and uncertainty never authorizes a new create.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedRelationship {
+    pub slot: String,
+    pub state: String,
+    pub expected_child_resource_type: String,
+    pub parent_operation_id: uuid::Uuid,
+    pub child_operation_id: Option<uuid::Uuid>,
+    pub ownership: o3k_kernel::RelationshipOwnership,
+    pub owner_scope: o3k_kernel::OwnershipScope,
+}
+
 /// Service-owned composition state. The control plane owns the parent and
 /// operation; this state contains only generic child references and is
 /// reconstructible from durable parent relationship records.
@@ -472,10 +486,8 @@ pub struct CompositionState {
     pub network: Option<ChildResourceReceipt>,
     pub volume: Option<ChildResourceReceipt>,
     pub compute: Option<ChildResourceReceipt>,
-    /// A durable relationship exists whose child mutation has no bound
-    /// resource yet.  Recovery must not report deletion as clean while this
-    /// intent is unresolved.
-    pub unresolved: bool,
+    /// Durable relationship intents whose child mutation is not resolved.
+    pub unresolved: Vec<UnresolvedRelationship>,
 }
 
 pub struct DatabaseComposition<C> {
@@ -550,7 +562,15 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
                 continue;
             }
             let Some(resource) = relationship.resource else {
-                state.unresolved = true;
+                state.unresolved.push(UnresolvedRelationship {
+                    slot: relationship.slot,
+                    state: relationship.state,
+                    expected_child_resource_type: relationship.resource_type.to_string(),
+                    parent_operation_id: relationship.parent_operation_id,
+                    child_operation_id: relationship.child_operation_id,
+                    ownership: relationship.ownership,
+                    owner_scope: request.owner_scope.clone(),
+                });
                 continue;
             };
             let receipt = ChildResourceReceipt {
@@ -604,6 +624,14 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
                 self.lifecycle.compute_create.clone(),
             ),
         ];
+        // A relationship without a bound child is not equivalent to an empty
+        // slot.  The generic composition boundary must first recover the
+        // persisted child operation/resource (or prove that dispatch never
+        // occurred) before another mutation can be considered.  Until that
+        // recovery API has returned a conclusive result, fail closed.
+        if !state.unresolved.is_empty() {
+            return Err(CompositionError::UnknownOutcome);
+        }
         for (slot, namespace, name, action) in slots {
             let exists = match slot {
                 "network-primary" => state.network.is_some(),
@@ -773,7 +801,7 @@ impl<C: ServiceCompositionClient> DatabaseComposition<C> {
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-        if state.unresolved {
+        if !state.unresolved.is_empty() {
             return Err(CompositionError::UnknownOutcome);
         }
         for receipt in &receipts {
@@ -1014,6 +1042,80 @@ mod tests {
         ) -> Result<Vec<o3k_service_sdk::composition::RelationshipView>, CompositionError> {
             Ok(Vec::new())
         }
+    }
+
+    #[tokio::test]
+    async fn unresolved_relationships_fail_closed_per_slot() {
+        let client = Arc::new(FakeComposition {
+            calls: Mutex::new(Vec::new()),
+            fail_create: None,
+            fail_observe: Mutex::new(None),
+            fail_delete: Mutex::new(None),
+        });
+        let lifecycle = ChildLifecycleActions {
+            network_create: ActionId::new("network", "CreateNetwork").unwrap(),
+            network_observe: ActionId::new("network", "ReadNetwork").unwrap(),
+            network_delete: ActionId::new("network", "DeleteNetwork").unwrap(),
+            volume_create: ActionId::new("volume", "CreateVolume").unwrap(),
+            volume_observe: ActionId::new("volume", "ReadVolume").unwrap(),
+            volume_delete: ActionId::new("volume", "DeleteVolume").unwrap(),
+            compute_create: ActionId::new("compute", "CreateServer").unwrap(),
+            compute_observe: ActionId::new("compute", "ReadServer").unwrap(),
+            compute_delete: ActionId::new("compute", "DeleteServer").unwrap(),
+        };
+        let composition = DatabaseComposition::new(client.clone(), lifecycle);
+        let scope = o3k_kernel::OwnershipScope::project(
+            o3k_kernel::ScopeId::new("project-recovery").unwrap(),
+            None,
+            None,
+        );
+        let operation = uuid::Uuid::new_v4();
+        let context = o3k_kernel::OperationContext {
+            request_id: uuid::Uuid::new_v4(),
+            operation_id: operation,
+            action: ActionId::new("database", "CreateInstance").unwrap(),
+            service_id: "database-example".into(),
+            owner_scope: scope.clone(),
+            session_id: uuid::Uuid::new_v4(),
+            session_generation: 1,
+            deadline_unix_ms: 300_000,
+            replay_identity: "recovery".into(),
+            audit_correlation: "recovery".into(),
+        };
+        let parent = o3k_kernel::ResourceReference {
+            resource_type: o3k_kernel::ResourceType::new("database", "instance").unwrap(),
+            resource_id: o3k_kernel::ResourceId::new("parent-recovery").unwrap(),
+            generation: 1,
+        };
+        let state = CompositionState {
+            unresolved: vec![UnresolvedRelationship {
+                slot: "volume-data".into(),
+                state: "reserved".into(),
+                expected_child_resource_type: "volume:volume".into(),
+                parent_operation_id: operation,
+                child_operation_id: Some(uuid::Uuid::new_v4()),
+                ownership: o3k_kernel::RelationshipOwnership::Exclusive,
+                owner_scope: scope.clone(),
+            }],
+            ..CompositionState::default()
+        };
+        let result = composition
+            .reconcile(
+                parent,
+                operation,
+                context,
+                "database-controller".into(),
+                scope,
+                &InstanceSpec {
+                    engine: "test".into(),
+                    version: "1".into(),
+                    storage_gb: 1,
+                },
+                state,
+            )
+            .await;
+        assert!(matches!(result, Err(CompositionError::UnknownOutcome)));
+        assert!(client.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

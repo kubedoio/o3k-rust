@@ -14,7 +14,7 @@ use o3k_service_sdk::{
 use o3k_store::QuotaRepository;
 use o3k_store::{
     CanonicalOperationRecord, DurableStore, IdempotencyReservationRequest, O3kStore,
-    OperationRecord, OperationState, ResourceRecord,
+    OperationRecord, OperationState, ResourceRecord, ResourceRelationshipRecord,
 };
 use std::{collections::HashMap, sync::Arc};
 use tokio_stream::wrappers::TcpListenerStream;
@@ -552,25 +552,44 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     assert!(foreign_child.is_err());
     assert!(store.list_relationships(parent_id).await?.is_empty());
 
-    let outcome = controller
-        .reconcile(o3k_kernel::ReconcileRequest {
-            context,
-            resource: o3k_kernel::ResourceSnapshot {
-                reference: o3k_kernel::ResourceReference {
-                    resource_type,
-                    resource_id: o3k_kernel::ResourceId::new(parent_id.to_string())?,
-                    generation: 1,
-                },
-                desired_spec: serde_json::from_str(&resource.desired_state)?,
-                known_status: None,
-                owner_scope: scope.clone(),
+    let reconcile_request = o3k_kernel::ReconcileRequest {
+        context,
+        resource: o3k_kernel::ResourceSnapshot {
+            reference: o3k_kernel::ResourceReference {
+                resource_type,
+                resource_id: o3k_kernel::ResourceId::new(parent_id.to_string())?,
+                generation: 1,
             },
-            delegation: Some(delegation),
-        })
-        .await;
+            desired_spec: serde_json::from_str(&resource.desired_state)?,
+            known_status: None,
+            owner_scope: scope.clone(),
+        },
+        delegation: Some(delegation),
+    };
+    // Two genuinely overlapping controller calls exercise both real gRPC
+    // boundaries. Durable relationship uniqueness and canonical child
+    // idempotency, rather than a process-local mutex, must converge them.
+    let first_controller = controller.clone();
+    let second_controller = controller.clone();
+    let first_request = reconcile_request.clone();
+    let second_request = reconcile_request;
+    let (first_outcome, second_outcome) = tokio::join!(
+        first_controller.reconcile(first_request),
+        second_controller.reconcile(second_request),
+    );
     assert!(
-        matches!(outcome, o3k_kernel::ReconcileOutcome::Succeeded { .. }),
-        "unexpected outcome: {outcome:?}"
+        matches!(
+            first_outcome,
+            o3k_kernel::ReconcileOutcome::Succeeded { .. }
+        ),
+        "unexpected first outcome: {first_outcome:?}"
+    );
+    assert!(
+        matches!(
+            second_outcome,
+            o3k_kernel::ReconcileOutcome::Succeeded { .. }
+        ),
+        "unexpected second outcome: {second_outcome:?}"
     );
     let relationships = store.list_relationships(parent_id).await?;
     assert_eq!(relationships.len(), 3);
@@ -702,5 +721,89 @@ async fn unavailable_external_controller_and_composition_endpoints_fail_closed()
     )
     .await;
     assert!(controller.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn p12_6_relationship_recovery_reopens_store_and_serializes_process_race()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "o3k-p12-6-recovery-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let parent = uuid::Uuid::new_v4();
+    let parent_operation = uuid::Uuid::new_v4();
+    let child_operation = uuid::Uuid::new_v4();
+    let record = ResourceRelationshipRecord {
+        parent_resource_id: parent,
+        parent_resource_type: "database:instance".into(),
+        slot: "network-primary".into(),
+        expected_child_resource_type: "network:network".into(),
+        child_resource_id: None,
+        ownership: "exclusive".into(),
+        parent_operation_id: parent_operation,
+        child_operation_id: Some(child_operation),
+        owner_scope: "project:project-recovery".into(),
+        state: "reserved".into(),
+        fingerprint: "parent-slot-fingerprint".into(),
+    };
+    {
+        let first = O3kStore::connect_sqlite_file(&path).await?;
+        first
+            .insert_resource(&ResourceRecord {
+                id: parent,
+                kind: "database:instance".into(),
+                project_id: "project-recovery".into(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: "{}".into(),
+                observed_state: "PROVISIONING".into(),
+                provider_id: None,
+            })
+            .await?;
+        first.reserve_relationship(&record).await?;
+        assert_eq!(first.list_relationships(parent).await?.len(), 1);
+    }
+
+    // Runtime A is gone: only the SQLite file remains. Runtime B must see the
+    // unresolved intent and preserve its child operation identity instead of
+    // treating the slot as empty.
+    let reopened = O3kStore::connect_sqlite_file(&path).await?;
+    let restored = reopened.list_relationships(parent).await?;
+    assert_eq!(restored, vec![record.clone()]);
+    drop(reopened);
+
+    // Two independent store/application owners race the same reservation.
+    // The database uniqueness constraint, not a process-local mutex, chooses
+    // one durable slot and both equivalent attempts observe the same record.
+    let left = O3kStore::connect_sqlite_file(&path).await?;
+    let right = O3kStore::connect_sqlite_file(&path).await?;
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let left_barrier = barrier.clone();
+    let right_barrier = barrier.clone();
+    let left_record = record.clone();
+    let right_record = record.clone();
+    let left_task = tokio::spawn(async move {
+        left_barrier.wait().await;
+        left.reserve_relationship(&left_record).await
+    });
+    let right_task = tokio::spawn(async move {
+        right_barrier.wait().await;
+        right.reserve_relationship(&right_record).await
+    });
+    barrier.wait().await;
+    let (left_result, right_result) = tokio::join!(left_task, right_task);
+    assert_eq!(left_result??, record);
+    assert_eq!(right_result??, record);
+
+    let final_store = O3kStore::connect_sqlite_file(&path).await?;
+    let final_relationships = final_store.list_relationships(parent).await?;
+    assert_eq!(final_relationships.len(), 1);
+    assert_eq!(
+        final_relationships[0].child_operation_id,
+        Some(child_operation)
+    );
+    drop(final_store);
+    let _ = std::fs::remove_file(path);
     Ok(())
 }

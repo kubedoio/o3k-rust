@@ -1571,6 +1571,16 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
                     "relationship reservation failed".into(),
                 )
             })?;
+        // A durable relationship intent is not an empty slot. If a previous
+        // create has an operation identity, or the slot is already uncertain
+        // or deleting, recovery must observe the canonical operation before
+        // another mutation can be attempted.
+        if relationship.child_resource_id.is_none()
+            && (relationship.child_operation_id.is_some()
+                || matches!(relationship.state.as_str(), "unknown" | "deleting"))
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::UnknownOutcome);
+        }
         if let (Some(child), Some(operation_id)) = (
             relationship.child_resource_id,
             relationship.child_operation_id,
