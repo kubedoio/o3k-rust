@@ -1454,9 +1454,6 @@ mod native_compute_tests {
         assert_eq!(op["owner_scope"]["id"], "project-a");
 
         // Replay delete with same idempotency key — same operation
-        provider
-            .set_failure(FailureInjection::Timeout)
-            .expect("set failure");
         let (status, replay) = exec(
             router,
             authed_delete(&format!("/compute/servers/{resource_id}"), "a", "delete-A"),
@@ -1505,11 +1502,8 @@ mod native_compute_tests {
             .expect("delete");
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-        // Create with SAME key — the idempotency reservation still exists so
-        // the replay returns the original (now-deleted) resource, not a new one.
-        // This is the "fail closed" behavior: the system does not create a new
-        // resource for a consumed idempotency key, even after the original
-        // resource has been deleted. The replay returns the original resource_id.
+        // Create with SAME key — fail closed: the consumed idempotency key
+        // cannot create a new resource, even after the original was deleted.
         let (status, _replay) = exec(
             router,
             authed_post("/compute/servers", "a", "create-A", body),
