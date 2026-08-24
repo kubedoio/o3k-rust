@@ -222,7 +222,17 @@ mapped onto canonical NetworkPolicy rules. P13.3 implements this.
 - `DELETE /v2.0/routers/{id}` (delete)
 
 These operations require a Neutron router compatibility projection over
-canonical AddressRealm gateway/route semantics. P13.3 implements this.
+canonical AddressRealm gateway/route semantics.
+
+**Identity caveat:** Neutron router has durable lifecycle identity that does
+not map one-to-one to any single existing O3K canonical resource. The
+compatibility projection's identity persistence, owner scope, uniqueness,
+restart reconstruction, mapping cardinality, and deletion semantics must be
+frozen in P13.1 provider contract discovery before P13.3 implementation. The
+possibility of a future canonical L3 Gateway/Router resource (not Neutron
+specific) must remain open.
+
+P13.3 implements this.
 
 ### openstack_networking_router_interface_v2
 
@@ -298,28 +308,65 @@ compatibility matrix. The following is a summary:
    active. Boot-from-volume and multi-attach are deferred. Online resize is
    not supported in the initial profile.
 
-8. **Operation semantics.** Create operations that involve long-running
-   infrastructure mutations return 202 Accepted with a location header pointing
-   to the operation resource for polling. Terraform provider behavior expects
-   this pattern for asynchronous resources.
+8. **Operation semantics.** O3K durable Operations remain internal to the Cloud
+   Kernel. The OpenStack compatibility layer must expose standard OpenStack
+   resource lifecycle semantics. Create returns `200`/`201` with the resource ID
+   and initial status. The provider polls `GET /{resource}/{id}` for status
+   transitions. `202 Accepted` with an O3K Operation reference is NOT valid for
+   resources where the upstream provider expects a synchronous response.
+
+## Provider contract discovery phase (P13.1)
+
+Before any P13.2+ runtime implementation, P13.1 must use real OpenTofu 1.12.6
+and real `terraform-provider-openstack` 3.4.0 to produce a frozen behavioral
+contract for every P13 target resource. This contract must capture:
+
+- minimal HCL configuration for each resource;
+- exact HTTP call traces (method, path, headers, body, query params) observed
+  during provider operations;
+- expected request/response field sets;
+- accepted status codes and error responses;
+- polling behavior (which endpoint, which fields, polling interval, terminal
+  states);
+- list/query filter behavior;
+- import and refresh read patterns;
+- microversion negotiation and extension detection;
+- error and retry behavior;
+- known divergence from standard OpenStack behavior.
+
+The provider contract is the evidence baseline for P13.2+ implementation.
 
 ## Evidence tiers
 
-Every resource in the P13 profile requires evidence at the following tiers:
+Every resource in the P13 profile has two evidence dimensions:
 
-### Tier 1 — Documented (P13.0)
-The resource is listed in the profile contract with required API operations,
-canonical mapping, and known deviations.
+- **Route implementation**: the OpenStack API endpoint exists, accepts valid
+  requests, and returns well-formed responses.
+- **Provider compatibility**: the pinned `terraform-provider-openstack` 3.4.0
+  converges through plan/apply/read/update/destroy/import for the declared
+  attribute subset.
 
-### Tier 2 — Black-box harness (P13.1)
-A real upstream `terraform-provider-openstack` is loaded by a real OpenTofu
-instance. Authentication, catalog discovery, and provider configuration are
-verified. No fake provider.
+Evidence states for each resource:
 
-### Tier 3 — Core lifecycle (P13.2)
+- `route-implemented`: the OpenStack API route is implemented in O3K.
+- `provider-unverified`: the route exists but has not been tested against the
+  pinned provider.
+- `provider-partial`: the provider converges for a known subset of attributes;
+  some attributes are known to diverge.
+- `provider-lifecycle-verified`: the pinned provider converges through the full
+  Terraform lifecycle (create/read/update/delete) for the declared attribute
+  subset.
+
+### P13.1 — Provider contract discovery
+Real upstream provider loaded by real OpenTofu. Authentication, catalog
+discovery, and provider configuration are verified. HTTP call traces produced
+for every target resource. Behavioral contract frozen.
+
+### P13.2 — Core lifecycle
 OpenTofu can create, read, update (no-op), and destroy core compute/network
 resources. Evidence includes Terraform plan/apply output and state file
-contents showing correct resource IDs and attributes.
+contents showing correct resource IDs and attributes. Provider compatibility
+verified at `provider-partial` minimum.
 
 ### Tier 4 — Advanced network (P13.3)
 OpenTofu can manage security groups, routers, and floating IPs through the

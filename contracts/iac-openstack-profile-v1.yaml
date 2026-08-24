@@ -9,10 +9,11 @@ profile:
   parent_profile: native-rust-testlab
   maturity: proposed
   user_outcome: >
-    Existing OpenStack Terraform/OpenTofu configurations can target O3K
-    through the standard, unmodified terraform-provider-openstack while all
-    resulting cloud resources remain canonical O3K resources and all OpenStack
-    concepts remain compatibility projections.
+    Existing OpenStack Terraform/OpenTofu configurations that use the resources
+    and attributes declared by this profile can target O3K through the standard,
+    unmodified terraform-provider-openstack while all resulting cloud resources
+    remain canonical O3K resources and all OpenStack concepts remain compatibility
+    projections.
 
 authority:
   mode: o3k-implemented
@@ -59,7 +60,7 @@ resources:
       - GET /v2/images
       - GET /v2/images/{id}
     known_deviations: []
-    evidence_tier: already-implemented
+    evidence_tier: route-implemented
     p13_phase: p13.0
     notes: Already implemented in existing compatibility surface.
 
@@ -74,7 +75,7 @@ resources:
       - GET /v2.1/{tenant}/flavors/{id}
     known_deviations:
       - Extra specifications are out of scope.
-    evidence_tier: already-implemented
+    evidence_tier: route-implemented
     p13_phase: p13.0
     notes: Already implemented in existing compatibility surface.
 
@@ -95,7 +96,7 @@ resources:
     known_deviations:
       - Private-key generation is unsupported; only public-key import.
       - Terraform auto-generation of a keypair is not supported.
-    evidence_tier: already-implemented
+    evidence_tier: route-implemented
     p13_phase: p13.2
 
   # ============================================================
@@ -116,7 +117,7 @@ resources:
     known_deviations:
       - Only flat provider network in initial profile.
       - Routed fabric profile only.
-    evidence_tier: already-implemented
+    evidence_tier: route-implemented
     p13_phase: p13.2
 
   - resource: openstack_networking_subnet_v2
@@ -133,7 +134,10 @@ resources:
       - DELETE /v2.0/subnets/{id}
     known_deviations:
       - One subnet and one allocation pool per network in initial profile.
-    evidence_tier: already-implemented
+      - One-to-one mapping to AddressRealm/subnet is the target, but
+        lifecycle/cardinality must be verified against real provider behavior
+        in P13.1 before being frozen.
+    evidence_tier: route-implemented
     p13_phase: p13.2
 
   - resource: openstack_networking_port_v2
@@ -151,7 +155,7 @@ resources:
     known_deviations:
       - Ports receive one deterministic IPv4 address.
       - Device owners, security groups, and rich updates are out of scope.
-    evidence_tier: already-implemented
+    evidence_tier: route-implemented
     p13_phase: p13.2
 
   # ============================================================
@@ -173,7 +177,7 @@ resources:
     known_deviations:
       - Guest key injection, metadata extensions, and scheduler extensions have limited support.
       - Config-drive is supported for user_data and metadata.
-    evidence_tier: already-implemented
+    evidence_tier: route-implemented
     p13_phase: p13.2
 
   # ============================================================
@@ -229,6 +233,11 @@ resources:
       - Mapped onto canonical AddressRealm gateway/route semantics.
       - No native NeutronRouter domain concept is introduced.
       - L3 agent, HA router, DVR are not implemented.
+      - Router lifecycle identity persistence, owner scope, uniqueness, restart
+        reconstruction, mapping cardinality, and deletion semantics must be
+        frozen in P13.1 provider contract discovery before P13.3 implementation.
+      - A future canonical L3 Gateway/Router resource (not Neutron specific)
+        may be needed if AddressRealm is not a true lifecycle match.
     evidence_tier: proposed
     p13_phase: p13.3
 

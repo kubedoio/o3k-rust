@@ -36,10 +36,11 @@ Kernel authority.
 The next ecosystem milestone is Infrastructure as Code (IaC) compatibility.
 Terraform and OpenTofu are the dominant tools for managing cloud infrastructure
 in the OpenStack ecosystem. Existing OpenStack Terraform/OpenTofu configurations
-should be able to target O3K through the standard, unmodified
-`terraform-provider-openstack` provider while all resulting cloud resources
-remain canonical O3K resources and all OpenStack concepts remain compatibility
-projections.
+that use the resources and attributes declared by the
+`p13-iac-compatibility-v1` profile should be able to target O3K through the
+standard, unmodified `terraform-provider-openstack` provider while all resulting
+cloud resources remain canonical O3K resources and all OpenStack concepts remain
+compatibility projections.
 
 This creates several architectural challenges:
 
@@ -165,16 +166,26 @@ follows:
 | Terraform resource | O3K canonical mapping | Projection type |
 |---|---|---|
 | `openstack_networking_network_v2` | Canonical `network` resource | One-to-one |
-| `openstack_networking_subnet_v2` | Canonical subnet/AddressRealm mapping | One-to-one |
+| `openstack_networking_subnet_v2` | Canonical subnet/AddressRealm | One-to-one (lifecycle/cardinality TBD in P13.1) |
 | `openstack_networking_port_v2` | Canonical endpoint/port resource | One-to-one |
 | `openstack_networking_secgroup_v2` | Canonical NetworkPolicy (projection) | Compatibility mapping |
 | `openstack_networking_secgroup_rule_v2` | Canonical NetworkPolicy rule (projection) | Compatibility mapping |
-| `openstack_networking_router_v2` | Canonical AddressRealm gateway/route (projection) | Compatibility mapping |
-| `openstack_networking_router_interface_v2` | Canonical route/endpoint (projection) | Compatibility mapping |
+| `openstack_networking_router_v2` | AddressRealm gateway/route (projection) | Compatibility mapping; full lifecycle identity TBD in P13.1 |
+| `openstack_networking_router_interface_v2` | Route/endpoint (projection) | Compatibility mapping; TBD in P13.1 |
 | `openstack_networking_floatingip_v2` | Canonical PublicAddress resource | One-to-one |
 
 New canonical O3K domain concepts (NeutronRouter, SecurityGroup, FloatingIp)
 are NOT introduced. Compatibility projections live in the adapter layer.
+
+For Neutron router and router-interface, the compatibility projection has
+durable identity and lifecycle semantics that do not map one-to-one to any
+single existing O3K canonical resource. The exact mapping (persistent
+compatibility-only state vs. future canonical L3 Gateway/Router resource) must
+be frozen in P13.1 provider contract discovery before P13.3 implementation.
+
+For subnet, the one-to-one mapping to an AddressRealm/subnet is the target, but
+the lifecycle/cardinality must be verified against real provider behavior in
+P13.1 before being frozen.
 
 ### 8. Storage translation
 
@@ -193,27 +204,56 @@ For the initial P13 storage profile:
 - In the external-hosted Cinder testbed profile, these operations delegate to
   the external Cinder service through the existing adapter.
 
-### 9. Idempotency and unknown outcome
+### 9. Operation semantics and the OpenStack compatibility boundary
 
 Terraform provider behavior does not replace O3K's durable operation semantics.
 
-O3K preserves:
+O3K preserves internally:
 
 - durable acceptance before external side effects;
 - canonical Operation identity;
-- idempotency scope through Idempotency-Key and resource generation;
 - generation fencing;
 - unknown-outcome semantics on timeout;
 - observe-before-retry;
 - compensation on failure.
 
-The OpenStack compatibility API layer maps synchronous HTTP request/response
-patterns (which Terraform expects) onto the durable operation model. Create
-returns 202 Accepted with an operation reference where the operation does not
-complete synchronously; Terraform polls status until completion.
+**O3K Operations must remain internal to the Cloud Kernel.** The OpenStack
+compatibility API layer must expose the exact OpenStack resource lifecycle
+semantics that the standard `terraform-provider-openstack` expects.
 
-Do not add unsafe retry behavior solely to appease a client. O3K's safety
-properties take precedence over Terraform's retry expectations.
+In practice this means:
+
+`POST /servers` -> O3K internally establishes the canonical server identity
+and a durable Operation -> the compatibility layer returns a standard Nova
+server response containing the canonical server ID (`status: BUILD`) -> the
+provider polls `GET /servers/{id}` -> O3K projects internal state as
+BUILD/ACTIVE/ERROR following standard OpenStack status transitions.
+
+The `202 Accepted` response with an O3K Operation reference is NOT valid for
+resources where the upstream provider expects a synchronous `200`/`201`
+response with the resource ID (Nova servers, Neutron networks/ports/subnets,
+etc.). O3K's durable Operation is an internal implementation detail.
+
+A `202` response may be used only where the specific upstream OpenStack API
+and the pinned provider actually accept it. The client must never depend on
+the O3K native Operation API.
+
+#### Idempotency boundary — internal execution vs. client-transport guarantees
+
+O3K guarantees internal idempotency: for one accepted canonical Operation, O3K
+will not duplicate the provider-side effect, even after timeout or restart.
+
+O3K does NOT guarantee client-level exactly-once creation when an upstream
+client loses the response. Example: O3K commits Server A and returns the
+canonical ID in a standard Nova response. If the response is lost in transit,
+Terraform has no ID in state. A later apply issues another create. O3K cannot
+safely infer that this is the same intent vs. a legitimate second server merely
+from identical fields/name — the OpenStack protocol has no durable client token
+or idempotency key at this level.
+
+Do not add unsafe retry behavior, server-name deduplication, or blind
+replay-detection logic solely to appease a client. O3K's safety properties
+take precedence over Terraform's retry expectations.
 
 ### 10. Terraform state
 

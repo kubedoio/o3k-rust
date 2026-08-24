@@ -11,8 +11,9 @@ profiles:
   - id: p13-iac-compatibility-v1
     maturity: proposed
     parent_profile: native-rust-testlab
-    user_outcome: |
-      Existing OpenStack Terraform/OpenTofu configurations target O3K through
+    user_outcome: >
+      Existing OpenStack Terraform/OpenTofu configurations that use the
+      resources and attributes declared by this profile can target O3K through
       the standard, unmodified terraform-provider-openstack provider. All
       resources remain canonical O3K resources; all OpenStack concepts are
       compatibility projections.
@@ -45,7 +46,6 @@ profiles:
     normative_spec: docs/specs/SPEC-0032-openstack-terraform-opentofu-compatibility-profile-v1.md
     contract: contracts/iac-openstack-profile-v1.yaml
 
-profiles:
   - id: openstack-service-testbed
     maturity: specified
     user_outcome: run a selected real OpenStack service against O3K without a complete DevStack or full OpenStack control plane

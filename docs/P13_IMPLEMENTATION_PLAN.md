@@ -47,15 +47,18 @@ terraform-provider-openstack  (unmodified upstream v3.4.0)
 - Repository governance tests pass
 - **No runtime implementation**
 
-### P13.1 — Real OpenStack provider / OpenTofu black-box harness
+### P13.1 — Real OpenStack provider / OpenTofu behavioral contract discovery
 
 - Real upstream `terraform-provider-openstack` loaded by real OpenTofu
 - Real authentication/catalog/discovery through O3K's Keystone-compatible API
+- Produce a frozen behavioral contract for every P13 target resource:
+  minimal HCL, exact HTTP call traces, field/filter requirements, expected
+  status codes, polling behavior, import/read patterns, microversion
+  negotiation, error/retry behavior
 - No fake provider
-- Verify provider configuration (`OS_*` env vars or `openrc`)
-- Verify `openstack_images_image_v2` and `openstack_compute_flavor_v2` data
-  sources work
-- Test harness scripts in `tests/` or `scripts/`
+- Verify data source reads (`openstack_images_image_v2`,
+  `openstack_compute_flavor_v2`)
+- The behavioral contract is the evidence baseline for P13.2+ implementation
 
 ### P13.2 — Core Image/Compute/Network IaC lifecycle
 
@@ -89,7 +92,12 @@ terraform-provider-openstack  (unmodified upstream v3.4.0)
 
 - `terraform refresh` — state refresh with accurate API response
 - `terraform import` — import existing O3K resources into Terraform state
-- Drift detection — create resource outside Terraform, run plan
+- Drift detection — create resource through OpenTofu, then mutate/delete the
+  same canonical resource through the native O3K API, run `tofu plan` /
+  refresh-only, verify the exact drift is detected, re-apply and verify
+  convergence. This proves the one-authority model: created via OpenTofu/
+  OpenStack projection, mutated via native API, observed again through the
+  standard provider.
 - Destroy-recreate — verify replacement semantics
 - Retry/replay — verify Terraform retry behavior against O3K operation model
 
@@ -134,6 +142,11 @@ See ADR-0175 §1–§13 for the full authority model. Summary:
 5. Network/storage translators are compatibility projections.
 6. Security properties are not weakened.
 7. OpenTofu is the mandatory default; Terraform is secondary.
+8. O3K Operations remain internal; the OpenStack compatibility layer exposes
+   standard OpenStack resource lifecycle semantics.
+9. Internal O3K execution idempotency is guaranteed for one accepted Operation.
+   Client-level exactly-once creation is NOT guaranteed when the upstream
+   client loses the response (no durable client token in the OpenStack protocol).
 
 ## Files expected to change (across all P13 sub-phases)
 
