@@ -56,7 +56,7 @@ use crate::{
     },
     identity::{check_token, issue_token, validate_token},
     image::{create_image, delete_image, download_image, list_images, show_image, upload_image},
-    middleware::microversion_middleware,
+    middleware::{compatibility_trace_middleware, microversion_middleware},
     network::{
         create_floating_ip, create_network, create_network_policy, create_port,
         create_security_group, create_security_group_rule, create_subnet, delete_floating_ip,
@@ -409,6 +409,7 @@ pub fn router_with_state(state: AppState) -> Router {
             );
     }
     router
+        .layer(axum::middleware::from_fn(compatibility_trace_middleware))
         .layer(axum::middleware::from_fn(microversion_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(
             o3k_image::DEFAULT_MAX_UPLOAD_BYTES,

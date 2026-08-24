@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.example/contracts/p13-1/provider-contract.schema.json",
+  "type": "object",
+  "required": ["schema_version", "artifact_type", "toolchain", "resources", "traces"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_type": {"const": "o3k-p13-1-provider-contract"},
+    "toolchain": {"type": "object"},
+    "resources": {"type": "array", "minItems": 7},
+    "traces": {"type": "array"}
+  }
+}
