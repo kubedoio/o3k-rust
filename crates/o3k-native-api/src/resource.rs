@@ -213,6 +213,7 @@ pub trait ResourceApplication: Send + Sync {
         auth: &AuthContext,
         id: &str,
         idempotency_key: Option<&str>,
+        expected_generation: Option<i64>,
     ) -> Result<MutationResult, ResourceApplicationError>;
     async fn list(
         &self,
@@ -587,7 +588,25 @@ async fn delete_for(
         Ok(key) => key,
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
-    match application.delete(descriptor, &auth.0, &id, key).await {
+    // v1 uses one explicit, versioned precondition form for lifecycle
+    // mutations: `If-Match: generation-N`.  Ownership is authorized before
+    // the application evaluates this value, so a foreign resource cannot
+    // disclose its generation.
+    let expected_generation = match headers.get("if-match") {
+        None => None,
+        Some(value) => match value.to_str().ok().and_then(|value| {
+            value
+                .strip_prefix("generation-")
+                .and_then(|generation| generation.parse::<i64>().ok())
+        }) {
+            Some(generation) if generation >= 0 => Some(generation),
+            _ => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        },
+    };
+    match application
+        .delete(descriptor, &auth.0, &id, key, expected_generation)
+        .await
+    {
         Ok(result) if result.complete => StatusCode::NO_CONTENT.into_response(),
         Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
         Err(error) => application_problem(error),

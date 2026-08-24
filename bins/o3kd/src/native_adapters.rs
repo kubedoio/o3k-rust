@@ -1050,6 +1050,7 @@ impl ResourceApplication for GenericResourceApplication {
         auth: &o3k_kernel::AuthContext,
         id: &str,
         idempotency_key: Option<&str>,
+        expected_generation: Option<i64>,
     ) -> Result<MutationResult, ResourceApplicationError> {
         if let Some(controller) = self.external_controllers.get(&descriptor.owning_service) {
             if !controller.health().await.healthy {
@@ -1067,6 +1068,9 @@ impl ResourceApplication for GenericResourceApplication {
                 || resource.project_id != auth.effective_scope().id().as_str()
             {
                 return Err(ResourceApplicationError::NotFound);
+            }
+            if expected_generation.is_some_and(|expected| expected != resource.generation) {
+                return Err(ResourceApplicationError::PreconditionConflict);
             }
             let action = descriptor
                 .lifecycle_actions
@@ -1165,7 +1169,7 @@ impl ResourceApplication for GenericResourceApplication {
                         resource.generation,
                         "DELETED",
                         "DELETED",
-                        resource.generation,
+                        resource.generation.saturating_add(1),
                         None,
                     )
                     .await
@@ -1191,6 +1195,9 @@ impl ResourceApplication for GenericResourceApplication {
                 || resource.project_id != auth.effective_scope().id().as_str()
             {
                 return Err(ResourceApplicationError::NotFound);
+            }
+            if expected_generation.is_some_and(|expected| expected != resource.generation) {
+                return Err(ResourceApplicationError::PreconditionConflict);
             }
             let action = descriptor
                 .lifecycle_actions
@@ -1255,7 +1262,7 @@ impl ResourceApplication for GenericResourceApplication {
                     resource.generation,
                     "DELETED",
                     "DELETED",
-                    resource.generation,
+                    resource.generation.saturating_add(1),
                     None,
                 )
                 .await
@@ -1271,6 +1278,19 @@ impl ResourceApplication for GenericResourceApplication {
             let resource_id = id
                 .parse::<Uuid>()
                 .map_err(|_| ResourceApplicationError::NotFound)?;
+            let resource = self
+                .store
+                .get_resource(resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            if resource.kind != "network:network"
+                || resource.project_id != auth.effective_scope().id().as_str()
+            {
+                return Err(ResourceApplicationError::NotFound);
+            }
+            if expected_generation.is_some_and(|expected| expected != resource.generation) {
+                return Err(ResourceApplicationError::PreconditionConflict);
+            }
             self.network_service
                 .delete_network(auth, resource_id)
                 .await
@@ -1302,6 +1322,9 @@ impl ResourceApplication for GenericResourceApplication {
             .map_err(|_| ResourceApplicationError::NotFound)?;
         if existing.project_id != auth.effective_scope().id().as_str() {
             return Err(ResourceApplicationError::NotFound);
+        }
+        if expected_generation.is_some_and(|expected| expected != existing.generation) {
+            return Err(ResourceApplicationError::PreconditionConflict);
         }
         let action = descriptor
             .lifecycle_actions
@@ -1581,6 +1604,13 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
         let parent_id = self.validate_parent(&request).await.map_err(|_| {
             o3k_service_sdk::composition::CompositionError::Failed("parent denied".into())
         })?;
+        // Child creation is an allocation operation, not an adoption API. A
+        // caller-supplied canonical child ID could otherwise be recorded in a
+        // relationship and then silently ignored by the create path. Reject
+        // it before reserving a relationship or invoking the child service.
+        if request.child.is_some() {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
         let descriptor = self.descriptor_for(&request.resource_type)?;
         let expected_action = descriptor
             .lifecycle_actions
@@ -1776,6 +1806,7 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
                 &auth,
                 child.resource_id.as_str(),
                 Some(&request.idempotency_key),
+                None,
             )
             .await
             .map_err(|_| {

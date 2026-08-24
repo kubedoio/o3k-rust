@@ -584,6 +584,42 @@ async fn run_native_openstack_http_conformance(
     let native_server_id = native_server_json["resource_id"]
         .as_str()
         .ok_or("native server ID")?;
+    let current_generation = native_server_json["resource"]["metadata"]["generation"]
+        .as_i64()
+        .ok_or("native server generation")?;
+    assert!(current_generation > 0);
+
+    // SPEC-0030 v1 generation preconditions are exercised at the native HTTP
+    // boundary.  The resource starts at generation 1; a stale request is
+    // rejected before the compute provider is touched, while the matching
+    // request is accepted and advances durable generation through deletion.
+    let before_stale_generation = provider.instance_count();
+    let stale_delete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/o3k/v1/compute/servers/{native_server_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .header("if-match", format!("generation-{}", current_generation - 1))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(stale_delete.status(), StatusCode::CONFLICT);
+    assert_eq!(provider.instance_count(), before_stale_generation);
+    let tenant_b_generation_attempt = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/o3k/v1/compute/servers/{native_server_id}"))
+                .header("authorization", format!("Bearer {token_b}"))
+                .header("if-match", format!("generation-{current_generation}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(tenant_b_generation_attempt.status(), StatusCode::NOT_FOUND);
+    assert_eq!(provider.instance_count(), before_stale_generation);
 
     // Native collection pagination is exercised through HTTP, including its
     // opaque authenticated cursor rather than the cursor codec directly.
@@ -618,16 +654,23 @@ async fn run_native_openstack_http_conformance(
     .await?;
     assert_eq!(openstack_server_read["server"]["id"], native_server_id);
 
-    assert_eq!(
-        status_for(
-            &app,
-            Method::DELETE,
-            &format!("/o3k/v1/compute/servers/{native_server_id}"),
-            &token,
+    let matching_delete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/o3k/v1/compute/servers/{native_server_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .header("if-match", format!("generation-{current_generation}"))
+                .body(Body::empty())?,
         )
-        .await,
-        StatusCode::NO_CONTENT
-    );
+        .await?;
+    assert_eq!(matching_delete.status(), StatusCode::NO_CONTENT);
+    let deleted = store
+        .get_resource(uuid::Uuid::parse_str(native_server_id)?)
+        .await?;
+    assert_eq!(deleted.generation, current_generation + 1);
+    assert_eq!(deleted.observed_state, "DELETED");
     assert_eq!(
         status_for(
             &app,
