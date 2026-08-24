@@ -3207,4 +3207,31 @@ mod native_compute_tests {
         assert_ne!(recreate["resource_id"].as_str().unwrap(), resource_id);
         assert!(recreate["complete"].as_bool().unwrap());
     }
+
+    #[test]
+    fn native_compute_manifest_exposes_no_generation_precondition_mutation() {
+        let registry = compute_manifest_registry();
+        let manifest = registry.get("compute").expect("compute manifest");
+        let actions = manifest
+            .actions
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.ends_with(":CreateServer"))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.ends_with(":DeleteServer"))
+        );
+        assert!(!actions.iter().any(|action| action.contains("Update")));
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action.contains("CompareAndSet"))
+        );
+    }
 }

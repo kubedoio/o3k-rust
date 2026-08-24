@@ -24,7 +24,9 @@ Native Volume has no supported OpenStack-compatible endpoint in the advertised
 profile, so a Volume native/OpenStack pair is NOT APPLICABLE; external Cinder
 remains an explicitly separate authority under the accepted architecture.
 
-Generation applicability: native Compute's advertised manifest operations are
+Generation applicability is structurally exercised by
+`native_adapters::native_compute_manifest_exposes_no_generation_precondition_mutation`.
+Native Compute's advertised manifest operations are
 `list`, `show`, `create`, and `delete`; no native update or compare-and-set
 route/header/request field is advertised in SPEC-0030 v1. Resources expose
 generation metadata and the store has CAS semantics, but API-level stale
