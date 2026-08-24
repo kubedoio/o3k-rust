@@ -33,6 +33,15 @@ defined in each source.
 | Native O3K resource API, resource envelope, identity/versioning/operations/error/pagination/CLI semantics | `docs/adr/ADR-0173-native-o3k-resource-api-and-resource-model.md`, `docs/specs/SPEC-0030-native-o3k-resource-api-v1.md`, `contracts/native-resource-envelope-v1.schema.json` |
 | Service Manifest, registry evolution, namespace ownership, external controller/service-principal/delegation/composition model | `docs/adr/ADR-0174-service-manifest-and-resource-provider-controller.md`, `docs/specs/SPEC-0031-service-extension-controller-v1.md`, `contracts/service-manifest-v1.schema.json`, `contracts/controller-protocol-v1.md` |
 | Separation of native service identity from OpenStack service/catalog/API compatibility metadata | `contracts/openstack-compatibility-projection-v1.schema.json` under ADR-0174/SPEC-0031; actual advertisement remains gated by SPEC-0022 and compatibility manifests |
+
+## Proposed P13 sources — not active authority until human approval
+
+The following documents are proposed P13 sources, not active architecture
+authority while their status remains `Proposed`. P13.1+ runtime implementation
+is not authorized until human architecture/security acceptance is recorded.
+
+| Subject | Normative source |
+|---|---|
 | OpenStack Ecosystem and Infrastructure-as-Code Compatibility Boundary | `docs/adr/ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md`, `docs/specs/SPEC-0032-openstack-terraform-opentofu-compatibility-profile-v1.md`, `contracts/iac-openstack-profile-v1.yaml` |
 
 ## Core rules

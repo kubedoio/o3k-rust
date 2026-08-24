@@ -13,8 +13,9 @@ profiles:
     parent_profile: native-rust-testlab
     user_outcome: >
       Existing OpenStack Terraform/OpenTofu configurations that use the
-      resources and attributes declared by this profile can target O3K through
-      the standard, unmodified terraform-provider-openstack provider. All
+      resources listed by this profile and the attribute subsets frozen by the
+      applicable provider-contract discovery gate can target O3K through the standard, unmodified
+      terraform-provider-openstack provider. All
       resources remain canonical O3K resources; all OpenStack concepts are
       compatibility projections.
     o3k_owned_capabilities:

@@ -49,9 +49,10 @@ standard OpenStack behavior.
 
 Resources are listed by name in P13.0. The exact Terraform attribute subset
 for each resource (the fields that the provider reads/writes and that O3K must
-populate) is declared prospective and will be frozen in P13.1 provider contract
-discovery. P13.2+ implementation and verification proceed against that frozen
-attribute subset.
+populate) is declared prospective and will be frozen by the applicable
+provider-contract discovery gate: P13.1 for core resources and the mandatory
+pre-P13.3/P13.4 gates for later resource groups. Each phase proceeds only
+against its own frozen attribute subset.
 
 The profile is operation-level. A resource is not supported simply because
 its name appears here; it is supported only when its evidence tier requirements
@@ -234,7 +235,8 @@ canonical AddressRealm gateway/route semantics.
 not map one-to-one to any single existing O3K canonical resource. The
 compatibility projection's identity persistence, owner scope, uniqueness,
 restart reconstruction, mapping cardinality, and deletion semantics must be
-frozen in P13.1 provider contract discovery before P13.3 implementation. The
+frozen by the mandatory P13.3 provider-contract discovery gate before
+implementation. The
 possibility of a future canonical L3 Gateway/Router resource (not Neutron
 specific) must remain open.
 
@@ -322,13 +324,18 @@ compatibility matrix. The following is a summary:
    is valid with a standard Nova server body), `blockstorage/v3/volumes.Create`
    accepts **only** `202`, and most Neutron v2.0 operations accept `200`/`201`.
    The client must never depend on an O3K native Operation API response. Exact
-   per-operation status codes belong in the P13.1 behavioral contract.
+   per-operation status codes belong in the applicable provider-contract
+   discovery gate.
 
 ## Provider contract discovery phase (P13.1)
 
-Before any P13.2+ runtime implementation, P13.1 must use real OpenTofu 1.12.6
-and real `terraform-provider-openstack` 3.4.0 to produce a frozen behavioral
-contract for every P13 target resource. This contract must capture:
+Before P13.2 runtime implementation, P13.1 must use real OpenTofu 1.12.6 and
+real `terraform-provider-openstack` 3.4.0 to produce a frozen behavioral
+contract for the core P13.1 target resources. Equivalent mandatory discovery
+gates immediately before P13.3 and P13.4 freeze the advanced-network and
+storage targets before their runtime implementation. This staged boundary is
+intentional: no phase may implement a target before its provider contract is
+frozen. Each contract must capture:
 
 - minimal HCL configuration for each resource;
 - exact HTTP call traces (method, path, headers, body, query params) observed
@@ -343,7 +350,8 @@ contract for every P13 target resource. This contract must capture:
 - error and retry behavior;
 - known divergence from standard OpenStack behavior.
 
-The provider contract is the evidence baseline for P13.2+ implementation.
+Each frozen provider contract is the evidence baseline for its corresponding
+implementation phase.
 
 ## Evidence tiers
 
@@ -368,22 +376,29 @@ Evidence states for each resource:
 
 ### P13.1 — Provider contract discovery
 Real upstream provider loaded by real OpenTofu. Authentication, catalog
-discovery, and provider configuration are verified. HTTP call traces produced
-for every target resource. Behavioral contract frozen.
+discovery, and provider configuration are verified. HTTP call traces are
+produced for every core P13.1 target resource. The core behavioral contract is
+frozen before P13.2 implementation.
 
 ### P13.2 — Core lifecycle
-OpenTofu can create, read, update (no-op), and destroy core compute/network
+OpenTofu can create, read, update, and destroy core compute/network
 resources for the bounded attribute subset frozen in P13.1. Evidence includes
 Terraform plan/apply output and state file contents showing correct resource
 IDs and attributes. Provider compatibility verified at
 `provider-lifecycle-verified` minimum for the declared attribute subset.
 
 ### P13.3 — Advanced network
+Before implementation, run the same real-provider discovery gate for every
+P13.3 target and freeze its contract. P13.3 cannot rely on an unverified
+P13.1/core trace.
 OpenTofu can manage security groups, routers, and floating IPs through the
 OpenStack compatibility projection. Evidence includes Terraform lifecycle
 output and state verification.
 
 ### P13.4 — Storage
+Before implementation, run the same real-provider discovery gate for every
+P13.4 target and freeze its contract. P13.4 cannot rely on an unverified
+P13.1/core trace.
 OpenTofu can manage volumes and volume attachments through the OpenStack
 compatibility projection. Evidence includes Terraform lifecycle output.
 

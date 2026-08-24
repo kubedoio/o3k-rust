@@ -23,7 +23,10 @@ assert doc["go_reference"]["repository"] == "https://github.com/kubedoio/o3k"
 assert re.fullmatch(r"[0-9a-f]{40}", doc["rust_reference"]["commit"]), "rust commit must be a pinned 40-hex sha"
 assert doc["rust_reference"]["repository"] == "https://github.com/kubedoio/o3k-rust"
 
-valid_profiles = {"openstack-service-testbed", "native-rust-testlab", "small-edge-cloud"}
+registry_path = __import__("pathlib").Path(artifact_path).resolve().parents[1] / "../compatibility/product-profiles.yaml"
+registry_text = registry_path.read_text(encoding="utf-8")
+valid_profiles = set(re.findall(r"^  - id: ([A-Za-z0-9-]+)$", registry_text, re.MULTILINE))
+assert valid_profiles, "product profile registry contains no profile IDs"
 valid_status = {"missing", "partial", "implemented", "unsupported"}
 valid_priority = {"blocks-declared-journey", "useful-later", "intentionally-omitted"}
 url_re = re.compile(r"^https?://")
@@ -33,6 +36,10 @@ total = 0
 for journey in doc["journeys"]:
     journey_id = journey["id"]
     assert journey_id and journey["name"] and journey["client"]
+    journey_profiles = journey.get("profiles", [])
+    if journey_id == "terraform":
+        assert "p13-iac-compatibility-v1" in journey_profiles, "Terraform journey must be scoped to P13"
+    assert set(journey_profiles) <= valid_profiles, f"{journey_id} unknown journey profile"
     assert isinstance(journey["recommendation"], str) and journey["recommendation"]
     candidates = journey["candidates"]
     assert candidates, f"{journey_id} has no candidates"
@@ -60,6 +67,10 @@ for journey in doc["journeys"]:
             profiles = candidate.get("profiles")
             assert profiles, f"{cid} in_product_profile without profiles"
             assert set(profiles) <= valid_profiles, f"{cid} unknown profile"
+            if journey_id == "terraform":
+                # Terraform candidates inherit the native TestLab parent while
+                # the declared journey itself is scoped to the P13 profile.
+                assert set(profiles) <= {"p13-iac-compatibility-v1", "native-rust-testlab"}, f"{cid} escapes P13 scope"
         else:
             assert "profiles" not in candidate, f"{cid} profiles set while in_product_profile is false"
 

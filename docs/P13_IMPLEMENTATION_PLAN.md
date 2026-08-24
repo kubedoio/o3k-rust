@@ -3,12 +3,13 @@
 ## Product objective
 
 Existing OpenStack Terraform/OpenTofu configurations that use the resources
-declared by the `p13-iac-compatibility-v1` profile should be able to target
-O3K through the standard, unmodified `terraform-provider-openstack` provider
-while all resulting cloud resources remain canonical O3K resources and all
-OpenStack concepts remain compatibility projections. Exact Terraform attribute
-subsets for each resource are prospective and will be frozen in P13.1 provider
-contract discovery.
+listed by the `p13-iac-compatibility-v1` profile and the attribute subsets
+frozen by the applicable provider-contract discovery gate should be able to
+target O3K through the standard, unmodified `terraform-provider-openstack`
+provider while all resulting cloud resources remain canonical O3K resources
+and all OpenStack concepts remain compatibility projections. Exact Terraform
+attribute subsets are prospective and are frozen by P13.1 for core resources
+and by the equivalent P13.3/P13.4 gates for later resource groups.
 
 ## Architecture
 
@@ -54,22 +55,25 @@ terraform-provider-openstack  (unmodified upstream v3.4.0)
 
 - Real upstream `terraform-provider-openstack` loaded by real OpenTofu
 - Real authentication/catalog/discovery through O3K's Keystone-compatible API
-- Produce a frozen behavioral contract for every P13 target resource:
+- Produce a frozen behavioral contract for the P13.1 core target resources:
   minimal HCL, exact HTTP call traces, field/filter requirements, expected
   status codes, polling behavior, import/read patterns, microversion
   negotiation, error/retry behavior
 - No fake provider
 - Verify data source reads (`openstack_images_image_v2`,
   `openstack_compute_flavor_v2`)
-- The behavioral contract is the evidence baseline for P13.2+ implementation
+- The behavioral contract is the evidence baseline for P13.2 implementation.
+  P13.3 and P13.4 have mandatory, equivalent discovery gates immediately before
+  their implementation; they must freeze their advanced-network and storage
+  targets before runtime work in those phases begins.
 
 ### P13.2 — Core Image/Compute/Network IaC lifecycle
 
 - `openstack_compute_keypair_v2` create/read/delete
 - `openstack_networking_network_v2` create/read/update/delete
-- `openstack_networking_subnet_v2` create/read/delete
-- `openstack_networking_port_v2` create/read/delete
-- `openstack_compute_instance_v2` create/read/delete/start/stop
+- `openstack_networking_subnet_v2` create/read/update/delete
+- `openstack_networking_port_v2` create/read/update/delete
+- `openstack_compute_instance_v2` create/read/update/delete/start/stop/reboot
 - Terraform OpenTofu apply/plan/destroy lifecycle for each resource for the
   bounded attribute subset frozen in P13.1
 - State file verification

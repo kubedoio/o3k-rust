@@ -1,7 +1,7 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: 519517e5bd217b08ba1b5e6957f996040fd8fbac
-updated_at: 2026-08-10T00:00:00Z
+source_commit: 9a56859dedcacabe977a0a683535cbed8cf4787f
+updated_at: 2026-08-24T00:00:00Z
 release_context: >-
   The first native alpha candidate v0.2.0-alpha.1 at
   952dcf9c4a1ae958996e4ae9444763e5524eddc5 is rejected and permanently
@@ -262,7 +262,7 @@ profiles:
       IaC compatibility. Architecture and contracts defined in ADR-0175 and
       SPEC-0032 (both Proposed). Runtime implementation not yet authorized.
       P13.1+ implementation requires human ADR/SPEC acceptance first.
-    source_commit: 38b7bfa6023000b4ca916737616e6a03778a1791
+    source_commit: 9a56859dedcacabe977a0a683535cbed8cf4787f
     portable_evidence:
       - name: adr-0175-proposed
         state: not-proven
@@ -285,7 +285,8 @@ profiles:
       extends native-rust-testlab but does not alter its release gate.
     blockers:
       - human architecture/security acceptance of ADR-0175 and SPEC-0032
-      - P13.1 provider contract discovery for every target resource
+      - P13.1 provider contract discovery for core target resources
+      - equivalent provider contract discovery gates before P13.3/P13.4 runtime work
       - P13.2-P13.7 implementation evidence as defined in SPEC-0032
     next_evidence_action: >-
       After ADR/SPEC acceptance, execute P13.1: real provider + OpenTofu

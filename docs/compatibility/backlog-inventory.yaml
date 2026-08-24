@@ -1053,6 +1053,7 @@
     {
       "id": "terraform",
       "name": "Terraform OpenStack provider workflows",
+      "profiles": ["p13-iac-compatibility-v1"],
       "client": "terraform-provider-openstack v3.4.0 with Terraform CLI",
       "recommendation": "P13 declared journey (P13.2 initial slice). When started: plain terraform apply/plan/destroy with keypair/flavor/image/network/subnet/port/instance resources (no router/FIP/security group), surfacing the field and filter gaps recorded below.",
       "candidates": [

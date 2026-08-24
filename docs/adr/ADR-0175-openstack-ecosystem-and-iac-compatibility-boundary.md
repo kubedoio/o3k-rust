@@ -37,8 +37,9 @@ Kernel authority.
 The next ecosystem milestone is Infrastructure as Code (IaC) compatibility.
 Terraform and OpenTofu are the dominant tools for managing cloud infrastructure
 in the OpenStack ecosystem. Existing OpenStack Terraform/OpenTofu configurations
-that use the resources and attributes declared by the
-`p13-iac-compatibility-v1` profile should be able to target O3K through the
+that use the resources listed by the `p13-iac-compatibility-v1` profile and
+the attribute subsets frozen by its provider-contract discovery gates should
+be able to target O3K through the
 standard, unmodified `terraform-provider-openstack` provider while all resulting
 cloud resources remain canonical O3K resources and all OpenStack concepts remain
 compatibility projections.
@@ -171,8 +172,8 @@ follows:
 | `openstack_networking_port_v2` | Canonical endpoint/port resource | One-to-one |
 | `openstack_networking_secgroup_v2` | Canonical NetworkPolicy (projection) | Compatibility mapping |
 | `openstack_networking_secgroup_rule_v2` | Canonical NetworkPolicy rule (projection) | Compatibility mapping |
-| `openstack_networking_router_v2` | AddressRealm gateway/route (projection) | Compatibility mapping; full lifecycle identity TBD in P13.1 |
-| `openstack_networking_router_interface_v2` | Route/endpoint (projection) | Compatibility mapping; TBD in P13.1 |
+| `openstack_networking_router_v2` | AddressRealm gateway/route (projection) | Compatibility mapping; full lifecycle identity TBD in the P13.3 discovery gate |
+| `openstack_networking_router_interface_v2` | Route/endpoint (projection) | Compatibility mapping; TBD in the P13.3 discovery gate |
 | `openstack_networking_floatingip_v2` | Canonical PublicAddress resource | One-to-one |
 
 New canonical O3K domain concepts (NeutronRouter, SecurityGroup, FloatingIp)
@@ -182,7 +183,8 @@ For Neutron router and router-interface, the compatibility projection has
 durable identity and lifecycle semantics that do not map one-to-one to any
 single existing O3K canonical resource. The exact mapping (persistent
 compatibility-only state vs. future canonical L3 Gateway/Router resource) must
-be frozen in P13.1 provider contract discovery before P13.3 implementation.
+be frozen by the mandatory P13.3 provider-contract discovery gate before
+implementation.
 
 For subnet, the one-to-one mapping to an AddressRealm/subnet is the target, but
 the lifecycle/cardinality must be verified against real provider behavior in
@@ -247,7 +249,8 @@ The client must never depend on the O3K native Operation API. A `202` where
 it occurs is still a standard OpenStack `202` with the resource ID and
 initial status in the body, not an O3K Operation reference.
 
-Exact per-operation status codes belong in the P13.1 behavioral contract.
+Exact per-operation status codes belong in the applicable provider-contract
+discovery gate.
 This ADR does not freeze a generic `200/201` rule.
 
 #### Idempotency boundary — internal execution vs. client-transport guarantees
