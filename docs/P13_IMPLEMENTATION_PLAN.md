@@ -2,10 +2,12 @@
 
 ## Product objective
 
-Existing OpenStack Terraform/OpenTofu configurations should be able to target
-O3K through the standard, unmodified `terraform-provider-openstack` provider
-while all resulting cloud resources remain canonical O3K resources and all
-OpenStack concepts remain compatibility projections.
+Existing OpenStack Terraform/OpenTofu configurations that use the resources
+and attributes declared by the `p13-iac-compatibility-v1` profile should be
+able to target O3K through the standard, unmodified
+`terraform-provider-openstack` provider while all resulting cloud resources
+remain canonical O3K resources and all OpenStack concepts remain compatibility
+projections.
 
 ## Architecture
 

@@ -368,24 +368,24 @@ resources. Evidence includes Terraform plan/apply output and state file
 contents showing correct resource IDs and attributes. Provider compatibility
 verified at `provider-partial` minimum.
 
-### Tier 4 — Advanced network (P13.3)
+### P13.3 — Advanced network
 OpenTofu can manage security groups, routers, and floating IPs through the
 OpenStack compatibility projection. Evidence includes Terraform lifecycle
 output and state verification.
 
-### Tier 5 — Storage (P13.4)
+### P13.4 — Storage
 OpenTofu can manage volumes and volume attachments through the OpenStack
 compatibility projection. Evidence includes Terraform lifecycle output.
 
-### Tier 6 — State convergence (P13.5)
+### P13.5 — State convergence
 OpenTofu refresh, import, drift detection, destroy-recreate, and
 retry/replay semantics are verified.
 
-### Tier 7 — Multi-project security (P13.6)
+### P13.6 — Multi-project security
 Two independent OpenTofu projects targeting separate O3K projects demonstrate
 isolation. Restart/failure matrix proves safety.
 
-### Tier 8 — Full-stack acceptance (P13.7)
+### P13.7 — Full-stack acceptance
 Real-host evidence with the complete IaC journey. Product profile and
 compatibility manifest updated to reflect implemented/verified status.
 

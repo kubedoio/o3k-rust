@@ -24,7 +24,7 @@ profiles:
       - network-neutron-compatibility
       - volume-cinder-compatibility
       - iam
-      - natural-resource-ownership
+      - canonical-resource-authority
       - durable-operations
       - reconciliation
     external_hosted_services: []

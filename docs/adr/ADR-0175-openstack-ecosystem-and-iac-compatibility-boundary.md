@@ -19,6 +19,7 @@ Related decisions and specifications:
 - [ADR-0173 — Native O3K Resource API and Resource Model](ADR-0173-native-o3k-resource-api-and-resource-model.md)
 - [ADR-0174 — Service Manifest and Resource Provider/Controller Architecture](ADR-0174-service-manifest-and-resource-provider-controller.md)
 - [SPEC-0020 — Keystone trust, catalog, and auth context](../specs/SPEC-0020-keystone-trust-catalog-and-auth-context.md)
+- [SPEC-0021 — Cross-service workflows and compensation](../specs/SPEC-0021-cross-service-workflows-and-compensation.md)
 - [SPEC-0022 — Service API baseline and evidence gates](../specs/SPEC-0022-service-api-baseline-and-evidence-gates.md)
 - [SPEC-0024 — Product profiles and claims](../specs/SPEC-0024-product-profiles-and-claims.md)
 - [SPEC-0025 — Rust rewrite and architecture convergence](../specs/SPEC-0025-rust-rewrite-and-architecture-convergence.md)

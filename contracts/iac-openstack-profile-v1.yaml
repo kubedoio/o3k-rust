@@ -374,5 +374,8 @@ compatibility_rules:
   - Unsupported operations must fail closed (4xx error).
   - No operation may be advertised as implemented without the required
     evidence tier.
-  - Synchronous HTTP request/response patterns map onto O3K's durable
-    operation model. Create may return 202 Accepted with operation reference.
+  - O3K durable Operations remain internal. The OpenStack compatibility layer
+    exposes standard OpenStack resource lifecycle semantics. Create returns
+    `200`/`201` with the resource ID and initial status; the provider polls
+    `GET /{resource}/{id}` for status transitions. The O3K native Operation
+    API must never be exposed to the provider.
