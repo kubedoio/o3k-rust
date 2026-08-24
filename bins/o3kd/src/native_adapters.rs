@@ -2836,6 +2836,42 @@ mod native_compute_tests {
     }
 
     #[tokio::test]
+    async fn native_http_route_shapes_fail_closed_without_descriptor_dispatch() {
+        let (router, _, provider, _) = setup().await;
+        for (method, uri) in [
+            ("GET", "/future/servers"),
+            ("GET", "/compute/servers/extra/path"),
+            ("GET", "/compute/servers/%2Fambiguous"),
+            ("POST", "/compute/servers/known-id"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("authorization", "Bearer project-a")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND
+                        | StatusCode::METHOD_NOT_ALLOWED
+                        | StatusCode::BAD_REQUEST
+                        | StatusCode::FORBIDDEN
+                ),
+                "unexpected status for {method} {uri}: {}",
+                response.status()
+            );
+        }
+        assert_eq!(provider.instance_count(), 0);
+    }
+
+    #[tokio::test]
     async fn native_compute_rejects_foreign_network_before_provider_mutation() {
         let (router, store, provider, foreign_port) = setup().await;
         let body = serde_json::json!({

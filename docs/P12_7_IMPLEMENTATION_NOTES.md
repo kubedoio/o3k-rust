@@ -45,6 +45,7 @@ advertised.
 | Generation/CAS and authorization-before-side-effect | `o3k-store` SQLite/PostgreSQL P12.4 lifecycle and race tests; `native_compute_rejects_foreign_network_before_provider_mutation`; resolvable durable UUID port references are owner-checked before native Compute mutation |
 | Malformed JSON | `native_adapters::native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation` |
 | Oversized JSON | `native_adapters::native_http_oversized_body_is_rejected_before_provider_mutation` exercises the advertised 1 MiB Axum body limit and proves HTTP 413 with zero provider mutation |
+| Concrete route fail-closed behavior | `native_adapters::native_http_route_shapes_fail_closed_without_descriptor_dispatch` exercises future, extra-segment, encoded, and wrong-method routes with no provider mutation |
 | Update semantics | NOT APPLICABLE: no native generic update route is advertised in SPEC-0030 v1 |
 
 ## Controller and extension security (SPEC-0031 §22)
