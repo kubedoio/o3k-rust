@@ -301,6 +301,7 @@ fn compile_realm_plan(
 ) -> Result<NamespacedRoutedFabricPlan, DriverError> {
     let address_realm = AddressRealm {
         id: realm.id,
+        network_id: Uuid::from_u128(0xfeed),
         project_id: realm.project_id.clone(),
         prefix: realm.prefix,
         overlapping_prefixes: true,

@@ -652,6 +652,7 @@ mod tests {
             project_id: "project-a".into(),
             realm: AddressRealm {
                 id: Uuid::from_u128(2),
+                network_id: Uuid::from_u128(1),
                 project_id: "project-a".into(),
                 prefix: prefix("10.0.0.0", 24),
                 overlapping_prefixes: false,
@@ -660,6 +661,7 @@ mod tests {
             endpoints: vec![EndpointIntent {
                 id: Uuid::from_u128(3),
                 project_id: "project-a".into(),
+                realm_id: Uuid::from_u128(2),
                 mac: "02:00:00:00:00:03".into(),
                 fixed_ip: Ipv4Addr::new(10, 0, 0, 3),
                 generation: 1,

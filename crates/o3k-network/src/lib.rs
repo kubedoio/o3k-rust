@@ -170,6 +170,7 @@ mod p9_plan_tests {
             project_id: "project-a".to_owned(),
             realm: AddressRealm {
                 id: Uuid::from_u128(2),
+                network_id: id,
                 project_id: "project-a".to_owned(),
                 prefix: prefix("10.0.0.0", 24),
                 overlapping_prefixes: false,
@@ -178,6 +179,7 @@ mod p9_plan_tests {
             endpoints: vec![EndpointIntent {
                 id: Uuid::from_u128(3),
                 project_id: "project-a".to_owned(),
+                realm_id: Uuid::from_u128(2),
                 mac: "02:00:00:00:00:03".to_owned(),
                 fixed_ip: Ipv4Addr::new(10, 0, 0, 3),
                 generation: 4,
@@ -343,6 +345,7 @@ mod p9_plan_tests {
     fn plan_rejects_overlap_before_provider_mutation() {
         let existing = AddressRealm {
             id: Uuid::from_u128(7),
+            network_id: Uuid::from_u128(70),
             project_id: "project-b".to_owned(),
             prefix: prefix("10.0.0.0", 16),
             overlapping_prefixes: false,
@@ -364,6 +367,7 @@ mod p9_plan_tests {
     fn geneve_capability_allows_overlap_only_when_realm_and_provider_opt_in() {
         let existing = AddressRealm {
             id: Uuid::from_u128(7),
+            network_id: Uuid::from_u128(70),
             project_id: "project-b".to_owned(),
             prefix: prefix("10.0.0.0", 16),
             overlapping_prefixes: false,
@@ -396,6 +400,7 @@ mod p9_plan_tests {
                 &missing_encapsulation,
                 &[AddressRealm {
                     id: Uuid::from_u128(7),
+                    network_id: Uuid::from_u128(70),
                     project_id: "project-b".to_owned(),
                     prefix: prefix("10.0.0.0", 16),
                     overlapping_prefixes: false,
@@ -646,6 +651,7 @@ mod p9_plan_tests {
         duplicate_address.endpoints.push(EndpointIntent {
             id: Uuid::from_u128(99),
             project_id: duplicate_address.project_id.clone(),
+            realm_id: duplicate_address.realm.id,
             mac: "02:00:00:00:00:99".to_owned(),
             fixed_ip: Ipv4Addr::new(10, 0, 0, 3),
             generation: 1,
@@ -666,6 +672,7 @@ mod p9_plan_tests {
         duplicate_mac.endpoints.push(EndpointIntent {
             id: Uuid::from_u128(99),
             project_id: duplicate_mac.project_id.clone(),
+            realm_id: duplicate_mac.realm.id,
             mac: duplicate_mac.endpoints[0].mac.clone(),
             fixed_ip: Ipv4Addr::new(10, 0, 0, 99),
             generation: 1,
@@ -3905,6 +3912,7 @@ pub fn compile_attachment_plan(
         project_id: project_id.to_owned(),
         realm: AddressRealm {
             id: realm_id,
+            network_id: endpoint_id,
             project_id: project_id.to_owned(),
             prefix,
             overlapping_prefixes: false,
@@ -3913,6 +3921,7 @@ pub fn compile_attachment_plan(
         endpoints: vec![o3k_domain::EndpointIntent {
             id: endpoint_id,
             project_id: project_id.to_owned(),
+            realm_id,
             mac: mac.to_owned(),
             fixed_ip,
             generation: 1,
@@ -5014,6 +5023,7 @@ impl NetworkService {
             project_id: project_id.to_owned(),
             realm: AddressRealm {
                 id: network_id,
+                network_id,
                 project_id: project_id.to_owned(),
                 prefix,
                 overlapping_prefixes: false,
@@ -5032,6 +5042,7 @@ impl NetworkService {
                 .map(|port| o3k_domain::EndpointIntent {
                     id: port.id,
                     project_id: port.project_id,
+                    realm_id: port.subnet_id.unwrap_or(network_id),
                     mac: port.mac_address,
                     fixed_ip: port.fixed_ip,
                     generation: 1,
