@@ -374,14 +374,16 @@ everything exists before the security evidence gate.
 
 ## P13 — Ecosystem Compatibility & Infrastructure as Code — implementation active
 
-P13 makes O3K targetable by existing OpenStack Terraform/OpenTofu configurations
-through the standard, unmodified `terraform-provider-openstack` provider, while
-all resulting cloud resources remain canonical O3K resources and all OpenStack
-concepts remain compatibility projections.
+P13 targets configurations using the resources listed by
+`p13-iac-compatibility-v1` and the attribute subsets frozen by its staged
+provider-contract discovery gates. They use the standard, unmodified
+`terraform-provider-openstack` provider, while all resulting cloud resources
+remain canonical O3K resources and all OpenStack concepts remain compatibility
+projections.
 
 The P13 architecture is defined by ADR-0175 and SPEC-0032. Those sources are
-Proposed and require human architecture/security acceptance before runtime
-implementation begins.
+Accepted as of 2026-08-24. Acceptance authorizes P13.1 provider-contract
+discovery; runtime compatibility claims remain gated by SPEC-0032 evidence.
 
 ### P13.0 — Architecture, compatibility contracts, IaC profile (this phase)
 

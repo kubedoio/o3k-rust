@@ -34,11 +34,15 @@ defined in each source.
 | Service Manifest, registry evolution, namespace ownership, external controller/service-principal/delegation/composition model | `docs/adr/ADR-0174-service-manifest-and-resource-provider-controller.md`, `docs/specs/SPEC-0031-service-extension-controller-v1.md`, `contracts/service-manifest-v1.schema.json`, `contracts/controller-protocol-v1.md` |
 | Separation of native service identity from OpenStack service/catalog/API compatibility metadata | `contracts/openstack-compatibility-projection-v1.schema.json` under ADR-0174/SPEC-0031; actual advertisement remains gated by SPEC-0022 and compatibility manifests |
 
-## Proposed P13 sources — not active authority until human approval
+## Accepted P13 sources — active architecture authority
 
-The following documents are proposed P13 sources, not active architecture
-authority while their status remains `Proposed`. P13.1+ runtime implementation
-is not authorized until human architecture/security acceptance is recorded.
+The following P13 sources were accepted on 2026-08-24 through explicit human
+architecture/security approval by the project-requester, after review findings
+were resolved at baseline `7b4a352dd719607e72bfb0cad0749c38fe54686e`.
+They are active architecture authority.
+Acceptance authorizes P13.1 provider-contract discovery but does not create
+runtime compatibility or product-support evidence; those claims remain gated
+by SPEC-0032.
 
 | Subject | Normative source |
 |---|---|

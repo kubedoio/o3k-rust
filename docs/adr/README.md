@@ -182,9 +182,9 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0170](ADR-0170-namespaced-routed-edge-fabric.md) (superseded by accepted ADR-0171)
 - [ADR-0171](ADR-0171-addressrealm-encapsulated-edge-fabric.md) (accepted)
 - [ADR-0172](ADR-0172-configurable-edge-fabric-transport-ports.md) (accepted)
-- [ADR-0173](ADR-0173-native-o3k-resource-api-and-resource-model.md) (proposed)
-- [ADR-0174](ADR-0174-service-manifest-and-resource-provider-controller.md) (proposed)
-- [ADR-0175](ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md) (proposed)
+- [ADR-0173](ADR-0173-native-o3k-resource-api-and-resource-model.md) (accepted)
+- [ADR-0174](ADR-0174-service-manifest-and-resource-provider-controller.md) (accepted)
+- [ADR-0175](ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md) (accepted)
 
 ## Required audit
 

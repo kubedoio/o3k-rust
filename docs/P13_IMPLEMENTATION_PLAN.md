@@ -33,11 +33,11 @@ terraform-provider-openstack  (unmodified upstream v3.4.0)
 ## Authoritative documents
 
 - **ADR-0175** — OpenStack Ecosystem and Infrastructure-as-Code Compatibility
-  Boundary (Proposed)
+  Boundary (Accepted 2026-08-24)
 - **SPEC-0032** — OpenStack Terraform/OpenTofu Compatibility Profile v1
-  (Proposed)
+  (Accepted 2026-08-24)
 - **contracts/iac-openstack-profile-v1.yaml** — Machine-readable IaC profile
-  contract (Proposed)
+  contract (Accepted 2026-08-24)
 
 ## Phase sequence
 

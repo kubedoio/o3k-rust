@@ -1,12 +1,20 @@
 # ADR-0175 — OpenStack Ecosystem and Infrastructure-as-Code Compatibility Boundary
 
-Status: Proposed
+Status: Accepted
 Date: 2026-08-24
+Human-approval: project-requester (2026-08-24, explicit architecture/security approval recorded in task instruction; reviewed baseline 7b4a352dd719607e72bfb0cad0749c38fe54686e)
 Supersedes: none
 Superseded-by: none
 Affected-services: governance, cloud-kernel, identity, image, compute, network, volume, api, compatibility
 
 Related issue: P13 — Ecosystem Compatibility & Infrastructure as Code
+
+This ADR was accepted by explicit human architecture/security approval on
+2026-08-24 after the P13.0 review findings were resolved at baseline
+`7b4a352dd719607e72bfb0cad0749c38fe54686e`.
+Acceptance activates the architecture boundary only; runtime compatibility and
+product claims remain gated by SPEC-0032 and profile-specific executable
+evidence.
 
 Related decisions and specifications:
 

@@ -1,5 +1,5 @@
 schema_version: 1
-status: proposed
+status: accepted
 normative_adr: docs/adr/ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md
 normative_spec: docs/specs/SPEC-0032-openstack-terraform-opentofu-compatibility-profile-v1.md
 
@@ -7,7 +7,7 @@ profile:
   id: p13-iac-compatibility-v1
   product: O3K Cloud OS
   parent_profile: native-rust-testlab
-  maturity: proposed
+  maturity: specified
   user_outcome: >
     Existing OpenStack Terraform/OpenTofu configurations that use the resources
     listed by this profile and the attribute subsets frozen by the applicable

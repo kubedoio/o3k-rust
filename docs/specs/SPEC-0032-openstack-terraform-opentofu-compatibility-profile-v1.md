@@ -1,9 +1,15 @@
 # SPEC-0032 — OpenStack Terraform/OpenTofu Compatibility Profile v1
 
-Status: Proposed
+Status: Accepted
 
-Related decision: [ADR-0175](../adr/ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md)
+Related decision: [ADR-0175](../adr/ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md) (human architecture/security approval 2026-08-24; this spec derives acceptance from that decision; reviewed baseline `7b4a352dd719607e72bfb0cad0749c38fe54686e`)
 Related contract: [IaC OpenStack profile v1](../../contracts/iac-openstack-profile-v1.yaml)
+
+This specification derives acceptance from ADR-0175. Acceptance authorizes
+P13.1 provider-contract discovery; it does not claim that any Terraform
+resource lifecycle is implemented or provider-verified. P13.2+ runtime work and
+all compatibility claims remain gated by the staged evidence requirements in
+this specification.
 
 Primary compatibility reference: OpenStack 2026.1 Gazpacho
 Backward compatibility reference: OpenStack 2025.2 Flamingo where declared

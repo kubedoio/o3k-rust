@@ -1,6 +1,6 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: 9a56859dedcacabe977a0a683535cbed8cf4787f
+source_commit: 7b4a352dd719607e72bfb0cad0749c38fe54686e
 updated_at: 2026-08-24T00:00:00Z
 release_context: >-
   The first native alpha candidate v0.2.0-alpha.1 at
@@ -258,21 +258,23 @@ profiles:
       - generic cross-cloud connectivity
   p13-iac-compatibility-v1:
     implementation_state: >-
-      Proposed. This profile extends native-rust-testlab for Terraform/OpenTofu
-      IaC compatibility. Architecture and contracts defined in ADR-0175 and
-      SPEC-0032 (both Proposed). Runtime implementation not yet authorized.
-      P13.1+ implementation requires human ADR/SPEC acceptance first.
-    source_commit: 9a56859dedcacabe977a0a683535cbed8cf4787f
+      Specified. This profile extends native-rust-testlab for Terraform/OpenTofu
+      IaC compatibility. ADR-0175, SPEC-0032, and the machine-readable profile
+      contract were accepted on 2026-08-24 against reviewed baseline
+      7b4a352dd719607e72bfb0cad0749c38fe54686e.
+      P13.1 provider-contract discovery is authorized but has not started; no
+      Terraform lifecycle or runtime compatibility evidence is claimed.
+    source_commit: 7b4a352dd719607e72bfb0cad0749c38fe54686e
     portable_evidence:
-      - name: adr-0175-proposed
-        state: not-proven
-        note: ADR-0175 is Proposed; not accepted.
-      - name: spec-0032-proposed
-        state: not-proven
-        note: SPEC-0032 is Proposed; not accepted.
+      - name: adr-0175-accepted
+        state: passed
+        note: Human architecture/security acceptance recorded 2026-08-24 against 7b4a352dd719607e72bfb0cad0749c38fe54686e.
+      - name: spec-0032-accepted
+        state: passed
+        note: SPEC-0032 derives acceptance from ADR-0175.
       - name: iac-openstack-profile-contract
-        state: not-proven
-        note: Profile contract is Proposed; no runtime evidence exists.
+        state: passed
+        note: Accepted contract passes repository governance validation; this is not runtime evidence.
     protected_component_evidence:
       - name: iac-provider-harness
         state: not-executed
@@ -284,13 +286,12 @@ profiles:
       Non-blocking for the first native alpha (v0.2.0-alpha.1). This profile
       extends native-rust-testlab but does not alter its release gate.
     blockers:
-      - human architecture/security acceptance of ADR-0175 and SPEC-0032
       - P13.1 provider contract discovery for core target resources
       - equivalent provider contract discovery gates before P13.3/P13.4 runtime work
       - P13.2-P13.7 implementation evidence as defined in SPEC-0032
     next_evidence_action: >-
-      After ADR/SPEC acceptance, execute P13.1: real provider + OpenTofu
-      behavioral contract discovery.
+      Execute P13.1: real provider + OpenTofu behavioral contract discovery for
+      the core target resources.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)
