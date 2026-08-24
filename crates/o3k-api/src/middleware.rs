@@ -9,6 +9,47 @@ use axum::{
 
 use crate::placement::parse_microversion;
 
+/// Returns (parsed_version, malformed).
+fn parse_service_version<'a>(
+    headers: &'a axum::http::HeaderMap,
+    service: &str,
+) -> (Option<&'a str>, bool) {
+    let os_api_ver = headers
+        .get("OpenStack-API-Version")
+        .and_then(|h| h.to_str().ok());
+
+    let mut version: Option<&str> = None;
+    let mut malformed = false;
+
+    if let Some(val) = os_api_ver {
+        for part in val.split(',') {
+            let tokens: Vec<&str> = part.split_whitespace().collect();
+            if tokens.len() == 2 && tokens[0].eq_ignore_ascii_case(service) {
+                version = Some(tokens[1]);
+                break;
+            } else if tokens.len() != 2
+                && !part.trim().is_empty()
+                && part.trim().to_lowercase().contains(service)
+            {
+                malformed = true;
+            }
+        }
+    }
+
+    (version, malformed)
+}
+
+fn set_compute_vary(response: &mut axum::http::HeaderMap) {
+    response.insert(
+        "Vary",
+        HeaderValue::from_static("OpenStack-API-Version, X-OpenStack-Nova-API-Version"),
+    );
+}
+
+fn set_placement_vary(response: &mut axum::http::HeaderMap) {
+    response.insert("Vary", HeaderValue::from_static("OpenStack-API-Version"));
+}
+
 pub(crate) async fn microversion_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -20,31 +61,12 @@ pub(crate) async fn microversion_middleware(
             return next.run(req).await;
         }
 
-        let headers = req.headers();
-        let os_api_ver = headers
-            .get("OpenStack-API-Version")
-            .and_then(|h| h.to_str().ok());
-        let nova_api_ver = headers
+        let (mut compute_version, malformed) = parse_service_version(req.headers(), "compute");
+
+        let nova_api_ver = req
+            .headers()
             .get("X-OpenStack-Nova-API-Version")
             .and_then(|h| h.to_str().ok());
-
-        let mut compute_version: Option<&str> = None;
-        let mut malformed = false;
-
-        if let Some(val) = os_api_ver {
-            for part in val.split(',') {
-                let tokens: Vec<&str> = part.split_whitespace().collect();
-                if tokens.len() == 2 && tokens[0].eq_ignore_ascii_case("compute") {
-                    compute_version = Some(tokens[1]);
-                    break;
-                } else if tokens.len() != 2
-                    && !part.trim().is_empty()
-                    && part.trim().to_lowercase().contains("compute")
-                {
-                    malformed = true;
-                }
-            }
-        }
 
         if compute_version.is_none()
             && !malformed
@@ -72,10 +94,7 @@ pub(crate) async fn microversion_middleware(
                 "X-OpenStack-Nova-API-Version",
                 HeaderValue::from_static("2.1"),
             );
-            resp.headers_mut().insert(
-                "Vary",
-                HeaderValue::from_static("OpenStack-API-Version, X-OpenStack-Nova-API-Version"),
-            );
+            set_compute_vary(resp.headers_mut());
             return resp;
         }
 
@@ -108,10 +127,7 @@ pub(crate) async fn microversion_middleware(
                 "X-OpenStack-Nova-API-Version",
                 HeaderValue::from_static("2.1"),
             );
-            resp.headers_mut().insert(
-                "Vary",
-                HeaderValue::from_static("OpenStack-API-Version, X-OpenStack-Nova-API-Version"),
-            );
+            set_compute_vary(resp.headers_mut());
             return resp;
         }
 
@@ -135,10 +151,7 @@ pub(crate) async fn microversion_middleware(
                 HeaderValue::from_static("2.1"),
             );
         }
-        response.headers_mut().insert(
-            "Vary",
-            HeaderValue::from_static("OpenStack-API-Version, X-OpenStack-Nova-API-Version"),
-        );
+        set_compute_vary(response.headers_mut());
         return response;
     }
 
@@ -147,28 +160,7 @@ pub(crate) async fn microversion_middleware(
             return next.run(req).await;
         }
 
-        let headers = req.headers();
-        let os_api_ver = headers
-            .get("OpenStack-API-Version")
-            .and_then(|h| h.to_str().ok());
-
-        let mut placement_version: Option<&str> = None;
-        let mut malformed = false;
-
-        if let Some(val) = os_api_ver {
-            for part in val.split(',') {
-                let tokens: Vec<&str> = part.split_whitespace().collect();
-                if tokens.len() == 2 && tokens[0].eq_ignore_ascii_case("placement") {
-                    placement_version = Some(tokens[1]);
-                    break;
-                } else if tokens.len() != 2
-                    && !part.trim().is_empty()
-                    && part.trim().to_lowercase().contains("placement")
-                {
-                    malformed = true;
-                }
-            }
-        }
+        let (placement_version, malformed) = parse_service_version(req.headers(), "placement");
 
         if malformed {
             let body = serde_json::json!({
@@ -182,8 +174,7 @@ pub(crate) async fn microversion_middleware(
                 "OpenStack-API-Version",
                 HeaderValue::from_static("placement 1.0"),
             );
-            resp.headers_mut()
-                .insert("Vary", HeaderValue::from_static("OpenStack-API-Version"));
+            set_placement_vary(resp.headers_mut());
             return resp;
         }
 
@@ -217,8 +208,7 @@ pub(crate) async fn microversion_middleware(
                     "OpenStack-API-Version",
                     HeaderValue::from_static("placement 1.28"),
                 );
-                resp.headers_mut()
-                    .insert("Vary", HeaderValue::from_static("OpenStack-API-Version"));
+                set_placement_vary(resp.headers_mut());
                 return resp;
             }
         }
@@ -229,9 +219,7 @@ pub(crate) async fn microversion_middleware(
                 .headers_mut()
                 .insert("OpenStack-API-Version", header_val);
         }
-        response
-            .headers_mut()
-            .insert("Vary", HeaderValue::from_static("OpenStack-API-Version"));
+        set_placement_vary(response.headers_mut());
         return response;
     }
 

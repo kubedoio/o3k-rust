@@ -1771,7 +1771,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower",
- "tracing",
  "uuid",
 ]
 
