@@ -1,0 +1,91 @@
+schema_version: 1
+artifact_type: o3k-p13-2-managed-resource-requirements
+phase: p13.1c
+status: discovery
+source_provenance:
+  provider: terraform-provider-openstack/openstack-3.4.0
+  gophercloud: github.com/gophercloud/gophercloud/v2 v2.8.0
+  engine: OpenTofu 1.12.6
+  source_evidence: tests/p13_1/provider-managed-resource-source-evidence.md
+resources:
+  openstack_compute_keypair_v2:
+    attribute_subset:
+      required: [name, public_key]
+      computed_for_convergence: [id, fingerprint, region, user_id]
+      deferred: [private_key]
+      unsupported: [provider_generated_private_key]
+    operations:
+      create: {method: POST, path: /v2.1/{project_id}/os-keypairs, status: 200}
+      read: {method: GET, path: /v2.1/{project_id}/os-keypairs/{name}, status: 200}
+      delete: {method: DELETE, path: /v2.1/{project_id}/os-keypairs/{name}, status: 202}
+      update: {status: not_applicable, reason: provider_has_no_update}
+      import: {id: keypair_name, first_request: GET}
+    current_o3k: provider-unverified
+  openstack_networking_network_v2:
+    attribute_subset:
+      required: [name]
+      optional_bounded: [admin_state_up]
+      computed_for_convergence: [id, status, tenant_id, mtu, subnets]
+      deferred: [shared, external, provider_network_type, provider_physical_network, provider_segmentation_id]
+    operations:
+      create: {method: POST, path: /v2.0/networks, status: 201}
+      read: {method: GET, path: /v2.0/networks/{id}, status: 200}
+      update: {method: PUT, path: /v2.0/networks/{id}, status: 200}
+      delete: {method: DELETE, path: /v2.0/networks/{id}, status: 204}
+      import: {id: network_uuid, first_request: GET}
+    current_o3k: provider-unverified
+  openstack_networking_subnet_v2:
+    attribute_subset:
+      required: [network_id, cidr, ip_version]
+      optional_bounded: [name, gateway_ip, enable_dhcp]
+      computed_for_convergence: [id, tenant_id, allocation_pools, dns_nameservers, host_routes]
+      deferred: [allocation_pool, ipv6_address_mode, ipv6_ra_mode]
+    cardinality:
+      decision: unresolved
+      reason: provider permits multiple subnets; AddressRealm mapping requires an explicit accepted one-to-one or collection contract
+    operations:
+      create: {method: POST, path: /v2.0/subnets, status: 201}
+      read: {method: GET, path: /v2.0/subnets/{id}, status: 200}
+      update: {method: PUT, path: /v2.0/subnets/{id}, status: 200}
+      delete: {method: DELETE, path: /v2.0/subnets/{id}, status: 204}
+      import: {id: subnet_uuid, first_request: GET}
+    current_o3k: provider-unverified
+  openstack_networking_port_v2:
+    attribute_subset:
+      required: [network_id]
+      optional_bounded: [name, admin_state_up, fixed_ip, no_fixed_ip]
+      computed_for_convergence: [id, mac_address, fixed_ips, status, tenant_id]
+      deferred: [security_groups, device_id, device_owner, allowed_address_pairs, binding_profile]
+    operations:
+      create: {method: POST, path: /v2.0/ports, status: 201}
+      read: {method: GET, path: /v2.0/ports/{id}, status: 200}
+      update: {method: PUT, path: /v2.0/ports/{id}, status: 200}
+      delete: {method: DELETE, path: /v2.0/ports/{id}, status: 204}
+      import: {id: port_uuid, first_request: GET}
+    fixed_ip: provider_accepts_subnet_id_and_optional_ip_address
+    security_groups: deferred_to_p13.3
+    current_o3k: provider-unverified
+  openstack_compute_instance_v2:
+    attribute_subset:
+      required: [name, image_id, flavor_id, network.uuid]
+      optional_bounded: [key_pair, config_drive, metadata, user_data, power_state]
+      computed_for_convergence: [id, status, access_ip_v4, addresses, created, updated, tenant_id, flavor, image]
+      deferred: [personality, block_device, scheduler_hints, security_groups, floating_ip, availability_zone, user_data_secret_variants]
+    operations:
+      create: {method: POST, path: /v2.1/{project_id}/servers, status: 202}
+      poll: {method: GET, path: /v2.1/{project_id}/servers/{id}, terminal_success: [ACTIVE], terminal_failure: [ERROR, UNKNOWN]}
+      read: {method: GET, path: /v2.1/{project_id}/servers/{id}, status: 200}
+      update: {method: PUT, path: /v2.1/{project_id}/servers/{id}, status: 200, bounded: [name]}
+      actions: {method: POST, path: /v2.1/{project_id}/servers/{id}/action, verbs: [start, stop, reboot]}
+      delete: {method: DELETE, path: /v2.1/{project_id}/servers/{id}, status: 204}
+      import: {id: server_uuid, first_request: GET}
+    operation_authority: Nova wire state; never an O3K native Operation response
+    current_o3k: provider-unverified
+dependency_graph:
+  - [image_data_source, instance]
+  - [flavor_data_source, instance]
+  - [network, subnet]
+  - [network, port]
+  - [subnet, port]
+  - [port, instance]
+  - [keypair, instance]
