@@ -262,9 +262,12 @@ profiles:
       IaC compatibility. ADR-0175, SPEC-0032, and the machine-readable profile
       contract were accepted on 2026-08-24 against reviewed baseline
       7b4a352dd719607e72bfb0cad0749c38fe54686e.
-      P13.1 provider-contract discovery is authorized but has not started; no
-      Terraform lifecycle or runtime compatibility evidence is claimed.
-    source_commit: 7b4a352dd719607e72bfb0cad0749c38fe54686e
+      ADR-0176 and SPEC-0033 were accepted on 2026-08-24 against reviewed
+      proposal baseline 9b5a74d9e470278c77907a5c3ca22a56af4fe64a. P13.1
+      discovery is complete, but the canonical Network/AddressRealm runtime
+      separation, migration, and zero-realm reconstruction are not implemented.
+      No Terraform lifecycle or runtime compatibility evidence is claimed.
+    source_commit: 9b5a74d9e470278c77907a5c3ca22a56af4fe64a
     portable_evidence:
       - name: adr-0175-accepted
         state: passed
@@ -272,6 +275,12 @@ profiles:
       - name: spec-0032-accepted
         state: passed
         note: SPEC-0032 derives acceptance from ADR-0175.
+      - name: adr-0176-spec-0033-accepted
+        state: passed
+        note: >-
+          Canonical Network/AddressRealm lifecycle architecture accepted by
+          the project requester on 2026-08-24 against reviewed baseline
+          9b5a74d9e470278c77907a5c3ca22a56af4fe64a.
       - name: iac-openstack-profile-contract
         state: passed
         note: Accepted contract passes repository governance validation; this is not runtime evidence.
@@ -286,12 +295,13 @@ profiles:
       Non-blocking for the first native alpha (v0.2.0-alpha.1). This profile
       extends native-rust-testlab but does not alter its release gate.
     blockers:
-      - P13.1 provider contract discovery for core target resources
+      - P13.1F canonical Network/AddressRealm lifecycle implementation, persistence migration, and reconstruction
       - equivalent provider contract discovery gates before P13.3/P13.4 runtime work
       - P13.2-P13.7 implementation evidence as defined in SPEC-0032
     next_evidence_action: >-
-      Execute P13.1: real provider + OpenTofu behavioral contract discovery for
-      the core target resources.
+      Execute P13.1F: implement and validate canonical Network/AddressRealm
+      lifecycle separation, persistence migration, and zero-realm reconstruction;
+      then reassess P13.2 readiness.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)

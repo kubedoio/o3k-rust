@@ -1,11 +1,15 @@
 # SPEC-0033 — Canonical Network / AddressRealm lifecycle v1
 
-Status: Proposed
+Status: Accepted
+Decision-accepted: 2026-08-24
+Human-approval: project-requester (2026-08-24, explicit acceptance recorded in task instruction)
+Reviewed-proposal-baseline: 9b5a74d9e470278c77907a5c3ca22a56af4fe64a
 Decision: [ADR-0176](../adr/ADR-0176-canonical-network-and-addressrealm-lifecycle-separation.md)
 Applies-to: canonical network domain, store, API, network execution planning, P13 profile
 
-This proposed specification is architecture/contract authority only after human
-acceptance. It defines the target model; it does not authorize implementation.
+This specification derives acceptance from ADR-0176 and is active architecture
+and contract authority. It defines the target model; it does not claim runtime
+implementation or authorize P13.2 before P13.1F implementation and evidence.
 
 ## 1. Scope and invariants
 
@@ -179,6 +183,6 @@ multiple realms require a future explicit selection mechanism.
 
 Implementation must add domain invariant, authorization, migration, restart,
 reconstruction, dependency-deletion, provider-mapping cleanup, and P13
-conformance tests. Acceptance requires human approval of ADR-0176 and this SPEC;
-then P13.2 may implement the bounded lifecycle. Neither this Proposed SPEC nor
-P13 discovery advances runtime support claims.
+conformance tests. Acceptance of ADR-0176 and this SPEC activates the
+architecture; P13.2 remains gated on P13.1F implementation and evidence. This
+SPEC and P13 discovery do not themselves advance runtime support claims.

@@ -1,14 +1,16 @@
 schema_version: 1
 artifact_type: o3k-p13-2-managed-resource-requirements
 phase: p13.1e
-phase_closure: p13.1e-architecture-amendment-proposed
-status: discovery-blocked-pending-architecture-acceptance
+phase_closure: p13.1e-architecture-accepted
+status: discovery-blocked-pending-canonical-implementation
 architecture_amendment:
   adr: docs/adr/ADR-0176-canonical-network-and-addressrealm-lifecycle-separation.md
   spec: docs/specs/SPEC-0033-canonical-network-addressrealm-lifecycle-v1.md
-  status: proposed
+  status: accepted
+  reviewed_proposal_baseline: 9b5a74d9e470278c77907a5c3ca22a56af4fe64a
+  accepted_at: 2026-08-24
   implementation_authorized: false
-  p13_2_gate: human acceptance of ADR-0176 and SPEC-0033, followed by migration and restart evidence
+  p13_2_gate: P13.1F canonical-model implementation, migration, reconstruction, and evidence
 source_provenance:
   provider: terraform-provider-openstack/openstack-3.4.0
   gophercloud: github.com/gophercloud/gophercloud/v2 v2.8.0
@@ -55,7 +57,7 @@ resources:
       computed_for_convergence: [id, tenant_id, allocation_pools, dns_nameservers, host_routes]
       deferred: [allocation_pool, ipv6_address_mode, ipv6_ra_mode]
     cardinality:
-      decision: proposed-zero-to-many-addressrealms-owned-by-independent-network
+      decision: accepted-zero-to-many-addressrealms-owned-by-independent-network
       p13_v1_target: one subnet and one AddressPool per Network
       second_subnet_admission:
         invariant: reject before canonical or provider mutation
@@ -68,7 +70,7 @@ resources:
         - zero-or-one AddressRealm: smallest P13 change, less extensible
         - zero-or-many AddressRealms: preserves P11 realm identity and future multiple-subnet support
         - distinct canonical subnet resource: clean separation, larger new domain surface
-      required_authority_change: ADR-0176 and SPEC-0033 acceptance before runtime implementation
+      required_authority_change: satisfied by accepted ADR-0176 and SPEC-0033; runtime implementation remains P13.1F
     operations:
       create: {method: POST, path: /v2.0/subnets, status: 201}
       read: {method: GET, path: "/v2.0/subnets/{id}", status: 200}
@@ -143,8 +145,8 @@ architecture_decision:
   network_without_subnet:
     current_compatibility_projection: network_networks is independently persisted and can exist without network_subnets
     current_canonical_model: NetworkIntent.realm is mandatory; canonical intent reconstruction currently requires a subnet
-    decision: proposed-independent-network-zero-to-many-realms
-    p13_2_gate: human acceptance of ADR-0176/SPEC-0033 and implementation evidence
+    decision: accepted-independent-network-zero-to-many-realms
+    p13_2_gate: P13.1F implementation evidence and reconstruction/migration validation
   subnet_identity:
     current_compatibility_identity: independent SubnetRecord UUID
     address_realm_identity: independent stable UUID owned by exactly one Network; P13 v1 may project Subnet ID to Realm ID
@@ -156,4 +158,9 @@ architecture_decision:
     network_intent: mandatory single realm in crates/o3k-domain/src/network.rs
     compatibility_persistence: independent network_networks and network_subnets tables
     reconstruction: crates/o3k-network/src/lib.rs currently returns NotFound when a network has no subnet
-    proposed_resolution: ADR-0176/SPEC-0033; no runtime implementation in P13.1E
+    accepted_resolution: ADR-0176/SPEC-0033; no runtime implementation in P13.1E-ACCEPT
+  runtime_status:
+    canonical_network_realm_separation: not_implemented
+    persistence_migration: not_implemented
+    zero_realm_reconstruction: not_implemented
+    next_prerequisite: P13.1F

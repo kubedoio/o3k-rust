@@ -1,7 +1,10 @@
 # ADR-0176 — Canonical Network and AddressRealm lifecycle separation
 
-Status: Proposed
+Status: Accepted
 Date: 2026-08-24
+Decision-accepted: 2026-08-24
+Human-approval: project-requester (2026-08-24, explicit acceptance recorded in task instruction)
+Reviewed-proposal-baseline: 9b5a74d9e470278c77907a5c3ca22a56af4fe64a
 Supersedes: none
 Superseded-by: none
 Affected-services: api, network, store, kernel, compute, compatibility, governance
@@ -16,9 +19,10 @@ Related decisions and specifications:
 - [SPEC-0033 — canonical Network / AddressRealm lifecycle v1](../specs/SPEC-0033-canonical-network-addressrealm-lifecycle-v1.md)
 - [P13 managed-resource requirements](../compatibility/p13-1/p13-2-managed-resource-requirements.yaml)
 
-This is a proposed architecture amendment. It is not active implementation
-authority until human architecture approval is recorded. It does not authorize
-P13.2 runtime work.
+This architecture amendment was accepted against reviewed proposal baseline
+`9b5a74d9e470278c77907a5c3ca22a56af4fe64a`. Acceptance makes the architecture
+active authority, but does not claim runtime implementation or authorize P13.2
+before the P13.1F canonical-model implementation and evidence gate.
 
 ## Context
 
@@ -35,7 +39,7 @@ ADR-0171 makes AddressRealm the tenant routing/isolation identity and requires
 realm-scoped endpoint and fabric state. Neither decision requires one realm to
 exist before a Network, nor does either permit bare IP identity across realms.
 
-## Decision proposed
+## Decision
 
 Adopt an independent canonical Network identity whose aggregate owns zero or
 more AddressRealms. An AddressRealm has a stable identity and belongs to exactly
@@ -55,7 +59,7 @@ Network 1 ─── 0..N AddressRealm 1 ─── 0..N AddressPool
 P13 v1 admits at most one Neutron Subnet/AddressRealm per Network as an explicit
 compatibility-profile rule. This is not a permanent domain invariant.
 
-The proposed model is equivalent to Option C's independent lifecycle identities
+The accepted model is equivalent to Option C's independent lifecycle identities
 and Option B's aggregate ownership. It does not introduce a provider-facing
 canonical Subnet type.
 
@@ -199,9 +203,9 @@ implementation contract should use the existing O3K conflict mapping (HTTP
 409) with a stable profile error, but the exact wire message remains to be
 verified by P13.2 conformance. No canonical or provider mutation may occur.
 
-No runtime implementation is authorized by this Proposed ADR. P13.2 remains
-blocked until this ADR and SPEC-0033 are accepted and the migration/restart
-tests pass.
+This accepted ADR does not itself claim runtime implementation or authorize
+P13.2. P13.2 remains blocked until P13.1F implements and verifies the
+migration/restart requirements.
 
 ## Consequences
 
