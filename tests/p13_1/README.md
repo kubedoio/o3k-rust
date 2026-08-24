@@ -49,3 +49,21 @@ tests/p13_1b_provider_harness.sh
 The P13.1B run fails closed if the provider plan fails or if the expected
 request sequence is absent. The artifact is written under `target/p13-1b/`
 unless `O3K_P13_EVIDENCE_OUTPUT` is supplied.
+
+P13.1C runs five isolated real-provider managed-resource applies. It records
+successful partial operations and precise failures without changing O3K runtime
+compatibility behavior:
+
+```bash
+O3K_P13_TOFU_ARCHIVE=... \
+O3K_P13_PROVIDER_ARCHIVE=... \
+O3K_P13_PROVIDER_BINARY=... \
+O3K_P13_PROVIDER_SHA256=... \
+O3K_P13_TOFU=/absolute/path/to/tofu \
+tests/p13_1c_provider_harness.sh
+```
+
+The P13.1C artifact is written under `target/p13-1c/`. Pinned provider source
+provenance is recorded in `provider-managed-resource-source-evidence.md`, and
+the resulting P13.2 requirements matrix is in
+`docs/compatibility/p13-1/p13-2-managed-resource-requirements.yaml`.

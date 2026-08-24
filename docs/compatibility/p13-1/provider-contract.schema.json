@@ -6,11 +6,13 @@
   "properties": {
     "schema_version": {"const": 1},
     "artifact_type": {"const": "o3k-p13-1-provider-contract"},
-    "phase": {"enum": ["p13.1a", "p13.1b"]},
+    "phase": {"enum": ["p13.1a", "p13.1b", "p13.1c"]},
     "toolchain": {"type": "object"},
     "resources": {"type": "array", "minItems": 7},
     "provider_run": {"type": "object"},
     "findings": {"type": "array"},
+    "managed_cases": {"type": "array", "minItems": 5},
+    "dependency_graph": {"type": "array"},
     "traces": {"type": "array"}
   }
 }

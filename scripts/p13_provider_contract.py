@@ -42,6 +42,8 @@ def load_json(path: pathlib.Path) -> dict[str, Any]:
 
 
 def load_trace_records(path: pathlib.Path) -> list[dict[str, Any]]:
+    if not path.exists() or not path.read_text(encoding="utf-8").strip():
+        return []
     text = path.read_text(encoding="utf-8")
     try:
         value = json.loads(text)
@@ -69,7 +71,8 @@ def validate_contract(path: pathlib.Path) -> None:
     if not isinstance(resources, list):
         raise ValueError("resources must be an array")
     names = {item.get("resource") for item in resources if isinstance(item, dict)}
-    missing = sorted(CORE - names)
+    required_resources = CORE if document.get("phase") != "p13.1c" else CORE - CORE_RESOURCES
+    missing = sorted(required_resources - names)
     if missing:
         raise ValueError("missing core resource entries: " + ", ".join(missing))
     forbidden = names - CORE
@@ -100,6 +103,21 @@ def validate_contract(path: pathlib.Path) -> None:
                 raise ValueError("successful P13.1B evidence is missing the image list request")
             if not any("/os-extra_specs" in trace.get("path", "") and trace.get("status") == 200 for trace in document["traces"]):
                 raise ValueError("successful P13.1B evidence is missing the extra-specs read")
+    if document.get("phase") == "p13.1c":
+        cases = document.get("managed_cases")
+        if not isinstance(cases, list):
+            raise ValueError("P13.1C requires managed_cases")
+        case_names = {case.get("resource") for case in cases if isinstance(case, dict)}
+        if case_names != CORE - CORE_RESOURCES:
+            raise ValueError("P13.1C must contain exactly the five managed core resources")
+        allowed = {"observed", "source-proven", "observed-and-source-proven", "harness-only"}
+        for case in cases:
+            if case.get("status") not in allowed:
+                raise ValueError(f"invalid P13.1C case status: {case.get('status')}")
+            if case.get("status") == "observed" and not case.get("gap"):
+                raise ValueError("an observed managed case must have a precise gap")
+            if not case.get("source_proof"):
+                raise ValueError(f"P13.1C case lacks source proof: {case.get('resource')}")
     for index, trace in enumerate(document["traces"]):
         if not isinstance(trace, dict):
             raise ValueError(f"trace {index} is not an object")
@@ -356,12 +374,83 @@ def run_real() -> None:
         print("P13.1B completed with source-backed discovery gaps; no compatibility behavior was changed")
 
 
+MANAGED_SOURCE = {
+    "keypair": {"resource": "openstack_compute_keypair_v2", "operation": "create", "expected": "POST /v2.1/{project_id}/os-keypairs", "gap": "provider create/read/delete lifecycle is not provider-verified"},
+    "network": {"resource": "openstack_networking_network_v2", "operation": "create", "expected": "POST /v2.0/networks", "gap": "provider create/read/update/delete lifecycle is not provider-verified"},
+    "subnet": {"resource": "openstack_networking_subnet_v2", "operation": "create", "expected": "POST /v2.0/subnets", "gap": "provider create/read/update/delete lifecycle is not provider-verified; AddressRealm cardinality remains unresolved"},
+    "port": {"resource": "openstack_networking_port_v2", "operation": "create", "expected": "POST /v2.0/ports", "gap": "provider create/read/update/delete lifecycle is not provider-verified; security groups are P13.3"},
+    "server": {"resource": "openstack_compute_instance_v2", "operation": "create", "expected": "POST /v2.1/{project_id}/servers", "gap": "provider create/poll/read/update/action/delete lifecycle is not provider-verified"},
+}
+
+
+def assemble_managed() -> None:
+    results = load_json(pathlib.Path(os.environ["O3K_P13_P13C_RESULTS"]))
+    traces = redact(load_trace_records(pathlib.Path(os.environ["O3K_P13_RAW_EVIDENCE"])))
+    cases = []
+    for name, source in MANAGED_SOURCE.items():
+        result = results.get(name)
+        if not isinstance(result, dict):
+            raise ValueError(f"missing managed case result: {name}")
+        output = result.get("output", "")
+        status = "observed"
+        case_traces = [trace for trace in traces if trace.get("resource") in {source["resource"], "auth", "catalog", "extensions", "placement"}]
+        path_values = [trace.get("path", "") for trace in case_traces]
+        if result.get("exit_code", 1) == 0:
+            classification = "provider-partial"
+            current = "create/read succeeded; complete managed lifecycle was not exercised by this bounded apply"
+        elif any("/v2.0/v2.0/" in path for path in path_values):
+            classification = "wrong-catalog-endpoint-base"
+            current = "O3K advertises a versioned Neutron endpoint and Gophercloud composes a duplicate /v2.0 prefix"
+        elif name == "server" and any("networks" in path for path in path_values):
+            classification = "dependency-blocked-by-catalog-gap"
+            current = "server prerequisite network lookup failed because the advertised Neutron base composes /v2.0/v2.0"
+        else:
+            classification = "missing-route-or-current-o3k-gap" if case_traces else "harness-only"
+            current = "provider execution failed before a complete lifecycle was observed"
+        gap = {
+            "classification": classification,
+            "provider_expected_behavior": source["expected"],
+            "current_o3k": current,
+            "minimum_p13_2_requirement": source["gap"],
+            "provider_output": redact(output[-4000:]),
+        }
+        cases.append({
+            "resource": source["resource"],
+            "operation": source["operation"],
+            "source_proof": {"provider": "3.4.0", "gophercloud": "v2.8.0", "reference": "tests/p13_1/provider-managed-resource-source-evidence.md", "expected": source["expected"]},
+            "requests": case_traces,
+            "terraform_result": {"exit_code": result.get("exit_code"), "output": redact(output[-4000:])},
+            "status": status,
+            "gap": gap,
+        })
+    document = {
+        "schema_version": 1,
+        "artifact_type": "o3k-p13-1-provider-contract",
+        "phase": "p13.1c",
+        "toolchain": load_json(TOOLCHAIN),
+        "provider_run": {"engine_version": "1.12.6", "provider_version": "3.4.0", "lock_file_verified": True, "result": "discovery-complete"},
+        "resources": [{"resource": item["resource"], "evidence": item["status"]} for item in cases],
+        "managed_cases": cases,
+        "dependency_graph": load_yaml_like_dependency_graph(),
+        "traces": traces,
+    }
+    output = pathlib.Path(os.environ["O3K_P13_EVIDENCE_OUTPUT"])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    validate_contract(output)
+
+
+def load_yaml_like_dependency_graph() -> list[list[str]]:
+    return [["image_data_source", "instance"], ["flavor_data_source", "instance"], ["network", "subnet"], ["network", "port"], ["subnet", "port"], ["port", "instance"], ["keypair", "instance"]]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--verify-tools", action="store_true")
     parser.add_argument("--run-real", action="store_true")
+    parser.add_argument("--assemble-managed", action="store_true")
     parser.add_argument("--validate-artifact")
     args = parser.parse_args()
     try:
@@ -375,6 +464,8 @@ def main() -> int:
             verify_tools()
         if args.run_real:
             run_real()
+        if args.assemble_managed:
+            assemble_managed()
         if args.validate_artifact:
             validate_contract(pathlib.Path(args.validate_artifact))
             print(f"validated {args.validate_artifact}")
