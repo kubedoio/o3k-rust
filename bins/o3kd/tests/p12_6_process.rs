@@ -617,6 +617,36 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         idempotency_key: format!("{operation_id}:network-primary"),
         desired_spec: serde_json::json!({"name": format!("database-network-{parent_id}")}),
     };
+
+    // Each binding is exercised independently through the real mTLS
+    // composition boundary.  These requests use the otherwise valid signed
+    // delegation, so a rejection cannot be attributed to malformed
+    // credentials or a bypassed transport check.
+    let mut wrong_action = child_request.clone();
+    wrong_action.action = ActionId::new("network", "DeleteNetwork")?;
+    assert!(composition_client.create_child(wrong_action).await.is_err());
+    assert!(store.list_relationships(parent_id).await?.is_empty());
+
+    let mut wrong_parent_operation = child_request.clone();
+    wrong_parent_operation.parent_operation_id = uuid::Uuid::new_v4();
+    assert!(
+        composition_client
+            .create_child(wrong_parent_operation)
+            .await
+            .is_err()
+    );
+    assert!(store.list_relationships(parent_id).await?.is_empty());
+
+    let mut wrong_service_principal = child_request.clone();
+    wrong_service_principal.service_principal = "other-service-controller".into();
+    assert!(
+        composition_client
+            .create_child(wrong_service_principal)
+            .await
+            .is_err()
+    );
+    assert!(store.list_relationships(parent_id).await?.is_empty());
+
     // Build a second application object over the same durable store.  The
     // race below must exercise independent application state; two handlers
     // around one application would only prove transport concurrency.
