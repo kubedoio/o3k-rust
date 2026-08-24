@@ -894,6 +894,103 @@ async fn native_and_openstack_http_surfaces_reconstruct_over_durable_postgres()
 }
 
 #[tokio::test]
+async fn native_http_scope_like_request_fields_cannot_select_foreign_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (app, provider) = build_http_runtime(Arc::new(
+        o3k_store::unified::O3kStore::connect_sqlite_memory().await?,
+    ))
+    .await?;
+    let token = issue_token_for(&app, "user-a", "password-a", "project-a").await?;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/o3k/v1/compute/servers")
+                .header("authorization", format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "scope-injection")
+                .body(Body::from(
+                    serde_json::json!({
+                        "owner_scope": "project-b",
+                        "project_id": "project-b",
+                        "metadata": {"owner_scope": "project-b", "project_id": "project-b"},
+                        "kind": "compute:server",
+                        "spec": {
+                            "name": "scope-injection",
+                            "image_id": "image-a",
+                            "flavor_id": "00000000-0000-0000-0000-000000000001",
+                            "network_ids": ["opaque-network-reference"]
+                        }
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert!(response.status().is_client_error());
+    assert_eq!(provider.instance_count(), 0);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/o3k/v1/compute/servers")
+                .header("authorization", format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "scope-injection-valid")
+                .body(Body::from(
+                    serde_json::json!({
+                        "kind": "compute:server",
+                        "spec": {
+                            "name": "scope-injection-valid",
+                            "image_id": "image-a",
+                            "flavor_id": "00000000-0000-0000-0000-000000000001",
+                            "network_ids": ["opaque-network-reference"]
+                        }
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = response_json(response).await;
+    let id = created["resource_id"].as_str().ok_or("resource id")?;
+    let shown = get_json(&app, &format!("/o3k/v1/compute/servers/{id}"), &token).await?;
+    assert_eq!(shown["metadata"]["owner_scope"], "project-a");
+    assert_eq!(provider.instance_count(), 1);
+
+    // Scope-like fields inside the typed desired-state object are rejected by
+    // schema validation rather than becoming an owner-selection mechanism.
+    let rejected = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/o3k/v1/compute/servers")
+                .header("authorization", format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "scope-injection-spec")
+                .body(Body::from(
+                    serde_json::json!({
+                        "kind": "compute:server",
+                        "spec": {
+                            "name": "scope-injection-rejected",
+                            "owner_scope": "project-b",
+                            "image_id": "image-a",
+                            "flavor_id": "00000000-0000-0000-0000-000000000001",
+                            "network_ids": ["opaque-network-reference"]
+                        }
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert!(rejected.status().is_client_error());
+    assert_eq!(provider.instance_count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn native_and_openstack_http_surfaces_share_compute_and_network_authority()
 -> Result<(), Box<dyn std::error::Error>> {
     run_native_openstack_http_conformance(Arc::new(

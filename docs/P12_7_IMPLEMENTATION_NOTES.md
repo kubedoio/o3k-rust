@@ -42,7 +42,7 @@ advertised.
 | Unknown namespace/resource fails closed | `native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation`; `resource::tests::different_resource_types_share_one_registry_resolution_path` |
 | Idempotency replay, conflict, cross-scope isolation, and provider-side-effect bound | `native_compute_create_replay_equivalent`; `native_compute_create_changed_body_conflict`; `native_compute_idempotency_isolated_between_owner_scopes` |
 | Cursor traversal, tampering, owner binding, and stale-anchor handling | `p12_7_convergence::native_and_openstack_http_surfaces_share_compute_and_network_authority`; `native_adapters::native_http_cursor_is_bound_to_owner_and_rejects_tampering`; `native_adapters::native_http_cursor_continues_deterministically_after_anchor_deletion`; codec boundary tests in `o3k_native_api::pagination::tests` |
-| Owner scope is derived from authenticated context | `o3k_api::two_tenant_isolation::two_tenant_path_and_resource_isolation`; native security test |
+| Owner scope is derived from authenticated context | `o3k_api::two_tenant_isolation::two_tenant_path_and_resource_isolation`; `p12_7_convergence::native_http_scope_like_request_fields_cannot_select_foreign_owner` rejects top-level and typed scope injection and verifies the resulting resource remains owned by the authenticated project |
 | Secret-safe public operation errors | `operation_visibility_tests::operation_route_is_store_backed_owner_scoped_and_redacts_provider_fields`; `o3k-store::postgres_ops::test_postgres_error_mapping_and_no_leakage` |
 | Generation/CAS and authorization-before-side-effect | `native_compute_manifest_exposes_no_generation_precondition_mutation` proves no advertised native mutation accepts CAS; `o3k-store` SQLite/PostgreSQL P12.4 lifecycle and race tests prove generation safety at the store layer; `native_compute_rejects_foreign_network_before_provider_mutation` proves authorization precedes provider mutation |
 | Malformed JSON | `native_adapters::native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation` |
@@ -57,7 +57,7 @@ advertised.
 | Manifest validation, namespace/action conflicts, generic discovery | `p12_6_process::p12_6_reconstructs_two_independent_control_plane_runtimes`; manifest registry/unit validation tests |
 | Authenticated controller identity and mTLS boundary | `p12_6_process::database_controller_and_composition_cross_real_mtls_boundaries` |
 | Stale-session fencing / reconnect | `p12_6_process::p12_6_reconstructs_two_independent_control_plane_runtimes`; `unavailable_external_controller_and_composition_endpoints_fail_closed` |
-| Delegated actor, owner scope, action, target, and parent operation | `p12_6_process::database_controller_and_composition_cross_real_mtls_boundaries` exercises valid mTLS composition plus wrong action, owner scope, parent operation, service principal, expired delegation, and stale session through the composition boundary; each rejected case leaves no relationship |
+| Delegated actor, owner scope, action, target, and parent operation | `p12_6_process::database_controller_and_composition_cross_real_mtls_boundaries` exercises valid mTLS composition plus wrong action, owner scope, parent operation, service principal, expired delegation, stale session, and a real tenant-B child observation attempt through the composition boundary; each rejected case leaves no relationship |
 | Unknown outcome, replay-safe reconciliation, compensation, cleanup | `p12_6_process::database_controller_and_composition_cross_real_mtls_boundaries`; `p12_6_independent_application_instances_converge_durable_slots` |
 | Unsafe service removal | `manifest::tests::service_authority_cannot_be_forgotten_by_registry_removal`; registry removal fails closed and controller removal retains the manifest |
 | Separate compatibility projection/evidence gating | compatibility inventory/target validation tests and `docs/compatibility/` manifests; no metadata-only capability is advertised |
@@ -105,7 +105,7 @@ The same backend-parameterized restart body is executed by
 2. namespace/resource/action conflict rejection — PASS
 3. separate compatibility projection — PASS
 4. authenticated/versioned external controller — PASS
-5. bounded actor/scope-preserving delegation — PASS (`p12_6_process::database_controller_and_composition_cross_real_mtls_boundaries` independently rejects wrong action, wrong owner scope, wrong parent operation, wrong service principal, expired delegation, and stale session through the real mTLS composition boundary, with no durable relationship created)
+5. bounded actor/scope-preserving delegation — PASS (`p12_6_process::database_controller_and_composition_cross_real_mtls_boundaries` independently rejects wrong action, wrong owner scope, wrong parent operation, wrong service principal, expired delegation, stale session, and observation of a real tenant-B child through the real mTLS composition boundary, with no durable relationship created)
 6. generic discovery and CLI — PASS (P12.6 process/CLI coverage)
 7. canonical cross-service composition — PASS
 8. durable operation/audit correlation and unknown outcome — PASS

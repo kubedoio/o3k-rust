@@ -618,6 +618,28 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         desired_spec: serde_json::json!({"name": format!("database-network-{parent_id}")}),
     };
 
+    // A real child resource owned by another tenant must not become
+    // observable or adoptable merely because its canonical ID is supplied to
+    // the composition boundary. This traverses the same authenticated mTLS
+    // delegation path used by controller composition.
+    let tenant_b_child = network_service
+        .create_network_for_project("project-b", "tenant-b-network".into())
+        .await?;
+    let mut foreign_child_observe = child_request.clone();
+    foreign_child_observe.child = Some(o3k_kernel::ResourceReference {
+        resource_type: o3k_kernel::ResourceType::new("network", "network")?,
+        resource_id: o3k_kernel::ResourceId::new(tenant_b_child.id.to_string())?,
+        generation: 1,
+    });
+    foreign_child_observe.slot = "foreign-child-observe".into();
+    assert!(
+        composition_client
+            .observe_child(foreign_child_observe)
+            .await
+            .is_err()
+    );
+    assert!(store.list_relationships(parent_id).await?.is_empty());
+
     // Each binding is exercised independently through the real mTLS
     // composition boundary.  These requests use the otherwise valid signed
     // delegation, so a rejection cannot be attributed to malformed
