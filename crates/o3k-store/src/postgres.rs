@@ -1,4 +1,4 @@
-use std::{str::FromStr, time::Duration};
+use std::{net::Ipv4Addr, str::FromStr, time::Duration};
 
 use async_trait::async_trait;
 use o3k_kernel::{
@@ -632,7 +632,7 @@ impl PostgresStore {
                 image_overlay_ownership, volume_attachments,
                 keystone_domains, keystone_projects, keystone_users, keystone_roles,
                 keystone_role_assignments, keystone_services, keystone_endpoints, keystone_regions,
-                image_metadata, network_networks, network_subnets, network_ports,
+                image_metadata, network_intents, network_networks, network_subnets, network_ports,
                 canonical_realm_encapsulation_bindings, canonical_endpoints, canonical_address_pools, canonical_address_realms, canonical_networks,
                 network_security_group_bindings, network_security_group_rules, network_security_groups,
                 placement_providers, placement_inventories, placement_allocations,
@@ -4198,16 +4198,12 @@ fn canonical_pool_from_pg_row(row: &PgRow) -> Result<CanonicalAddressPoolRecord,
         prefix: row.get("prefix"),
         gateway: row
             .get::<Option<String>, _>("gateway")
-            .map(|value| value.parse())
+            .map(|value| parse_pg_ipv4(&value))
             .transpose()
             .map_err(|_| StoreError::Corrupt("invalid canonical gateway".into()))?,
-        first_usable: row
-            .get::<String, _>("first_usable")
-            .parse()
+        first_usable: parse_pg_ipv4(&row.get::<String, _>("first_usable"))
             .map_err(|_| StoreError::Corrupt("invalid canonical pool start".into()))?,
-        last_usable: row
-            .get::<String, _>("last_usable")
-            .parse()
+        last_usable: parse_pg_ipv4(&row.get::<String, _>("last_usable"))
             .map_err(|_| StoreError::Corrupt("invalid canonical pool end".into()))?,
         generation: u64::try_from(generation)
             .map_err(|_| StoreError::Corrupt("negative canonical generation".into()))?,
@@ -4222,15 +4218,17 @@ fn canonical_endpoint_from_pg_row(row: &PgRow) -> Result<CanonicalEndpointRecord
         realm_id: Uuid::parse_str(row.get::<&str, _>("realm_id"))
             .map_err(StoreError::InvalidUuid)?,
         project_id: row.get("project_id"),
-        fixed_ip: row
-            .get::<String, _>("fixed_ip")
-            .parse()
+        fixed_ip: parse_pg_ipv4(&row.get::<String, _>("fixed_ip"))
             .map_err(|_| StoreError::Corrupt("invalid canonical endpoint IP".into()))?,
         mac: row.get("mac"),
         generation: u64::try_from(generation)
             .map_err(|_| StoreError::Corrupt("negative canonical generation".into()))?,
         state: row.get("state"),
     })
+}
+
+fn parse_pg_ipv4(value: &str) -> Result<Ipv4Addr, std::net::AddrParseError> {
+    value.split('/').next().unwrap_or(value).parse()
 }
 
 fn parse_pg_ipv4_prefix(value: &str) -> Result<(u32, u8), StoreError> {
