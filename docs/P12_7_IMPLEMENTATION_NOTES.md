@@ -15,7 +15,7 @@ database with `O3K_DATABASE_URL`.
 | OpenStack foreign Network dependency authorization | `p12_7_convergence::native_and_openstack_http_surfaces_share_compute_and_network_authority` creates a real project-b Network/Port, attempts Nova create from project-a, and proves a concealed 404 with zero provider mutation |
 | Volume canonical owner/read path | `o3kd::native_adapters::volume_reader_tests`; `o3k-store` P12.4 canonical-resource tests |
 | Duplicate authority | Executable convergence tests prove shared canonical authority for the exercised Compute/Network paths; architecture inspection confirms no second native/OpenStack synchronization store exists |
-| Restart relationship | `p12_6_reconstructs_two_independent_control_plane_runtimes`; `p12_6_relationship_recovery_reopens_store_and_serializes_process_race`; native HTTP restart convergence remains NOT PROVEN |
+| Restart relationship | `p12_6_reconstructs_two_independent_control_plane_runtimes`; `p12_6_relationship_recovery_reopens_store_and_serializes_process_race`; `native_and_openstack_http_surfaces_reconstruct_over_durable_sqlite` proves fresh HTTP runtime reconstruction over durable SQLite; PostgreSQL HTTP reconstruction remains NOT PROVEN |
 
 The selected OpenStack compatibility tests exercise the same application
 services used by the native adapters. The process-level convergence test
@@ -93,7 +93,7 @@ for PostgreSQL; the latter was executed with
 5. service-neutral Operation — PASS (operation visibility and process tests)
 6. idempotency/generation safety — NOT PROVEN (native cross-scope idempotency is covered; generation metadata and store CAS exist, but no advertised native mutation exposes a compare-and-set precondition)
 7. opaque pagination scope safety — PASS (`p12_7_convergence` HTTP traversal/tampering, `native_http_cursor_is_bound_to_owner_and_rejects_tampering` cross-owner binding, and `native_http_cursor_continues_deterministically_after_anchor_deletion` stale-anchor rejection)
-8. SQLite/PostgreSQL conformance — NOT PROVEN (the shared native HTTP/application body now executes against both SQLite and real PostgreSQL for identity, ownership, operations, idempotency, and pagination; a native HTTP reopen/reconstruction case remains unproven)
+8. SQLite/PostgreSQL conformance — NOT PROVEN (the shared native HTTP/application body executes against both SQLite and real PostgreSQL for identity, ownership, operations, idempotency, and pagination; `native_and_openstack_http_surfaces_reconstruct_over_durable_sqlite` proves durable HTTP reconstruction for SQLite, but equivalent PostgreSQL HTTP reconstruction remains unproven)
 9. selected OpenStack regression — PASS (`o3k-api` isolation/lifecycle suites)
 10. one canonical native/OpenStack authority — PASS for exercised Compute/Network paths (fully wired HTTP convergence, deletion, shared application/store wiring, and lifecycle evidence)
 

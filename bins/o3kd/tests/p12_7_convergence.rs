@@ -130,6 +130,95 @@ async fn status_for(app: &axum::Router, method: Method, uri: &str, token: &str) 
     status
 }
 
+async fn build_http_runtime(
+    store: Arc<o3k_store::unified::O3kStore>,
+) -> Result<(axum::Router, Arc<FakeComputeProvider>), Box<dyn std::error::Error>> {
+    let identity = o3k_identity::testkit::test_service_with_projects(
+        "http://127.0.0.1:8080",
+        vec![
+            o3k_identity::ExtraProjectSeed {
+                project_id: "project-a".to_owned(),
+                project_name: "project-a".to_owned(),
+                user_id: "user-a".to_owned(),
+                user_name: "user-a".to_owned(),
+                password: o3k_identity::Secret::new("password-a".to_owned()),
+            },
+            o3k_identity::ExtraProjectSeed {
+                project_id: "project-b".to_owned(),
+                project_name: "project-b".to_owned(),
+                user_id: "user-b".to_owned(),
+                user_name: "user-b".to_owned(),
+                password: o3k_identity::Secret::new("password-b".to_owned()),
+            },
+        ],
+    )
+    .await?;
+    let provider = Arc::new(FakeComputeProvider::new());
+    let compute_service = ComputeService::new(store.clone(), provider.clone());
+    let compute = Arc::new(compute_service.clone());
+    let network = Arc::new(
+        NetworkService::open(
+            std::env::temp_dir().join(format!(
+                "o3k-p12-7-restart-network-{}",
+                uuid::Uuid::new_v4()
+            )),
+            store.clone(),
+        )
+        .await?,
+    );
+    let mut manifests = ManifestRegistry::new();
+    manifests.seed_core()?;
+    for (service, namespace) in [
+        ("compute", "compute"),
+        ("network", "network"),
+        ("volume", "volume"),
+    ] {
+        manifests.register_controller(service, session(service, namespace, 1))?;
+        manifests.activate_controller(service)?;
+    }
+    let server_reader: Arc<dyn o3k_native_api::compute::ServerReader> =
+        Arc::new(o3kd::native_adapters::ServerReaderAdapter {
+            service: compute.clone(),
+        });
+    let network_reader: Arc<dyn o3k_native_api::network::NetworkReader> =
+        Arc::new(o3kd::native_adapters::NetworkReaderAdapter {
+            store: store.clone(),
+            authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
+        });
+    let application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
+        Arc::new(o3kd::native_adapters::GenericResourceApplication {
+            compute: compute.clone(),
+            network_service: network.clone(),
+            store: store.clone(),
+            server: server_reader.clone(),
+            network: network_reader.clone(),
+            external_controllers: Arc::new(Default::default()),
+        });
+    let token_issuer: Arc<dyn TokenIssuer> = Arc::new(o3kd::native_adapters::TokenIssuerAdapter {
+        service: Arc::new(identity.clone()),
+    });
+    let native = o3k_native_api::NativeApiState::new(
+        Some(manifests),
+        o3k_native_api::pagination::CursorConfig::default(),
+        Some(token_issuer),
+        Some(server_reader),
+        None,
+        Some(network_reader),
+    )?
+    .with_resource_application(application)
+    .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
+    Ok((
+        o3k_api::router_with_state(
+            o3k_api::AppState::new()
+                .with_identity(identity)
+                .with_compute(compute_service)
+                .with_network((*network).clone())
+                .with_native_api(native),
+        ),
+        provider,
+    ))
+}
+
 async fn run_native_openstack_http_conformance(
     store: Arc<o3k_store::unified::O3kStore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -598,6 +687,172 @@ async fn run_native_openstack_http_conformance(
             .project_id,
         project_id
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_and_openstack_http_surfaces_reconstruct_over_durable_sqlite()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "o3k-p12-7-http-restart-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let (app_a, provider_a) = build_http_runtime(Arc::new(
+        o3k_store::unified::O3kStore::connect_sqlite_file(&path).await?,
+    ))
+    .await?;
+    let token_a = issue_token_for(&app_a, "user-a", "password-a", "project-a").await?;
+
+    let network = app_a
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/networks")
+                .header("x-auth-token", &token_a)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"network":{"name":"restart-os-network"}}"#))?,
+        )
+        .await?;
+    assert_eq!(network.status(), StatusCode::CREATED);
+    let network_id = response_json(network).await["network"]["id"]
+        .as_str()
+        .ok_or("network id")?
+        .to_owned();
+    let native_network = app_a
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/o3k/v1/network/networks")
+                .header("authorization", format!("Bearer {token_a}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"kind":"network:network","spec":{"name":"restart-native-network"}}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(native_network.status(), StatusCode::CREATED);
+    let native_network_id = response_json(native_network).await["resource_id"]
+        .as_str()
+        .ok_or("native network id")?
+        .to_owned();
+    let subnet = app_a.clone().oneshot(Request::builder().method(Method::POST).uri("/v2.0/subnets")
+        .header("x-auth-token", &token_a).header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::json!({"subnet":{"network_id":network_id,"name":"restart-subnet","cidr":"192.0.2.0/24","gateway_ip":"192.0.2.1"}}).to_string()))?).await?;
+    assert_eq!(subnet.status(), StatusCode::CREATED);
+    let port = app_a
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/ports")
+                .header("x-auth-token", &token_a)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"port":{"network_id":network_id,"name":"restart-port"}})
+                        .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(port.status(), StatusCode::CREATED);
+    let port_id = response_json(port).await["port"]["id"]
+        .as_str()
+        .ok_or("port id")?
+        .to_owned();
+    let server_body = serde_json::json!({"server":{"name":"restart-server","image":{"id":"image-a"},"flavor":{"id":"00000000-0000-0000-0000-000000000001"},"networks":[{"port":port_id}]}});
+    let os_server = app_a
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.1/project-a/servers")
+                .header("x-auth-token", &token_a)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&server_body)?))?,
+        )
+        .await?;
+    assert_eq!(os_server.status(), StatusCode::ACCEPTED);
+    let os_server_id = response_json(os_server).await["server"]["id"]
+        .as_str()
+        .ok_or("os server id")?
+        .to_owned();
+    let native_server = app_a.clone().oneshot(Request::builder().method(Method::POST).uri("/o3k/v1/compute/servers")
+        .header("authorization", format!("Bearer {token_a}")).header(header::CONTENT_TYPE, "application/json")
+        .header("idempotency-key", "restart-native-server")
+        .body(Body::from(serde_json::json!({"kind":"compute:server","spec":{"name":"restart-native-server","image_id":"image-b","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":[port_id]}}).to_string()))?).await?;
+    assert_eq!(native_server.status(), StatusCode::CREATED);
+    let native_server_id = response_json(native_server).await["resource_id"]
+        .as_str()
+        .ok_or("native server id")?
+        .to_owned();
+    assert!(provider_a.instance_count() >= 2);
+    drop(app_a);
+    drop(provider_a);
+
+    let (app_b, _provider_b) = build_http_runtime(Arc::new(
+        o3k_store::unified::O3kStore::connect_sqlite_file(&path).await?,
+    ))
+    .await?;
+    let token_b = issue_token_for(&app_b, "user-a", "password-a", "project-a").await?;
+    for (native_path, os_path, id) in [
+        (
+            format!("/o3k/v1/network/networks/{network_id}"),
+            format!("/v2.0/networks/{network_id}"),
+            network_id.clone(),
+        ),
+        (
+            format!("/o3k/v1/network/networks/{native_network_id}"),
+            format!("/v2.0/networks/{native_network_id}"),
+            native_network_id.clone(),
+        ),
+        (
+            format!("/o3k/v1/compute/servers/{os_server_id}"),
+            format!("/v2.1/project-a/servers/{os_server_id}"),
+            os_server_id.clone(),
+        ),
+        (
+            format!("/o3k/v1/compute/servers/{native_server_id}"),
+            format!("/v2.1/project-a/servers/{native_server_id}"),
+            native_server_id.clone(),
+        ),
+    ] {
+        let native_read = get_json(&app_b, &native_path, &token_b).await?;
+        let os_read = get_json(&app_b, &os_path, &token_b).await?;
+        assert_eq!(
+            native_read["metadata"]["id"]
+                .as_str()
+                .or_else(|| native_read["network"]["id"].as_str()),
+            Some(id.as_str())
+        );
+        assert_eq!(
+            os_read["network"]["id"]
+                .as_str()
+                .or_else(|| os_read["server"]["id"].as_str()),
+            Some(id.as_str())
+        );
+    }
+    assert_eq!(
+        status_for(
+            &app_b,
+            Method::DELETE,
+            &format!("/o3k/v1/compute/servers/{native_server_id}"),
+            &token_b
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        status_for(
+            &app_b,
+            Method::GET,
+            &format!("/v2.1/project-a/servers/{native_server_id}"),
+            &token_b
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+    let _ = std::fs::remove_file(path);
     Ok(())
 }
 
