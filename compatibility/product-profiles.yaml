@@ -8,6 +8,45 @@ product_identity:
   openstack_role: northbound-compatibility-contract
   canonical_internal_platform: o3k-cloud-kernel
 profiles:
+  - id: p13-iac-compatibility-v1
+    maturity: specified
+    parent_profile: native-rust-testlab
+    user_outcome: >
+      Existing OpenStack Terraform/OpenTofu configurations that use the
+      resources listed by this profile and the attribute subsets frozen by the
+      applicable provider-contract discovery gate can target O3K through the standard, unmodified
+      terraform-provider-openstack provider. All
+      resources remain canonical O3K resources; all OpenStack concepts are
+      compatibility projections.
+    o3k_owned_capabilities:
+      - keystone-compatibility
+      - image-glance-compatibility
+      - compute-nova-compatibility
+      - network-neutron-compatibility
+      - volume-cinder-compatibility
+      - iam
+      - canonical-resource-authority
+      - durable-operations
+      - reconciliation
+    external_hosted_services: []
+    engines:
+      - opentofu v1.12.6 (mandatory)
+      - terraform latest (secondary)
+    provider:
+      upstream: true
+      name: terraform-provider-openstack/openstack
+      version: 3.4.0
+      unmodified: true
+    database:
+      default: sqlite
+      production_target: postgres
+    release_blocking_for_first_alpha: false
+    footprint_claim: unmeasured
+    evidence_state: specified
+    normative_adr: docs/adr/ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md
+    normative_spec: docs/specs/SPEC-0032-openstack-terraform-opentofu-compatibility-profile-v1.md
+    contract: contracts/iac-openstack-profile-v1.yaml
+
   - id: openstack-service-testbed
     maturity: specified
     user_outcome: run a selected real OpenStack service against O3K without a complete DevStack or full OpenStack control plane

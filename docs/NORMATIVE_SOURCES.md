@@ -34,6 +34,20 @@ defined in each source.
 | Service Manifest, registry evolution, namespace ownership, external controller/service-principal/delegation/composition model | `docs/adr/ADR-0174-service-manifest-and-resource-provider-controller.md`, `docs/specs/SPEC-0031-service-extension-controller-v1.md`, `contracts/service-manifest-v1.schema.json`, `contracts/controller-protocol-v1.md` |
 | Separation of native service identity from OpenStack service/catalog/API compatibility metadata | `contracts/openstack-compatibility-projection-v1.schema.json` under ADR-0174/SPEC-0031; actual advertisement remains gated by SPEC-0022 and compatibility manifests |
 
+## Accepted P13 sources — active architecture authority
+
+The following P13 sources were accepted on 2026-08-24 through explicit human
+architecture/security approval by the project-requester, after review findings
+were resolved at baseline `7b4a352dd719607e72bfb0cad0749c38fe54686e`.
+They are active architecture authority.
+Acceptance authorizes P13.1 provider-contract discovery but does not create
+runtime compatibility or product-support evidence; those claims remain gated
+by SPEC-0032.
+
+| Subject | Normative source |
+|---|---|
+| OpenStack Ecosystem and Infrastructure-as-Code Compatibility Boundary | `docs/adr/ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md`, `docs/specs/SPEC-0032-openstack-terraform-opentofu-compatibility-profile-v1.md`, `contracts/iac-openstack-profile-v1.yaml` |
+
 ## Core rules
 
 - O3K owns public identity, ownership, desired state, scheduling, operations,
@@ -87,9 +101,9 @@ defined in each source.
 
 Architecture is not release evidence. PostgreSQL/Kubernetes HA, routed
 networking, native storage, P11 multi-host networking, P12 native API/service
-framework, broad federation, complete parity, and fixed footprint/scale claims
-remain limited to the exact implementation and evidence profiles that passed
-their gates.
+framework, P13 IaC compatibility, broad federation, complete parity, and fixed
+footprint/scale claims remain limited to the exact implementation and evidence
+profiles that passed their gates.
 
 The current compatibility manifest remains authoritative for which OpenStack
 operations are actually advertised. Accepted P12 native contracts do not expand

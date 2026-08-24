@@ -1,0 +1,474 @@
+schema_version: 1
+status: accepted
+normative_adr: docs/adr/ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md
+normative_spec: docs/specs/SPEC-0032-openstack-terraform-opentofu-compatibility-profile-v1.md
+
+profile:
+  id: p13-iac-compatibility-v1
+  product: O3K Cloud OS
+  parent_profile: native-rust-testlab
+  maturity: specified
+  user_outcome: >
+    Existing OpenStack Terraform/OpenTofu configurations that use the resources
+    listed by this profile and the attribute subsets frozen by the applicable
+    provider-contract discovery gate can target O3K through the standard,
+    unmodified terraform-provider-openstack while all resulting cloud resources
+    remain canonical O3K resources and all OpenStack concepts remain
+    compatibility projections. P13.1 freezes core-resource subsets; equivalent
+    pre-P13.3/P13.4 gates freeze later resource groups.
+
+authority:
+  mode: o3k-implemented
+  statement: >
+    Terraform/OpenTofu and terraform-provider-openstack are clients only.
+    They do not own O3K resource IDs, owner scope, desired state, scheduling,
+    authorization, operations, reconciliation, provider selection, or backend
+    state. The same canonical O3K domain authority serves both native API and
+    OpenStack compatibility clients.
+
+engines:
+  - name: opentofu
+    version: 1.12.6
+    mandatory: true
+    public_reference: https://github.com/opentofu/opentofu
+    license: MPL-2.0
+  - name: terraform
+    version: latest
+    mandatory: false
+    notes: >
+      Secondary test target. P13 never requires vendoring, redistributing,
+      or modifying proprietary/BSL artifacts.
+
+providers:
+  - name: terraform-provider-openstack/openstack
+    version: 3.4.0
+    upstream: true
+    unmodified: true
+    public_reference: https://github.com/terraform-provider-openstack/terraform-provider-openstack
+    license: Apache-2.0
+    notes: No O3K fork or patch is permitted.
+
+resources:
+  # ============================================================
+  # Data sources (read-only, already implemented)
+  # ============================================================
+  - resource: openstack_images_image_v2
+    type: data
+    service: image
+    api: glance-v2
+    canonical_mapping: image:image
+    projection: one-to-one
+    required_operations:
+      - GET /v2/images
+      - GET /v2/images/{id}
+    known_deviations: []
+    route_evidence:
+      list: implemented
+      show: implemented
+    provider_evidence: provider-unverified
+    p13_phase: p13.0
+    notes: Already implemented in existing compatibility surface.
+
+  - resource: openstack_compute_flavor_v2
+    type: data
+    service: compute
+    api: nova-v2.1
+    canonical_mapping: compute:flavor
+    projection: one-to-one
+    required_operations:
+      - GET /v2.1/{tenant}/flavors
+      - GET /v2.1/{tenant}/flavors/{id}
+    known_deviations:
+      - Extra specifications are out of scope.
+    route_evidence:
+      list: implemented
+      show: implemented
+    provider_evidence: provider-unverified
+    p13_phase: p13.0
+    notes: Already implemented in existing compatibility surface.
+
+  # ============================================================
+  # Managed — core compute
+  # ============================================================
+  - resource: openstack_compute_keypair_v2
+    type: managed
+    service: compute
+    api: nova-v2.1
+    canonical_mapping: compute:keypair
+    projection: one-to-one
+    required_operations:
+      - POST /v2.1/{tenant}/os-keypairs
+      - GET /v2.1/{tenant}/os-keypairs/{keypair_name}
+      - GET /v2.1/{tenant}/os-keypairs
+      - DELETE /v2.1/{tenant}/os-keypairs/{keypair_name}
+    known_deviations:
+      - Private-key generation is unsupported; only public-key import.
+      - Terraform auto-generation of a keypair is not supported.
+    route_evidence:
+      create: implemented
+      list: implemented
+      show: implemented
+      delete: implemented
+    provider_evidence: provider-unverified
+    p13_phase: p13.2
+
+  # ============================================================
+  # Managed — core network
+  # ============================================================
+  - resource: openstack_networking_network_v2
+    type: managed
+    service: network
+    api: neutron-v2
+    canonical_mapping: network:network
+    projection: one-to-one
+    required_operations:
+      - POST /v2.0/networks
+      - GET /v2.0/networks/{id}
+      - GET /v2.0/networks
+      - PUT /v2.0/networks/{id}
+      - DELETE /v2.0/networks/{id}
+    known_deviations:
+      - Only flat provider network in initial profile.
+      - Routed fabric profile only.
+    route_evidence:
+      create: implemented
+      list: implemented
+      show: implemented
+      update: missing
+      delete: implemented
+    provider_evidence: provider-unverified
+    p13_phase: p13.2
+
+  - resource: openstack_networking_subnet_v2
+    type: managed
+    service: network
+    api: neutron-v2
+    canonical_mapping: network:subnet / AddressRealm
+    projection: pending-p13.1
+    required_operations:
+      - POST /v2.0/subnets
+      - GET /v2.0/subnets/{id}
+      - GET /v2.0/subnets
+      - PUT /v2.0/subnets/{id}
+      - DELETE /v2.0/subnets/{id}
+    known_deviations:
+      - One subnet and one allocation pool per network in initial profile.
+      - One-to-one mapping to AddressRealm/subnet is the target, but
+        lifecycle/cardinality must be verified against real provider behavior
+        in P13.1 before being frozen.
+    route_evidence:
+      create: implemented
+      list: implemented
+      show: implemented
+      update: missing
+      delete: implemented
+    provider_evidence: provider-unverified
+    p13_phase: p13.2
+
+  - resource: openstack_networking_port_v2
+    type: managed
+    service: network
+    api: neutron-v2
+    canonical_mapping: network:endpoint / port
+    projection: one-to-one
+    required_operations:
+      - POST /v2.0/ports
+      - GET /v2.0/ports/{id}
+      - GET /v2.0/ports
+      - PUT /v2.0/ports/{id}
+      - DELETE /v2.0/ports/{id}
+    known_deviations:
+      - Ports receive one deterministic IPv4 address.
+      - Device owners, security groups, and rich updates are out of scope.
+    route_evidence:
+      create: implemented
+      list: implemented
+      show: implemented
+      update: missing
+      delete: implemented
+    provider_evidence: provider-unverified
+    p13_phase: p13.2
+
+  # ============================================================
+  # Managed — compute instance
+  # ============================================================
+  - resource: openstack_compute_instance_v2
+    type: managed
+    service: compute
+    api: nova-v2.1
+    canonical_mapping: compute:server
+    projection: one-to-one
+    required_operations:
+      - POST /v2.1/{tenant}/servers
+      - GET /v2.1/{tenant}/servers/{id}
+      - GET /v2.1/{tenant}/servers
+      - PUT /v2.1/{tenant}/servers/{id}
+      - DELETE /v2.1/{tenant}/servers/{id}
+      - POST /v2.1/{tenant}/servers/{id}/action (start, stop, reboot)
+    known_deviations:
+      - Guest key injection, metadata extensions, and scheduler extensions have limited support.
+      - Config-drive is supported for user_data and metadata.
+    route_evidence:
+      create: implemented
+      list: implemented
+      show: implemented
+      update: missing
+      action: implemented
+      delete: implemented
+    provider_evidence: provider-unverified
+    p13_phase: p13.2
+
+  # ============================================================
+  # Managed — advanced network (P13.3)
+  # ============================================================
+  - resource: openstack_networking_secgroup_v2
+    type: managed
+    service: network
+    api: neutron-v2
+    canonical_mapping: NetworkPolicy (projection)
+    projection: compatibility-mapping
+    required_operations:
+      - POST /v2.0/security-groups
+      - GET /v2.0/security-groups/{id}
+      - GET /v2.0/security-groups
+      - PUT /v2.0/security-groups/{id}
+      - DELETE /v2.0/security-groups/{id}
+    known_deviations:
+      - Mapped onto canonical O3K NetworkPolicy.
+      - Full Neutron security-group semantics may have limitations.
+    route_evidence:
+      create: missing
+      list: missing
+      show: missing
+      update: missing
+      delete: missing
+    provider_evidence: provider-unverified
+    p13_phase: p13.3
+
+  - resource: openstack_networking_secgroup_rule_v2
+    type: managed
+    service: network
+    api: neutron-v2
+    canonical_mapping: NetworkPolicy rule (projection)
+    projection: compatibility-mapping
+    required_operations:
+      - POST /v2.0/security-group-rules
+      - GET /v2.0/security-group-rules/{id}
+      - GET /v2.0/security-group-rules
+      - DELETE /v2.0/security-group-rules/{id}
+    known_deviations:
+      - Mapped onto canonical O3K NetworkPolicy rules.
+    route_evidence:
+      create: missing
+      list: missing
+      show: missing
+      delete: missing
+    provider_evidence: provider-unverified
+    p13_phase: p13.3
+
+  - resource: openstack_networking_router_v2
+    type: managed
+    service: network
+    api: neutron-v2
+    canonical_mapping: AddressRealm gateway/route (projection)
+    projection: pending-p13.3
+    required_operations:
+      - POST /v2.0/routers
+      - GET /v2.0/routers/{id}
+      - GET /v2.0/routers
+      - PUT /v2.0/routers/{id}
+      - DELETE /v2.0/routers/{id}
+    known_deviations:
+      - Mapped onto canonical AddressRealm gateway/route semantics.
+      - No native NeutronRouter domain concept is introduced.
+      - L3 agent, HA router, DVR are not implemented.
+      - Router lifecycle identity persistence, owner scope, uniqueness, restart
+        reconstruction, mapping cardinality, and deletion semantics must be
+        frozen by the mandatory P13.3 provider-contract discovery gate before
+        implementation.
+      - A future canonical L3 Gateway/Router resource (not Neutron specific)
+        may be needed if AddressRealm is not a true lifecycle match.
+    route_evidence:
+      create: missing
+      list: missing
+      show: missing
+      update: missing
+      delete: missing
+    provider_evidence: provider-unverified
+    p13_phase: p13.3
+
+  - resource: openstack_networking_router_interface_v2
+    type: managed
+    service: network
+    api: neutron-v2
+    canonical_mapping: route/endpoint (projection)
+    projection: pending-p13.3
+    required_operations:
+      - PUT /v2.0/routers/{router_id}/add_router_interface
+      - PUT /v2.0/routers/{router_id}/remove_router_interface
+    known_deviations:
+      - Mapped onto canonical route/endpoint semantics.
+    route_evidence:
+      add_interface: missing
+      remove_interface: missing
+    provider_evidence: provider-unverified
+    p13_phase: p13.3
+
+  - resource: openstack_networking_floatingip_v2
+    type: managed
+    service: network
+    api: neutron-v2
+    canonical_mapping: PublicAddress
+    projection: one-to-one
+    required_operations:
+      - POST /v2.0/floatingips
+      - GET /v2.0/floatingips/{id}
+      - GET /v2.0/floatingips
+      - PUT /v2.0/floatingips/{id}
+      - DELETE /v2.0/floatingips/{id}
+    known_deviations:
+      - Mapped onto canonical O3K PublicAddress semantics.
+    route_evidence:
+      create: missing
+      list: missing
+      show: missing
+      update: missing
+      delete: missing
+    provider_evidence: provider-unverified
+    p13_phase: p13.3
+
+  # ============================================================
+  # Managed — storage (P13.4)
+  # ============================================================
+  - resource: openstack_blockstorage_volume_v3
+    type: managed
+    service: volume
+    api: cinder-v3
+    canonical_mapping: volume:volume
+    projection: one-to-one
+    required_operations:
+      - POST /v3/{tenant}/volumes
+      - GET /v3/{tenant}/volumes/{id}
+      - GET /v3/{tenant}/volumes
+      - PUT /v3/{tenant}/volumes/{id}
+      - DELETE /v3/{tenant}/volumes/{id}
+    known_deviations:
+      - Native O3K Volume domain (ADR-0169) is authority.
+      - External-hosted Cinder is a separate profile.
+      - Boot-from-volume and multi-attach are deferred.
+      - Online resize not supported in initial profile.
+    route_evidence:
+      create: missing
+      list: missing
+      show: missing
+      update: missing
+      delete: missing
+    provider_evidence: provider-unverified
+    p13_phase: p13.4
+
+  - resource: openstack_compute_volume_attach_v2
+    type: managed
+    service: compute
+    api: nova-v2.1
+    canonical_mapping: volume:volume_attachment
+    projection: one-to-one
+    required_operations:
+      - POST /v2.1/{tenant}/servers/{server_id}/os-volume_attachments
+      - GET /v2.1/{tenant}/servers/{server_id}/os-volume_attachments
+      - GET /v2.1/{tenant}/servers/{server_id}/os-volume_attachments/{id}
+      - DELETE /v2.1/{tenant}/servers/{server_id}/os-volume_attachments/{id}
+    known_deviations:
+      - Mapped onto canonical O3K VolumeAttachment semantics.
+    route_evidence:
+      create: missing
+      list: missing
+      show: missing
+      delete: missing
+    provider_evidence: provider-unverified
+    p13_phase: p13.4
+
+identity_projection:
+  one_to_one:
+    - resource_type: image:image
+      openstack_type: OS::Glance::Image
+      id_reuse: canonical O3K ID is the OpenStack image ID
+    - resource_type: compute:flavor
+      openstack_type: OS::Nova::Flavor
+      id_reuse: canonical O3K ID is the OpenStack flavor ID
+    - resource_type: compute:keypair
+      openstack_type: OS::Nova::Keypair
+      id_reuse: canonical O3K ID is the OpenStack keypair ID
+    - resource_type: compute:server
+      openstack_type: OS::Nova::Server
+      id_reuse: canonical O3K ID is the OpenStack server ID
+    - resource_type: network:network
+      openstack_type: OS::Neutron::Network
+      id_reuse: canonical O3K ID is the OpenStack network ID
+    - resource_type: network:subnet
+      openstack_type: OS::Neutron::Subnet
+      status: pending-p13.1
+      id_reuse: canonical O3K ID is the OpenStack subnet ID (lifecycle/cardinality
+        mapping to be frozen in P13.1 provider contract discovery)
+    - resource_type: network:endpoint
+      openstack_type: OS::Neutron::Port
+      id_reuse: canonical O3K ID is the OpenStack port ID
+    - resource_type: volume:volume
+      openstack_type: OS::Cinder::Volume
+      id_reuse: canonical O3K ID is the OpenStack volume ID
+    - resource_type: volume:volume_attachment
+      openstack_type: OS::Cinder::VolumeAttachment
+      id_reuse: canonical O3K ID is the OpenStack attachment ID
+  compatibility_mapping:
+    - openstack_type: OS::Neutron::SecurityGroup
+      canonical_type: network_policy (projection)
+      mapping: compatibility adapter maps security-group CRUD to NetworkPolicy CRUD
+    - openstack_type: OS::Neutron::SecurityGroupRule
+      canonical_type: network_policy_rule (projection)
+      mapping: compatibility adapter maps security-group-rule CRUD to NetworkPolicy rule CRUD
+    - openstack_type: OS::Neutron::Router
+      canonical_type: address_realm_gateway (projection)
+      status: pending-p13.3
+      mapping: compatibility adapter maps router CRUD to AddressRealm gateway/route CRUD
+        (lifecycle identity persistence, owner scope, uniqueness, restart
+        reconstruction, mapping cardinality, and deletion semantics to be frozen
+        by the mandatory P13.3 provider-contract discovery gate)
+    - openstack_type: OS::Neutron::FloatingIP
+      canonical_type: public_address
+      mapping: one-to-one with canonical PublicAddress
+    - openstack_type: OS::Neutron::RouterInterface
+      canonical_type: route/endpoint (projection)
+      status: pending-p13.3
+      mapping: compatibility adapter maps add/remove_router_interface to canonical
+        route/endpoint semantics (lifecycle identity and mapping cardinality to
+        be frozen by the mandatory P13.3 provider-contract discovery gate)
+
+security:
+  project_isolation: true
+  resource_reference_authorization: true
+  idor_defense: true
+  operation_isolation: true
+  idempotency_isolation: true
+  secret_handling: true
+  provider_side_effect_ordering: true
+  notes: >
+    IaC client compatibility must not weaken any existing O3K security
+    property. All existing project isolation, resource reference authorization,
+    IDOR/BOLA defenses, operation isolation, idempotency isolation, secret
+    handling, and provider-side-effect ordering rules apply.
+
+compatibility_rules:
+  - The standard upstream provider must remain unmodified.
+  - No O3K fork or patch is permitted.
+  - Unsupported operations must fail closed (4xx error).
+  - No operation may be advertised as implemented without the required
+    evidence tier.
+  - "O3K durable Operations remain internal. The OpenStack compatibility layer
+    exposes exactly the status code(s), body, headers, and polling semantics
+    accepted by the pinned upstream provider / Gophercloud call path for each
+    resource operation. The status code varies per upstream API — for example,
+    `compute/v2/servers.Create` accepts `200`/`202` (either is valid with a
+    standard Nova server body), `blockstorage/v3/volumes.Create` accepts only
+    `202`, and most Neutron v2.0 operations accept `200`/`201`. The client
+    must never depend on an O3K native Operation API response. Exact
+    per-operation status codes are frozen by the applicable provider-contract
+    discovery gate."

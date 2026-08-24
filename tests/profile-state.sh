@@ -59,4 +59,14 @@ for mutation in rename-profile missing-field cinder-evidence-in-native \
   echo "mutation rejected: ${mutation}"
 done
 
+duplicate_profiles="${temp_dir}/product-profiles-duplicate.yaml"
+cp "${repo_root}/compatibility/product-profiles.yaml" "${duplicate_profiles}"
+printf '\nprofiles: []\n' >>"${duplicate_profiles}"
+if python3 "${repo_root}/scripts/validate-profile-state.py" \
+    --root "${repo_root}" --profiles-file "${duplicate_profiles}" >/dev/null 2>&1; then
+  echo "ERROR: validator accepted duplicate YAML mapping keys" >&2
+  exit 1
+fi
+echo "mutation rejected: duplicate-yaml-key"
+
 echo "Product-profile status governance tests passed"

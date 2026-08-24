@@ -21,7 +21,7 @@
     "useful-later": "would improve a client journey but no declared workflow requires it yet",
     "intentionally-omitted": "explicit non-goal of an accepted spec; implementation requires the named amendment first"
   },
-  "recommendation": "Improve next: openstack-cli, then openstacksdk, then operator; defer terraform and horizon.",
+  "recommendation": "Improve next: openstack-cli, then openstacksdk, then operator. Terraform is now a declared P13 journey (see P13_IMPLEMENTATION_PLAN.md). Defer horizon.",
   "journeys": [
     {
       "id": "openstack-cli",
@@ -1053,8 +1053,9 @@
     {
       "id": "terraform",
       "name": "Terraform OpenStack provider workflows",
+      "profiles": ["p13-iac-compatibility-v1"],
       "client": "terraform-provider-openstack v3.4.0 with Terraform CLI",
-      "recommendation": "Defer until the CLI/SDK slices land. First bounded slice when started: plain terraform apply/plan/destroy with keypair/flavor/image/network/subnet/port/instance resources (no router/FIP/security group), surfacing the field and filter gaps recorded below.",
+      "recommendation": "P13 declared journey (P13.2 initial slice). When started: plain terraform apply/plan/destroy with keypair/flavor/image/network/subnet/port/instance resources (no router/FIP/security group), surfacing the field and filter gaps recorded below.",
       "candidates": [
         {
           "id": "terraform-001",
@@ -1072,9 +1073,9 @@
           "rust_status": "partial",
           "in_product_profile": true,
           "failure_seen": "not-exercised",
-          "priority": "useful-later",
+          "priority": "blocks-declared-journey",
           "requires_before_implementation": [
-            "contract record for Terraform instance lifecycle",
+            "P13 declared journey; see P13_IMPLEMENTATION_PLAN.md and SPEC-0032",
             "black-box test: terraform apply/plan converges on instance create-read-delete"
           ],
           "profiles": [

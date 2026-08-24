@@ -213,9 +213,9 @@ the product genuinely requires broader L2 semantics, larger topology, hardware
 offload, or external-router integration. Such providers must preserve canonical
 AddressRealm/endpoint identity.
 
-## P12 — Native O3K Resource API & Service Framework — implementation active
+## P12 — Native O3K Resource API & Service Framework — implementation complete
 
-P12 makes the O3K resource model a first-class product API and proves that the
+P12 made the O3K resource model a first-class product API and proved that the
 Cloud Kernel can support a new first-class cloud service without service-specific
 business logic being added to the kernel.
 
@@ -321,14 +321,18 @@ status as of the current release.
   endpoint + volume:volume), bounded delegation, durable operations,
   compensation, audit correlation, cleanup evidence.
 
-### P12.7 — Compatibility and evidence — pending
+### P12.7 — Compatibility and evidence — implemented
 
-- native/OpenStack authority convergence tests require a running `o3kd`
-  instance with both adapters configured;
+- Native/OpenStack canonical-authority convergence integration tests prove
+  that the same O3K resource authority serves both native API and OpenStack
+  compatibility projections;
+- generation/precondition safety, SQLite/PostgreSQL native conformance,
+  controller/delegation security evidence validated;
+- restart/reconstruction evidence completed;
 - existing OpenStack compatibility tests confirmed no regression (all existing
   tests pass);
-- security evidence matrix (cross-project, IDOR, delegation, cursor, etc.) not
-  yet implemented.
+- security evidence matrix (cross-project, IDOR, delegation, cursor, etc.)
+  implemented.
 
 ### P12 non-goals (confirmed)
 
@@ -368,20 +372,82 @@ create/delete; generic dispatch exists before the external controller boundary;
 the external controller boundary exists before real Database composition; and
 everything exists before the security evidence gate.
 
-## P13+ — richer cloud platform and ecosystem
+## P13 — Ecosystem Compatibility & Infrastructure as Code — implementation active
 
-Possible later tracks include:
+P13 targets configurations using the resources listed by
+`p13-iac-compatibility-v1` and the attribute subsets frozen by its staged
+provider-contract discovery gates. They use the standard, unmodified
+`terraform-provider-openstack` provider, while all resulting cloud resources
+remain canonical O3K resources and all OpenStack concepts remain compatibility
+projections.
 
-- richer IAM/organization/federation capabilities;
-- Terraform provider, public SDKs and UI around the native API;
-- eBPF network dataplane/observability provider where justified;
-- richer Neutron compatibility profiles;
-- production load balancing, DNS, object storage, secrets, managed database,
-  Kubernetes, AI/ML, or other first-class services built on the P12 framework;
-- delegated/federated cloud connectors with explicit authority models;
-- service packaging/installation/upgrade ecosystem once its safety/evidence
-  contracts are separately proven;
-- scale, performance, security and production-certification campaigns.
+The P13 architecture is defined by ADR-0175 and SPEC-0032. Those sources are
+Accepted as of 2026-08-24. Acceptance authorizes P13.1 provider-contract
+discovery; runtime compatibility claims remain gated by SPEC-0032 evidence.
+
+### P13.0 — Architecture, compatibility contracts, IaC profile (this phase)
+
+- ADR-0175: OpenStack Ecosystem and Infrastructure-as-Code Compatibility Boundary
+- SPEC-0032: OpenStack Terraform/OpenTofu Compatibility Profile v1
+- `contracts/iac-openstack-profile-v1.yaml`: machine-readable IaC profile
+- Roadmap, normative sources, and ADR index updated
+- **No runtime implementation. No new OpenStack API routes.**
+
+### P13.1 — Real OpenStack provider / OpenTofu black-box harness
+
+- Real upstream `terraform-provider-openstack` loaded by real OpenTofu
+- Real authentication/catalog/discovery through O3K's Keystone-compatible API
+- No fake provider
+- Data source verification (`openstack_images_image_v2`, `openstack_compute_flavor_v2`)
+
+### P13.2 — Core Image/Compute/Network IaC lifecycle
+
+- Keypair, network, subnet, port, and instance lifecycle through OpenTofu
+- Terraform apply/plan/destroy lifecycle for each resource
+- State file verification
+
+### P13.3 — Neutron adoption profile
+
+- Security groups and rules via canonical NetworkPolicy projection
+- Router and router interface via AddressRealm gateway projection
+- Floating IP via PublicAddress mapping
+
+### P13.4 — Native Volume Cinder projection and Terraform volume lifecycle
+
+- Cinder v3 compatibility over native O3K Volume domain
+- Nova volume-attachment compatibility
+- Terraform volume lifecycle verification
+
+### P13.5 — IaC state convergence
+
+- Refresh, import, drift detection, destroy-recreate, retry/replay semantics
+
+### P13.6 — Multi-project security and failure evidence
+
+- Two independent OpenTofu projects, cross-project isolation
+- Restart/failure matrix during IaC operations
+
+### P13.7 — Full-stack real-host acceptance
+
+- Complete IaC journey on real host, product profile closure
+
+### P13 non-goals
+
+- `terraform-provider-o3k` native provider;
+- Pulumi, Ansible modules, tenant web UI;
+- metering/billing, DNS/Designate, LBaaS/Octavia, Swift/S3;
+- Kubernetes-as-a-service, Trove;
+- arbitrary OpenStack endpoint parity;
+- live migration, automatic unfenced evacuation;
+- new hypervisors, XCP-ng, Proxmox, SR-IOV, DPDK;
+- multi-region, provider/dataplane redesign;
+- production SLA claims.
+
+Future tracks (beyond P13) may add richer IAM/organization/federation, eBPF
+network dataplane, richer Neutron profiles, production load balancing, DNS,
+object storage, secrets, managed database, Kubernetes, AI/ML, or other
+first-class services built on the P12 framework, delegated/federated cloud
+connectors, and scale/performance/security certification campaigns.
 
 New services must reuse Cloud Kernel IAM, authorization, ownership, quota,
 operations, audit/events and service registration rather than constructing a

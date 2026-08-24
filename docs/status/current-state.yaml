@@ -1,7 +1,7 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: 519517e5bd217b08ba1b5e6957f996040fd8fbac
-updated_at: 2026-08-10T00:00:00Z
+source_commit: 7b4a352dd719607e72bfb0cad0749c38fe54686e
+updated_at: 2026-08-24T00:00:00Z
 release_context: >-
   The first native alpha candidate v0.2.0-alpha.1 at
   952dcf9c4a1ae958996e4ae9444763e5524eddc5 is rejected and permanently
@@ -256,3 +256,45 @@ profiles:
       - PostgreSQL support
       - edge footprint
       - generic cross-cloud connectivity
+  p13-iac-compatibility-v1:
+    implementation_state: >-
+      Specified. This profile extends native-rust-testlab for Terraform/OpenTofu
+      IaC compatibility. ADR-0175, SPEC-0032, and the machine-readable profile
+      contract were accepted on 2026-08-24 against reviewed baseline
+      7b4a352dd719607e72bfb0cad0749c38fe54686e.
+      P13.1 provider-contract discovery is authorized but has not started; no
+      Terraform lifecycle or runtime compatibility evidence is claimed.
+    source_commit: 7b4a352dd719607e72bfb0cad0749c38fe54686e
+    portable_evidence:
+      - name: adr-0175-accepted
+        state: passed
+        note: Human architecture/security acceptance recorded 2026-08-24 against 7b4a352dd719607e72bfb0cad0749c38fe54686e.
+      - name: spec-0032-accepted
+        state: passed
+        note: SPEC-0032 derives acceptance from ADR-0175.
+      - name: iac-openstack-profile-contract
+        state: passed
+        note: Accepted contract passes repository governance validation; this is not runtime evidence.
+    protected_component_evidence:
+      - name: iac-provider-harness
+        state: not-executed
+        note: P13.1 provider contract discovery not yet started.
+    full_profile_evidence:
+      - name: iac-full-lifecycle-gate
+        state: not-proven
+    release_relevance: >-
+      Non-blocking for the first native alpha (v0.2.0-alpha.1). This profile
+      extends native-rust-testlab but does not alter its release gate.
+    blockers:
+      - P13.1 provider contract discovery for core target resources
+      - equivalent provider contract discovery gates before P13.3/P13.4 runtime work
+      - P13.2-P13.7 implementation evidence as defined in SPEC-0032
+    next_evidence_action: >-
+      Execute P13.1: real provider + OpenTofu behavioral contract discovery for
+      the core target resources.
+    explicitly_unproven_claims:
+      - production SLA
+      - broad OpenStack parity (operation-level only)
+      - external-Cinder or other external-hosted profile under this profile
+      - multi-region IaC
+      - native terraform-provider-o3k
