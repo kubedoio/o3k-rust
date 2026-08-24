@@ -284,6 +284,19 @@ mod tests {
             })?;
         assert_eq!(compute_pub.url, "http://127.0.0.1:18080/v2.1/project-abc");
 
+        let image_entry = catalog
+            .iter()
+            .find(|s| s.service_type == "image")
+            .ok_or_else(|| KernelError::InvalidServiceId("missing image in catalog".to_owned()))?;
+        let image_pub = image_entry
+            .endpoints
+            .iter()
+            .find(|e| e.interface == "public")
+            .ok_or_else(|| {
+                KernelError::InvalidServiceId("missing public image endpoint".to_owned())
+            })?;
+        assert_eq!(image_pub.url, "http://127.0.0.1:18080/");
+
         Ok(())
     }
 

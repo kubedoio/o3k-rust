@@ -328,17 +328,19 @@ impl KernelRegistry {
                 EndpointTemplate {
                     interface: "public".to_owned(),
                     region: "RegionOne".to_owned(),
-                    url_template: format!("{base}/v2"),
+                    // Gophercloud's NewImageV2 appends the Glance v2 API
+                    // prefix to this catalog service root.
+                    url_template: format!("{base}/"),
                 },
                 EndpointTemplate {
                     interface: "internal".to_owned(),
                     region: "RegionOne".to_owned(),
-                    url_template: format!("{base}/v2"),
+                    url_template: format!("{base}/"),
                 },
                 EndpointTemplate {
                     interface: "admin".to_owned(),
                     region: "RegionOne".to_owned(),
-                    url_template: format!("{base}/v2"),
+                    url_template: format!("{base}/"),
                 },
             ],
         });

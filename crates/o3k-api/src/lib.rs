@@ -51,8 +51,8 @@ mod volume_attachment;
 use crate::{
     compute::{
         create_flavor, create_keypair, create_server, delete_flavor, delete_keypair, delete_server,
-        list_flavors, list_keypairs, list_servers, server_action, show_flavor, show_keypair,
-        show_server,
+        list_flavor_extra_specs, list_flavors, list_keypairs, list_servers, server_action,
+        show_flavor, show_keypair, show_server,
     },
     identity::{check_token, issue_token, validate_token},
     image::{create_image, delete_image, download_image, list_images, show_image, upload_image},
@@ -314,6 +314,10 @@ pub fn router_with_state(state: AppState) -> Router {
         .route(
             "/v2.1/{project_id}/flavors/{id}",
             get(show_flavor).delete(delete_flavor),
+        )
+        .route(
+            "/v2.1/{project_id}/flavors/{id}/os-extra_specs",
+            get(list_flavor_extra_specs),
         )
         .route(
             "/v2.1/{project_id}/os-keypairs",
