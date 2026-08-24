@@ -118,6 +118,8 @@ def validate_contract(path: pathlib.Path) -> None:
                 raise ValueError("an observed managed case must have a precise gap")
             if not case.get("source_proof"):
                 raise ValueError(f"P13.1C case lacks source proof: {case.get('resource')}")
+        if any("/v2.0/v2.0/" in trace.get("path", "") for trace in document.get("traces", [])):
+            raise ValueError("P13.1C evidence contains a duplicate Neutron API prefix")
     for index, trace in enumerate(document["traces"]):
         if not isinstance(trace, dict):
             raise ValueError(f"trace {index} is not an object")
@@ -401,9 +403,18 @@ def assemble_managed() -> None:
         elif any("/v2.0/v2.0/" in path for path in path_values):
             classification = "wrong-catalog-endpoint-base"
             current = "O3K advertises a versioned Neutron endpoint and Gophercloud composes a duplicate /v2.0 prefix"
-        elif name == "server" and any("networks" in path for path in path_values):
+        elif name == "server" and any("/v2.0/v2.0/" in path for path in path_values):
             classification = "dependency-blocked-by-catalog-gap"
             current = "server prerequisite network lookup failed because the advertised Neutron base composes /v2.0/v2.0"
+        elif name == "subnet" and any(trace.get("method") == "POST" and trace.get("path", "").endswith("/subnets") and trace.get("status") == 400 for trace in case_traces):
+            classification = "wrong-request-semantics"
+            current = "O3K rejected the provider's valid subnet request because the provider omits name and the current handler rejects the resulting empty name"
+        elif name == "port" and any(trace.get("method") == "POST" and trace.get("path", "").endswith("/ports") and trace.get("status") == 404 for trace in case_traces):
+            classification = "dependency-blocked-by-subnet"
+            current = "O3K port allocation requires an existing subnet; the discovery subnet failed before the port case ran"
+        elif name == "server" and any(trace.get("method") == "POST" and trace.get("path", "").endswith("/servers") and trace.get("status") == 404 for trace in case_traces):
+            classification = "wrong-cross-service-resolution"
+            current = "Nova create could not resolve the network resource supplied by the provider after the Neutron prerequisite lookup succeeded"
         else:
             classification = "missing-route-or-current-o3k-gap" if case_traces else "harness-only"
             current = "provider execution failed before a complete lifecycle was observed"

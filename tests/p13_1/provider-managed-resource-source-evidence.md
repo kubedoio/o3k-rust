@@ -52,3 +52,9 @@ checkout at `openstack/compute/v2/keypairs/requests.go`,
 `openstack/compute/v2/servers/requests.go` plus `results.go`. These are the
 request builders and `Extract` contracts used by the provider source above;
 the P13.1C trace freezes the paths/statuses actually reached against O3K.
+
+For the P13.1D catalog correction, the exact pinned composition is
+`openstack/client.go:399-403`: `NewNetworkV2` calls `initClientOpts` and then
+sets `sc.ResourceBase = sc.Endpoint + "v2.0/"`. `initClientOpts` resolves the
+catalog endpoint into `ServiceClient.Endpoint`; therefore the catalog must
+advertise the service root, not `/v2.0`.
