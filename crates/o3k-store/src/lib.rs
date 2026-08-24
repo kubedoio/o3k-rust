@@ -1706,6 +1706,7 @@ pub trait NetworkRepository: Send + Sync + QuotaRepository {
     ) -> Result<Vec<PortRecord>, StoreError>;
     async fn get_port(&self, project_id: &str, id: &Uuid)
     -> Result<Option<PortRecord>, StoreError>;
+    async fn get_port_by_id(&self, id: &Uuid) -> Result<Option<PortRecord>, StoreError>;
     async fn delete_port(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError>;
     async fn update_port_binding(
         &self,
@@ -3839,6 +3840,17 @@ impl SqliteStore {
         )
         .bind(id.to_string())
         .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.as_ref().map(port_from_row).transpose()
+    }
+
+    pub async fn get_port_by_id(&self, id: &Uuid) -> Result<Option<PortRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state FROM network_ports WHERE id = ?",
+        )
+        .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await
         .map_err(StoreError::Database)?;
@@ -7064,6 +7076,10 @@ impl NetworkRepository for SqliteStore {
         id: &Uuid,
     ) -> Result<Option<PortRecord>, StoreError> {
         self.get_port(project_id, id).await
+    }
+
+    async fn get_port_by_id(&self, id: &Uuid) -> Result<Option<PortRecord>, StoreError> {
+        self.get_port_by_id(id).await
     }
 
     async fn delete_port(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {

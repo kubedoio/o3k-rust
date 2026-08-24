@@ -1435,6 +1435,14 @@ pub mod testkit {
     /// passwords are both `password`; the Cinder endpoint is the default
     /// 8776 port.
     pub async fn test_service(catalog_endpoint: &str) -> Result<TokenService, AuthError> {
+        test_service_with_projects(catalog_endpoint, Vec::new()).await
+    }
+
+    /// Test-only identity service with explicitly seeded tenant users.
+    pub async fn test_service_with_projects(
+        catalog_endpoint: &str,
+        extra_projects: Vec<ExtraProjectSeed>,
+    ) -> Result<TokenService, AuthError> {
         let store = Arc::new(
             o3k_store::testkit::open_memory()
                 .await
@@ -1448,7 +1456,7 @@ pub mod testkit {
                 cinder_password: Some(Secret::new("password".to_owned())),
                 cinder_endpoint: Some("http://127.0.0.1:8776".to_owned()),
                 pbkdf2_iterations: 1_000,
-                extra_projects: Vec::new(),
+                extra_projects,
             },
         )
         .await

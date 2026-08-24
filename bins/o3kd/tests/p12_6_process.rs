@@ -393,7 +393,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         .map_err(|error| format!("generic show: {error:?}"))?;
     assert!(api_show.get("status").is_some());
     let api_delete = api_application
-        .delete(descriptor, &api_auth, &api_id, Some("api-delete-1"))
+        .delete(descriptor, &api_auth, &api_id, Some("api-delete-1"), None)
         .await
         .map_err(|error| format!("generic delete: {error:?}"))?;
     if !api_delete.complete {
@@ -617,6 +617,114 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         idempotency_key: format!("{operation_id}:network-primary"),
         desired_spec: serde_json::json!({"name": format!("database-network-{parent_id}")}),
     };
+
+    // A real child resource owned by another tenant must not become
+    // observable or adoptable merely because its canonical ID is supplied to
+    // the composition boundary. This traverses the same authenticated mTLS
+    // delegation path used by controller composition.
+    let tenant_b_child = network_service
+        .create_network_for_project("project-b", "tenant-b-network".into())
+        .await?;
+    let mut foreign_child_create = child_request.clone();
+    foreign_child_create.child = Some(o3k_kernel::ResourceReference {
+        resource_type: o3k_kernel::ResourceType::new("network", "network")?,
+        resource_id: o3k_kernel::ResourceId::new(tenant_b_child.id.to_string())?,
+        generation: 1,
+    });
+    foreign_child_create.slot = "foreign-child-create".into();
+    assert!(
+        composition_client
+            .create_child(foreign_child_create)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        network_service
+            .get_network(
+                &o3k_kernel::AuthContext::new(
+                    o3k_kernel::Principal::User(o3k_kernel::UserPrincipal::new(
+                        o3k_kernel::PrincipalId::new("user-b")?,
+                        "user-b",
+                        None,
+                    )),
+                    OwnershipScope::project(ScopeId::new("project-b")?, None, None),
+                    Vec::new(),
+                    1,
+                    u64::MAX,
+                    "foreign-child-check",
+                    uuid::Uuid::new_v4().to_string(),
+                    None,
+                ),
+                tenant_b_child.id,
+            )
+            .await?
+            .id,
+        tenant_b_child.id
+    );
+    assert!(store.list_relationships(parent_id).await?.is_empty());
+
+    // Each binding is exercised independently through the real mTLS
+    // composition boundary.  These requests use the otherwise valid signed
+    // delegation, so a rejection cannot be attributed to malformed
+    // credentials or a bypassed transport check.
+    let mut wrong_action = child_request.clone();
+    wrong_action.action = ActionId::new("network", "DeleteNetwork")?;
+    assert!(composition_client.create_child(wrong_action).await.is_err());
+    assert!(store.list_relationships(parent_id).await?.is_empty());
+
+    let mut wrong_parent_operation = child_request.clone();
+    wrong_parent_operation.parent_operation_id = uuid::Uuid::new_v4();
+    assert!(
+        composition_client
+            .create_child(wrong_parent_operation)
+            .await
+            .is_err()
+    );
+    assert!(store.list_relationships(parent_id).await?.is_empty());
+
+    let mut wrong_service_principal = child_request.clone();
+    wrong_service_principal.service_principal = "other-service-controller".into();
+    assert!(
+        composition_client
+            .create_child(wrong_service_principal)
+            .await
+            .is_err()
+    );
+    assert!(store.list_relationships(parent_id).await?.is_empty());
+
+    // The composition endpoint must reject a cryptographically valid
+    // delegation after its bounded lifetime, before reserving a child slot.
+    let mut expired_wire: SignedDelegation = serde_json::from_slice(&wire_delegation)?;
+    expired_wire.claims.expires_at_unix_ms =
+        chrono::Utc::now().timestamp_millis().max(1) as u64 - 1;
+    let expired_wire = serde_json::to_vec(&SignedDelegation::sign(
+        expired_wire.claims,
+        &SigningKey::from_bytes(&[9; 32]),
+    )?)?;
+    let mut expired_request = child_request.clone();
+    expired_request.delegation = expired_wire;
+    expired_request.slot = "expired-delegation".into();
+    assert!(
+        composition_client
+            .create_child(expired_request)
+            .await
+            .is_err()
+    );
+    assert!(store.list_relationships(parent_id).await?.is_empty());
+
+    // A delegation from the old controller epoch cannot be rebound to a new
+    // session context, even when the request otherwise names the same parent.
+    let mut stale_session_request = child_request.clone();
+    stale_session_request.context.session_generation += 1;
+    stale_session_request.slot = "stale-session".into();
+    assert!(
+        composition_client
+            .create_child(stale_session_request)
+            .await
+            .is_err()
+    );
+    assert!(store.list_relationships(parent_id).await?.is_empty());
+
     // Build a second application object over the same durable store.  The
     // race below must exercise independent application state; two handlers
     // around one application would only prove transport concurrency.
@@ -713,7 +821,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     let first_controller = controller.clone();
     let second_controller = controller.clone();
     let first_request = reconcile_request.clone();
-    let second_request = reconcile_request;
+    let second_request = reconcile_request.clone();
     let (first_outcome, second_outcome) = tokio::join!(
         first_controller.reconcile(first_request),
         second_controller.reconcile(second_request),
@@ -740,6 +848,65 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             && relationship.owner_scope == "project-a"
             && relationship.child_resource_id.is_some()
     }));
+
+    // Replace the controller session on the same production controller
+    // endpoint. The old adapter still holds a valid signed delegation, but
+    // its transport context must be fenced before the handler can reconcile.
+    let stale_replay = reconcile_request.clone();
+    let replacement = GrpcControllerAdapter::connect(
+        &format!("https://{controller_address}"),
+        tls_client()?,
+        "database-example",
+        "database",
+        o3k_kernel::ServicePrincipal::new(
+            o3k_kernel::PrincipalId::new_unchecked("database-controller"),
+            "database-controller",
+            "database",
+        ),
+        "p12-6-test-manifest",
+        1,
+    )
+    .await?
+    .with_delegation_signer("p12-6-test", SigningKey::from_bytes(&[9; 32]));
+    assert_ne!(
+        replacement.session().session_id,
+        controller.session().session_id
+    );
+    let stale_outcome = controller.reconcile(stale_replay).await;
+    assert!(matches!(
+        stale_outcome,
+        o3k_kernel::ReconcileOutcome::Unknown { .. }
+    ));
+    assert_eq!(store.list_relationships(parent_id).await?.len(), 3);
+
+    // A delegation issued by the replacement session remains usable, proving
+    // the rejection above is session fencing rather than generic breakage.
+    let replacement_context = o3k_kernel::OperationContext {
+        request_id: uuid::Uuid::new_v4(),
+        session_id: replacement.session().session_id,
+        session_generation: replacement.session().session_generation,
+        replay_identity: "p12-6-session-replacement".into(),
+        ..reconcile_request.context.clone()
+    };
+    let replacement_delegation = replacement.issue_parent_delegation(
+        &replacement_context,
+        "user-a",
+        &reconcile_request.resource.reference,
+    )?;
+    let replacement_outcome = replacement
+        .reconcile(o3k_kernel::ReconcileRequest {
+            context: replacement_context,
+            resource: reconcile_request.resource.clone(),
+            delegation: Some(replacement_delegation),
+        })
+        .await;
+    assert!(
+        matches!(
+            &replacement_outcome,
+            o3k_kernel::ReconcileOutcome::Succeeded { .. }
+        ),
+        "replacement outcome: {replacement_outcome:?}"
+    );
     controller_task.abort();
     let restarted_handler =
         DatabaseControllerHandler::new(composition_client.clone(), lifecycle()?);

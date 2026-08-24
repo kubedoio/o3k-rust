@@ -738,6 +738,14 @@ mod tests {
         let supervisor = service.start(&binary)?;
         let pid_file = supervisor.pid_file.clone();
         let identity_file = supervisor.identity_file.clone();
+        let deadline = Instant::now() + LIVENESS_GRACE;
+        while !pid_file.exists() && Instant::now() < deadline {
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        assert!(
+            pid_file.exists(),
+            "dnsmasq must publish its pidfile before adoption"
+        );
         std::mem::forget(supervisor);
 
         let reopened = DhcpService::open(&root)?;

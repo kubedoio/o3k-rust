@@ -953,6 +953,33 @@ impl ResourceApplication for GenericResourceApplication {
         let semantic_request = serde_json::json!({"spec": request.spec});
         let spec: ComputeSpec = serde_json::from_value(semantic_request["spec"].clone())
             .map_err(|_| ResourceApplicationError::Validation)?;
+        for network_id in &spec.network_ids {
+            // Durable port references cross the Network authority boundary;
+            // the provider's legacy opaque test references remain outside it.
+            if let Ok(port_id) = network_id.parse::<Uuid>() {
+                match self.network_service.get_port(auth, port_id).await {
+                    Ok(_) => {}
+                    Err(o3k_network::NetworkError::Unauthorized) => {
+                        return Err(ResourceApplicationError::Forbidden);
+                    }
+                    // P12.6 generic composition also carries UUID child
+                    // slots which are not NetworkService ports. Preserve
+                    // that contract; resolvable ports remain owner-checked.
+                    Err(o3k_network::NetworkError::NotFound) => {
+                        if let Some(port) = self
+                            .network_service
+                            .find_port_by_id(port_id)
+                            .await
+                            .map_err(|_| ResourceApplicationError::Conflict)?
+                            && port.project_id != auth.effective_scope().id().as_str()
+                        {
+                            return Err(ResourceApplicationError::Forbidden);
+                        }
+                    }
+                    Err(_) => return Err(ResourceApplicationError::Conflict),
+                }
+            }
+        }
         let key = idempotency_key
             .map(str::to_owned)
             .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
@@ -983,7 +1010,9 @@ impl ResourceApplication for GenericResourceApplication {
                     network_ids: spec.network_ids,
                     key_name: spec.key_name,
                     config_drive: None,
-                    idempotency_key: key,
+                    // Keep provider command identity scoped even when the
+                    // client reuses the same canonical key in another tenant.
+                    idempotency_key: format!("{}:{key}", auth.effective_scope().id()),
                 },
                 context,
             )
@@ -1021,6 +1050,7 @@ impl ResourceApplication for GenericResourceApplication {
         auth: &o3k_kernel::AuthContext,
         id: &str,
         idempotency_key: Option<&str>,
+        expected_generation: Option<i64>,
     ) -> Result<MutationResult, ResourceApplicationError> {
         if let Some(controller) = self.external_controllers.get(&descriptor.owning_service) {
             if !controller.health().await.healthy {
@@ -1038,6 +1068,9 @@ impl ResourceApplication for GenericResourceApplication {
                 || resource.project_id != auth.effective_scope().id().as_str()
             {
                 return Err(ResourceApplicationError::NotFound);
+            }
+            if expected_generation.is_some_and(|expected| expected != resource.generation) {
+                return Err(ResourceApplicationError::PreconditionConflict);
             }
             let action = descriptor
                 .lifecycle_actions
@@ -1136,7 +1169,7 @@ impl ResourceApplication for GenericResourceApplication {
                         resource.generation,
                         "DELETED",
                         "DELETED",
-                        resource.generation,
+                        resource.generation.saturating_add(1),
                         None,
                     )
                     .await
@@ -1162,6 +1195,9 @@ impl ResourceApplication for GenericResourceApplication {
                 || resource.project_id != auth.effective_scope().id().as_str()
             {
                 return Err(ResourceApplicationError::NotFound);
+            }
+            if expected_generation.is_some_and(|expected| expected != resource.generation) {
+                return Err(ResourceApplicationError::PreconditionConflict);
             }
             let action = descriptor
                 .lifecycle_actions
@@ -1226,7 +1262,7 @@ impl ResourceApplication for GenericResourceApplication {
                     resource.generation,
                     "DELETED",
                     "DELETED",
-                    resource.generation,
+                    resource.generation.saturating_add(1),
                     None,
                 )
                 .await
@@ -1242,6 +1278,19 @@ impl ResourceApplication for GenericResourceApplication {
             let resource_id = id
                 .parse::<Uuid>()
                 .map_err(|_| ResourceApplicationError::NotFound)?;
+            let resource = self
+                .store
+                .get_resource(resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            if resource.kind != "network:network"
+                || resource.project_id != auth.effective_scope().id().as_str()
+            {
+                return Err(ResourceApplicationError::NotFound);
+            }
+            if expected_generation.is_some_and(|expected| expected != resource.generation) {
+                return Err(ResourceApplicationError::PreconditionConflict);
+            }
             self.network_service
                 .delete_network(auth, resource_id)
                 .await
@@ -1273,6 +1322,9 @@ impl ResourceApplication for GenericResourceApplication {
             .map_err(|_| ResourceApplicationError::NotFound)?;
         if existing.project_id != auth.effective_scope().id().as_str() {
             return Err(ResourceApplicationError::NotFound);
+        }
+        if expected_generation.is_some_and(|expected| expected != existing.generation) {
+            return Err(ResourceApplicationError::PreconditionConflict);
         }
         let action = descriptor
             .lifecycle_actions
@@ -1552,6 +1604,13 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
         let parent_id = self.validate_parent(&request).await.map_err(|_| {
             o3k_service_sdk::composition::CompositionError::Failed("parent denied".into())
         })?;
+        // Child creation is an allocation operation, not an adoption API. A
+        // caller-supplied canonical child ID could otherwise be recorded in a
+        // relationship and then silently ignored by the create path. Reject
+        // it before reserving a relationship or invoking the child service.
+        if request.child.is_some() {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
         let descriptor = self.descriptor_for(&request.resource_type)?;
         let expected_action = descriptor
             .lifecycle_actions
@@ -1747,6 +1806,7 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
                 &auth,
                 child.resource_id.as_str(),
                 Some(&request.idempotency_key),
+                None,
             )
             .await
             .map_err(|_| {
@@ -2412,9 +2472,10 @@ mod native_compute_tests {
         axum::Router,
         Arc<o3k_store::unified::O3kStore>,
         Arc<FakeComputeProvider>,
+        Uuid,
     ) {
-        use axum::Router;
         use axum::routing::get;
+        use axum::{Router, extract::DefaultBodyLimit};
         use o3k_native_api::{operation, resource};
 
         let store = Arc::new(
@@ -2435,6 +2496,27 @@ mod native_compute_tests {
             .await
             .expect("network service"),
         );
+        let foreign_network = network_service
+            .create_network_for_project("project-b", "foreign-network".to_owned())
+            .await
+            .expect("foreign network");
+        network_service
+            .create_subnet_for_project(
+                "project-b",
+                foreign_network.id,
+                "foreign-subnet".to_owned(),
+                "198.51.100.0/24".to_owned(),
+                None,
+                Some("198.51.100.10".parse().expect("pool start")),
+                Some("198.51.100.200".parse().expect("pool end")),
+            )
+            .await
+            .expect("foreign subnet");
+        let foreign_port = network_service
+            .create_port_for_project("project-b", foreign_network.id, "foreign-port".to_owned())
+            .await
+            .expect("foreign port")
+            .id;
 
         let app = GenericResourceApplication {
             compute: compute.clone(),
@@ -2481,9 +2563,10 @@ mod native_compute_tests {
                 get(resource::show).delete(resource::delete),
             )
             .route("/operations/{id}", get(operation::show_operation))
+            .layer(DefaultBodyLimit::max(1_048_576))
             .with_state(native);
 
-        (router, store, provider)
+        (router, store, provider, foreign_port)
     }
 
     fn authed(path: &str, project: &str) -> Request<Body> {
@@ -2536,7 +2619,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_compute_create_and_read_operation() {
-        let (router, _, _) = setup().await;
+        let (router, _, _, _) = setup().await;
         let router = &router;
         let body = serde_json::json!({
             "spec": {
@@ -2572,7 +2655,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_compute_create_replay_equivalent() {
-        let (router, _, provider) = setup().await;
+        let (router, _, provider, _) = setup().await;
         let router = &router;
         let body = serde_json::json!({
             "spec": {
@@ -2606,7 +2689,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_compute_create_changed_body_conflict() {
-        let (router, _, provider) = setup().await;
+        let (router, _, provider, _) = setup().await;
         let router = &router;
         let body_a = serde_json::json!({
             "spec": {
@@ -2644,8 +2727,361 @@ mod native_compute_tests {
     }
 
     #[tokio::test]
+    async fn native_compute_idempotency_isolated_between_owner_scopes() {
+        let (router, store, provider, _) = setup().await;
+        let body_a = serde_json::json!({"spec":{"name":"tenant-a","image_id":"image-a","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":["net-a"]}});
+        let body_b = serde_json::json!({"spec":{"name":"tenant-b","image_id":"image-a","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":["net-a"]}});
+
+        let (status_a, first_a) = exec(
+            &router,
+            authed_post("/compute/servers", "a", "shared-key", body_a.clone()),
+        )
+        .await;
+        assert_eq!(status_a, StatusCode::CREATED);
+        let (_, replay_a) = exec(
+            &router,
+            authed_post("/compute/servers", "a", "shared-key", body_a),
+        )
+        .await;
+        assert_eq!(replay_a["resource_id"], first_a["resource_id"]);
+        assert_eq!(replay_a["operation_id"], first_a["operation_id"]);
+
+        let conflict_a = exec(&router, authed_post("/compute/servers", "a", "shared-key", serde_json::json!({"spec":{"name":"other-a","image_id":"image-b","flavor_id":"00000000-0000-0000-0000-000000000002","network_ids":["net-b"]}}))).await;
+        assert_eq!(conflict_a.0, StatusCode::CONFLICT);
+
+        let (status_b, first_b) = exec(
+            &router,
+            authed_post("/compute/servers", "b", "shared-key", body_b.clone()),
+        )
+        .await;
+        assert_eq!(status_b, StatusCode::CREATED, "tenant B create: {first_b}");
+        assert_ne!(first_b["resource_id"], first_a["resource_id"]);
+        assert_ne!(first_b["operation_id"], first_a["operation_id"]);
+        let b_resource = store
+            .get_resource(uuid::Uuid::parse_str(first_b["resource_id"].as_str().unwrap()).unwrap())
+            .await
+            .expect("tenant B resource");
+        assert_eq!(b_resource.project_id, "project-b");
+
+        let (_, replay_b) = exec(
+            &router,
+            authed_post("/compute/servers", "b", "shared-key", body_b),
+        )
+        .await;
+        assert_eq!(replay_b["resource_id"], first_b["resource_id"]);
+        assert_eq!(replay_b["operation_id"], first_b["operation_id"]);
+        let conflict_b = exec(&router, authed_post("/compute/servers", "b", "shared-key", serde_json::json!({"spec":{"name":"other-b","image_id":"image-b","flavor_id":"00000000-0000-0000-0000-000000000002","network_ids":["net-b"]}}))).await;
+        assert_eq!(conflict_b.0, StatusCode::CONFLICT);
+
+        assert_eq!(
+            exec(
+                &router,
+                authed(
+                    &format!(
+                        "/compute/servers/{}",
+                        first_a["resource_id"].as_str().unwrap()
+                    ),
+                    "b"
+                )
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            exec(
+                &router,
+                authed(
+                    &format!("/operations/{}", first_a["operation_id"].as_str().unwrap()),
+                    "b"
+                )
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(provider.instance_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn native_http_cursor_is_bound_to_owner_and_rejects_tampering() {
+        let (router, _, provider, _) = setup().await;
+        for (key, name) in [("page-a", "page-a"), ("page-b", "page-b")] {
+            let (status, _) = exec(
+                &router,
+                authed_post(
+                    "/compute/servers",
+                    "a",
+                    key,
+                    serde_json::json!({"spec":{"name":name,"image_id":"image-a","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":["net-a"]}}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+        let (_, page_a) = exec(&router, authed("/compute/servers?limit=1", "a")).await;
+        let cursor_a = page_a["next_cursor"].as_str().expect("tenant A cursor");
+        let (second_status, second_page) = exec(
+            &router,
+            authed(&format!("/compute/servers?limit=1&cursor={cursor_a}"), "a"),
+        )
+        .await;
+        assert_eq!(second_status, StatusCode::OK);
+        assert_eq!(second_page["items"].as_array().map(Vec::len), Some(1));
+        let (cross_scope_status, _) = exec(
+            &router,
+            authed(&format!("/compute/servers?limit=1&cursor={cursor_a}"), "b"),
+        )
+        .await;
+        assert_eq!(cross_scope_status, StatusCode::BAD_REQUEST);
+        let (tampered_status, _) = exec(
+            &router,
+            authed(&format!("/compute/servers?limit=1&cursor={cursor_a}x"), "a"),
+        )
+        .await;
+        assert_eq!(tampered_status, StatusCode::BAD_REQUEST);
+        assert_eq!(provider.instance_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn native_http_cursor_continues_deterministically_after_anchor_deletion() {
+        let (router, _, provider, _) = setup().await;
+        for (key, name) in [("stale-a", "stale-a"), ("stale-b", "stale-b")] {
+            let (status, _) = exec(
+                &router,
+                authed_post(
+                    "/compute/servers",
+                    "a",
+                    key,
+                    serde_json::json!({"spec":{"name":name,"image_id":"image-a","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":["net-a"]}}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+        let (_, first_page) = exec(&router, authed("/compute/servers?limit=1", "a")).await;
+        let anchor_id = first_page["items"][0]["metadata"]["id"]
+            .as_str()
+            .expect("cursor anchor")
+            .to_owned();
+        let cursor = first_page["next_cursor"].as_str().expect("cursor");
+        let delete_response = router
+            .clone()
+            .oneshot(authed_delete(
+                &format!("/compute/servers/{anchor_id}"),
+                "a",
+                "stale-delete",
+            ))
+            .await
+            .expect("delete response");
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+        let (status, page_after_delete) = exec(
+            &router,
+            authed(&format!("/compute/servers?limit=1&cursor={cursor}"), "a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(page_after_delete.get("items").is_none());
+        assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_http_oversized_body_is_rejected_before_provider_mutation() {
+        let (router, _, provider, _) = setup().await;
+        let mut body = vec![b' '; 1_048_577];
+        body[0] = b'{';
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/compute/servers")
+                    .header("authorization", "Bearer project-a")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "oversized")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(provider.instance_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn native_http_route_shapes_fail_closed_without_descriptor_dispatch() {
+        let (router, _, provider, _) = setup().await;
+        for (method, uri) in [
+            ("GET", "/future/servers"),
+            ("GET", "/compute/servers/extra/path"),
+            ("GET", "/compute/servers/%2Fambiguous"),
+            ("POST", "/compute/servers/known-id"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("authorization", "Bearer project-a")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND
+                        | StatusCode::METHOD_NOT_ALLOWED
+                        | StatusCode::BAD_REQUEST
+                        | StatusCode::FORBIDDEN
+                ),
+                "unexpected status for {method} {uri}: {}",
+                response.status()
+            );
+        }
+        assert_eq!(provider.instance_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn native_compute_rejects_foreign_network_before_provider_mutation() {
+        let (router, store, provider, foreign_port) = setup().await;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "cross-tenant-network",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": [foreign_port.to_string()]
+            }
+        });
+        let (status, _) = exec(
+            &router,
+            authed_post("/compute/servers", "a", "foreign-network", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(provider.instance_count(), 0);
+        assert!(
+            store
+                .list_resources("project-a", "compute:server")
+                .await
+                .expect("resource list")
+                .is_empty()
+        );
+        // The setup-created foreign port is deliberately retained; the
+        // rejected request has no path to mutate it or create a relationship.
+    }
+
+    #[tokio::test]
+    async fn native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation() {
+        let (router, _, provider, _) = setup().await;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "security-test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+
+        let missing = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/compute/servers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let malformed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/compute/servers")
+                    .header("authorization", "Basic not-a-bearer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), StatusCode::UNAUTHORIZED);
+
+        let invalid = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/compute/servers")
+                    .header("authorization", "Bearer invalid-token-is-not-used")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(provider.instance_count(), 0);
+        let malformed_json = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/compute/servers")
+                    .header("authorization", "Bearer project-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(br#"{"spec": malformed}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(malformed_json.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(provider.instance_count(), 0);
+        let (_, created) = exec(
+            &router,
+            authed_post("/compute/servers", "a", "isolated", body),
+        )
+        .await;
+        let resource_id = created["resource_id"].as_str().unwrap();
+        let operation_id = created["operation_id"].as_str().unwrap();
+
+        let foreign_show = exec(
+            &router,
+            authed(&format!("/compute/servers/{resource_id}"), "b"),
+        )
+        .await;
+        assert_eq!(foreign_show.0, StatusCode::FORBIDDEN);
+        let foreign_operation =
+            exec(&router, authed(&format!("/operations/{operation_id}"), "b")).await;
+        assert_eq!(foreign_operation.0, StatusCode::NOT_FOUND);
+
+        let unknown = exec(&router, authed("/unknown/servers", "a")).await;
+        assert_eq!(unknown.0, StatusCode::NOT_FOUND);
+
+        let cross_scope_replay = exec(
+            &router,
+            authed_post(
+                "/compute/servers",
+                "b",
+                "isolated",
+                serde_json::json!({"spec":{"name":"different"}}),
+            ),
+        )
+        .await;
+        assert_eq!(cross_scope_replay.0, StatusCode::BAD_REQUEST);
+        assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
     async fn native_compute_delete_returns_operation() {
-        let (router, _, provider) = setup().await;
+        let (router, _, provider, _) = setup().await;
         let router = &router;
         let body = serde_json::json!({
             "spec": {
@@ -2701,7 +3137,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_compute_create_after_delete_same_key_fails() {
-        let (router, _, provider) = setup().await;
+        let (router, _, provider, _) = setup().await;
         let router = &router;
         let body = serde_json::json!({
             "spec": {
@@ -2755,7 +3191,7 @@ mod native_compute_tests {
 
     #[tokio::test]
     async fn native_compute_create_after_delete_new_key_succeeds() {
-        let (router, _, provider) = setup().await;
+        let (router, _, provider, _) = setup().await;
         let router = &router;
         let body = serde_json::json!({
             "spec": {
@@ -2801,5 +3237,32 @@ mod native_compute_tests {
         assert_eq!(status, StatusCode::CREATED);
         assert_ne!(recreate["resource_id"].as_str().unwrap(), resource_id);
         assert!(recreate["complete"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn native_compute_manifest_exposes_no_generation_precondition_mutation() {
+        let registry = compute_manifest_registry();
+        let manifest = registry.get("compute").expect("compute manifest");
+        let actions = manifest
+            .actions
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.ends_with(":CreateServer"))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.ends_with(":DeleteServer"))
+        );
+        assert!(!actions.iter().any(|action| action.contains("Update")));
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action.contains("CompareAndSet"))
+        );
     }
 }

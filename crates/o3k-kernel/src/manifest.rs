@@ -1443,11 +1443,19 @@ impl ManifestRegistry {
         self.manifests.is_empty()
     }
 
-    /// Remove a service by ID.
-    pub fn remove(&mut self, service_id: &str) {
-        if let Some(manifest) = self.manifests.remove(service_id) {
-            self.by_namespace.remove(&manifest.namespace);
+    /// Refuse to forget a registered service authority.
+    ///
+    /// P12 has no ownership/in-flight-operation retirement protocol. A
+    /// manifest therefore cannot be removed while the registry is the source
+    /// of service authority; controller disconnects use `remove_controller`
+    /// and retain the manifest for reconciliation.
+    pub fn remove(&mut self, service_id: &str) -> Result<(), ManifestError> {
+        if self.manifests.contains_key(service_id) {
+            return Err(ManifestError::InvalidField(
+                "service authority removal is not supported",
+            ));
         }
+        Ok(())
     }
 
     /// Checks whether a resource type is registered by any active service.
@@ -3579,5 +3587,18 @@ mod tests {
             result.is_ok(),
             "a valid non-http URL template must not be rejected by an undocumented prefix rule"
         );
+    }
+
+    #[test]
+    fn service_authority_cannot_be_forgotten_by_registry_removal() {
+        let mut registry = ManifestRegistry::new();
+        registry.seed_core().expect("core manifests");
+        let before = registry.len();
+        assert!(registry.remove("compute").is_err());
+        assert_eq!(registry.len(), before);
+        assert!(registry.get("compute").is_some());
+
+        registry.remove_controller("compute");
+        assert!(registry.get("compute").is_some());
     }
 }

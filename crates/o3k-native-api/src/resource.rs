@@ -213,6 +213,7 @@ pub trait ResourceApplication: Send + Sync {
         auth: &AuthContext,
         id: &str,
         idempotency_key: Option<&str>,
+        expected_generation: Option<i64>,
     ) -> Result<MutationResult, ResourceApplicationError>;
     async fn list(
         &self,
@@ -412,6 +413,61 @@ pub async fn create(
     State(state): State<NativeApiState>,
     Json(request): Json<CreateRequest>,
 ) -> Response {
+    create_for(
+        auth,
+        headers,
+        namespace,
+        collection,
+        State(state),
+        Json(request),
+    )
+    .await
+}
+
+/// Concrete routes must bind their canonical descriptor explicitly. They do
+/// not derive namespace/collection from the request URI.
+pub async fn create_compute(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    State(state): State<NativeApiState>,
+    Json(request): Json<CreateRequest>,
+) -> Response {
+    create_for(
+        auth,
+        headers,
+        "compute".to_owned(),
+        "servers".to_owned(),
+        State(state),
+        Json(request),
+    )
+    .await
+}
+
+pub async fn create_volume(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    State(state): State<NativeApiState>,
+    Json(request): Json<CreateRequest>,
+) -> Response {
+    create_for(
+        auth,
+        headers,
+        "volume".to_owned(),
+        "volumes".to_owned(),
+        State(state),
+        Json(request),
+    )
+    .await
+}
+
+async fn create_for(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    namespace: String,
+    collection: String,
+    State(state): State<NativeApiState>,
+    Json(request): Json<CreateRequest>,
+) -> Response {
     let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
         return ProblemDetails::with_detail(ErrorCode::ResourceNotFound, "resource type not found")
             .into_response();
@@ -459,6 +515,54 @@ pub async fn delete(
     Path((namespace, collection, id)): Path<(String, String, String)>,
     State(state): State<NativeApiState>,
 ) -> Response {
+    delete_for(auth, headers, namespace, collection, id, State(state)).await
+}
+
+/// DELETE handler for concrete native collection routes. Concrete routes
+/// retain their specialized GET representations, while mutations use the
+/// same manifest-derived application path as the generic route.
+pub async fn delete_fixed(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<NativeApiState>,
+) -> Response {
+    delete_for(
+        auth,
+        headers,
+        "compute".to_owned(),
+        "servers".to_owned(),
+        id,
+        State(state),
+    )
+    .await
+}
+
+pub async fn delete_volume(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<NativeApiState>,
+) -> Response {
+    delete_for(
+        auth,
+        headers,
+        "volume".to_owned(),
+        "volumes".to_owned(),
+        id,
+        State(state),
+    )
+    .await
+}
+
+async fn delete_for(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    namespace: String,
+    collection: String,
+    id: String,
+    State(state): State<NativeApiState>,
+) -> Response {
     let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
         return ProblemDetails::with_detail(ErrorCode::ResourceNotFound, "resource type not found")
             .into_response();
@@ -484,7 +588,25 @@ pub async fn delete(
         Ok(key) => key,
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
-    match application.delete(descriptor, &auth.0, &id, key).await {
+    // v1 uses one explicit, versioned precondition form for lifecycle
+    // mutations: `If-Match: generation-N`.  Ownership is authorized before
+    // the application evaluates this value, so a foreign resource cannot
+    // disclose its generation.
+    let expected_generation = match headers.get("if-match") {
+        None => None,
+        Some(value) => match value.to_str().ok().and_then(|value| {
+            value
+                .strip_prefix("generation-")
+                .and_then(|generation| generation.parse::<i64>().ok())
+        }) {
+            Some(generation) if generation >= 0 => Some(generation),
+            _ => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        },
+    };
+    match application
+        .delete(descriptor, &auth.0, &id, key, expected_generation)
+        .await
+    {
         Ok(result) if result.complete => StatusCode::NO_CONTENT.into_response(),
         Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
         Err(error) => application_problem(error),

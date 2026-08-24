@@ -1564,6 +1564,13 @@ impl NetworkRepository for O3kStore {
         }
     }
 
+    async fn get_port_by_id(&self, id: &Uuid) -> Result<Option<PortRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_port_by_id(id).await,
+            Self::Postgres(s) => s.get_port_by_id(id).await,
+        }
+    }
+
     async fn delete_port(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
         match self {
             Self::Sqlite(s) => s.delete_port(project_id, id).await,
