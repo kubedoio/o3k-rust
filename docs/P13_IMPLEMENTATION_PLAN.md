@@ -3,11 +3,12 @@
 ## Product objective
 
 Existing OpenStack Terraform/OpenTofu configurations that use the resources
-and attributes declared by the `p13-iac-compatibility-v1` profile should be
-able to target O3K through the standard, unmodified
-`terraform-provider-openstack` provider while all resulting cloud resources
-remain canonical O3K resources and all OpenStack concepts remain compatibility
-projections.
+declared by the `p13-iac-compatibility-v1` profile should be able to target
+O3K through the standard, unmodified `terraform-provider-openstack` provider
+while all resulting cloud resources remain canonical O3K resources and all
+OpenStack concepts remain compatibility projections. Exact Terraform attribute
+subsets for each resource are prospective and will be frozen in P13.1 provider
+contract discovery.
 
 ## Architecture
 
@@ -69,8 +70,11 @@ terraform-provider-openstack  (unmodified upstream v3.4.0)
 - `openstack_networking_subnet_v2` create/read/delete
 - `openstack_networking_port_v2` create/read/delete
 - `openstack_compute_instance_v2` create/read/delete/start/stop
-- Terraform OpenTofu apply/plan/destroy lifecycle for each resource
+- Terraform OpenTofu apply/plan/destroy lifecycle for each resource for the
+  bounded attribute subset frozen in P13.1
 - State file verification
+- Provider compatibility at `provider-lifecycle-verified` minimum for the
+  declared attribute subset
 
 ### P13.3 — Neutron adoption profile
 
@@ -108,8 +112,12 @@ terraform-provider-openstack  (unmodified upstream v3.4.0)
 - Two independent OpenTofu projects targeting separate O3K projects
 - Cross-project isolation verification
 - Restart/failure matrix: controller restart during IaC operations
-- No cross-project resource leakage
-- No duplicate resource creation on retry
+- Cross-project resource isolation: each O3K project's resources invisible to the other
+- No duplicate provider side effects for replay/retry of the same already-accepted
+  canonical O3K Operation (internal execution idempotency)
+- Lost-response client case documented: O3K cannot guarantee client-level exactly-once
+  creation when Terraform loses the create response and has no resource ID; this case
+  is exercised but not called a safety pass
 
 ### P13.7 — Full-stack real-host acceptance
 

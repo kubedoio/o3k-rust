@@ -234,7 +234,7 @@ def main():
             print(f"  - {error}", file=sys.stderr)
         return 1
     print(
-        "Product-profile status validated: three profiles, field contract, "
+        "Product-profile status validated: four profiles, field contract, "
         "evidence vocabulary, native alpha isolation, source commits, and "
         "release-tracker consistency all pass."
     )

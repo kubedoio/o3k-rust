@@ -219,25 +219,36 @@ O3K preserves internally:
 - compensation on failure.
 
 **O3K Operations must remain internal to the Cloud Kernel.** The OpenStack
-compatibility API layer must expose the exact OpenStack resource lifecycle
-semantics that the standard `terraform-provider-openstack` expects.
+compatibility API layer must expose exactly the status code(s), body,
+headers, and polling semantics accepted by the pinned upstream provider /
+Gophercloud call path for each resource operation.
 
 In practice this means:
 
 `POST /servers` -> O3K internally establishes the canonical server identity
 and a durable Operation -> the compatibility layer returns a standard Nova
-server response containing the canonical server ID (`status: BUILD`) -> the
-provider polls `GET /servers/{id}` -> O3K projects internal state as
+server response containing the canonical server ID (`status: BUILD`) ->
+the provider polls `GET /servers/{id}` -> O3K projects internal state as
 BUILD/ACTIVE/ERROR following standard OpenStack status transitions.
 
-The `202 Accepted` response with an O3K Operation reference is NOT valid for
-resources where the upstream provider expects a synchronous `200`/`201`
-response with the resource ID (Nova servers, Neutron networks/ports/subnets,
-etc.). O3K's durable Operation is an internal implementation detail.
+The status code returned for each operation MUST match what the pinned
+`terraform-provider-openstack` (v3.4.0, backed by Gophercloud v2.8.0)
+expects:
 
-A `202` response may be used only where the specific upstream OpenStack API
-and the pinned provider actually accept it. The client must never depend on
-the O3K native Operation API.
+- `compute/v2/servers.Create` accepts `OkCodes: []int{200, 202}` — either
+  code is valid, but the response must be a standard Nova server body (never
+  an O3K Operation representation).
+- `blockstorage/v3/volumes.Create` accepts **only** `OkCodes: []int{202}` —
+  this is the standard OpenStack behavior and must be echoed by the O3K
+  compatibility layer.
+- Most Neutron v2.0 operations accept `200`/`201`.
+
+The client must never depend on the O3K native Operation API. A `202` where
+it occurs is still a standard OpenStack `202` with the resource ID and
+initial status in the body, not an O3K Operation reference.
+
+Exact per-operation status codes belong in the P13.1 behavioral contract.
+This ADR does not freeze a generic `200/201` rule.
 
 #### Idempotency boundary — internal execution vs. client-transport guarantees
 
@@ -274,7 +285,7 @@ The P13 profile freezes:
 |---|---|---|
 | `terraform-provider-openstack` | v3.4.0 | Standard upstream provider, unmodified |
 | OpenTofu | v1.12.6 | Mandatory default IaC engine |
-| Terraform CLI | latest (verified compatible) | Secondary test target |
+| Terraform CLI | latest (secondary; unverified until P13 evidence exists) | Secondary test target |
 
 OpenTofu is the default mandatory executable IaC engine. Terraform CLI
 compatibility may be tested where legally and operationally appropriate, but
@@ -295,7 +306,11 @@ IaC compatibility must not weaken:
   project, same as any OpenStack client;
 - resource reference authorization: reading one resource does not leak metadata
   about another project's resources;
-- IDOR/BOLA defenses: resource IDs are not guessable across project boundaries;
+- IDOR/BOLA defenses: every read, mutation, and reference lookup is
+  authorized against the durable owner/project scope. Non-guessability is
+  not an authorization control. Security must hold even when an attacker
+  knows another project's valid resource ID. Foreign-resource existence and
+  metadata are not disclosed beyond the defined disclosure policy;
 - operation isolation: one Terraform run cannot observe or mutate another's
   in-progress operations;
 - idempotency isolation: idempotency keys are scoped to the authenticated

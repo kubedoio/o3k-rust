@@ -43,9 +43,15 @@ Related normative sources:
 ## Purpose
 
 This specification defines the O3K IaC compatibility profile: which Terraform
-resources are supported, which OpenStack API operations they require, the
+resources are targeted, which OpenStack API operations they require, the
 evidence tier for each resource, and the specific known deviations from
 standard OpenStack behavior.
+
+Resources are listed by name in P13.0. The exact Terraform attribute subset
+for each resource (the fields that the provider reads/writes and that O3K must
+populate) is declared prospective and will be frozen in P13.1 provider contract
+discovery. P13.2+ implementation and verification proceed against that frozen
+attribute subset.
 
 The profile is operation-level. A resource is not supported simply because
 its name appears here; it is supported only when its evidence tier requirements
@@ -309,11 +315,14 @@ compatibility matrix. The following is a summary:
    not supported in the initial profile.
 
 8. **Operation semantics.** O3K durable Operations remain internal to the Cloud
-   Kernel. The OpenStack compatibility layer must expose standard OpenStack
-   resource lifecycle semantics. Create returns `200`/`201` with the resource ID
-   and initial status. The provider polls `GET /{resource}/{id}` for status
-   transitions. `202 Accepted` with an O3K Operation reference is NOT valid for
-   resources where the upstream provider expects a synchronous response.
+   Kernel. The OpenStack compatibility layer must expose the exact status
+   code(s), body, headers, and polling semantics accepted by the pinned upstream
+   provider / Gophercloud call path for each resource operation. The status code
+   varies per resource: `compute/v2/servers.Create` accepts `200`/`202` (either
+   is valid with a standard Nova server body), `blockstorage/v3/volumes.Create`
+   accepts **only** `202`, and most Neutron v2.0 operations accept `200`/`201`.
+   The client must never depend on an O3K native Operation API response. Exact
+   per-operation status codes belong in the P13.1 behavioral contract.
 
 ## Provider contract discovery phase (P13.1)
 
@@ -364,9 +373,10 @@ for every target resource. Behavioral contract frozen.
 
 ### P13.2 — Core lifecycle
 OpenTofu can create, read, update (no-op), and destroy core compute/network
-resources. Evidence includes Terraform plan/apply output and state file
-contents showing correct resource IDs and attributes. Provider compatibility
-verified at `provider-partial` minimum.
+resources for the bounded attribute subset frozen in P13.1. Evidence includes
+Terraform plan/apply output and state file contents showing correct resource
+IDs and attributes. Provider compatibility verified at
+`provider-lifecycle-verified` minimum for the declared attribute subset.
 
 ### P13.3 — Advanced network
 OpenTofu can manage security groups, routers, and floating IPs through the
