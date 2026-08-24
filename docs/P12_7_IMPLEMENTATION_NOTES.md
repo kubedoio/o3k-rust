@@ -12,6 +12,7 @@ database with `O3K_DATABASE_URL`.
 | Compute canonical identity and owner | `p12_7_convergence::native_and_openstack_http_surfaces_share_compute_and_network_authority`; `o3kd::native_adapters::native_compute_create_and_read_operation` |
 | Native compute idempotent canonical mutation | `o3kd::native_adapters::native_compute_create_replay_equivalent`; `native_compute_create_changed_body_conflict` |
 | Network canonical owner/read path | `p12_7_convergence::native_and_openstack_http_surfaces_share_compute_and_network_authority`; `o3k_api::health::neutron_network_subnet_port_lifecycle_is_deterministic` |
+| OpenStack foreign Network dependency authorization | `p12_7_convergence::native_and_openstack_http_surfaces_share_compute_and_network_authority` creates a real project-b Network/Port, attempts Nova create from project-a, and proves a concealed 404 with zero provider mutation |
 | Volume canonical owner/read path | `o3kd::native_adapters::volume_reader_tests`; `o3k-store` P12.4 canonical-resource tests |
 | Duplicate authority | Executable convergence tests prove shared canonical authority for the exercised Compute/Network paths; architecture inspection confirms no second native/OpenStack synchronization store exists |
 | Restart relationship | `p12_6_reconstructs_two_independent_control_plane_runtimes`; `p12_6_relationship_recovery_reopens_store_and_serializes_process_race`; native HTTP restart convergence remains NOT PROVEN |
@@ -43,6 +44,7 @@ advertised.
 | Secret-safe public operation errors | `operation_visibility_tests::operation_route_is_store_backed_owner_scoped_and_redacts_provider_fields`; `o3k-store::postgres_ops::test_postgres_error_mapping_and_no_leakage` |
 | Generation/CAS and authorization-before-side-effect | `o3k-store` SQLite/PostgreSQL P12.4 lifecycle and race tests; `native_compute_rejects_foreign_network_before_provider_mutation`; resolvable durable UUID port references are owner-checked before native Compute mutation |
 | Malformed JSON | `native_adapters::native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation` |
+| Oversized JSON | `native_adapters::native_http_oversized_body_is_rejected_before_provider_mutation` exercises the advertised 1 MiB Axum body limit and proves HTTP 413 with zero provider mutation |
 | Update semantics | NOT APPLICABLE: no native generic update route is advertised in SPEC-0030 v1 |
 
 ## Controller and extension security (SPEC-0031 §22)

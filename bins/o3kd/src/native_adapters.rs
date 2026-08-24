@@ -2443,8 +2443,8 @@ mod native_compute_tests {
         Arc<FakeComputeProvider>,
         Uuid,
     ) {
-        use axum::Router;
         use axum::routing::get;
+        use axum::{Router, extract::DefaultBodyLimit};
         use o3k_native_api::{operation, resource};
 
         let store = Arc::new(
@@ -2532,6 +2532,7 @@ mod native_compute_tests {
                 get(resource::show).delete(resource::delete),
             )
             .route("/operations/{id}", get(operation::show_operation))
+            .layer(DefaultBodyLimit::max(1_048_576))
             .with_state(native);
 
         (router, store, provider, foreign_port)
@@ -2809,6 +2810,29 @@ mod native_compute_tests {
         .await;
         assert_eq!(tampered_status, StatusCode::BAD_REQUEST);
         assert_eq!(provider.instance_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn native_http_oversized_body_is_rejected_before_provider_mutation() {
+        let (router, _, provider, _) = setup().await;
+        let mut body = vec![b' '; 1_048_577];
+        body[0] = b'{';
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/compute/servers")
+                    .header("authorization", "Bearer project-a")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "oversized")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(provider.instance_count(), 0);
     }
 
     #[tokio::test]

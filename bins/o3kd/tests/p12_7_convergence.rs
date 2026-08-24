@@ -5,7 +5,6 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use o3k_compute::ComputeService;
-use o3k_identity::testkit::test_service;
 use o3k_kernel::{
     ControllerSession, ManifestRegistry, PrincipalId, ProtocolVersion, ServicePrincipal,
 };
@@ -47,14 +46,19 @@ async fn response_json(response: axum::response::Response) -> Value {
     })
 }
 
-async fn issue_token(app: &axum::Router) -> Result<String, Box<dyn std::error::Error>> {
+async fn issue_token_for(
+    app: &axum::Router,
+    user: &str,
+    password: &str,
+    project: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let body = serde_json::json!({
         "auth": {
             "identity": {
                 "methods": ["password"],
-                "password": {"user": {"name": "admin", "password": "password"}}
+                "password": {"user": {"name": user, "password": password}}
             },
-            "scope": {"project": {"name": "admin"}}
+            "scope": {"project": {"name": project}}
         }
     });
     let response = app
@@ -74,6 +78,10 @@ async fn issue_token(app: &axum::Router) -> Result<String, Box<dyn std::error::E
         .ok_or("missing Keystone token")?
         .to_str()?
         .to_owned())
+}
+
+async fn issue_token(app: &axum::Router) -> Result<String, Box<dyn std::error::Error>> {
+    issue_token_for(app, "admin", "password", "admin").await
 }
 
 async fn get_json(
@@ -126,7 +134,26 @@ async fn status_for(app: &axum::Router, method: Method, uri: &str, token: &str) 
 async fn native_and_openstack_http_surfaces_share_compute_and_network_authority()
 -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(o3k_store::unified::O3kStore::connect_sqlite_memory().await?);
-    let identity = test_service("http://127.0.0.1:8080").await?;
+    let identity = o3k_identity::testkit::test_service_with_projects(
+        "http://127.0.0.1:8080",
+        vec![
+            o3k_identity::ExtraProjectSeed {
+                project_id: "project-a".to_owned(),
+                project_name: "project-a".to_owned(),
+                user_id: "user-a".to_owned(),
+                user_name: "user-a".to_owned(),
+                password: o3k_identity::Secret::new("password-a".to_owned()),
+            },
+            o3k_identity::ExtraProjectSeed {
+                project_id: "project-b".to_owned(),
+                project_name: "project-b".to_owned(),
+                user_id: "user-b".to_owned(),
+                user_name: "user-b".to_owned(),
+                password: o3k_identity::Secret::new("password-b".to_owned()),
+            },
+        ],
+    )
+    .await?;
     let provider = Arc::new(FakeComputeProvider::new());
     let compute_service = ComputeService::new(store.clone(), provider.clone());
     let compute = Arc::new(compute_service.clone());
@@ -260,6 +287,86 @@ async fn native_and_openstack_http_surfaces_share_compute_and_network_authority(
     let port_id = openstack_port_json["port"]["id"]
         .as_str()
         .ok_or("OpenStack port ID")?;
+    let token_a = issue_token_for(&app, "user-a", "password-a", "project-a").await?;
+    let token_b = issue_token_for(&app, "user-b", "password-b", "project-b").await?;
+    let foreign_network = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/networks")
+                .header("x-auth-token", &token_b)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                    "network": {"name": "foreign-network"}
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(foreign_network.status(), StatusCode::CREATED);
+    let foreign_network_id = response_json(foreign_network).await["network"]["id"]
+        .as_str()
+        .ok_or("foreign network ID")?
+        .to_owned();
+    let foreign_subnet = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/subnets")
+                .header("x-auth-token", &token_b)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                    "subnet": {
+                        "network_id": foreign_network_id,
+                        "name": "foreign-subnet",
+                        "cidr": "198.51.100.0/24",
+                        "gateway_ip": "198.51.100.1"
+                    }
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(foreign_subnet.status(), StatusCode::CREATED);
+    let foreign_port = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/ports")
+                .header("x-auth-token", &token_b)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                    "port": {"network_id": foreign_network_id, "name": "foreign-port"}
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(foreign_port.status(), StatusCode::CREATED);
+    let foreign_port_id = response_json(foreign_port).await["port"]["id"]
+        .as_str()
+        .ok_or("foreign port ID")?
+        .to_owned();
+    let flavor_id = "00000000-0000-0000-0000-000000000001";
+    let before_foreign_attempt = provider.instance_count();
+    let foreign_attempt = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.1/project-a/servers")
+                .header("x-auth-token", &token_a)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-openstack-request-id", "foreign-network-attempt")
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                    "server": {
+                        "name": "must-not-exist",
+                        "image": {"id": "image-a"},
+                        "flavor": {"id": flavor_id},
+                        "networks": [{"port": foreign_port_id}]
+                    }
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(foreign_attempt.status(), StatusCode::NOT_FOUND);
+    assert_eq!(provider.instance_count(), before_foreign_attempt);
     let native_network = get_json(
         &app,
         &format!("/o3k/v1/network/networks/{network_id}"),
@@ -301,7 +408,6 @@ async fn native_and_openstack_http_surfaces_share_compute_and_network_authority(
 
     // Compute uses the same shared authority.  The fake provider is only an
     // execution dependency; neither adapter owns a second public record.
-    let flavor_id = "00000000-0000-0000-0000-000000000001";
     let openstack_server_body = serde_json::json!({
         "server": {
             "name": "p12-7-openstack-server",
