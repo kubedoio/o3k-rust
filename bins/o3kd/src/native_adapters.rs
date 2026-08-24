@@ -2813,6 +2813,48 @@ mod native_compute_tests {
     }
 
     #[tokio::test]
+    async fn native_http_cursor_continues_deterministically_after_anchor_deletion() {
+        let (router, _, provider, _) = setup().await;
+        for (key, name) in [("stale-a", "stale-a"), ("stale-b", "stale-b")] {
+            let (status, _) = exec(
+                &router,
+                authed_post(
+                    "/compute/servers",
+                    "a",
+                    key,
+                    serde_json::json!({"spec":{"name":name,"image_id":"image-a","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":["net-a"]}}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+        let (_, first_page) = exec(&router, authed("/compute/servers?limit=1", "a")).await;
+        let anchor_id = first_page["items"][0]["metadata"]["id"]
+            .as_str()
+            .expect("cursor anchor")
+            .to_owned();
+        let cursor = first_page["next_cursor"].as_str().expect("cursor");
+        let delete_response = router
+            .clone()
+            .oneshot(authed_delete(
+                &format!("/compute/servers/{anchor_id}"),
+                "a",
+                "stale-delete",
+            ))
+            .await
+            .expect("delete response");
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+        let (status, page_after_delete) = exec(
+            &router,
+            authed(&format!("/compute/servers?limit=1&cursor={cursor}"), "a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(page_after_delete.get("items").is_none());
+        assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
     async fn native_http_oversized_body_is_rejected_before_provider_mutation() {
         let (router, _, provider, _) = setup().await;
         let mut body = vec![b' '; 1_048_577];

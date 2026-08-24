@@ -39,7 +39,7 @@ advertised.
 | Cross-project isolation / IDOR / operation isolation | same test; `operation_visibility_tests::operation_route_is_store_backed_owner_scoped_and_redacts_provider_fields`; `native_compute_rejects_foreign_network_before_provider_mutation` |
 | Unknown namespace/resource fails closed | `native_security_rejects_auth_namespace_and_cross_scope_access_before_mutation`; `resource::tests::different_resource_types_share_one_registry_resolution_path` |
 | Idempotency replay, conflict, cross-scope isolation, and provider-side-effect bound | `native_compute_create_replay_equivalent`; `native_compute_create_changed_body_conflict`; `native_compute_idempotency_isolated_between_owner_scopes` |
-| Cursor traversal and tampering | `p12_7_convergence::native_and_openstack_http_surfaces_share_compute_and_network_authority`; `native_adapters::native_http_cursor_is_bound_to_owner_and_rejects_tampering`; codec boundary tests in `o3k_native_api::pagination::tests` |
+| Cursor traversal, tampering, owner binding, and stale-anchor handling | `p12_7_convergence::native_and_openstack_http_surfaces_share_compute_and_network_authority`; `native_adapters::native_http_cursor_is_bound_to_owner_and_rejects_tampering`; `native_adapters::native_http_cursor_continues_deterministically_after_anchor_deletion`; codec boundary tests in `o3k_native_api::pagination::tests` |
 | Owner scope is derived from authenticated context | `o3k_api::two_tenant_isolation::two_tenant_path_and_resource_isolation`; native security test |
 | Secret-safe public operation errors | `operation_visibility_tests::operation_route_is_store_backed_owner_scoped_and_redacts_provider_fields`; `o3k-store::postgres_ops::test_postgres_error_mapping_and_no_leakage` |
 | Generation/CAS and authorization-before-side-effect | `o3k-store` SQLite/PostgreSQL P12.4 lifecycle and race tests; `native_compute_rejects_foreign_network_before_provider_mutation`; resolvable durable UUID port references are owner-checked before native Compute mutation |
@@ -84,7 +84,7 @@ real PostgreSQL harness. The PostgreSQL tests are never replaced by a mock.
 4. correct mutation status codes — PASS (native mutation tests and P12.6 process test)
 5. service-neutral Operation — PASS (operation visibility and process tests)
 6. idempotency/generation safety — NOT PROVEN (native cross-scope idempotency is covered; generation metadata and store CAS exist, but no advertised native mutation exposes a compare-and-set precondition)
-7. opaque pagination scope safety — PASS (`p12_7_convergence` HTTP traversal/tampering and `native_http_cursor_is_bound_to_owner_and_rejects_tampering` cross-owner binding)
+7. opaque pagination scope safety — PASS (`p12_7_convergence` HTTP traversal/tampering, `native_http_cursor_is_bound_to_owner_and_rejects_tampering` cross-owner binding, and `native_http_cursor_continues_deterministically_after_anchor_deletion` stale-anchor rejection)
 8. SQLite/PostgreSQL conformance — NOT PROVEN (store-level PostgreSQL tests executed; native API conformance against PostgreSQL remains required)
 9. selected OpenStack regression — PASS (`o3k-api` isolation/lifecycle suites)
 10. one canonical native/OpenStack authority — PASS for exercised Compute/Network paths (fully wired HTTP convergence, deletion, shared application/store wiring, and lifecycle evidence)
