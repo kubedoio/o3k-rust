@@ -77,6 +77,12 @@ SQLite evidence is provided by the P12.4 lifecycle tests and P12.6 process
 tests. PostgreSQL evidence is provided by
 `crates/o3k-store/tests/postgres_p12_4.rs` and `postgres_ops.rs` against the
 real PostgreSQL harness. The PostgreSQL tests are never replaced by a mock.
+The same HTTP/application conformance body is also exposed through
+`p12_7_convergence::native_and_openstack_http_surfaces_share_compute_and_network_authority`
+for SQLite and
+`native_and_openstack_http_surfaces_share_compute_and_network_authority_postgres`
+for PostgreSQL; the latter was executed with
+`O3K_DATABASE_URL=postgres://o3k:password@127.0.0.1/o3k_p12_7 cargo test -p o3kd --test p12_7_convergence --all-features -- --ignored`.
 
 ## SPEC-0030 §20 final gates
 
@@ -87,7 +93,7 @@ real PostgreSQL harness. The PostgreSQL tests are never replaced by a mock.
 5. service-neutral Operation — PASS (operation visibility and process tests)
 6. idempotency/generation safety — NOT PROVEN (native cross-scope idempotency is covered; generation metadata and store CAS exist, but no advertised native mutation exposes a compare-and-set precondition)
 7. opaque pagination scope safety — PASS (`p12_7_convergence` HTTP traversal/tampering, `native_http_cursor_is_bound_to_owner_and_rejects_tampering` cross-owner binding, and `native_http_cursor_continues_deterministically_after_anchor_deletion` stale-anchor rejection)
-8. SQLite/PostgreSQL conformance — NOT PROVEN (store-level PostgreSQL tests executed; native API conformance against PostgreSQL remains required)
+8. SQLite/PostgreSQL conformance — NOT PROVEN (the shared native HTTP/application body now executes against both SQLite and real PostgreSQL for identity, ownership, operations, idempotency, and pagination; a native HTTP reopen/reconstruction case remains unproven)
 9. selected OpenStack regression — PASS (`o3k-api` isolation/lifecycle suites)
 10. one canonical native/OpenStack authority — PASS for exercised Compute/Network paths (fully wired HTTP convergence, deletion, shared application/store wiring, and lifecycle evidence)
 

@@ -130,10 +130,9 @@ async fn status_for(app: &axum::Router, method: Method, uri: &str, token: &str) 
     status
 }
 
-#[tokio::test]
-async fn native_and_openstack_http_surfaces_share_compute_and_network_authority()
--> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(o3k_store::unified::O3kStore::connect_sqlite_memory().await?);
+async fn run_native_openstack_http_conformance(
+    store: Arc<o3k_store::unified::O3kStore>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let identity = o3k_identity::testkit::test_service_with_projects(
         "http://127.0.0.1:8080",
         vec![
@@ -600,4 +599,24 @@ async fn native_and_openstack_http_surfaces_share_compute_and_network_authority(
         project_id
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn native_and_openstack_http_surfaces_share_compute_and_network_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_native_openstack_http_conformance(Arc::new(
+        o3k_store::unified::O3kStore::connect_sqlite_memory().await?,
+    ))
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires O3K_DATABASE_URL pointing at a real PostgreSQL conformance database"]
+async fn native_and_openstack_http_surfaces_share_compute_and_network_authority_postgres()
+-> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("O3K_DATABASE_URL")?;
+    run_native_openstack_http_conformance(Arc::new(
+        o3k_store::unified::O3kStore::connect_postgres(&url).await?,
+    ))
+    .await
 }
