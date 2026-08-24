@@ -889,7 +889,7 @@ async fn keystone_catalog_contains_all_testlab_services_and_consistent_urls()
     assert_eq!(services.len(), 6);
     assert_eq!(services["identity"], "http://testlab.example.invalid/v3");
     assert_eq!(services["image"], "http://testlab.example.invalid/");
-    assert_eq!(services["network"], "http://testlab.example.invalid/v2.0");
+    assert_eq!(services["network"], "http://testlab.example.invalid/");
     assert_eq!(
         services["compute"],
         "http://testlab.example.invalid/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb"
