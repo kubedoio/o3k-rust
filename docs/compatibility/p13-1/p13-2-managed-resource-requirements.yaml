@@ -1,8 +1,14 @@
 schema_version: 1
 artifact_type: o3k-p13-2-managed-resource-requirements
-phase: p13.1c
-phase_closure: p13.1d
-status: discovery
+phase: p13.1e
+phase_closure: p13.1e-architecture-amendment-proposed
+status: discovery-blocked-pending-architecture-acceptance
+architecture_amendment:
+  adr: docs/adr/ADR-0176-canonical-network-and-addressrealm-lifecycle-separation.md
+  spec: docs/specs/SPEC-0033-canonical-network-addressrealm-lifecycle-v1.md
+  status: proposed
+  implementation_authorized: false
+  p13_2_gate: human acceptance of ADR-0176 and SPEC-0033, followed by migration and restart evidence
 source_provenance:
   provider: terraform-provider-openstack/openstack-3.4.0
   gophercloud: github.com/gophercloud/gophercloud/v2 v2.8.0
@@ -16,9 +22,9 @@ resources:
       deferred: [private_key]
       unsupported: [provider_generated_private_key]
     operations:
-      create: {method: POST, path: /v2.1/{project_id}/os-keypairs, status: 200}
-      read: {method: GET, path: /v2.1/{project_id}/os-keypairs/{name}, status: 200}
-      delete: {method: DELETE, path: /v2.1/{project_id}/os-keypairs/{name}, status: 202}
+      create: {method: POST, path: "/v2.1/{project_id}/os-keypairs", status: 200}
+      read: {method: GET, path: "/v2.1/{project_id}/os-keypairs/{name}", status: 200}
+      delete: {method: DELETE, path: "/v2.1/{project_id}/os-keypairs/{name}", status: 202}
       update: {status: not_applicable, reason: provider_has_no_update}
       import: {id: keypair_name, first_request: GET}
     current_o3k: provider-unverified
@@ -30,14 +36,14 @@ resources:
       deferred: [shared, external, provider_network_type, provider_physical_network, provider_segmentation_id]
     operations:
       create: {method: POST, path: /v2.0/networks, status: 201}
-      read: {method: GET, path: /v2.0/networks/{id}, status: 200}
-      update: {method: PUT, path: /v2.0/networks/{id}, status: 200}
-      delete: {method: DELETE, path: /v2.0/networks/{id}, status: 204}
+      read: {method: GET, path: "/v2.0/networks/{id}", status: 200}
+      update: {method: PUT, path: "/v2.0/networks/{id}", status: 200}
+      delete: {method: DELETE, path: "/v2.0/networks/{id}", status: 204}
       import: {id: network_uuid, first_request: GET}
     current_o3k: provider-partial
     observed:
       - {method: POST, path: /v2.0/networks, status: 201, response: network envelope with id/name/status}
-      - {method: GET, path: /v2.0/networks/{id}, status: 200, response: network envelope}
+      - {method: GET, path: "/v2.0/networks/{id}", status: 200, response: network envelope}
     remaining_gap:
       classification: provider-partial
       required_implementation: complete update/delete/import convergence; no P13.1D runtime fix permitted
@@ -49,20 +55,25 @@ resources:
       computed_for_convergence: [id, tenant_id, allocation_pools, dns_nameservers, host_routes]
       deferred: [allocation_pool, ipv6_address_mode, ipv6_ra_mode]
     cardinality:
-      decision: unresolved-pending-normative-amendment
+      decision: proposed-zero-to-many-addressrealms-owned-by-independent-network
       p13_v1_target: one subnet and one AddressPool per Network
+      second_subnet_admission:
+        invariant: reject before canonical or provider mutation
+        classification: unsupported-profile-cardinality-conflict
+        proposed_status: 409
+        wire_message: implementation-contract-requirement; verify during P13.2 conformance
       reason: NetworkIntent currently requires one AddressRealm, while compatibility NetworkRecord exists independently; a truthful addressless canonical NetworkIntent and durable realm deletion semantics require an accepted architecture amendment
-      recommended_model: zero-or-many AddressRealms owned by NetworkIntent, with P13 v1 admission limited to one
+      recommended_model: zero-or-many AddressRealms owned by canonical Network, with P13 v1 admission limited to one
       alternatives_considered:
         - zero-or-one AddressRealm: smallest P13 change, less extensible
         - zero-or-many AddressRealms: preserves P11 realm identity and future multiple-subnet support
         - distinct canonical subnet resource: clean separation, larger new domain surface
-      required_authority_change: ADR-0168/ADR-0171 and corresponding SPEC amendment before runtime implementation
+      required_authority_change: ADR-0176 and SPEC-0033 acceptance before runtime implementation
     operations:
       create: {method: POST, path: /v2.0/subnets, status: 201}
-      read: {method: GET, path: /v2.0/subnets/{id}, status: 200}
-      update: {method: PUT, path: /v2.0/subnets/{id}, status: 200}
-      delete: {method: DELETE, path: /v2.0/subnets/{id}, status: 204}
+      read: {method: GET, path: "/v2.0/subnets/{id}", status: 200}
+      update: {method: PUT, path: "/v2.0/subnets/{id}", status: 200}
+      delete: {method: DELETE, path: "/v2.0/subnets/{id}", status: 204}
       import: {id: subnet_uuid, first_request: GET}
     current_o3k: provider-partial
     observed:
@@ -81,9 +92,9 @@ resources:
       deferred: [security_groups, device_id, device_owner, allowed_address_pairs, binding_profile]
     operations:
       create: {method: POST, path: /v2.0/ports, status: 201}
-      read: {method: GET, path: /v2.0/ports/{id}, status: 200}
-      update: {method: PUT, path: /v2.0/ports/{id}, status: 200}
-      delete: {method: DELETE, path: /v2.0/ports/{id}, status: 204}
+      read: {method: GET, path: "/v2.0/ports/{id}", status: 200}
+      update: {method: PUT, path: "/v2.0/ports/{id}", status: 200}
+      delete: {method: DELETE, path: "/v2.0/ports/{id}", status: 204}
       import: {id: port_uuid, first_request: GET}
     fixed_ip: provider_accepts_subnet_id_and_optional_ip_address
     security_groups: deferred_to_p13.3
@@ -103,18 +114,18 @@ resources:
       computed_for_convergence: [id, status, access_ip_v4, addresses, created, updated, tenant_id, flavor, image]
       deferred: [personality, block_device, scheduler_hints, security_groups, floating_ip, availability_zone, user_data_secret_variants]
     operations:
-      create: {method: POST, path: /v2.1/{project_id}/servers, status: 202}
-      poll: {method: GET, path: /v2.1/{project_id}/servers/{id}, terminal_success: [ACTIVE], terminal_failure: [ERROR, UNKNOWN]}
-      read: {method: GET, path: /v2.1/{project_id}/servers/{id}, status: 200}
-      update: {method: PUT, path: /v2.1/{project_id}/servers/{id}, status: 200, bounded: [name]}
-      actions: {method: POST, path: /v2.1/{project_id}/servers/{id}/action, verbs: [start, stop, reboot]}
-      delete: {method: DELETE, path: /v2.1/{project_id}/servers/{id}, status: 204}
+      create: {method: POST, path: "/v2.1/{project_id}/servers", status: 202}
+      poll: {method: GET, path: "/v2.1/{project_id}/servers/{id}", terminal_success: [ACTIVE], terminal_failure: [ERROR, UNKNOWN]}
+      read: {method: GET, path: "/v2.1/{project_id}/servers/{id}", status: 200}
+      update: {method: PUT, path: "/v2.1/{project_id}/servers/{id}", status: 200, bounded: [name]}
+      actions: {method: POST, path: "/v2.1/{project_id}/servers/{id}/action", verbs: [start, stop, reboot]}
+      delete: {method: DELETE, path: "/v2.1/{project_id}/servers/{id}", status: 204}
       import: {id: server_uuid, first_request: GET}
     operation_authority: Nova wire state; never an O3K native Operation response
     current_o3k: provider-partial
     observed:
       prerequisite: {method: GET, path: /v2.0/networks, query: "id={network_id}&status=ACTIVE", status: 200}
-      create: {method: POST, path: /v2.1/{project_id}/servers, status: 404, message: "network resource was not found"}
+      create: {method: POST, path: "/v2.1/{project_id}/servers", status: 404, message: "network resource was not found"}
     remaining_gap:
       classification: wrong-cross-service-resolution
       required_implementation: resolve network identity/resource visibility for Nova create and continue source-defined polling discovery; no P13.1D runtime fix permitted
@@ -132,12 +143,17 @@ architecture_decision:
   network_without_subnet:
     current_compatibility_projection: network_networks is independently persisted and can exist without network_subnets
     current_canonical_model: NetworkIntent.realm is mandatory; canonical intent reconstruction currently requires a subnet
-    decision: unresolved
-    p13_2_gate: normative architecture amendment and migration plan required
+    decision: proposed-independent-network-zero-to-many-realms
+    p13_2_gate: human acceptance of ADR-0176/SPEC-0033 and implementation evidence
   subnet_identity:
     current_compatibility_identity: independent SubnetRecord UUID
-    address_realm_identity: must not be equated to Network UUID without durable one-to-one realm ownership
+    address_realm_identity: independent stable UUID owned by exactly one Network; P13 v1 may project Subnet ID to Realm ID
     address_pool_identity: bounded allocation range record linked to the realm/subnet
   deletion:
     current_compatibility_behavior: subnet deletion succeeds with network retained when no network ports exist; network deletion rejects remaining subnet/port rows
-    canonical_requirement: realm/pool removal must leave the Network authoritative and reconstructable
+    canonical_requirement: realm/pool removal must leave the independent Network authoritative and reconstructable; provider cleanup must be proven first
+  current_model_audit:
+    network_intent: mandatory single realm in crates/o3k-domain/src/network.rs
+    compatibility_persistence: independent network_networks and network_subnets tables
+    reconstruction: crates/o3k-network/src/lib.rs currently returns NotFound when a network has no subnet
+    proposed_resolution: ADR-0176/SPEC-0033; no runtime implementation in P13.1E

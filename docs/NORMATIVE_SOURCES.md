@@ -48,6 +48,16 @@ by SPEC-0032.
 |---|---|
 | OpenStack Ecosystem and Infrastructure-as-Code Compatibility Boundary | `docs/adr/ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md`, `docs/specs/SPEC-0032-openstack-terraform-opentofu-compatibility-profile-v1.md`, `contracts/iac-openstack-profile-v1.yaml` |
 
+## Proposed architecture amendments — not active authority
+
+The following documents are frozen proposals for human review. They do not
+supersede accepted ADRs/specs, authorize runtime implementation, or create
+product/compatibility claims until their status changes through the governance
+process:
+
+- [ADR-0176 — Canonical Network and AddressRealm lifecycle separation](adr/ADR-0176-canonical-network-and-addressrealm-lifecycle-separation.md) — Proposed.
+- [SPEC-0033 — Canonical Network / AddressRealm lifecycle v1](specs/SPEC-0033-canonical-network-addressrealm-lifecycle-v1.md) — Proposed.
+
 ## Core rules
 
 - O3K owns public identity, ownership, desired state, scheduling, operations,
