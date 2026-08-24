@@ -219,9 +219,28 @@ async fn build_http_runtime(
     ))
 }
 
+enum HttpRestartBackend {
+    Sqlite(std::path::PathBuf),
+    Postgres(String),
+}
+
+async fn open_http_restart_store(
+    backend: &HttpRestartBackend,
+) -> Result<o3k_store::unified::O3kStore, Box<dyn std::error::Error>> {
+    Ok(match backend {
+        HttpRestartBackend::Sqlite(path) => {
+            o3k_store::unified::O3kStore::connect_sqlite_file(path).await?
+        }
+        HttpRestartBackend::Postgres(url) => {
+            o3k_store::unified::O3kStore::connect_postgres(url).await?
+        }
+    })
+}
+
 async fn run_native_openstack_http_conformance(
     store: Arc<o3k_store::unified::O3kStore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let run_tag = uuid::Uuid::new_v4().simple().to_string();
     let identity = o3k_identity::testkit::test_service_with_projects(
         "http://127.0.0.1:8080",
         vec![
@@ -306,7 +325,7 @@ async fn run_native_openstack_http_conformance(
 
     // Direction A: OpenStack create -> native read.  The ID and owner are
     // asserted from both protocol representations, not inferred by name.
-    let network_body = serde_json::json!({"network": {"name": "p12-7-network"}});
+    let network_body = serde_json::json!({"network": {"name": format!("p12-7-network-{run_tag}")}});
     let openstack_network = app
         .clone()
         .oneshot(
@@ -337,7 +356,7 @@ async fn run_native_openstack_http_conformance(
                 .body(Body::from(serde_json::to_vec(&serde_json::json!({
                     "subnet": {
                         "network_id": network_id,
-                        "name": "p12-7-subnet",
+                        "name": format!("p12-7-subnet-{run_tag}"),
                         "cidr": "192.0.2.0/24",
                         "gateway_ip": "192.0.2.1",
                         "allocation_pools": [{"start": "192.0.2.10", "end": "192.0.2.200"}]
@@ -359,7 +378,7 @@ async fn run_native_openstack_http_conformance(
                 .header("x-auth-token", &token)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                    "port": {"network_id": network_id, "name": "p12-7-port"}
+                    "port": {"network_id": network_id, "name": format!("p12-7-port-{run_tag}")}
                 }))?))?,
         )
         .await?;
@@ -386,7 +405,7 @@ async fn run_native_openstack_http_conformance(
                 .header("x-auth-token", &token_b)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                    "network": {"name": "foreign-network"}
+                    "network": {"name": format!("foreign-network-{run_tag}")}
                 }))?))?,
         )
         .await?;
@@ -406,7 +425,7 @@ async fn run_native_openstack_http_conformance(
                 .body(Body::from(serde_json::to_vec(&serde_json::json!({
                     "subnet": {
                         "network_id": foreign_network_id,
-                        "name": "foreign-subnet",
+                        "name": format!("foreign-subnet-{run_tag}"),
                         "cidr": "198.51.100.0/24",
                         "gateway_ip": "198.51.100.1"
                     }
@@ -423,7 +442,7 @@ async fn run_native_openstack_http_conformance(
                 .header("x-auth-token", &token_b)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                    "port": {"network_id": foreign_network_id, "name": "foreign-port"}
+                    "port": {"network_id": foreign_network_id, "name": format!("foreign-port-{run_tag}")}
                 }))?))?,
         )
         .await?;
@@ -476,7 +495,7 @@ async fn run_native_openstack_http_conformance(
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::to_vec(&serde_json::json!({
                     "kind": "network:network",
-                    "spec": {"name": "p12-7-native-network"}
+                    "spec": {"name": format!("p12-7-native-network-{run_tag}")}
                 }))?))?,
         )
         .await?;
@@ -498,7 +517,7 @@ async fn run_native_openstack_http_conformance(
     // execution dependency; neither adapter owns a second public record.
     let openstack_server_body = serde_json::json!({
         "server": {
-            "name": "p12-7-openstack-server",
+            "name": format!("p12-7-openstack-server-{run_tag}"),
             "image": {"id": "image-a"},
             "flavor": {"id": flavor_id},
             "networks": [{"port": port_id}]
@@ -512,7 +531,10 @@ async fn run_native_openstack_http_conformance(
                 .uri(format!("/v2.1/{project_id}/servers"))
                 .header("x-auth-token", &token)
                 .header(header::CONTENT_TYPE, "application/json")
-                .header("x-openstack-request-id", "p12-7-openstack-create")
+                .header(
+                    "x-openstack-request-id",
+                    format!("p12-7-openstack-create-{run_tag}"),
+                )
                 .body(Body::from(serde_json::to_vec(&openstack_server_body)?))?,
         )
         .await?;
@@ -545,11 +567,11 @@ async fn run_native_openstack_http_conformance(
                 .uri("/o3k/v1/compute/servers")
                 .header("authorization", format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
-                .header("idempotency-key", "p12-7-native-create")
+                .header("idempotency-key", format!("p12-7-native-create-{run_tag}"))
                 .body(Body::from(serde_json::to_vec(&serde_json::json!({
                     "kind": "compute:server",
                     "spec": {
-                        "name": "p12-7-native-server",
+                        "name": format!("p12-7-native-server-{run_tag}"),
                         "image_id": "image-b",
                         "flavor_id": flavor_id,
                         "network_ids": [port_id]
@@ -697,10 +719,17 @@ async fn native_and_openstack_http_surfaces_reconstruct_over_durable_sqlite()
         "o3k-p12-7-http-restart-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
-    let (app_a, provider_a) = build_http_runtime(Arc::new(
-        o3k_store::unified::O3kStore::connect_sqlite_file(&path).await?,
-    ))
-    .await?;
+    run_http_restart_conformance(HttpRestartBackend::Sqlite(path.clone())).await?;
+    let _ = std::fs::remove_file(path);
+    Ok(())
+}
+
+async fn run_http_restart_conformance(
+    backend: HttpRestartBackend,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run_tag = uuid::Uuid::new_v4().simple().to_string();
+    let (app_a, provider_a) =
+        build_http_runtime(Arc::new(open_http_restart_store(&backend).await?)).await?;
     let token_a = issue_token_for(&app_a, "user-a", "password-a", "project-a").await?;
 
     let network = app_a
@@ -711,7 +740,10 @@ async fn native_and_openstack_http_surfaces_reconstruct_over_durable_sqlite()
                 .uri("/v2.0/networks")
                 .header("x-auth-token", &token_a)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"network":{"name":"restart-os-network"}}"#))?,
+                .body(Body::from(
+                    serde_json::json!({"network":{"name":format!("restart-os-network-{run_tag}")}})
+                        .to_string(),
+                ))?,
         )
         .await?;
     assert_eq!(network.status(), StatusCode::CREATED);
@@ -728,7 +760,7 @@ async fn native_and_openstack_http_surfaces_reconstruct_over_durable_sqlite()
                 .header("authorization", format!("Bearer {token_a}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    r#"{"kind":"network:network","spec":{"name":"restart-native-network"}}"#,
+                    serde_json::json!({"kind":"network:network","spec":{"name":format!("restart-native-network-{run_tag}")}}).to_string(),
                 ))?,
         )
         .await?;
@@ -739,7 +771,7 @@ async fn native_and_openstack_http_surfaces_reconstruct_over_durable_sqlite()
         .to_owned();
     let subnet = app_a.clone().oneshot(Request::builder().method(Method::POST).uri("/v2.0/subnets")
         .header("x-auth-token", &token_a).header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::json!({"subnet":{"network_id":network_id,"name":"restart-subnet","cidr":"192.0.2.0/24","gateway_ip":"192.0.2.1"}}).to_string()))?).await?;
+        .body(Body::from(serde_json::json!({"subnet":{"network_id":network_id,"name":format!("restart-subnet-{run_tag}"),"cidr":"192.0.2.0/24","gateway_ip":"192.0.2.1"}}).to_string()))?).await?;
     assert_eq!(subnet.status(), StatusCode::CREATED);
     let port = app_a
         .clone()
@@ -750,7 +782,7 @@ async fn native_and_openstack_http_surfaces_reconstruct_over_durable_sqlite()
                 .header("x-auth-token", &token_a)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"port":{"network_id":network_id,"name":"restart-port"}})
+                    serde_json::json!({"port":{"network_id":network_id,"name":format!("restart-port-{run_tag}")}})
                         .to_string(),
                 ))?,
         )
@@ -760,7 +792,7 @@ async fn native_and_openstack_http_surfaces_reconstruct_over_durable_sqlite()
         .as_str()
         .ok_or("port id")?
         .to_owned();
-    let server_body = serde_json::json!({"server":{"name":"restart-server","image":{"id":"image-a"},"flavor":{"id":"00000000-0000-0000-0000-000000000001"},"networks":[{"port":port_id}]}});
+    let server_body = serde_json::json!({"server":{"name":format!("restart-server-{run_tag}"),"image":{"id":"image-a"},"flavor":{"id":"00000000-0000-0000-0000-000000000001"},"networks":[{"port":port_id}]}});
     let os_server = app_a
         .clone()
         .oneshot(
@@ -779,8 +811,8 @@ async fn native_and_openstack_http_surfaces_reconstruct_over_durable_sqlite()
         .to_owned();
     let native_server = app_a.clone().oneshot(Request::builder().method(Method::POST).uri("/o3k/v1/compute/servers")
         .header("authorization", format!("Bearer {token_a}")).header(header::CONTENT_TYPE, "application/json")
-        .header("idempotency-key", "restart-native-server")
-        .body(Body::from(serde_json::json!({"kind":"compute:server","spec":{"name":"restart-native-server","image_id":"image-b","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":[port_id]}}).to_string()))?).await?;
+        .header("idempotency-key", format!("restart-native-server-{run_tag}"))
+        .body(Body::from(serde_json::json!({"kind":"compute:server","spec":{"name":format!("restart-native-server-{run_tag}"),"image_id":"image-b","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":[port_id]}}).to_string()))?).await?;
     assert_eq!(native_server.status(), StatusCode::CREATED);
     let native_server_id = response_json(native_server).await["resource_id"]
         .as_str()
@@ -790,10 +822,8 @@ async fn native_and_openstack_http_surfaces_reconstruct_over_durable_sqlite()
     drop(app_a);
     drop(provider_a);
 
-    let (app_b, _provider_b) = build_http_runtime(Arc::new(
-        o3k_store::unified::O3kStore::connect_sqlite_file(&path).await?,
-    ))
-    .await?;
+    let (app_b, _provider_b) =
+        build_http_runtime(Arc::new(open_http_restart_store(&backend).await?)).await?;
     let token_b = issue_token_for(&app_b, "user-a", "password-a", "project-a").await?;
     for (native_path, os_path, id) in [
         (
@@ -852,8 +882,15 @@ async fn native_and_openstack_http_surfaces_reconstruct_over_durable_sqlite()
         .await,
         StatusCode::NOT_FOUND
     );
-    let _ = std::fs::remove_file(path);
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires O3K_DATABASE_URL pointing at a real PostgreSQL conformance database"]
+async fn native_and_openstack_http_surfaces_reconstruct_over_durable_postgres()
+-> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("O3K_DATABASE_URL")?;
+    run_http_restart_conformance(HttpRestartBackend::Postgres(url)).await
 }
 
 #[tokio::test]

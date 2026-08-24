@@ -647,6 +647,39 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     );
     assert!(store.list_relationships(parent_id).await?.is_empty());
 
+    // The composition endpoint must reject a cryptographically valid
+    // delegation after its bounded lifetime, before reserving a child slot.
+    let mut expired_wire: SignedDelegation = serde_json::from_slice(&wire_delegation)?;
+    expired_wire.claims.expires_at_unix_ms =
+        chrono::Utc::now().timestamp_millis().max(1) as u64 - 1;
+    let expired_wire = serde_json::to_vec(&SignedDelegation::sign(
+        expired_wire.claims,
+        &SigningKey::from_bytes(&[9; 32]),
+    )?)?;
+    let mut expired_request = child_request.clone();
+    expired_request.delegation = expired_wire;
+    expired_request.slot = "expired-delegation".into();
+    assert!(
+        composition_client
+            .create_child(expired_request)
+            .await
+            .is_err()
+    );
+    assert!(store.list_relationships(parent_id).await?.is_empty());
+
+    // A delegation from the old controller epoch cannot be rebound to a new
+    // session context, even when the request otherwise names the same parent.
+    let mut stale_session_request = child_request.clone();
+    stale_session_request.context.session_generation += 1;
+    stale_session_request.slot = "stale-session".into();
+    assert!(
+        composition_client
+            .create_child(stale_session_request)
+            .await
+            .is_err()
+    );
+    assert!(store.list_relationships(parent_id).await?.is_empty());
+
     // Build a second application object over the same durable store.  The
     // race below must exercise independent application state; two handlers
     // around one application would only prove transport concurrency.
