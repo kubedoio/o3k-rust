@@ -130,6 +130,63 @@ pub struct NetworkRecord {
     pub status: String,
 }
 
+/// Canonical Network identity introduced by ADR-0176. `NetworkRecord` remains
+/// the legacy OpenStack projection until the compatibility adapter is migrated;
+/// these records are the authoritative durable Network rows going forward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalNetworkRecord {
+    pub id: Uuid,
+    pub project_id: String,
+    pub name: String,
+    pub generation: u64,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalAddressRealmRecord {
+    pub id: Uuid,
+    pub network_id: Uuid,
+    pub project_id: String,
+    pub prefix: String,
+    pub overlapping_prefixes: bool,
+    pub generation: u64,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalAddressPoolRecord {
+    pub id: Uuid,
+    pub realm_id: Uuid,
+    pub project_id: String,
+    pub prefix: String,
+    pub gateway: Option<Ipv4Addr>,
+    pub first_usable: Ipv4Addr,
+    pub last_usable: Ipv4Addr,
+    pub generation: u64,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalEndpointRecord {
+    pub id: Uuid,
+    pub realm_id: Uuid,
+    pub project_id: String,
+    pub fixed_ip: Ipv4Addr,
+    pub mac: String,
+    pub generation: u64,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalRealmBindingRecord {
+    pub fabric_domain_id: String,
+    pub realm_id: Uuid,
+    pub provider_kind: String,
+    pub provider_segment_id: u64,
+    pub binding_generation: u64,
+    pub state: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubnetRecord {
     pub id: Uuid,
@@ -1100,6 +1157,8 @@ pub enum StoreError {
     KeypairInUse,
     #[error("keypair and server ownership do not match")]
     KeypairOwnershipConflict,
+    #[error("canonical network ownership conflict")]
+    OwnershipConflict,
     #[error("image not found")]
     ImageNotFound,
     #[error("image is already active")]
@@ -2018,6 +2077,7 @@ impl SqliteStore {
             pool,
             agent_command_projection_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
+        store.backfill_canonical_network_state().await?;
         store.verify_integrity().await?;
         Ok(store)
     }
@@ -2269,12 +2329,12 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions', 'image_metadata', 'network_networks', 'network_subnets', 'network_ports', 'placement_providers', 'placement_inventories', 'placement_allocations', 'placement_allocation_resources', 'placement_allocation_intents', 'placement_allocation_intent_resources', 'native_storage_backends', 'native_volumes', 'native_volume_attachments', 'native_snapshots')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions', 'image_metadata', 'network_networks', 'network_subnets', 'network_ports', 'canonical_networks', 'canonical_address_realms', 'canonical_address_pools', 'canonical_endpoints', 'canonical_realm_encapsulation_bindings', 'placement_providers', 'placement_inventories', 'placement_allocations', 'placement_allocation_resources', 'placement_allocation_intents', 'placement_allocation_intent_resources', 'native_storage_backends', 'native_volumes', 'native_volume_attachments', 'native_snapshots')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 32 {
+        if table_count != 37 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
 
@@ -3678,6 +3738,546 @@ impl SqliteStore {
         .await
         .map_err(StoreError::Database)?;
         row.as_ref().map(network_from_row).transpose()
+    }
+
+    pub async fn insert_canonical_network(
+        &self,
+        network: &CanonicalNetworkRecord,
+    ) -> Result<(), StoreError> {
+        validate_canonical_state(&network.state)?;
+        let generation = checked_generation(network.generation)?;
+        sqlx::query(
+            "INSERT INTO canonical_networks (id, project_id, name, generation, state) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(network.id.to_string())
+        .bind(&network.project_id)
+        .bind(&network.name)
+        .bind(generation)
+        .bind(&network.state)
+        .execute(&self.pool)
+        .await
+        .map_err(map_canonical_insert_error)
+        .map(|_| ())
+    }
+
+    pub async fn get_canonical_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalNetworkRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, project_id, name, generation, state FROM canonical_networks WHERE id = ? AND project_id = ?",
+        )
+        .bind(id.to_string())
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.as_ref().map(canonical_network_from_row).transpose()
+    }
+
+    pub async fn list_canonical_networks(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<CanonicalNetworkRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, project_id, name, generation, state FROM canonical_networks WHERE project_id = ? ORDER BY id",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(canonical_network_from_row).collect()
+    }
+
+    pub async fn insert_canonical_realm(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+    ) -> Result<(), StoreError> {
+        validate_canonical_state(&realm.state)?;
+        let generation = checked_generation(realm.generation)?;
+        let network = self
+            .get_canonical_network_by_id(&realm.network_id)
+            .await?
+            .ok_or(StoreError::NetworkNotFound)?;
+        if network.project_id != realm.project_id {
+            return Err(StoreError::OwnershipConflict);
+        }
+        sqlx::query(
+            "INSERT INTO canonical_address_realms (id, network_id, project_id, prefix, overlapping_prefixes, generation, state) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(realm.id.to_string())
+        .bind(realm.network_id.to_string())
+        .bind(&realm.project_id)
+        .bind(&realm.prefix)
+        .bind(realm.overlapping_prefixes)
+        .bind(generation)
+        .bind(&realm.state)
+        .execute(&self.pool)
+        .await
+        .map_err(map_canonical_insert_error)
+        .map(|_| ())
+    }
+
+    pub async fn get_canonical_realm(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalAddressRealmRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, network_id, project_id, prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE id = ? AND project_id = ?",
+        )
+        .bind(id.to_string())
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.as_ref().map(canonical_realm_from_row).transpose()
+    }
+
+    pub async fn list_canonical_realms(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, network_id, project_id, prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE project_id = ? AND network_id = ? ORDER BY id",
+        )
+        .bind(project_id)
+        .bind(network_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(canonical_realm_from_row).collect()
+    }
+
+    pub async fn insert_canonical_pool(
+        &self,
+        pool: &CanonicalAddressPoolRecord,
+    ) -> Result<(), StoreError> {
+        validate_canonical_state(&pool.state)?;
+        let generation = checked_generation(pool.generation)?;
+        let realm = self
+            .get_canonical_realm_by_id(&pool.realm_id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
+        if realm.project_id != pool.project_id {
+            return Err(StoreError::OwnershipConflict);
+        }
+        sqlx::query(
+            "INSERT INTO canonical_address_pools (id, realm_id, project_id, prefix, gateway, first_usable, last_usable, generation, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(pool.id.to_string())
+        .bind(pool.realm_id.to_string())
+        .bind(&pool.project_id)
+        .bind(&pool.prefix)
+        .bind(pool.gateway.map(|value| value.to_string()))
+        .bind(pool.first_usable.to_string())
+        .bind(pool.last_usable.to_string())
+        .bind(generation)
+        .bind(&pool.state)
+        .execute(&self.pool)
+        .await
+        .map_err(map_canonical_insert_error)
+        .map(|_| ())
+    }
+
+    pub async fn list_canonical_pools(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<Vec<CanonicalAddressPoolRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, realm_id, project_id, prefix, gateway, first_usable, last_usable, generation, state FROM canonical_address_pools WHERE project_id = ? AND realm_id = ? ORDER BY id",
+        )
+        .bind(project_id)
+        .bind(realm_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(canonical_pool_from_row).collect()
+    }
+
+    pub async fn insert_canonical_endpoint(
+        &self,
+        endpoint: &CanonicalEndpointRecord,
+    ) -> Result<(), StoreError> {
+        validate_canonical_state(&endpoint.state)?;
+        let generation = checked_generation(endpoint.generation)?;
+        let realm = self
+            .get_canonical_realm_by_id(&endpoint.realm_id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
+        if realm.project_id != endpoint.project_id {
+            return Err(StoreError::OwnershipConflict);
+        }
+        sqlx::query(
+            "INSERT INTO canonical_endpoints (id, realm_id, project_id, fixed_ip, mac, generation, state) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(endpoint.id.to_string())
+        .bind(endpoint.realm_id.to_string())
+        .bind(&endpoint.project_id)
+        .bind(endpoint.fixed_ip.to_string())
+        .bind(&endpoint.mac)
+        .bind(generation)
+        .bind(&endpoint.state)
+        .execute(&self.pool)
+        .await
+        .map_err(map_canonical_insert_error)
+        .map(|_| ())
+    }
+
+    pub async fn list_canonical_endpoints(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<Vec<CanonicalEndpointRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, realm_id, project_id, fixed_ip, mac, generation, state FROM canonical_endpoints WHERE project_id = ? AND realm_id = ? ORDER BY id",
+        )
+        .bind(project_id)
+        .bind(realm_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(canonical_endpoint_from_row).collect()
+    }
+
+    pub async fn insert_canonical_realm_binding(
+        &self,
+        binding: &CanonicalRealmBindingRecord,
+    ) -> Result<(), StoreError> {
+        let _realm = self
+            .get_canonical_realm_by_id(&binding.realm_id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
+        validate_canonical_state(&binding.state)?;
+        let generation = checked_generation(binding.binding_generation)?;
+        let segment = checked_generation(binding.provider_segment_id)?;
+        sqlx::query(
+            "INSERT INTO canonical_realm_encapsulation_bindings (fabric_domain_id, realm_id, provider_kind, provider_segment_id, binding_generation, state) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&binding.fabric_domain_id)
+        .bind(binding.realm_id.to_string())
+        .bind(&binding.provider_kind)
+        .bind(segment)
+        .bind(generation)
+        .bind(&binding.state)
+        .execute(&self.pool)
+        .await
+        .map_err(map_canonical_insert_error)
+        .map(|_| ())
+    }
+
+    pub async fn get_canonical_realm_binding(
+        &self,
+        fabric_domain_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<Option<CanonicalRealmBindingRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT fabric_domain_id, realm_id, provider_kind, provider_segment_id, binding_generation, state FROM canonical_realm_encapsulation_bindings WHERE fabric_domain_id = ? AND realm_id = ?",
+        )
+        .bind(fabric_domain_id)
+        .bind(realm_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.map(|row| {
+            Ok(CanonicalRealmBindingRecord {
+                fabric_domain_id: row.get("fabric_domain_id"),
+                realm_id: parse_uuid(row.get("realm_id"))?,
+                provider_kind: row.get("provider_kind"),
+                provider_segment_id: u64::try_from(row.get::<i64, _>("provider_segment_id"))
+                    .map_err(|_| StoreError::Corrupt("negative provider segment".into()))?,
+                binding_generation: u64::try_from(row.get::<i64, _>("binding_generation"))
+                    .map_err(|_| StoreError::Corrupt("negative binding generation".into()))?,
+                state: row.get("state"),
+            })
+        })
+        .transpose()
+    }
+
+    pub async fn delete_canonical_realm(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "DELETE FROM canonical_address_realms WHERE id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id)",
+        )
+        .bind(realm_id.to_string())
+        .bind(project_id)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_canonical_realm(project_id, realm_id).await? {
+                Some(_) => Err(StoreError::NetworkInUse),
+                None => Err(StoreError::ResourceNotFound),
+            };
+        }
+        Ok(())
+    }
+
+    async fn get_canonical_network_by_id(
+        &self,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalNetworkRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, project_id, name, generation, state FROM canonical_networks WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.as_ref().map(canonical_network_from_row).transpose()
+    }
+
+    async fn get_canonical_realm_by_id(
+        &self,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalAddressRealmRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, network_id, project_id, prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.as_ref().map(canonical_realm_from_row).transpose()
+    }
+
+    /// Materializes the accepted canonical Network/Realm relations from the
+    /// legacy durable rows. This is a data migration, not a compatibility
+    /// write path: legacy rows are compared against any usable canonical
+    /// intent metadata and contradictions fail closed.
+    async fn backfill_canonical_network_state(&self) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let intents = sqlx::query(
+            "SELECT id, project_id, generation, payload, status FROM network_intents ORDER BY id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+
+        for intent in &intents {
+            let id_text: String = intent.get("id");
+            let Ok(id) = Uuid::parse_str(&id_text) else {
+                continue;
+            };
+            let project_id: String = intent.get("project_id");
+            let generation: i64 = intent.get("generation");
+            let generation = u64::try_from(generation)
+                .map_err(|_| StoreError::Corrupt("negative network intent generation".into()))?;
+            let state: String = intent.get("status");
+            validate_canonical_state(&state)?;
+            sqlx::query(
+                "INSERT INTO canonical_networks (id, project_id, name, generation, state) VALUES (?, ?, '', ?, ?) ON CONFLICT(id) DO NOTHING",
+            )
+            .bind(id.to_string())
+            .bind(&project_id)
+            .bind(checked_generation(generation)?)
+            .bind(&state)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_canonical_insert_error)?;
+            let row = sqlx::query(
+                "SELECT project_id, name, generation, state FROM canonical_networks WHERE id = ?",
+            )
+            .bind(id.to_string())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+            let existing_project: String = row.get("project_id");
+            if existing_project != project_id {
+                return Err(StoreError::OwnershipConflict);
+            }
+            let existing_generation: i64 = row.get("generation");
+            let existing_state: String = row.get("state");
+            if existing_generation != i64::try_from(generation).unwrap_or_default()
+                || existing_state != state
+            {
+                return Err(StoreError::Corrupt(
+                    "canonical network contradicts network intent".into(),
+                ));
+            }
+            let payload: serde_json::Value =
+                serde_json::from_str(intent.get("payload")).map_err(|error| {
+                    StoreError::Corrupt(format!("invalid network intent JSON: {error}"))
+                })?;
+            if let Some(payload_id) = payload.get("id").and_then(serde_json::Value::as_str)
+                && payload_id != id_text
+            {
+                return Err(StoreError::Corrupt(
+                    "network intent payload identity contradicts its row".into(),
+                ));
+            }
+        }
+
+        let networks = sqlx::query("SELECT id, name, project_id FROM network_networks ORDER BY id")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        for network in &networks {
+            let id: String = network.get("id");
+            let name: String = network.get("name");
+            let project_id: String = network.get("project_id");
+            sqlx::query(
+                "INSERT INTO canonical_networks (id, project_id, name, generation, state) VALUES (?, ?, ?, 1, 'active') ON CONFLICT(id) DO NOTHING",
+            )
+            .bind(&id)
+            .bind(&project_id)
+            .bind(&name)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_canonical_insert_error)?;
+            let canonical: (String, String) =
+                sqlx::query_as("SELECT project_id, name FROM canonical_networks WHERE id = ?")
+                    .bind(&id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(StoreError::Database)?;
+            if canonical.0 != project_id || (canonical.1 != name && !canonical.1.is_empty()) {
+                return Err(StoreError::OwnershipConflict);
+            }
+            if canonical.1.is_empty() {
+                sqlx::query("UPDATE canonical_networks SET name = ? WHERE id = ?")
+                    .bind(&name)
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(StoreError::Database)?;
+            }
+        }
+
+        let subnets = sqlx::query(
+            "SELECT id, network_id, project_id, cidr, gateway_ip, allocation_start, allocation_end FROM network_subnets ORDER BY id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        for subnet in &subnets {
+            let id: String = subnet.get("id");
+            let network_id: String = subnet.get("network_id");
+            let project_id: String = subnet.get("project_id");
+            let cidr: String = subnet.get("cidr");
+            validate_ipv4_cidr(&cidr)?;
+            let network_project: String =
+                sqlx::query_scalar("SELECT project_id FROM canonical_networks WHERE id = ?")
+                    .bind(&network_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(StoreError::Database)?
+                    .ok_or(StoreError::NetworkNotFound)?;
+            if network_project != project_id {
+                return Err(StoreError::OwnershipConflict);
+            }
+            sqlx::query(
+                "INSERT INTO canonical_address_realms (id, network_id, project_id, prefix, overlapping_prefixes, generation, state) VALUES (?, ?, ?, ?, 0, 1, 'active') ON CONFLICT(id) DO NOTHING",
+            )
+            .bind(&id)
+            .bind(&network_id)
+            .bind(&project_id)
+            .bind(&cidr)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_canonical_insert_error)?;
+            let realm: (String, String, String) = sqlx::query_as(
+                "SELECT network_id, project_id, prefix FROM canonical_address_realms WHERE id = ?",
+            )
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+            if realm.0 != network_id || realm.1 != project_id || realm.2 != cidr {
+                return Err(StoreError::Corrupt(
+                    "canonical realm contradicts legacy subnet state".into(),
+                ));
+            }
+            let gateway: String = subnet.get("gateway_ip");
+            let first_usable: String = subnet.get("allocation_start");
+            let last_usable: String = subnet.get("allocation_end");
+            let pool_id = id.clone();
+            sqlx::query(
+                "INSERT INTO canonical_address_pools (id, realm_id, project_id, prefix, gateway, first_usable, last_usable, generation, state) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'active') ON CONFLICT(id) DO NOTHING",
+            )
+            .bind(&pool_id)
+            .bind(&id)
+            .bind(&project_id)
+            .bind(&cidr)
+            .bind(&gateway)
+            .bind(&first_usable)
+            .bind(&last_usable)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_canonical_insert_error)?;
+        }
+
+        for intent in &intents {
+            let payload: serde_json::Value =
+                serde_json::from_str(intent.get("payload")).map_err(|error| {
+                    StoreError::Corrupt(format!("invalid network intent JSON: {error}"))
+                })?;
+            if let Some(realm_id) = payload
+                .get("realm")
+                .and_then(|realm| realm.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+            {
+                let realm_exists: Option<String> =
+                    sqlx::query_scalar("SELECT id FROM canonical_address_realms WHERE id = ?")
+                        .bind(realm_id.to_string())
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(StoreError::Database)?;
+                if realm_exists.is_none() {
+                    return Err(StoreError::Corrupt(
+                        "network intent realm has no durable canonical owner".into(),
+                    ));
+                }
+            }
+        }
+
+        let ports = sqlx::query(
+            "SELECT id, subnet_id, project_id, fixed_ip, mac_address FROM network_ports ORDER BY id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        for port in &ports {
+            let id: String = port.get("id");
+            let subnet_id: Option<String> = port.get("subnet_id");
+            let realm_id = subnet_id.ok_or_else(|| {
+                StoreError::Corrupt("legacy endpoint has no explicit subnet owner".into())
+            })?;
+            let project_id: String = port.get("project_id");
+            let realm_project: String =
+                sqlx::query_scalar("SELECT project_id FROM canonical_address_realms WHERE id = ?")
+                    .bind(&realm_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(StoreError::Database)?
+                    .ok_or(StoreError::ResourceNotFound)?;
+            if realm_project != project_id {
+                return Err(StoreError::OwnershipConflict);
+            }
+            let fixed_ip: String = port.get("fixed_ip");
+            fixed_ip
+                .parse::<Ipv4Addr>()
+                .map_err(|_| StoreError::Corrupt("invalid legacy endpoint IP".into()))?;
+            sqlx::query(
+                "INSERT INTO canonical_endpoints (id, realm_id, project_id, fixed_ip, mac, generation, state) VALUES (?, ?, ?, ?, ?, 1, 'active') ON CONFLICT(id) DO NOTHING",
+            )
+            .bind(&id)
+            .bind(&realm_id)
+            .bind(&project_id)
+            .bind(&fixed_ip)
+            .bind(port.get::<String, _>("mac_address"))
+            .execute(&mut *tx)
+            .await
+            .map_err(map_canonical_insert_error)?;
+        }
+        tx.commit().await.map_err(StoreError::Database)
     }
 
     pub async fn delete_network(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
@@ -5211,6 +5811,138 @@ fn network_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<NetworkRecord, Stor
         name: row.get("name"),
         project_id: row.get("project_id"),
         status: row.get("status"),
+    })
+}
+
+pub(crate) fn validate_canonical_state(state: &str) -> Result<(), StoreError> {
+    if matches!(
+        state,
+        "requested" | "active" | "deleting" | "deleted" | "error"
+    ) {
+        Ok(())
+    } else {
+        Err(StoreError::Corrupt(format!(
+            "invalid canonical network state `{state}`"
+        )))
+    }
+}
+
+pub(crate) fn validate_ipv4_cidr(value: &str) -> Result<(), StoreError> {
+    let (address, prefix) = value
+        .split_once('/')
+        .ok_or_else(|| StoreError::Corrupt("invalid canonical IPv4 prefix".to_owned()))?;
+    let address: Ipv4Addr = address
+        .parse()
+        .map_err(|_| StoreError::Corrupt("invalid canonical IPv4 prefix".to_owned()))?;
+    let prefix: u8 = prefix
+        .parse()
+        .map_err(|_| StoreError::Corrupt("invalid canonical IPv4 prefix".to_owned()))?;
+    if prefix > 32 {
+        return Err(StoreError::Corrupt(
+            "invalid canonical IPv4 prefix length".to_owned(),
+        ));
+    }
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    if u32::from(address) & mask != u32::from(address) {
+        return Err(StoreError::Corrupt("non-canonical IPv4 prefix".to_owned()));
+    }
+    Ok(())
+}
+
+pub(crate) fn checked_generation(generation: u64) -> Result<i64, StoreError> {
+    i64::try_from(generation)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| StoreError::Corrupt("invalid canonical generation".to_owned()))
+}
+
+pub(crate) fn map_canonical_insert_error(error: sqlx::Error) -> StoreError {
+    if matches!(&error, sqlx::Error::Database(database) if database.is_unique_violation()) {
+        StoreError::ResourceAlreadyExists
+    } else {
+        StoreError::Database(error)
+    }
+}
+
+fn canonical_network_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<CanonicalNetworkRecord, StoreError> {
+    let generation: i64 = row.get("generation");
+    Ok(CanonicalNetworkRecord {
+        id: parse_uuid(row.get("id"))?,
+        project_id: row.get("project_id"),
+        name: row.get("name"),
+        generation: u64::try_from(generation)
+            .map_err(|_| StoreError::Corrupt("negative canonical generation".to_owned()))?,
+        state: row.get("state"),
+    })
+}
+
+fn canonical_realm_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<CanonicalAddressRealmRecord, StoreError> {
+    let generation: i64 = row.get("generation");
+    let overlapping: i64 = row.get("overlapping_prefixes");
+    Ok(CanonicalAddressRealmRecord {
+        id: parse_uuid(row.get("id"))?,
+        network_id: parse_uuid(row.get("network_id"))?,
+        project_id: row.get("project_id"),
+        prefix: row.get("prefix"),
+        overlapping_prefixes: overlapping != 0,
+        generation: u64::try_from(generation)
+            .map_err(|_| StoreError::Corrupt("negative canonical generation".to_owned()))?,
+        state: row.get("state"),
+    })
+}
+
+fn canonical_pool_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<CanonicalAddressPoolRecord, StoreError> {
+    let generation: i64 = row.get("generation");
+    Ok(CanonicalAddressPoolRecord {
+        id: parse_uuid(row.get("id"))?,
+        realm_id: parse_uuid(row.get("realm_id"))?,
+        project_id: row.get("project_id"),
+        prefix: row.get("prefix"),
+        gateway: row
+            .get::<Option<String>, _>("gateway")
+            .map(|value| value.parse())
+            .transpose()
+            .map_err(|_| StoreError::Corrupt("invalid canonical gateway".to_owned()))?,
+        first_usable: row
+            .get::<String, _>("first_usable")
+            .parse()
+            .map_err(|_| StoreError::Corrupt("invalid canonical pool start".to_owned()))?,
+        last_usable: row
+            .get::<String, _>("last_usable")
+            .parse()
+            .map_err(|_| StoreError::Corrupt("invalid canonical pool end".to_owned()))?,
+        generation: u64::try_from(generation)
+            .map_err(|_| StoreError::Corrupt("negative canonical generation".to_owned()))?,
+        state: row.get("state"),
+    })
+}
+
+fn canonical_endpoint_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<CanonicalEndpointRecord, StoreError> {
+    let generation: i64 = row.get("generation");
+    Ok(CanonicalEndpointRecord {
+        id: parse_uuid(row.get("id"))?,
+        realm_id: parse_uuid(row.get("realm_id"))?,
+        project_id: row.get("project_id"),
+        fixed_ip: row
+            .get::<String, _>("fixed_ip")
+            .parse()
+            .map_err(|_| StoreError::Corrupt("invalid canonical endpoint IP".to_owned()))?,
+        mac: row.get("mac"),
+        generation: u64::try_from(generation)
+            .map_err(|_| StoreError::Corrupt("negative canonical generation".to_owned()))?,
+        state: row.get("state"),
     })
 }
 
@@ -11651,6 +12383,195 @@ mod tests {
         let _ = fs::remove_file(&backup_path);
         let _ = fs::remove_file(format!("{}-wal", backup_path.display()));
         let _ = fs::remove_file(format!("{}-shm", backup_path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_network_relations_support_zero_realms_and_realm_removal()
+    -> Result<(), Box<dyn Error>> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let network = CanonicalNetworkRecord {
+            id: Uuid::from_u128(0x100),
+            project_id: "project-a".to_owned(),
+            name: "network-a".to_owned(),
+            generation: 7,
+            state: "active".to_owned(),
+        };
+        store.insert_canonical_network(&network).await?;
+        assert!(
+            store
+                .list_canonical_realms("project-a", &network.id)
+                .await?
+                .is_empty()
+        );
+
+        let realm_a = CanonicalAddressRealmRecord {
+            id: Uuid::from_u128(0x101),
+            network_id: network.id,
+            project_id: "project-a".to_owned(),
+            prefix: "10.0.0.0/24".to_owned(),
+            overlapping_prefixes: true,
+            generation: 3,
+            state: "active".to_owned(),
+        };
+        let realm_b = CanonicalAddressRealmRecord {
+            id: Uuid::from_u128(0x102),
+            ..realm_a.clone()
+        };
+        store.insert_canonical_realm(&realm_a).await?;
+        store.insert_canonical_realm(&realm_b).await?;
+        assert_eq!(
+            store
+                .list_canonical_realms("project-a", &network.id)
+                .await?
+                .len(),
+            2
+        );
+
+        let endpoint = CanonicalEndpointRecord {
+            id: Uuid::from_u128(0x103),
+            realm_id: realm_a.id,
+            project_id: "project-a".to_owned(),
+            fixed_ip: "10.0.0.10".parse()?,
+            mac: "02:00:00:00:00:10".to_owned(),
+            generation: 1,
+            state: "active".to_owned(),
+        };
+        store.insert_canonical_endpoint(&endpoint).await?;
+        let binding = CanonicalRealmBindingRecord {
+            fabric_domain_id: "fabric-a".to_owned(),
+            realm_id: realm_a.id,
+            provider_kind: "geneve".to_owned(),
+            provider_segment_id: 42,
+            binding_generation: 5,
+            state: "active".to_owned(),
+        };
+        store.insert_canonical_realm_binding(&binding).await?;
+        assert_eq!(
+            store
+                .get_canonical_realm_binding("fabric-a", &realm_a.id)
+                .await?,
+            Some(binding)
+        );
+        let duplicate = CanonicalEndpointRecord {
+            id: Uuid::from_u128(0x104),
+            mac: "02:00:00:00:00:11".to_owned(),
+            ..endpoint.clone()
+        };
+        assert!(matches!(
+            store.insert_canonical_endpoint(&duplicate).await,
+            Err(StoreError::ResourceAlreadyExists)
+        ));
+
+        assert!(matches!(
+            store.delete_canonical_realm("project-a", &realm_a.id).await,
+            Err(StoreError::NetworkInUse)
+        ));
+        store
+            .delete_canonical_realm("project-a", &realm_b.id)
+            .await?;
+        assert!(
+            store
+                .get_canonical_network("project-a", &network.id)
+                .await?
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_backfill_preserves_legacy_ids_and_rejects_ownership_conflicts()
+    -> Result<(), Box<dyn Error>> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let network_id = Uuid::from_u128(0x200);
+        let realm_id = Uuid::from_u128(0x201);
+        let endpoint_id = Uuid::from_u128(0x202);
+        store
+            .insert_network(&NetworkRecord {
+                id: network_id,
+                name: "legacy-network".to_owned(),
+                project_id: "project-a".to_owned(),
+                status: "ACTIVE".to_owned(),
+            })
+            .await?;
+        store
+            .insert_subnet(&SubnetRecord {
+                id: realm_id,
+                network_id,
+                name: "legacy-subnet".to_owned(),
+                project_id: "project-a".to_owned(),
+                cidr: "10.1.0.0/24".to_owned(),
+                gateway_ip: "10.1.0.1".parse()?,
+                allocation_start: "10.1.0.2".parse()?,
+                allocation_end: "10.1.0.254".parse()?,
+            })
+            .await?;
+        store
+            .insert_port(&PortRecord {
+                id: endpoint_id,
+                network_id,
+                subnet_id: Some(realm_id),
+                project_id: "project-a".to_owned(),
+                name: "legacy-port".to_owned(),
+                mac_address: "02:00:00:00:02:02".to_owned(),
+                fixed_ip: "10.1.0.10".parse()?,
+                status: "ACTIVE".to_owned(),
+                binding_host: None,
+                binding_state: None,
+            })
+            .await?;
+        store.backfill_canonical_network_state().await?;
+        let canonical_network = store
+            .get_canonical_network("project-a", &network_id)
+            .await?
+            .ok_or(StoreError::Corrupt("canonical network missing".into()))?;
+        assert_eq!(canonical_network.id, network_id);
+        let canonical_realms = store
+            .list_canonical_realms("project-a", &network_id)
+            .await?;
+        assert_eq!(
+            canonical_realms
+                .first()
+                .ok_or(StoreError::Corrupt("canonical realm missing".into()))?
+                .id,
+            realm_id
+        );
+        let canonical_endpoints = store
+            .list_canonical_endpoints("project-a", &realm_id)
+            .await?;
+        assert_eq!(
+            canonical_endpoints
+                .first()
+                .ok_or(StoreError::Corrupt("canonical endpoint missing".into()))?
+                .id,
+            endpoint_id
+        );
+
+        let conflict_network = Uuid::from_u128(0x203);
+        store
+            .insert_network(&NetworkRecord {
+                id: conflict_network,
+                name: "conflict".to_owned(),
+                project_id: "project-a".to_owned(),
+                status: "ACTIVE".to_owned(),
+            })
+            .await?;
+        store
+            .insert_subnet(&SubnetRecord {
+                id: Uuid::from_u128(0x204),
+                network_id: conflict_network,
+                name: "foreign-subnet".to_owned(),
+                project_id: "project-b".to_owned(),
+                cidr: "10.2.0.0/24".to_owned(),
+                gateway_ip: "10.2.0.1".parse()?,
+                allocation_start: "10.2.0.2".parse()?,
+                allocation_end: "10.2.0.254".parse()?,
+            })
+            .await?;
+        assert!(matches!(
+            store.backfill_canonical_network_state().await,
+            Err(StoreError::OwnershipConflict)
+        ));
         Ok(())
     }
 
