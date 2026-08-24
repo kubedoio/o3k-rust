@@ -47,23 +47,37 @@ fn sensitive_name(name: &str) -> bool {
 }
 
 fn redacted_json(value: serde_json::Value) -> serde_json::Value {
+    redacted_json_inner(value, false)
+}
+
+fn redacted_json_inner(value: serde_json::Value, token_object: bool) -> serde_json::Value {
     match value {
         serde_json::Value::Object(entries) => serde_json::Value::Object(
             entries
                 .into_iter()
                 .map(|(key, value)| {
-                    let value = if sensitive_name(&key) {
+                    let value = if token_object && key == "id" {
+                        serde_json::Value::String("<redacted>".to_owned())
+                    } else if key == "token" && value.is_object() {
+                        // Keystone uses `token` as the response envelope. Keep
+                        // its catalog and scope visible, while nested token
+                        // identifiers are redacted by the recursive pass.
+                        redacted_json_inner(value, true)
+                    } else if sensitive_name(&key) {
                         serde_json::Value::String("<redacted>".to_owned())
                     } else {
-                        redacted_json(value)
+                        redacted_json_inner(value, false)
                     };
                     (key, value)
                 })
                 .collect(),
         ),
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.into_iter().map(redacted_json).collect())
-        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(|value| redacted_json_inner(value, false))
+                .collect(),
+        ),
         value => value,
     }
 }
@@ -118,7 +132,7 @@ fn trace_resource(path: &str) -> &'static str {
         "extensions"
     } else if path.starts_with("/placement") {
         "placement"
-    } else if path.starts_with("/v2/images") {
+    } else if path.contains("/images") {
         "openstack_images_image_v2"
     } else if path.contains("/flavors") {
         "openstack_compute_flavor_v2"
@@ -219,10 +233,10 @@ async fn finish_trace(
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
     let response_length = bounded_content_length(response.headers());
-    let (response, response_body) = if response_length.is_some()
-        && response_content_type
-            .as_deref()
-            .is_some_and(|value| value.to_ascii_lowercase().contains("json"))
+    let (response, response_body) = if response_content_type
+        .as_deref()
+        .is_some_and(|value| value.to_ascii_lowercase().contains("json"))
+        && response_length.is_none_or(|length| length <= TRACE_BODY_LIMIT)
     {
         let (parts, body) = response.into_parts();
         match axum::body::to_bytes(body, TRACE_BODY_LIMIT).await {

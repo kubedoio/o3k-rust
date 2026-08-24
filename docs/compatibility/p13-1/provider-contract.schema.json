@@ -6,8 +6,11 @@
   "properties": {
     "schema_version": {"const": 1},
     "artifact_type": {"const": "o3k-p13-1-provider-contract"},
+    "phase": {"enum": ["p13.1a", "p13.1b"]},
     "toolchain": {"type": "object"},
     "resources": {"type": "array", "minItems": 7},
+    "provider_run": {"type": "object"},
+    "findings": {"type": "array"},
     "traces": {"type": "array"}
   }
 }

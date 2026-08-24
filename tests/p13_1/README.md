@@ -33,3 +33,19 @@ The committed probe project is at `tests/p13_1/real-project`. Set its
 provider is downloaded by OpenTofu from the public registry at exactly v3.4.0;
 the disposable project prevents generated lock state from changing the
 repository.
+
+P13.1B runs the real process, creates one owned disposable image fixture, and
+executes both read-only data sources:
+
+```bash
+O3K_P13_TOFU_ARCHIVE=... \
+O3K_P13_PROVIDER_ARCHIVE=... \
+O3K_P13_PROVIDER_BINARY=... \
+O3K_P13_PROVIDER_SHA256=... \
+O3K_P13_TOFU=/absolute/path/to/tofu \
+tests/p13_1b_provider_harness.sh
+```
+
+The P13.1B run fails closed if the provider plan fails or if the expected
+request sequence is absent. The artifact is written under `target/p13-1b/`
+unless `O3K_P13_EVIDENCE_OUTPUT` is supplied.
