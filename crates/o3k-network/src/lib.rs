@@ -8955,6 +8955,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_explicit_fixed_ip_creation_has_one_winner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path =
+            std::env::temp_dir().join(format!("o3k-network-explicit-race-{}", Uuid::now_v7()));
+        let sqlite_path = path.with_extension("sqlite");
+        fs::create_dir_all(&path)?;
+        let setup_store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+        let setup = NetworkService::open(&path, setup_store.clone()).await?;
+        let network = setup
+            .create_network(&auth("project-a"), "flat".to_owned())
+            .await?;
+        let subnet = setup
+            .create_subnet(
+                &auth("project-a"),
+                network.id,
+                "lab".to_owned(),
+                "192.0.2.0/28".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        drop(setup);
+        drop(setup_store);
+
+        let service_a = NetworkService::open(
+            &path,
+            Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?),
+        )
+        .await?;
+        let service_b = NetworkService::open(
+            &path,
+            Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?),
+        )
+        .await?;
+        let fixed_ip = Ipv4Addr::new(192, 0, 2, 5);
+        let first = tokio::spawn({
+            let service = service_a.clone();
+            async move {
+                service
+                    .create_port_with_fixed_ip(
+                        &auth("project-a"),
+                        network.id,
+                        "first".to_owned(),
+                        Some((subnet.id, Some(fixed_ip))),
+                    )
+                    .await
+            }
+        });
+        let second = tokio::spawn({
+            let service = service_b.clone();
+            async move {
+                service
+                    .create_port_with_fixed_ip(
+                        &auth("project-a"),
+                        network.id,
+                        "second".to_owned(),
+                        Some((subnet.id, Some(fixed_ip))),
+                    )
+                    .await
+            }
+        });
+        let outcomes = [first.await?, second.await?];
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| matches!(result, Err(NetworkError::Conflict)))
+                .count(),
+            1
+        );
+        drop(service_a);
+        drop(service_b);
+        fs::remove_dir_all(path)?;
+        let _ = fs::remove_file(&sqlite_path);
+        let _ = fs::remove_file(format!("{}-wal", sqlite_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", sqlite_path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn concurrent_cross_instance_writers_conflict_deterministically_without_duplicates()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = std::env::temp_dir().join(format!("o3k-network-multiwriter-{}", Uuid::now_v7()));
