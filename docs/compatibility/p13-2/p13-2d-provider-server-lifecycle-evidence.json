@@ -38,6 +38,12 @@
     "parent_network_and_subnet_retained_until_fixture_teardown": "PASS",
     "fixture_teardown": "PASS"
   },
+  "backend_proof": {
+    "sqlite_provider_lifecycle": "PASS",
+    "postgresql_provider_lifecycle": "PASS",
+    "postgresql_configuration": "O3K_DATABASE_BACKEND=postgres O3K_DATABASE_URL=postgres:///o3k_p13_2d",
+    "postgresql_execution": "same tests/p13_2d_server_lifecycle.sh sequence against a fresh PostgreSQL database"
+  },
   "canonical_projection": {
     "server_identity": "canonical compute:server UUID",
     "network_authority": "canonical Network",
