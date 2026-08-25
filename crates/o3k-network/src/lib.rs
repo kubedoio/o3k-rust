@@ -7071,6 +7071,17 @@ impl NetworkService {
         network_id: Uuid,
         name: String,
     ) -> Result<PortRecord, NetworkError> {
+        self.create_port_with_fixed_ip(auth, network_id, name, None)
+            .await
+    }
+
+    pub async fn create_port_with_fixed_ip(
+        &self,
+        auth: &AuthContext,
+        network_id: Uuid,
+        name: String,
+        requested_fixed_ip: Option<(Uuid, Option<Ipv4Addr>)>,
+    ) -> Result<PortRecord, NetworkError> {
         let ns = ServiceNamespace::new("network")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
         let act = ActionId::new("network", "CreatePort").unwrap_or_else(|_| {
@@ -7093,7 +7104,12 @@ impl NetworkService {
             return Err(NetworkError::Unauthorized);
         }
         match self
-            .create_port_for_project(auth.effective_scope().id().as_str(), network_id, name)
+            .create_port_for_project_with_fixed_ip(
+                auth.effective_scope().id().as_str(),
+                network_id,
+                name,
+                requested_fixed_ip,
+            )
             .await
         {
             Ok(record) => {
@@ -7123,10 +7139,17 @@ impl NetworkService {
         network_id: Uuid,
         name: String,
     ) -> Result<PortRecord, NetworkError> {
-        if name.trim().is_empty() {
-            return Err(NetworkError::InvalidRequest);
-        }
-        let _guard = self.lock().await;
+        self.create_port_for_project_with_fixed_ip(project_id, network_id, name, None)
+            .await
+    }
+
+    pub async fn create_port_for_project_with_fixed_ip(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+        name: String,
+        requested_fixed_ip: Option<(Uuid, Option<Ipv4Addr>)>,
+    ) -> Result<PortRecord, NetworkError> {
         self.get_canonical_network_for_project(project_id, network_id)
             .await?;
         let realms = self
@@ -7135,11 +7158,18 @@ impl NetworkService {
             .list_canonical_realms(project_id, &network_id)
             .await
             .map_err(map_store_error)?;
-        let realm = match realms.as_slice() {
-            [] => return Err(NetworkError::NotFound),
-            [realm] if realm.state == "active" => realm,
-            [_] => return Err(NetworkError::Conflict),
-            _ => return Err(NetworkError::InvalidRequest),
+        let realm = if let Some((subnet_id, _)) = requested_fixed_ip {
+            realms
+                .into_iter()
+                .find(|realm| realm.id == subnet_id && realm.state == "active")
+                .ok_or(NetworkError::NotFound)?
+        } else {
+            match realms.as_slice() {
+                [] => return Err(NetworkError::NotFound),
+                [realm] if realm.state == "active" => realm.clone(),
+                [_] => return Err(NetworkError::Conflict),
+                _ => return Err(NetworkError::InvalidRequest),
+            }
         };
         let pool = self
             .inner
@@ -7150,21 +7180,21 @@ impl NetworkService {
             .into_iter()
             .next()
             .ok_or(NetworkError::NotFound)?;
-        let used: HashSet<Ipv4Addr> = self
-            .inner
-            .repository
-            .list_canonical_endpoints(project_id, &realm.id)
-            .await
-            .map_err(map_store_error)?
-            .into_iter()
-            .map(|endpoint| endpoint.fixed_ip)
-            .collect();
-        let mut candidate = u32::from(pool.first_usable);
-        let end = u32::from(pool.last_usable);
+        let explicit_ip = requested_fixed_ip.and_then(|(_, ip)| ip);
+        let mut candidate = explicit_ip
+            .map(u32::from)
+            .unwrap_or_else(|| u32::from(pool.first_usable));
+        let end = explicit_ip
+            .map(u32::from)
+            .unwrap_or_else(|| u32::from(pool.last_usable));
         let gateway = pool.gateway.ok_or(NetworkError::InvalidRequest)?;
         while candidate <= end {
             let address = Ipv4Addr::from(candidate);
-            if address != gateway && !used.contains(&address) {
+            if address != gateway
+                && (explicit_ip.is_some()
+                    || (candidate >= u32::from(pool.first_usable)
+                        && candidate <= u32::from(pool.last_usable)))
+            {
                 let id = Uuid::now_v7();
                 let port = PortRecord {
                     id,
@@ -7215,41 +7245,39 @@ impl NetworkService {
                     generation: 1,
                     state: "active".to_owned(),
                 };
-                match self
-                    .inner
-                    .repository
-                    .insert_canonical_endpoint(&endpoint)
-                    .await
-                {
-                    Ok(()) => match self.inner.repository.insert_port(&port).await {
-                        Ok(()) => {
-                            let _ = self
-                                .inner
-                                .repository
-                                .commit_reservation(&quota_res.id)
-                                .await;
-                            return Ok(port);
-                        }
-                        Err(error) => {
-                            let _ = self
-                                .inner
-                                .repository
-                                .delete_canonical_endpoint(project_id, &endpoint.id)
-                                .await;
-                            let _ = self
-                                .inner
-                                .repository
-                                .release_reservation(&quota_res.id)
-                                .await;
-                            return Err(map_store_error(error));
-                        }
-                    },
+                let mut insert_result = Err(o3k_store::StoreError::ResourceNotFound);
+                for _ in 0..8 {
+                    insert_result = self
+                        .inner
+                        .repository
+                        .insert_canonical_endpoint_and_port(&endpoint, &port)
+                        .await;
+                    if !insert_result
+                        .as_ref()
+                        .is_err_and(|error| error.to_string().contains("database is locked"))
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                match insert_result {
+                    Ok(()) => {
+                        let _ = self
+                            .inner
+                            .repository
+                            .commit_reservation(&quota_res.id)
+                            .await;
+                        return Ok(port);
+                    }
                     Err(o3k_store::StoreError::ResourceAlreadyExists) => {
                         let _ = self
                             .inner
                             .repository
                             .release_reservation(&quota_res.id)
                             .await;
+                        if explicit_ip.is_some() {
+                            return Err(NetworkError::Conflict);
+                        }
                     }
                     Err(error) => {
                         let _ = self
@@ -7261,9 +7289,16 @@ impl NetworkService {
                     }
                 }
             }
+            if explicit_ip.is_some() {
+                break;
+            }
             candidate = candidate.saturating_add(1);
         }
-        Err(NetworkError::PoolExhausted)
+        if explicit_ip.is_some() {
+            Err(NetworkError::InvalidRequest)
+        } else {
+            Err(NetworkError::PoolExhausted)
+        }
     }
 
     pub async fn list_ports(&self, auth: &AuthContext) -> Result<Vec<PortRecord>, NetworkError> {
@@ -7378,6 +7413,20 @@ impl NetworkService {
             .await
     }
 
+    pub async fn update_port_name_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        name: String,
+    ) -> Result<PortRecord, NetworkError> {
+        self.inner
+            .repository
+            .update_port_name(project_id, &id, &name)
+            .await
+            .map_err(map_store_error)?;
+        self.get_port_for_project(project_id, id).await
+    }
+
     async fn project_canonical_port(
         &self,
         project_id: &str,
@@ -7473,26 +7522,11 @@ impl NetworkService {
         project_id: &str,
         id: Uuid,
     ) -> Result<(), NetworkError> {
-        let _guard = self.lock().await;
-        let metadata_exists = self
-            .inner
-            .repository
-            .get_port(project_id, &id)
-            .await
-            .map_err(map_store_error)?
-            .is_some();
         self.inner
             .repository
-            .delete_canonical_endpoint(project_id, &id)
+            .delete_canonical_endpoint_and_port(project_id, &id)
             .await
             .map_err(map_store_error)?;
-        if metadata_exists {
-            self.inner
-                .repository
-                .delete_port(project_id, &id)
-                .await
-                .map_err(map_store_error)?;
-        }
         let _ = self
             .inner
             .repository

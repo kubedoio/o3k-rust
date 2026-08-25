@@ -185,9 +185,9 @@ resources:
       create: implemented
       list: implemented
       show: implemented
-      update: missing
+      update: implemented
       delete: implemented
-    provider_evidence: provider-partial
+    provider_evidence: provider-lifecycle-verified (bounded P13.2C subset)
     p13_phase: p13.2
 
   - resource: openstack_networking_subnet_v2

@@ -187,14 +187,27 @@ pub(crate) struct UpdatePortRequestBody {
 #[derive(serde::Deserialize)]
 pub(crate) struct UpdatePortRequest {
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     security_groups: Vec<uuid::Uuid>,
 }
 #[derive(serde::Deserialize)]
 pub(crate) struct CreatePortRequest {
-    name: String,
+    #[serde(default)]
+    name: Option<String>,
     network_id: uuid::Uuid,
     #[serde(default)]
+    fixed_ips: Vec<FixedIpRequest>,
+    #[serde(default)]
+    no_fixed_ip: bool,
+    #[serde(default)]
     security_groups: Vec<uuid::Uuid>,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct FixedIpRequest {
+    subnet_id: uuid::Uuid,
+    #[serde(default)]
+    ip_address: Option<Ipv4Addr>,
 }
 #[derive(serde::Serialize)]
 pub(crate) struct PortEnvelope {
@@ -214,6 +227,11 @@ pub(crate) struct PortResponse {
     fixed_ips: Vec<FixedIpResponse>,
     status: String,
     security_groups: Vec<String>,
+    tenant_id: String,
+    admin_state_up: bool,
+    device_id: String,
+    device_owner: String,
+    port_security_enabled: bool,
 }
 #[derive(serde::Serialize)]
 pub(crate) struct FixedIpResponse {
@@ -1156,10 +1174,11 @@ async fn dispatch_policy_network(
 }
 
 pub(crate) fn port_response(value: PortRecord, security_groups: Vec<Uuid>) -> PortResponse {
+    let project_id = value.project_id.clone();
     PortResponse {
         id: value.id.to_string(),
         network_id: value.network_id.to_string(),
-        project_id: value.project_id,
+        project_id: project_id.clone(),
         name: value.name,
         mac_address: value.mac_address,
         fixed_ips: value
@@ -1175,6 +1194,11 @@ pub(crate) fn port_response(value: PortRecord, security_groups: Vec<Uuid>) -> Po
             .into_iter()
             .map(|id| id.to_string())
             .collect(),
+        tenant_id: project_id,
+        admin_state_up: true,
+        device_id: String::new(),
+        device_owner: String::new(),
+        port_security_enabled: false,
     }
 }
 
@@ -2005,43 +2029,42 @@ pub(crate) async fn create_port(
             "invalid port request",
         );
     };
-    let security_groups = body.port.security_groups.clone();
+    if body.port.no_fixed_ip || body.port.fixed_ips.len() > 1 {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "this profile requires one canonical fixed IP",
+        );
+    }
+    if !body.port.security_groups.is_empty() {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "security groups are deferred by this profile",
+        );
+    }
+    let fixed_ip = body
+        .port
+        .fixed_ips
+        .into_iter()
+        .next()
+        .map(|value| (value.subnet_id, value.ip_address));
     match service
-        .create_port(&auth, body.port.network_id, body.port.name)
+        .create_port_with_fixed_ip(
+            &auth,
+            body.port.network_id,
+            body.port.name.unwrap_or_default(),
+            fixed_ip,
+        )
         .await
     {
-        Ok(value) => {
-            if let Err(error) = service
-                .replace_security_group_bindings_for_project(
-                    auth.effective_scope().id().as_str(),
-                    value.id,
-                    security_groups,
-                )
-                .await
-            {
-                return network_error(error);
-            }
-            let groups = service
-                .list_security_group_bindings_for_project(
-                    auth.effective_scope().id().as_str(),
-                    Some(value.id),
-                )
-                .await
-                .map(|bindings| {
-                    bindings
-                        .into_iter()
-                        .map(|binding| binding.security_group_id)
-                        .collect()
-                })
-                .unwrap_or_default();
-            (
-                StatusCode::CREATED,
-                Json(PortEnvelope {
-                    port: port_response(value, groups),
-                }),
-            )
-                .into_response()
-        }
+        Ok(value) => (
+            StatusCode::CREATED,
+            Json(PortEnvelope {
+                port: port_response(value, Vec::new()),
+            }),
+        )
+            .into_response(),
         Err(error) => network_error(error),
     }
 }
@@ -2143,33 +2166,27 @@ pub(crate) async fn update_port(
         Err(response) => return response,
     };
     let project = auth.effective_scope().id().as_str();
-    let port = match service.get_port_for_project(project, id).await {
-        Ok(value) => value,
-        Err(error) => return network_error(error),
-    };
-    if let Err(error) = service
-        .replace_security_group_bindings_for_project(project, id, body.port.security_groups)
-        .await
-    {
+    if let Err(error) = service.get_port_for_project(project, id).await {
         return network_error(error);
     }
-    if let Err(response) = dispatch_policy_network(&state, project, port.network_id, port.id).await
-    {
-        return response;
+    if !body.port.security_groups.is_empty() {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "security groups are deferred by this profile",
+        );
     }
-    let groups = match service
-        .list_security_group_bindings_for_project(project, Some(id))
-        .await
-    {
-        Ok(values) => values
-            .into_iter()
-            .map(|value| value.security_group_id)
-            .collect(),
-        Err(error) => return network_error(error),
-    };
+    if let Some(name) = body.port.name {
+        if let Err(error) = service
+            .update_port_name_for_project(project, id, name)
+            .await
+        {
+            return network_error(error);
+        }
+    }
     match service.get_port_for_project(project, id).await {
         Ok(value) => Json(PortEnvelope {
-            port: port_response(value, groups),
+            port: port_response(value, Vec::new()),
         })
         .into_response(),
         Err(error) => network_error(error),

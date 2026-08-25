@@ -1899,6 +1899,11 @@ pub trait NetworkRepository: Send + Sync + DurableStore + QuotaRepository {
         &self,
         endpoint: &CanonicalEndpointRecord,
     ) -> Result<(), StoreError>;
+    async fn insert_canonical_endpoint_and_port(
+        &self,
+        endpoint: &CanonicalEndpointRecord,
+        port: &PortRecord,
+    ) -> Result<(), StoreError>;
     async fn list_canonical_endpoints(
         &self,
         project_id: &str,
@@ -1910,6 +1915,11 @@ pub trait NetworkRepository: Send + Sync + DurableStore + QuotaRepository {
         endpoint_id: &Uuid,
     ) -> Result<Option<CanonicalEndpointRecord>, StoreError>;
     async fn delete_canonical_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError>;
+    async fn delete_canonical_endpoint_and_port(
         &self,
         project_id: &str,
         endpoint_id: &Uuid,
@@ -2040,6 +2050,12 @@ pub trait NetworkRepository: Send + Sync + DurableStore + QuotaRepository {
         id: &Uuid,
         binding_host: Option<&str>,
         binding_state: Option<&str>,
+    ) -> Result<PortRecord, StoreError>;
+    async fn update_port_name(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        name: &str,
     ) -> Result<PortRecord, StoreError>;
     async fn insert_security_group(&self, group: &SecurityGroupRecord) -> Result<(), StoreError>;
     async fn list_security_groups(
@@ -4373,6 +4389,74 @@ impl SqliteStore {
         .map(|_| ())
     }
 
+    pub async fn insert_canonical_endpoint_and_port(
+        &self,
+        endpoint: &CanonicalEndpointRecord,
+        port: &PortRecord,
+    ) -> Result<(), StoreError> {
+        validate_canonical_state(&endpoint.state)?;
+        let generation = checked_generation(endpoint.generation)?;
+        let subnet_id = port.subnet_id.ok_or(StoreError::ResourceNotFound)?;
+        if endpoint.id != port.id
+            || endpoint.realm_id != subnet_id
+            || endpoint.project_id != port.project_id
+        {
+            return Err(StoreError::OwnershipConflict);
+        }
+        let mut tx = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<(), StoreError> = async {
+            let realm = sqlx::query(
+            "SELECT network_id, project_id FROM canonical_address_realms WHERE id = ? AND state = 'active'",
+            )
+            .bind(endpoint.realm_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::ResourceNotFound)?;
+            if realm.get::<String, _>("project_id") != endpoint.project_id
+                || realm.get::<String, _>("network_id") != port.network_id.to_string()
+            {
+                return Err(StoreError::OwnershipConflict);
+            }
+            sqlx::query(
+            "INSERT INTO canonical_endpoints (id, realm_id, project_id, fixed_ip, mac, generation, state) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(endpoint.id.to_string())
+            .bind(endpoint.realm_id.to_string())
+            .bind(&endpoint.project_id)
+            .bind(endpoint.fixed_ip.to_string())
+            .bind(&endpoint.mac)
+            .bind(generation)
+            .bind(&endpoint.state)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_canonical_insert_error)?;
+            sqlx::query(
+            "INSERT INTO network_ports (id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(port.id.to_string())
+            .bind(port.network_id.to_string())
+            .bind(Some(subnet_id.to_string()))
+            .bind(&port.project_id)
+            .bind(&port.name)
+            .bind(&port.mac_address)
+            .bind(port.fixed_ip.to_string())
+            .bind(&port.status)
+            .bind(&port.binding_host)
+            .bind(&port.binding_state)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_canonical_insert_error)?;
+            Ok(())
+        }
+        .await;
+        SqliteStore::commit_or_rollback(&mut tx, outcome).await
+    }
+
     pub async fn list_canonical_endpoints(
         &self,
         project_id: &str,
@@ -4422,6 +4506,47 @@ impl SqliteStore {
             return Err(StoreError::ResourceNotFound);
         }
         Ok(())
+    }
+
+    pub async fn delete_canonical_endpoint_and_port(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<(), StoreError> = async {
+            sqlx::query(
+                "DELETE FROM canonical_network_policies WHERE endpoint_id = ? AND project_id = ?",
+            )
+            .bind(endpoint_id.to_string())
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+            let result =
+                sqlx::query("DELETE FROM canonical_endpoints WHERE id = ? AND project_id = ?")
+                    .bind(endpoint_id.to_string())
+                    .bind(project_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(StoreError::Database)?;
+            if result.rows_affected() == 0 {
+                return Err(StoreError::ResourceNotFound);
+            }
+            sqlx::query("DELETE FROM network_ports WHERE id = ? AND project_id = ?")
+                .bind(endpoint_id.to_string())
+                .bind(project_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?;
+            Ok(())
+        }
+        .await;
+        SqliteStore::commit_or_rollback(&mut tx, outcome).await
     }
 
     pub async fn upsert_canonical_policy(
@@ -5271,6 +5396,28 @@ impl SqliteStore {
         self.get_port(project_id, id)
             .await?
             .ok_or(StoreError::Corrupt("updated port is missing".to_owned()))
+    }
+
+    pub async fn update_port_name(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        name: &str,
+    ) -> Result<PortRecord, StoreError> {
+        let result =
+            sqlx::query("UPDATE network_ports SET name = ? WHERE id = ? AND project_id = ?")
+                .bind(name)
+                .bind(id.to_string())
+                .bind(project_id)
+                .execute(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NetworkNotFound);
+        }
+        self.get_port(project_id, id)
+            .await?
+            .ok_or(StoreError::NetworkNotFound)
     }
 
     pub async fn insert_security_group(
@@ -8655,6 +8802,14 @@ impl NetworkRepository for SqliteStore {
     ) -> Result<(), StoreError> {
         self.insert_canonical_endpoint(endpoint).await
     }
+    async fn insert_canonical_endpoint_and_port(
+        &self,
+        endpoint: &CanonicalEndpointRecord,
+        port: &PortRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_canonical_endpoint_and_port(endpoint, port)
+            .await
+    }
     async fn list_canonical_endpoints(
         &self,
         project_id: &str,
@@ -8675,6 +8830,14 @@ impl NetworkRepository for SqliteStore {
         endpoint_id: &Uuid,
     ) -> Result<(), StoreError> {
         self.delete_canonical_endpoint(project_id, endpoint_id)
+            .await
+    }
+    async fn delete_canonical_endpoint_and_port(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.delete_canonical_endpoint_and_port(project_id, endpoint_id)
             .await
     }
     async fn upsert_canonical_policy(
@@ -8909,6 +9072,14 @@ impl NetworkRepository for SqliteStore {
     ) -> Result<PortRecord, StoreError> {
         self.update_port_binding(project_id, id, binding_host, binding_state)
             .await
+    }
+    async fn update_port_name(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        name: &str,
+    ) -> Result<PortRecord, StoreError> {
+        self.update_port_name(project_id, id, name).await
     }
 
     async fn insert_security_group(&self, group: &SecurityGroupRecord) -> Result<(), StoreError> {

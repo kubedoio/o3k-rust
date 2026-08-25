@@ -1548,6 +1548,16 @@ impl NetworkRepository for O3kStore {
             Self::Postgres(s) => s.insert_canonical_endpoint(endpoint).await,
         }
     }
+    async fn insert_canonical_endpoint_and_port(
+        &self,
+        endpoint: &CanonicalEndpointRecord,
+        port: &PortRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_canonical_endpoint_and_port(endpoint, port).await,
+            Self::Postgres(s) => s.insert_canonical_endpoint_and_port(endpoint, port).await,
+        }
+    }
     async fn list_canonical_endpoints(
         &self,
         project_id: &str,
@@ -1576,6 +1586,22 @@ impl NetworkRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.delete_canonical_endpoint(project_id, endpoint_id).await,
             Self::Postgres(s) => s.delete_canonical_endpoint(project_id, endpoint_id).await,
+        }
+    }
+    async fn delete_canonical_endpoint_and_port(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.delete_canonical_endpoint_and_port(project_id, endpoint_id)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.delete_canonical_endpoint_and_port(project_id, endpoint_id)
+                    .await
+            }
         }
     }
     async fn upsert_canonical_policy(
@@ -1959,6 +1985,17 @@ impl NetworkRepository for O3kStore {
                 s.update_port_binding(project_id, id, binding_host, binding_state)
                     .await
             }
+        }
+    }
+    async fn update_port_name(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        name: &str,
+    ) -> Result<PortRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.update_port_name(project_id, id, name).await,
+            Self::Postgres(s) => s.update_port_name(project_id, id, name).await,
         }
     }
 

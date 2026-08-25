@@ -168,8 +168,10 @@ only public-key import is supported.
 - `PUT /v2.0/networks/{id}` (update — name, admin_state_up)
 - `DELETE /v2.0/networks/{id}` (delete)
 
-Already implemented for create/list/show/delete. Update may need additional
-verification.
+P13.2C implements and verifies the bounded create/list/show/update/delete/import
+projection onto canonical Endpoint state. Fixed IPs are Realm-scoped and the
+profile supports one fixed IPv4 address per port; security groups, binding,
+device ownership, and rich Neutron port fields remain deferred.
 
 ### openstack_networking_subnet_v2
 

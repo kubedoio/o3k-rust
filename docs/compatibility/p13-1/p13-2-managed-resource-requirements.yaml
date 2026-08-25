@@ -108,16 +108,16 @@ resources:
       import: {id: port_uuid, first_request: GET}
     fixed_ip: provider_accepts_subnet_id_and_optional_ip_address
     security_groups: deferred_to_p13.3
-    current_o3k: provider-partial
-    evidence_status: provider-blocked-by-subnet-create; canonical endpoint lifecycle independently proven
+    current_o3k: implemented-bounded-profile
+    evidence_status: provider-lifecycle-verified for the bounded P13.2C subset; security groups and rich port fields remain deferred
     observed:
       request: {method: POST, path: /v2.0/ports, fields: [network_id, name]}
       response: {status: 404, message: "network resource was not found"}
       reason: discovery-only network reference had no successfully created subnet; O3K port allocation requires a subnet
     remaining_gap:
-      classification: dependency-blocked
-      required_implementation: rerun after canonical subnet architecture and provider-compatible subnet creation are implemented; security groups remain P13.3
-      evidence_reference: target/p13-1/provider-contract.json
+      classification: bounded-profile
+      required_implementation: canonical Endpoint lifecycle with Realm-scoped fixed-IP allocation, restart, import, and project isolation
+      evidence_reference: docs/compatibility/p13-2/p13-2c-provider-port-lifecycle-evidence.json
   openstack_compute_instance_v2:
     attribute_subset:
       required: [name, image_id, flavor_id, network.uuid]
