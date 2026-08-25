@@ -31,6 +31,7 @@ pub(crate) struct UpdateNetworkRequestBody {
     network: UpdateNetworkRequest,
 }
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct UpdateNetworkRequest {
     name: Option<String>,
     #[serde(default)]
@@ -56,17 +57,35 @@ pub(crate) struct NetworkResponse {
     subnets: Vec<String>,
 }
 
-pub(crate) fn network_response(value: NetworkRecord) -> NetworkResponse {
+pub(crate) fn network_response(
+    value: NetworkRecord,
+    admin_state_up: bool,
+    subnet_ids: Vec<Uuid>,
+) -> NetworkResponse {
     NetworkResponse {
         id: value.id.to_string(),
         name: value.name,
         tenant_id: value.project_id.clone(),
         project_id: value.project_id,
         status: value.status,
-        admin_state_up: true,
+        admin_state_up,
         mtu: 1500,
-        subnets: Vec::new(),
+        subnets: subnet_ids.into_iter().map(|id| id.to_string()).collect(),
     }
+}
+
+async fn canonical_network_response(
+    service: &NetworkService,
+    value: NetworkRecord,
+) -> Result<NetworkResponse, NetworkError> {
+    let snapshot = service
+        .reconstruct_canonical_network(&value.project_id, value.id)
+        .await?;
+    Ok(network_response(
+        value,
+        snapshot.network.admin_state_up,
+        snapshot.realms.into_iter().map(|realm| realm.id).collect(),
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -1636,13 +1655,10 @@ pub(crate) async fn create_network(
         );
     };
     match service.create_network(&auth, body.network.name).await {
-        Ok(value) => (
-            StatusCode::CREATED,
-            Json(NetworkEnvelope {
-                network: network_response(value),
-            }),
-        )
-            .into_response(),
+        Ok(value) => match canonical_network_response(service, value).await {
+            Ok(network) => (StatusCode::CREATED, Json(NetworkEnvelope { network })).into_response(),
+            Err(error) => network_error(error),
+        },
         Err(error) => network_error(error),
     }
 }
@@ -1660,10 +1676,16 @@ pub(crate) async fn list_networks(
         Err(response) => return response,
     };
     match service.list_networks(&auth).await {
-        Ok(values) => Json(NetworkList {
-            networks: values.into_iter().map(network_response).collect(),
-        })
-        .into_response(),
+        Ok(values) => {
+            let mut networks = Vec::with_capacity(values.len());
+            for value in values {
+                match canonical_network_response(service, value).await {
+                    Ok(network) => networks.push(network),
+                    Err(error) => return network_error(error),
+                }
+            }
+            Json(NetworkList { networks }).into_response()
+        }
         Err(error) => network_error(error),
     }
 }
@@ -1682,10 +1704,10 @@ pub(crate) async fn show_network(
         Err(response) => return response,
     };
     match service.get_network(&auth, id).await {
-        Ok(value) => Json(NetworkEnvelope {
-            network: network_response(value),
-        })
-        .into_response(),
+        Ok(value) => match canonical_network_response(service, value).await {
+            Ok(network) => Json(NetworkEnvelope { network }).into_response(),
+            Err(error) => network_error(error),
+        },
         Err(error) => network_error(error),
     }
 }
@@ -1707,29 +1729,18 @@ pub(crate) async fn update_network(
             "invalid network request",
         );
     };
-    if body.network.admin_state_up == Some(false) {
-        return keystone_error(
-            StatusCode::BAD_REQUEST,
-            "Bad Request",
-            "admin_state_up=false is not supported by this profile",
-        );
-    }
-    let Some(name) = body.network.name else {
-        return keystone_error(
-            StatusCode::BAD_REQUEST,
-            "Bad Request",
-            "network name is required",
-        );
-    };
     let service = match network_service(&state) {
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.update_network(&auth, id, name).await {
-        Ok(value) => Json(NetworkEnvelope {
-            network: network_response(value),
-        })
-        .into_response(),
+    match service
+        .update_network(&auth, id, body.network.name, body.network.admin_state_up)
+        .await
+    {
+        Ok(value) => match canonical_network_response(service, value).await {
+            Ok(network) => Json(NetworkEnvelope { network }).into_response(),
+            Err(error) => network_error(error),
+        },
         Err(error) => network_error(error),
     }
 }

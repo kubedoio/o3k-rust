@@ -43,11 +43,12 @@ impl PostgresStore {
     ) -> Result<(), StoreError> {
         crate::validate_canonical_state(&network.state)?;
         sqlx::query(
-            "INSERT INTO canonical_networks (id, project_id, name, generation, state) VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO canonical_networks (id, project_id, name, admin_state_up, generation, state) VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(network.id.to_string())
         .bind(&network.project_id)
         .bind(&network.name)
+        .bind(network.admin_state_up)
         .bind(crate::checked_generation(network.generation)?)
         .bind(&network.state)
         .execute(&self.pool)
@@ -62,7 +63,7 @@ impl PostgresStore {
         id: &Uuid,
     ) -> Result<Option<CanonicalNetworkRecord>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, project_id, name, generation, state FROM canonical_networks WHERE id = $1 AND project_id = $2",
+            "SELECT id, project_id, name, admin_state_up, generation, state FROM canonical_networks WHERE id = $1 AND project_id = $2",
         )
         .bind(id.to_string())
         .bind(project_id)
@@ -77,7 +78,7 @@ impl PostgresStore {
         project_id: &str,
     ) -> Result<Vec<CanonicalNetworkRecord>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, project_id, name, generation, state FROM canonical_networks WHERE project_id = $1 ORDER BY id",
+            "SELECT id, project_id, name, admin_state_up, generation, state FROM canonical_networks WHERE project_id = $1 ORDER BY id",
         )
         .bind(project_id)
         .fetch_all(&self.pool)
@@ -92,6 +93,7 @@ impl PostgresStore {
         id: &Uuid,
         expected_generation: u64,
         name: &str,
+        admin_state_up: bool,
     ) -> Result<CanonicalNetworkRecord, StoreError> {
         if name.trim().is_empty() {
             return Err(StoreError::ResourceNotFound);
@@ -109,22 +111,33 @@ impl PostgresStore {
         {
             return Err(StoreError::ResourceAlreadyExists);
         }
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
         let result = sqlx::query(
-            "UPDATE canonical_networks SET name = $1, generation = generation + 1 WHERE id = $2 AND project_id = $3 AND generation = $4 AND state = 'active'",
+            "UPDATE canonical_networks SET name = $1, admin_state_up = $2, generation = generation + 1 WHERE id = $3 AND project_id = $4 AND generation = $5 AND state = 'active'",
         )
         .bind(name)
+        .bind(admin_state_up)
         .bind(id.to_string())
         .bind(project_id)
         .bind(crate::checked_generation(expected_generation)?)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(StoreError::Database)?;
         if result.rows_affected() == 0 {
+            transaction.rollback().await.map_err(StoreError::Database)?;
             return match self.get_canonical_network(project_id, id).await? {
                 Some(_) => Err(StoreError::StaleGeneration),
                 None => Err(StoreError::ResourceNotFound),
             };
         }
+        sqlx::query("UPDATE network_networks SET name = $1 WHERE id = $2 AND project_id = $3")
+            .bind(name)
+            .bind(id.to_string())
+            .bind(project_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        transaction.commit().await.map_err(StoreError::Database)?;
         self.get_canonical_network(project_id, id)
             .await?
             .ok_or(StoreError::ResourceNotFound)
@@ -3942,8 +3955,9 @@ impl NetworkRepository for PostgresStore {
         id: &Uuid,
         expected_generation: u64,
         name: &str,
+        admin_state_up: bool,
     ) -> Result<CanonicalNetworkRecord, StoreError> {
-        self.update_canonical_network(project_id, id, expected_generation, name)
+        self.update_canonical_network(project_id, id, expected_generation, name, admin_state_up)
             .await
     }
     async fn insert_canonical_realm(
@@ -4735,6 +4749,7 @@ fn canonical_network_from_pg_row(row: &PgRow) -> Result<CanonicalNetworkRecord, 
         id: Uuid::parse_str(row.get::<&str, _>("id")).map_err(StoreError::InvalidUuid)?,
         project_id: row.get("project_id"),
         name: row.get("name"),
+        admin_state_up: row.get("admin_state_up"),
         generation: u64::try_from(generation)
             .map_err(|_| StoreError::Corrupt("negative canonical generation".into()))?,
         state: row.get("state"),

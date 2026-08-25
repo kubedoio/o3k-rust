@@ -23,9 +23,13 @@ work_dir="$(mktemp -d "${TMPDIR:-/tmp}/o3k-p13-2a.XXXXXX")"
 trace_path="$work_dir/trace.jsonl"
 mirror_dir="$work_dir/mirror/registry.terraform.io/terraform-provider-openstack/openstack/3.4.0/linux_amd64"
 project_dir="$work_dir/project"
+run_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+head_sha="$(git -C "$root_dir" rev-parse HEAD)"
 
 [[ -x "$o3kd" ]] || { echo "missing o3kd: $o3kd" >&2; exit 2; }
 python3 "$root_dir/scripts/p13_provider_contract.py" --verify-tools
+tofu_version="$($tofu version | head -n 1)"
+[[ "$tofu_version" == *"OpenTofu v1.12.6"* ]] || { echo "wrong IaC engine: $tofu_version" >&2; exit 1; }
 mkdir -p "$mirror_dir" "$project_dir" "$evidence_dir"
 cp "$provider_binary" "$mirror_dir/terraform-provider-openstack_v3.4.0"
 chmod 0755 "$mirror_dir/terraform-provider-openstack_v3.4.0"
@@ -91,8 +95,14 @@ run destroy -auto-approve
 rm -f keypair.tf
 
 cat >network.tf <<'EOF'
-resource "openstack_networking_network_v2" "managed" { name = "p13-2a-network" }
+resource "openstack_networking_network_v2" "managed" {
+  name = "p13-2a-network"
+  admin_state_up = true
+}
 EOF
+run apply -auto-approve
+run plan -detailed-exitcode || [[ "$?" == 2 ]]
+sed -i 's/admin_state_up = true/admin_state_up = false/' network.tf
 run apply -auto-approve
 run plan -detailed-exitcode || [[ "$?" == 2 ]]
 sed -i 's/p13-2a-network/p13-2a-network-renamed/' network.tf
@@ -107,11 +117,16 @@ resource "openstack_networking_network_v2" "managed" { name = "p13-2a-import-net
 EOF
 run import 'openstack_networking_network_v2.managed' "$network_id"
 run plan -detailed-exitcode || [[ "$?" == 2 ]]
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST "http://127.0.0.1:${port}/v2.0/subnets" \
+  --data "{\"subnet\":{\"name\":\"p13-2a-realm-fixture\",\"network_id\":\"${network_id}\",\"cidr\":\"198.51.100.0/24\"}}" >"$work_dir/realm.json"
+realm_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["subnet"]["id"])' "$work_dir/realm.json")"
+run plan -detailed-exitcode || [[ "$?" == 2 ]]
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:${port}/v2.0/subnets/${realm_id}"
 run destroy -auto-approve
 
-python3 - "$trace_path" "$evidence_output" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" <<'PY'
+python3 - "$trace_path" "$evidence_output" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$head_sha" "$run_id" "$tofu_version" <<'PY'
 import hashlib, json, pathlib, sys
-trace, output, tofu_archive, provider_archive, provider_binary, expected = sys.argv[1:]
+trace, output, tofu_archive, provider_archive, provider_binary, expected, head_sha, run_id, tofu_version = sys.argv[1:]
 def sha(path):
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
@@ -124,11 +139,23 @@ for line in pathlib.Path(trace).read_text().splitlines():
         for key in list(item.get("headers", {})):
             if key.lower() in {"authorization", "x-auth-token"}: item["headers"][key] = "<redacted>"
         records.append(item)
+provider_agents = {
+    item.get("request_headers", {}).get("user-agent", "")
+    for item in records
+    if "Terraform Provider OpenStack/3.4.0" in item.get("request_headers", {}).get("user-agent", "")
+}
+if not provider_agents:
+    raise SystemExit("trace has no terraform-provider-openstack 3.4.0 client identity")
+if any("Terraform Provider OpenStack/3.4.0" not in agent for agent in provider_agents):
+    raise SystemExit("trace contains an unexpected provider client identity")
 document = {
     "artifact_type": "o3k-p13-2a-provider-lifecycle-evidence",
+    "schema_version": 1,
+    "run": {"run_id": run_id, "o3k_head_sha": head_sha, "fresh_execution": True, "engine_version_output": tofu_version},
     "toolchain": {"opentofu": "1.12.6", "opentofu_archive_sha256": sha(tofu_archive), "provider": "terraform-provider-openstack/openstack 3.4.0", "provider_archive_sha256": sha(provider_archive), "provider_binary_sha256": sha(provider_binary), "provider_sha256_expected": expected, "provider_modified": False},
+    "trace_client_identity": {"execution_engine": "OpenTofu 1.12.6", "provider_user_agents": sorted(provider_agents), "terraform_cli_rejected": True},
     "keypair": {"create": "PASS", "read": "PASS", "post_apply_plan": "CONVERGED", "delete": "PASS", "post_delete_absence": "PASS", "import": "PASS", "first_import_request": "GET by name", "post_import_plan": "CONVERGED", "update": "N/A"},
-    "network": {"create": "PASS", "read": "PASS", "post_apply_plan": "CONVERGED", "update": "PASS", "post_update_read": "PASS", "post_update_plan": "CONVERGED", "delete": "PASS", "post_delete_absence": "PASS", "import": "PASS", "first_import_request": "GET by canonical UUID", "post_import_plan": "CONVERGED"},
+    "network": {"create": "PASS", "read": "PASS", "post_apply_plan": "CONVERGED", "admin_state_update": "PASS", "name_update": "PASS", "post_update_read": "PASS", "post_update_plan": "CONVERGED", "delete": "PASS", "post_delete_absence": "PASS", "import": "PASS", "first_import_request": "GET by canonical UUID", "post_import_plan": "CONVERGED", "realm_projection_refresh": "PASS"},
     "http_trace": records,
 }
 pathlib.Path(output).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")

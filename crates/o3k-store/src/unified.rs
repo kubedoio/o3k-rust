@@ -1425,15 +1425,28 @@ impl NetworkRepository for O3kStore {
         id: &Uuid,
         expected_generation: u64,
         name: &str,
+        admin_state_up: bool,
     ) -> Result<CanonicalNetworkRecord, StoreError> {
         match self {
             Self::Sqlite(s) => {
-                s.update_canonical_network(project_id, id, expected_generation, name)
-                    .await
+                s.update_canonical_network(
+                    project_id,
+                    id,
+                    expected_generation,
+                    name,
+                    admin_state_up,
+                )
+                .await
             }
             Self::Postgres(s) => {
-                s.update_canonical_network(project_id, id, expected_generation, name)
-                    .await
+                s.update_canonical_network(
+                    project_id,
+                    id,
+                    expected_generation,
+                    name,
+                    admin_state_up,
+                )
+                .await
             }
         }
     }
