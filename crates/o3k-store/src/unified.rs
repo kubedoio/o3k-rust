@@ -12,15 +12,15 @@ use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
     CanonicalNetworkPolicyRecord, CanonicalNetworkRecord, CanonicalOperationRecord,
-    ComputeRepository, ControllerEpoch, ControllerId, ControllerSession, CoordinationRepository,
-    DatabaseHealth, DurableStore, FencingToken, IdempotencyReservation,
-    IdempotencyReservationRequest, IdentityRepository, ImageMetadataRecord, ImageOverlayIdentity,
-    ImageOverlayOwnershipRecord, ImageOverlayUpdate, ImageRepository, KeypairRecord,
-    KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord,
-    KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord,
-    KeystoneUserRecord, LeaseAcquireOutcome, NetworkAddressAllocationRecord, NetworkIntentRecord,
-    NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
-    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    CanonicalRealmBindingRecord, ComputeRepository, ControllerEpoch, ControllerId,
+    ControllerSession, CoordinationRepository, DatabaseHealth, DurableStore, FencingToken,
+    IdempotencyReservation, IdempotencyReservationRequest, IdentityRepository, ImageMetadataRecord,
+    ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayUpdate, ImageRepository,
+    KeypairRecord, KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord,
+    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
+    KeystoneServiceRecord, KeystoneUserRecord, LeaseAcquireOutcome, NetworkAddressAllocationRecord,
+    NetworkIntentRecord, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord,
+    OperationState, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository, PortRecord,
     PostgresStore, ProviderReference, RelationshipRepository, ResourceRecord,
     ResourceRelationshipRecord, SecurityGroupBindingRecord, SecurityGroupRecord,
@@ -525,6 +525,26 @@ impl DurableStore for O3kStore {
             Self::Postgres(store) => {
                 store
                     .create_or_replay_canonical_lifecycle_operation(operation, canonical, request)
+                    .await
+            }
+        }
+    }
+
+    async fn create_or_replay_canonical_scoped_operation(
+        &self,
+        operation: &OperationRecord,
+        canonical: &CanonicalOperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        match self {
+            Self::Sqlite(store) => {
+                store
+                    .create_or_replay_canonical_scoped_operation(operation, canonical, request)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .create_or_replay_canonical_scoped_operation(operation, canonical, request)
                     .await
             }
         }
@@ -1545,6 +1565,31 @@ impl NetworkRepository for O3kStore {
             }
             Self::Postgres(s) => {
                 s.finalize_canonical_realm_deletion(project_id, realm_id, expected_generation)
+                    .await
+            }
+        }
+    }
+    async fn list_canonical_realm_bindings(
+        &self,
+        realm_id: &Uuid,
+    ) -> Result<Vec<CanonicalRealmBindingRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_canonical_realm_bindings(realm_id).await,
+            Self::Postgres(s) => s.list_canonical_realm_bindings(realm_id).await,
+        }
+    }
+    async fn delete_canonical_realm_binding(
+        &self,
+        binding: &CanonicalRealmBindingRecord,
+        expected_realm_generation: u64,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.delete_canonical_realm_binding(binding, expected_realm_generation)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.delete_canonical_realm_binding(binding, expected_realm_generation)
                     .await
             }
         }

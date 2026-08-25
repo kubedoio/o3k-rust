@@ -4417,6 +4417,60 @@ fn map_store_error(error: o3k_store::StoreError) -> NetworkError {
     }
 }
 
+fn realm_delete_operation(
+    project_id: &str,
+    realm_id: Uuid,
+) -> Result<
+    (
+        o3k_store::OperationRecord,
+        o3k_store::CanonicalOperationRecord,
+        o3k_store::IdempotencyReservationRequest,
+    ),
+    NetworkError,
+> {
+    let action =
+        ActionId::new("network", "DeleteRealm").map_err(|_| NetworkError::InvalidRequest)?;
+    let resource_type =
+        ResourceType::new("network", "address_realm").map_err(|_| NetworkError::InvalidRequest)?;
+    let operation_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:network:realm-delete:{project_id}:{realm_id}").as_bytes(),
+    );
+    let scope = OwnershipScope::project(ScopeId::new_unchecked(project_id.to_owned()), None, None);
+    let kernel = o3k_kernel::Operation::new(
+        operation_id,
+        "network",
+        action.clone(),
+        "o3k:network-service",
+        scope,
+        resource_type.clone(),
+        Some(ResourceId::new_unchecked(realm_id.to_string())),
+        None,
+    );
+    let canonical = o3k_store::CanonicalOperationRecord::from_kernel_operation(&kernel)
+        .map_err(map_store_error)?;
+    let operation = o3k_store::OperationRecord {
+        id: operation_id,
+        resource_id: realm_id,
+        kind: "lifecycle:realm-delete".to_owned(),
+        state: o3k_store::OperationState::Pending,
+        provider_operation_id: None,
+        error_category: None,
+        error_message: None,
+    };
+    let request = o3k_store::IdempotencyReservationRequest::from_semantics(
+        project_id,
+        action.to_string(),
+        format!("canonical:realm-delete:{realm_id}"),
+        &resource_type.to_string(),
+        Some(&realm_id.to_string()),
+        &serde_json::json!({"realm_id": realm_id}),
+        operation_id,
+    )
+    .map_err(map_store_error)?;
+    Ok((operation, canonical, request))
+}
+
 fn canonical_network_projection(network: o3k_store::CanonicalNetworkRecord) -> NetworkRecord {
     NetworkRecord {
         id: network.id,
@@ -4450,6 +4504,25 @@ pub struct CanonicalNetworkSnapshot {
     pub endpoints: BTreeMap<Uuid, Vec<o3k_store::CanonicalEndpointRecord>>,
 }
 
+/// Result of observing one provider-owned Realm cleanup identity.  A Realm
+/// remains canonical while the provider outcome is present or unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RealmCleanupObservation {
+    Absent(o3k_store::CanonicalRealmBindingRecord),
+    Present(o3k_store::CanonicalRealmBindingRecord),
+    Unknown {
+        binding: o3k_store::CanonicalRealmBindingRecord,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RealmCleanupProgress {
+    Deleting { operation_id: Uuid, generation: u64 },
+    AwaitingObservation { operation_id: Uuid, generation: u64 },
+    Removed { operation_id: Uuid },
+}
+
 impl NetworkService {
     pub async fn open(
         root: impl Into<PathBuf>,
@@ -4471,12 +4544,14 @@ impl NetworkService {
             .backfill_canonical_network_state()
             .await
             .map_err(map_store_error)?;
-        Ok(Self {
+        let service = Self {
             inner,
             lock: Arc::new(tokio::sync::Mutex::new(())),
             authorizer: Arc::new(StaticAuthorizer::standard()),
             audit_sink: Arc::new(NoopAuditSink),
-        })
+        };
+        service.recover_realm_deletion_operations().await?;
+        Ok(service)
     }
 
     #[must_use]
@@ -4489,6 +4564,124 @@ impl NetworkService {
     pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
         self.audit_sink = audit_sink;
         self
+    }
+
+    async fn recover_realm_deletion_operations(&self) -> Result<(), NetworkError> {
+        let operations = self
+            .inner
+            .repository
+            .list_non_terminal_lifecycle_operations()
+            .await
+            .map_err(map_store_error)?;
+        for operation in operations {
+            if operation.kind != "lifecycle:realm-delete" {
+                continue;
+            }
+            let canonical = self
+                .inner
+                .repository
+                .get_canonical_operation(operation.id)
+                .await
+                .map_err(map_store_error)?;
+            let realm_id = canonical
+                .resource_id
+                .as_deref()
+                .ok_or(NetworkError::InvalidRequest)?
+                .parse::<Uuid>()
+                .map_err(|_| NetworkError::InvalidRequest)?;
+            let realm = self
+                .inner
+                .repository
+                .get_canonical_realm(&canonical.owner_scope, &realm_id)
+                .await
+                .map_err(map_store_error)?;
+            let Some(realm) = realm else {
+                let update = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                    o3k_kernel::OperationState::Succeeded,
+                    canonical.attempt.saturating_add(1),
+                    canonical.started_at.clone(),
+                    Some(
+                        canonical
+                            .started_at
+                            .clone()
+                            .unwrap_or_else(|| canonical.created_at.clone()),
+                    ),
+                    None,
+                )
+                .map_err(map_store_error)?;
+                self.inner
+                    .repository
+                    .update_canonical_operation_lifecycle(operation.id, &update)
+                    .await
+                    .map_err(map_store_error)?;
+                continue;
+            };
+            if realm.state == "active" {
+                let deleting = match self
+                    .inner
+                    .repository
+                    .begin_canonical_realm_deletion(
+                        &canonical.owner_scope,
+                        &realm_id,
+                        realm.generation,
+                    )
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(o3k_store::StoreError::NetworkInUse) => {
+                        let update = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                            o3k_kernel::OperationState::Retryable,
+                            canonical.attempt.saturating_add(1),
+                            canonical.started_at.clone(),
+                            None,
+                            Some("realm still has canonical dependents".to_owned()),
+                        )
+                        .map_err(map_store_error)?;
+                        self.inner
+                            .repository
+                            .update_canonical_operation_lifecycle(operation.id, &update)
+                            .await
+                            .map_err(map_store_error)?;
+                        continue;
+                    }
+                    Err(error) => return Err(map_store_error(error)),
+                };
+                self.inner
+                    .repository
+                    .update_resource(
+                        realm_id,
+                        i64::try_from(realm.generation)
+                            .map_err(|_| NetworkError::InvalidRequest)?,
+                        "deleting",
+                        "deleting",
+                        i64::try_from(deleting.generation)
+                            .map_err(|_| NetworkError::InvalidRequest)?,
+                        None,
+                    )
+                    .await
+                    .map_err(map_store_error)?;
+                let update = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                    o3k_kernel::OperationState::Running,
+                    canonical.attempt.saturating_add(1),
+                    Some(
+                        canonical
+                            .started_at
+                            .clone()
+                            .unwrap_or_else(|| canonical.created_at.clone()),
+                    ),
+                    None,
+                    None,
+                )
+                .map_err(map_store_error)?;
+                self.inner
+                    .repository
+                    .update_canonical_operation_lifecycle(operation.id, &update)
+                    .await
+                    .map_err(map_store_error)?;
+                debug_assert_eq!(deleting.state, "deleting");
+            }
+        }
+        Ok(())
     }
 
     /// Creates only the canonical Network row.  Address realms, pools and
@@ -4599,6 +4792,28 @@ impl NetworkService {
             .insert_canonical_realm(&realm)
             .await
             .map_err(map_store_error)?;
+        if let Err(error) = self
+            .inner
+            .repository
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: realm.id,
+                kind: "network:address_realm".to_owned(),
+                project_id: realm.project_id.clone(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: realm.state.clone(),
+                observed_state: realm.state.clone(),
+                provider_id: None,
+            })
+            .await
+        {
+            let _ = self
+                .inner
+                .repository
+                .delete_canonical_realm(project_id, &realm.id)
+                .await;
+            return Err(map_store_error(error));
+        }
         Ok(realm)
     }
 
@@ -4626,6 +4841,45 @@ impl NetworkService {
         project_id: &str,
         realm_id: Uuid,
     ) -> Result<(), NetworkError> {
+        let progress = self
+            .begin_canonical_realm_deletion_for_project(project_id, realm_id)
+            .await?;
+        let operation_id = match progress {
+            RealmCleanupProgress::Deleting { operation_id, .. }
+            | RealmCleanupProgress::AwaitingObservation { operation_id, .. }
+            | RealmCleanupProgress::Removed { operation_id } => operation_id,
+        };
+        let bindings = self
+            .inner
+            .repository
+            .list_canonical_realm_bindings(&realm_id)
+            .await
+            .map_err(map_store_error)?;
+        if bindings.is_empty() {
+            match self
+                .observe_canonical_realm_cleanup_for_project(project_id, realm_id, Vec::new())
+                .await?
+            {
+                RealmCleanupProgress::Removed { .. } => Ok(()),
+                _ => Err(NetworkError::Conflict),
+            }
+        } else {
+            // No provider observation is available at this service boundary;
+            // retaining Deleting is the safe result. A provider/reconciler
+            // must call the explicit observation method before final removal.
+            let _ = operation_id;
+            Err(NetworkError::Conflict)
+        }
+    }
+
+    /// Durably accepts a Realm deletion before any provider mutation. The
+    /// operation identity is deterministic, so retries join the same
+    /// workflow even after a process restart.
+    pub async fn begin_canonical_realm_deletion_for_project(
+        &self,
+        project_id: &str,
+        realm_id: Uuid,
+    ) -> Result<RealmCleanupProgress, NetworkError> {
         let _guard = self.lock.lock().await;
         let realm = self
             .inner
@@ -4634,17 +4888,250 @@ impl NetworkService {
             .await
             .map_err(map_store_error)?
             .ok_or(NetworkError::NotFound)?;
-        let deleting = self
+        let (operation, canonical, request) = realm_delete_operation(project_id, realm_id)?;
+        let accepted = self
+            .inner
+            .repository
+            .create_or_replay_canonical_scoped_operation(&operation, &canonical, &request)
+            .await
+            .map_err(map_store_error)?;
+        let operation_id = match accepted {
+            o3k_store::IdempotencyReservation::Conflict => return Err(NetworkError::Conflict),
+            o3k_store::IdempotencyReservation::Created(id)
+            | o3k_store::IdempotencyReservation::ExistingEquivalent(id) => id,
+        };
+        if realm.state == "deleting" {
+            return Ok(RealmCleanupProgress::AwaitingObservation {
+                operation_id,
+                generation: realm.generation,
+            });
+        }
+        if realm.state != "active" {
+            let _ = self
+                .inner
+                .repository
+                .update_operation(
+                    operation_id,
+                    o3k_store::OperationState::Failed,
+                    None,
+                    Some("invalid_state"),
+                    Some("Realm is not deletable in its current lifecycle state"),
+                )
+                .await;
+            return Err(NetworkError::Conflict);
+        }
+        let deleting = match self
             .inner
             .repository
             .begin_canonical_realm_deletion(project_id, &realm_id, realm.generation)
             .await
-            .map_err(map_store_error)?;
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let state = if matches!(error, o3k_store::StoreError::NetworkInUse) {
+                    o3k_store::OperationState::Retryable
+                } else {
+                    o3k_store::OperationState::Failed
+                };
+                let _ = self
+                    .inner
+                    .repository
+                    .update_operation(
+                        operation_id,
+                        state,
+                        None,
+                        Some("rejected"),
+                        Some(&error.to_string()),
+                    )
+                    .await;
+                return Err(map_store_error(error));
+            }
+        };
         self.inner
             .repository
-            .finalize_canonical_realm_deletion(project_id, &realm_id, deleting.generation)
+            .update_resource(
+                realm_id,
+                i64::try_from(realm.generation).map_err(|_| NetworkError::InvalidRequest)?,
+                "deleting",
+                "deleting",
+                i64::try_from(deleting.generation).map_err(|_| NetworkError::InvalidRequest)?,
+                None,
+            )
             .await
-            .map_err(map_store_error)
+            .map_err(map_store_error)?;
+        let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+            o3k_kernel::OperationState::Running,
+            1,
+            Some(canonical.created_at.clone()),
+            None,
+            None,
+        )
+        .map_err(map_store_error)?;
+        self.inner
+            .repository
+            .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+            .await
+            .map_err(map_store_error)?;
+        Ok(RealmCleanupProgress::Deleting {
+            operation_id,
+            generation: deleting.generation,
+        })
+    }
+
+    /// Applies a provider observation to a durable Realm deletion. Every
+    /// current binding must be identified exactly; absent observations remove
+    /// only the matching owned binding after generation validation.
+    pub async fn observe_canonical_realm_cleanup_for_project(
+        &self,
+        project_id: &str,
+        realm_id: Uuid,
+        observations: Vec<RealmCleanupObservation>,
+    ) -> Result<RealmCleanupProgress, NetworkError> {
+        let _guard = self.lock.lock().await;
+        let realm = self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, &realm_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        if realm.state != "deleting" {
+            return Err(NetworkError::Conflict);
+        }
+        let (operation, _, _) = realm_delete_operation(project_id, realm_id)?;
+        let operation_record = self
+            .inner
+            .repository
+            .get_operation(operation.id)
+            .await
+            .map_err(map_store_error)?;
+        let canonical = self
+            .inner
+            .repository
+            .get_canonical_operation(operation.id)
+            .await
+            .map_err(map_store_error)?;
+        if operation_record.resource_id != realm_id
+            || canonical.owner_scope != project_id
+            || canonical.resource_id.as_deref() != Some(&realm_id.to_string())
+        {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let bindings = self
+            .inner
+            .repository
+            .list_canonical_realm_bindings(&realm_id)
+            .await
+            .map_err(map_store_error)?;
+        if observations.len() != bindings.len() {
+            return Err(NetworkError::Conflict);
+        }
+        let same_binding =
+            |left: &o3k_store::CanonicalRealmBindingRecord,
+             right: &o3k_store::CanonicalRealmBindingRecord| {
+                left == right && left.realm_id == realm_id
+            };
+        for binding in &bindings {
+            let matching: Vec<_> = observations
+                .iter()
+                .filter(|observation| match observation {
+                    RealmCleanupObservation::Absent(value)
+                    | RealmCleanupObservation::Present(value) => same_binding(binding, value),
+                    RealmCleanupObservation::Unknown { binding: value, .. } => {
+                        same_binding(binding, value)
+                    }
+                })
+                .collect();
+            if matching.len() != 1 {
+                return Err(NetworkError::Conflict);
+            }
+            match matching[0] {
+                RealmCleanupObservation::Unknown { reason, .. } => {
+                    let update = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                        o3k_kernel::OperationState::UnknownOutcome,
+                        canonical.attempt.saturating_add(1),
+                        canonical.started_at.clone(),
+                        None,
+                        Some(reason.clone()),
+                    )
+                    .map_err(map_store_error)?;
+                    self.inner
+                        .repository
+                        .update_canonical_operation_lifecycle(operation.id, &update)
+                        .await
+                        .map_err(map_store_error)?;
+                    return Ok(RealmCleanupProgress::AwaitingObservation {
+                        operation_id: operation.id,
+                        generation: realm.generation,
+                    });
+                }
+                RealmCleanupObservation::Present(_) => {
+                    let update = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                        o3k_kernel::OperationState::Retryable,
+                        canonical.attempt.saturating_add(1),
+                        canonical.started_at.clone(),
+                        None,
+                        Some("owned provider Realm state is still present".to_owned()),
+                    )
+                    .map_err(map_store_error)?;
+                    self.inner
+                        .repository
+                        .update_canonical_operation_lifecycle(operation.id, &update)
+                        .await
+                        .map_err(map_store_error)?;
+                    return Ok(RealmCleanupProgress::AwaitingObservation {
+                        operation_id: operation.id,
+                        generation: realm.generation,
+                    });
+                }
+                RealmCleanupObservation::Absent(_) => {}
+            }
+        }
+        for binding in bindings {
+            self.inner
+                .repository
+                .delete_canonical_realm_binding(&binding, realm.generation)
+                .await
+                .map_err(map_store_error)?;
+        }
+        self.inner
+            .repository
+            .finalize_canonical_realm_deletion(project_id, &realm_id, realm.generation)
+            .await
+            .map_err(map_store_error)?;
+        let _ = self
+            .inner
+            .repository
+            .update_resource(
+                realm_id,
+                i64::try_from(realm.generation).map_err(|_| NetworkError::InvalidRequest)?,
+                "deleted",
+                "deleted",
+                i64::try_from(realm.generation).map_err(|_| NetworkError::InvalidRequest)?,
+                None,
+            )
+            .await;
+        let update = o3k_store::CanonicalOperationLifecycleUpdate::new(
+            o3k_kernel::OperationState::Succeeded,
+            canonical.attempt.saturating_add(1),
+            canonical.started_at.clone(),
+            Some(
+                canonical
+                    .started_at
+                    .clone()
+                    .unwrap_or_else(|| canonical.created_at.clone()),
+            ),
+            None,
+        )
+        .map_err(map_store_error)?;
+        self.inner
+            .repository
+            .update_canonical_operation_lifecycle(operation.id, &update)
+            .await
+            .map_err(map_store_error)?;
+        Ok(RealmCleanupProgress::Removed {
+            operation_id: operation.id,
+        })
     }
 
     pub async fn create_canonical_pool_for_project(
@@ -6736,6 +7223,7 @@ fn deterministic_port_mac(port_id: Uuid) -> String {
 mod tests {
     use super::*;
     use o3k_domain::PolicyAction;
+    use o3k_store::DurableStore;
 
     fn auth(project_id: &str) -> AuthContext {
         AuthContext::new(
@@ -7014,6 +7502,115 @@ mod tests {
                 .await
                 .is_ok()
         );
+        let _ = fs::remove_dir_all(path);
+        let _ = fs::remove_file(sqlite_path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn realm_cleanup_unknown_outcome_replays_and_finalizes_after_observation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("realm-cleanup-recovery");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let network = service
+            .create_canonical_network_for_project("project-a", "recovery".to_owned())
+            .await?;
+        let realm = service
+            .create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.31.0.0/24".to_owned(),
+                false,
+            )
+            .await?;
+        let binding = o3k_store::CanonicalRealmBindingRecord {
+            fabric_domain_id: "fabric-a".to_owned(),
+            realm_id: realm.id,
+            provider_kind: "geneve".to_owned(),
+            provider_segment_id: 301,
+            binding_generation: 1,
+            state: "active".to_owned(),
+        };
+        store.insert_canonical_realm_binding(&binding).await?;
+
+        assert!(matches!(
+            service
+                .delete_canonical_realm_for_project("project-a", realm.id)
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+        let first = service
+            .begin_canonical_realm_deletion_for_project("project-a", realm.id)
+            .await?;
+        let operation_id = match first {
+            RealmCleanupProgress::AwaitingObservation { operation_id, .. } => operation_id,
+            _ => return Err("unexpected replay progress".into()),
+        };
+        let unknown = service
+            .observe_canonical_realm_cleanup_for_project(
+                "project-a",
+                realm.id,
+                vec![RealmCleanupObservation::Unknown {
+                    binding: binding.clone(),
+                    reason: "provider response lost".to_owned(),
+                }],
+            )
+            .await?;
+        assert!(matches!(
+            unknown,
+            RealmCleanupProgress::AwaitingObservation { .. }
+        ));
+        assert_eq!(
+            store.get_canonical_operation(operation_id).await?.state,
+            o3k_store::OperationState::UnknownOutcome
+        );
+
+        drop(service);
+        let reopened_store =
+            Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let replay = reopened
+            .begin_canonical_realm_deletion_for_project("project-a", realm.id)
+            .await?;
+        assert!(matches!(
+            replay,
+            RealmCleanupProgress::AwaitingObservation { operation_id: id, .. } if id == operation_id
+        ));
+        let present = reopened
+            .observe_canonical_realm_cleanup_for_project(
+                "project-a",
+                realm.id,
+                vec![RealmCleanupObservation::Present(binding.clone())],
+            )
+            .await?;
+        assert!(matches!(
+            present,
+            RealmCleanupProgress::AwaitingObservation { .. }
+        ));
+        let removed = reopened
+            .observe_canonical_realm_cleanup_for_project(
+                "project-a",
+                realm.id,
+                vec![RealmCleanupObservation::Absent(binding)],
+            )
+            .await?;
+        assert_eq!(removed, RealmCleanupProgress::Removed { operation_id });
+        assert!(
+            reopened
+                .get_canonical_network_for_project("project-a", network.id)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            reopened
+                .reconstruct_canonical_network("project-a", network.id)
+                .await,
+            Ok(snapshot) if snapshot.realms.is_empty()
+        ));
         let _ = fs::remove_dir_all(path);
         let _ = fs::remove_file(sqlite_path);
         Ok(())

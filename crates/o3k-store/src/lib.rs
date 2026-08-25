@@ -240,9 +240,10 @@ pub struct SecurityGroupBindingRecord {
     pub security_group_id: Uuid,
 }
 
-/// Durable projection of canonical P9 network intent. The payload is the
-/// canonical domain representation; the store deliberately does not know
-/// about provider commands or host networking.
+/// Transitional persisted execution/projection data for the legacy P9 path.
+/// Canonical Network, Realm, Pool, Endpoint, and Policy rows are authoritative;
+/// this payload is migration input or a derived cache and must never recreate
+/// or override canonical state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkIntentRecord {
     pub id: Uuid,
@@ -1463,6 +1464,17 @@ pub trait DurableStore: Send + Sync {
         canonical: &CanonicalOperationRecord,
         request: &IdempotencyReservationRequest,
     ) -> Result<IdempotencyReservation, StoreError>;
+    /// Atomically records/replays canonical operation metadata for a
+    /// canonical resource whose authoritative row is owned by a
+    /// service-specific table rather than the generic `resources` index.
+    /// This keeps the shared Operation/idempotency contract while avoiding a
+    /// second desired-state authority for those resources.
+    async fn create_or_replay_canonical_scoped_operation(
+        &self,
+        operation: &OperationRecord,
+        canonical: &CanonicalOperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError>;
     async fn create_or_replay_canonical_resource_operation(
         &self,
         resource: &ResourceRecord,
@@ -1809,7 +1821,7 @@ pub trait ImageRepository: Send + Sync + QuotaRepository {
 /// persistence surface. Application code depends on this trait instead of on
 /// the concrete `SqliteStore` adapter.
 #[async_trait]
-pub trait NetworkRepository: Send + Sync + QuotaRepository {
+pub trait NetworkRepository: Send + Sync + DurableStore + QuotaRepository {
     async fn insert_canonical_network(
         &self,
         network: &CanonicalNetworkRecord,
@@ -1895,6 +1907,15 @@ pub trait NetworkRepository: Send + Sync + QuotaRepository {
         project_id: &str,
         realm_id: &Uuid,
         expected_generation: u64,
+    ) -> Result<(), StoreError>;
+    async fn list_canonical_realm_bindings(
+        &self,
+        realm_id: &Uuid,
+    ) -> Result<Vec<CanonicalRealmBindingRecord>, StoreError>;
+    async fn delete_canonical_realm_binding(
+        &self,
+        binding: &CanonicalRealmBindingRecord,
+        expected_realm_generation: u64,
     ) -> Result<(), StoreError>;
     async fn delete_canonical_realm(
         &self,
@@ -4398,6 +4419,43 @@ impl SqliteStore {
             })
         })
         .transpose()
+    }
+
+    pub async fn list_canonical_realm_bindings(
+        &self,
+        realm_id: &Uuid,
+    ) -> Result<Vec<CanonicalRealmBindingRecord>, StoreError> {
+        let rows = sqlx::query("SELECT fabric_domain_id, realm_id, provider_kind, provider_segment_id, binding_generation, state FROM canonical_realm_encapsulation_bindings WHERE realm_id = ? ORDER BY fabric_domain_id")
+            .bind(realm_id.to_string()).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(CanonicalRealmBindingRecord {
+                    fabric_domain_id: row.get("fabric_domain_id"),
+                    realm_id: parse_uuid(row.get("realm_id"))?,
+                    provider_kind: row.get("provider_kind"),
+                    provider_segment_id: u64::try_from(row.get::<i64, _>("provider_segment_id"))
+                        .map_err(|_| StoreError::Corrupt("negative provider segment".into()))?,
+                    binding_generation: u64::try_from(row.get::<i64, _>("binding_generation"))
+                        .map_err(|_| StoreError::Corrupt("negative binding generation".into()))?,
+                    state: row.get("state"),
+                })
+            })
+            .collect()
+    }
+
+    pub async fn delete_canonical_realm_binding(
+        &self,
+        binding: &CanonicalRealmBindingRecord,
+        expected_realm_generation: u64,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query("DELETE FROM canonical_realm_encapsulation_bindings WHERE fabric_domain_id = ? AND realm_id = ? AND provider_kind = ? AND provider_segment_id = ? AND binding_generation = ? AND binding_generation < ?")
+            .bind(&binding.fabric_domain_id).bind(binding.realm_id.to_string()).bind(&binding.provider_kind)
+            .bind(checked_generation(binding.provider_segment_id)?).bind(checked_generation(binding.binding_generation)?)
+            .bind(checked_generation(expected_realm_generation)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration);
+        }
+        Ok(())
     }
 
     pub async fn delete_canonical_realm(
@@ -7096,6 +7154,62 @@ impl DurableStore for SqliteStore {
         .await
     }
 
+    async fn create_or_replay_canonical_scoped_operation(
+        &self,
+        operation: &OperationRecord,
+        canonical: &CanonicalOperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        if operation.id != request.operation_id {
+            return Err(StoreError::Corrupt(
+                "operation and idempotency identities differ".into(),
+            ));
+        }
+        validate_canonical_idempotent_operation_identity(operation, canonical, request)?;
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let result: Result<IdempotencyReservation, StoreError> = async {
+            let resource = sqlx::query("SELECT kind, project_id FROM resources WHERE id=?")
+                .bind(operation.resource_id.to_string()).fetch_optional(&mut *connection)
+                .await.map_err(StoreError::Database)?
+                .ok_or(StoreError::ResourceNotFound)?;
+            if resource.get::<String, _>("kind") != canonical.resource_type
+                || resource.get::<String, _>("project_id") != canonical.owner_scope
+            {
+                return Err(StoreError::Corrupt("canonical scoped operation resource index differs".into()));
+            }
+            if let Some(row) = sqlx::query("SELECT fingerprint, operation_id FROM idempotency_reservations WHERE owner_scope=? AND action=? AND idempotency_key=?")
+                .bind(&request.owner_scope).bind(&request.action).bind(&request.key)
+                .fetch_optional(&mut *connection).await.map_err(StoreError::Database)?
+            {
+                let fingerprint: String = row.try_get("fingerprint").map_err(StoreError::Database)?;
+                let existing = Uuid::parse_str(&row.try_get::<String, _>("operation_id").map_err(StoreError::Database)?)
+                    .map_err(StoreError::InvalidUuid)?;
+                if fingerprint != request.fingerprint {
+                    return Ok(IdempotencyReservation::Conflict);
+                }
+                let op = sqlx::query("SELECT resource_id FROM operations WHERE id=?")
+                    .bind(existing.to_string()).fetch_one(&mut *connection).await.map_err(StoreError::Database)?;
+                let metadata = sqlx::query("SELECT owner_scope, action, resource_id FROM canonical_operation_metadata WHERE operation_id=?")
+                    .bind(existing.to_string()).fetch_one(&mut *connection).await.map_err(StoreError::Database)?;
+                if op.get::<String, _>("resource_id") != operation.resource_id.to_string()
+                    || metadata.get::<String, _>("owner_scope") != request.owner_scope
+                    || metadata.get::<String, _>("action") != request.action
+                    || metadata.get::<Option<String>, _>("resource_id") != Some(operation.resource_id.to_string())
+                {
+                    return Err(StoreError::Corrupt("canonical scoped operation replay identity differs".into()));
+                }
+                return Ok(IdempotencyReservation::ExistingEquivalent(existing));
+            }
+            insert_sqlite_canonical_acceptance(&mut connection, operation, canonical, request).await?;
+            Ok(IdempotencyReservation::Created(operation.id))
+        }.await;
+        Self::commit_or_rollback(&mut connection, result).await
+    }
+
     async fn create_or_replay_canonical_resource_operation(
         &self,
         resource: &ResourceRecord,
@@ -8267,6 +8381,20 @@ impl NetworkRepository for SqliteStore {
         expected_generation: u64,
     ) -> Result<(), StoreError> {
         self.finalize_canonical_realm_deletion(project_id, realm_id, expected_generation)
+            .await
+    }
+    async fn list_canonical_realm_bindings(
+        &self,
+        realm_id: &Uuid,
+    ) -> Result<Vec<CanonicalRealmBindingRecord>, StoreError> {
+        self.list_canonical_realm_bindings(realm_id).await
+    }
+    async fn delete_canonical_realm_binding(
+        &self,
+        binding: &CanonicalRealmBindingRecord,
+        expected_realm_generation: u64,
+    ) -> Result<(), StoreError> {
+        self.delete_canonical_realm_binding(binding, expected_realm_generation)
             .await
     }
     async fn delete_canonical_realm(
