@@ -378,3 +378,85 @@ actions:
     accepted_principal_classes: ["user", "service"]
     require_ownership: true
     public_discovery: true
+
+  # Internal canonical Network/AddressRealm lifecycle entry points. These
+  # actions are authorization/audit identities, not new OpenStack routes.
+  - action_id: "network:CreateAddressRealm"
+    service_namespace: "network"
+    resource_type: "address_realm"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:DeleteAddressRealm"
+    service_namespace: "network"
+    resource_type: "address_realm"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ListAddressPools"
+    service_namespace: "network"
+    resource_type: "address_pool"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:CreateAddressPool"
+    service_namespace: "network"
+    resource_type: "address_pool"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ReadAddressPool"
+    service_namespace: "network"
+    resource_type: "address_pool"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:DeleteAddressPool"
+    service_namespace: "network"
+    resource_type: "address_pool"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ListEndpoints"
+    service_namespace: "network"
+    resource_type: "endpoint"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:CreateEndpoint"
+    service_namespace: "network"
+    resource_type: "endpoint"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ReadEndpoint"
+    service_namespace: "network"
+    resource_type: "endpoint"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:DeleteEndpoint"
+    service_namespace: "network"
+    resource_type: "endpoint"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false

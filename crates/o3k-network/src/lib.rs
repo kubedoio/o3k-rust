@@ -4566,6 +4566,81 @@ impl NetworkService {
         self
     }
 
+    fn authorize_canonical_action(
+        &self,
+        auth: &AuthContext,
+        action_name: &str,
+        resource_name: &str,
+        resource_id: Option<Uuid>,
+    ) -> Result<(ServiceNamespace, ActionId, ResourceType), NetworkError> {
+        let namespace = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let action =
+            ActionId::new("network", action_name).map_err(|_| NetworkError::InvalidRequest)?;
+        let resource_type = ResourceType::new("network", resource_name)
+            .map_err(|_| NetworkError::InvalidRequest)?;
+        let target = match resource_id {
+            Some(id) => ResourceTarget::instance(
+                resource_type.clone(),
+                ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+            None => ResourceTarget::collection(
+                resource_type.clone(),
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        let decision = self.authorizer.authorize(&AuthorizationRequest {
+            auth_context: auth,
+            action: action.clone(),
+            resource_target: target,
+        });
+        if !decision.is_allowed() {
+            self.audit_sink.record(
+                &AuditEvent::from_auth(
+                    auth,
+                    namespace.clone(),
+                    action.clone(),
+                    AuditOutcome::Denied,
+                )
+                .with_resource(
+                    resource_type.clone(),
+                    resource_id.and_then(|id| ResourceId::new(id.to_string()).ok()),
+                    Some(auth.effective_scope().clone()),
+                )
+                .with_decision(decision)
+                .with_reason("unauthorized"),
+            );
+            return Err(NetworkError::Unauthorized);
+        }
+        Ok((namespace, action, resource_type))
+    }
+
+    fn audit_canonical_result(
+        &self,
+        auth: &AuthContext,
+        namespace: ServiceNamespace,
+        action: ActionId,
+        resource_type: ResourceType,
+        resource_id: Option<Uuid>,
+        result: Result<(), &NetworkError>,
+    ) {
+        let outcome = if result.is_ok() {
+            AuditOutcome::Succeeded
+        } else {
+            AuditOutcome::Failed
+        };
+        let mut event = AuditEvent::from_auth(auth, namespace, action, outcome).with_resource(
+            resource_type,
+            resource_id.and_then(|id| ResourceId::new(id.to_string()).ok()),
+            Some(auth.effective_scope().clone()),
+        );
+        if let Err(error) = result {
+            event = event.with_reason(error.to_string());
+        }
+        self.audit_sink.record(&event);
+    }
+
     async fn recover_realm_deletion_operations(&self) -> Result<(), NetworkError> {
         let operations = self
             .inner
@@ -4722,6 +4797,24 @@ impl NetworkService {
         Ok(network)
     }
 
+    /// Authenticated entry point for canonical Network creation. The
+    /// project-scoped primitive remains intentionally separate for internal
+    /// reconciliation and migration callers.
+    pub async fn create_canonical_network(
+        &self,
+        auth: &AuthContext,
+        name: String,
+    ) -> Result<o3k_store::CanonicalNetworkRecord, NetworkError> {
+        let (namespace, action, resource_type) =
+            self.authorize_canonical_action(auth, "CreateNetwork", "network", None)?;
+        let result = self
+            .create_canonical_network_for_project(auth.effective_scope().id().as_str(), name)
+            .await;
+        let audit_result = result.as_ref().map(|_| ());
+        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
+        result
+    }
+
     pub async fn get_canonical_network_for_project(
         &self,
         project_id: &str,
@@ -4817,6 +4910,28 @@ impl NetworkService {
         Ok(realm)
     }
 
+    pub async fn create_canonical_realm(
+        &self,
+        auth: &AuthContext,
+        network_id: Uuid,
+        prefix: String,
+        overlapping_prefixes: bool,
+    ) -> Result<o3k_store::CanonicalAddressRealmRecord, NetworkError> {
+        let (namespace, action, resource_type) =
+            self.authorize_canonical_action(auth, "CreateAddressRealm", "address_realm", None)?;
+        let result = self
+            .create_canonical_realm_for_project(
+                auth.effective_scope().id().as_str(),
+                network_id,
+                prefix,
+                overlapping_prefixes,
+            )
+            .await;
+        let audit_result = result.as_ref().map(|_| ());
+        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
+        result
+    }
+
     pub async fn list_canonical_realms_for_project(
         &self,
         project_id: &str,
@@ -4834,6 +4949,21 @@ impl NetworkService {
             .list_canonical_realms(project_id, &network_id)
             .await
             .map_err(map_store_error)
+    }
+
+    pub async fn list_canonical_realms(
+        &self,
+        auth: &AuthContext,
+        network_id: Uuid,
+    ) -> Result<Vec<o3k_store::CanonicalAddressRealmRecord>, NetworkError> {
+        let (namespace, action, resource_type) =
+            self.authorize_canonical_action(auth, "ListAddressRealms", "address_realm", None)?;
+        let result = self
+            .list_canonical_realms_for_project(auth.effective_scope().id().as_str(), network_id)
+            .await;
+        let audit_result = result.as_ref().map(|_| ());
+        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
+        result
     }
 
     pub async fn delete_canonical_realm_for_project(
@@ -4870,6 +5000,31 @@ impl NetworkService {
             let _ = operation_id;
             Err(NetworkError::Conflict)
         }
+    }
+
+    pub async fn delete_canonical_realm(
+        &self,
+        auth: &AuthContext,
+        realm_id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let (namespace, action, resource_type) = self.authorize_canonical_action(
+            auth,
+            "DeleteAddressRealm",
+            "address_realm",
+            Some(realm_id),
+        )?;
+        let result = self
+            .delete_canonical_realm_for_project(auth.effective_scope().id().as_str(), realm_id)
+            .await;
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            Some(realm_id),
+            result.as_ref().map(|_| ()),
+        );
+        result
     }
 
     /// Durably accepts a Realm deletion before any provider mutation. The
@@ -5190,6 +5345,38 @@ impl NetworkService {
         Ok(pool)
     }
 
+    pub async fn create_canonical_pool(
+        &self,
+        auth: &AuthContext,
+        realm_id: Uuid,
+        prefix: String,
+        gateway: Option<Ipv4Addr>,
+        first_usable: Ipv4Addr,
+        last_usable: Ipv4Addr,
+    ) -> Result<o3k_store::CanonicalAddressPoolRecord, NetworkError> {
+        let (namespace, action, resource_type) =
+            self.authorize_canonical_action(auth, "CreateAddressPool", "address_pool", None)?;
+        let result = self
+            .create_canonical_pool_for_project(
+                auth.effective_scope().id().as_str(),
+                realm_id,
+                prefix,
+                gateway,
+                first_usable,
+                last_usable,
+            )
+            .await;
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            None,
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
     pub async fn create_canonical_endpoint_for_project(
         &self,
         project_id: &str,
@@ -5226,6 +5413,34 @@ impl NetworkService {
             .await
             .map_err(map_store_error)?;
         Ok(endpoint)
+    }
+
+    pub async fn create_canonical_endpoint(
+        &self,
+        auth: &AuthContext,
+        realm_id: Uuid,
+        fixed_ip: Ipv4Addr,
+        mac: String,
+    ) -> Result<o3k_store::CanonicalEndpointRecord, NetworkError> {
+        let (namespace, action, resource_type) =
+            self.authorize_canonical_action(auth, "CreateEndpoint", "endpoint", None)?;
+        let result = self
+            .create_canonical_endpoint_for_project(
+                auth.effective_scope().id().as_str(),
+                realm_id,
+                fixed_ip,
+                mac,
+            )
+            .await;
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            None,
+            result.as_ref().map(|_| ()),
+        );
+        result
     }
 
     /// Reconstructs canonical execution inputs from durable rows. Empty child
@@ -7434,6 +7649,111 @@ mod tests {
         let _ = fs::remove_file(&sqlite_path);
         let _ = fs::remove_file(format!("{sqlite_path}-wal"));
         let _ = fs::remove_file(format!("{sqlite_path}-shm"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authenticated_canonical_entry_points_enforce_scope_and_audit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("canonical-auth");
+        let _ = fs::remove_dir_all(&path);
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let sink = Arc::new(o3k_kernel::MemoryAuditSink::new());
+        let service = NetworkService::open(&path, store)
+            .await?
+            .with_audit_sink(sink.clone());
+        let network = service
+            .create_canonical_network(&auth("project-a"), "authorized".to_owned())
+            .await?;
+        let realm = service
+            .create_canonical_realm(
+                &auth("project-a"),
+                network.id,
+                "10.30.0.0/24".to_owned(),
+                false,
+            )
+            .await?;
+        assert!(matches!(
+            service
+                .delete_canonical_realm(&auth("project-b"), realm.id)
+                .await,
+            Err(NetworkError::NotFound)
+        ));
+        let events = sink.events();
+        assert!(events.iter().any(|event| {
+            event.action.to_string() == "network:DeleteAddressRealm"
+                && event.outcome == AuditOutcome::Failed
+                && event
+                    .resource_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() == realm.id.to_string())
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn independent_services_preserve_canonical_endpoint_and_realm_races()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("canonical-races");
+        let _ = fs::remove_dir_all(&path);
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service_a = NetworkService::open(&path, store.clone()).await?;
+        let service_b = NetworkService::open(&path, store.clone()).await?;
+        let network = service_a
+            .create_canonical_network_for_project("project-a", "races".to_owned())
+            .await?;
+        let realm = service_a
+            .create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.31.0.0/24".to_owned(),
+                false,
+            )
+            .await?;
+        let (left, right) = tokio::join!(
+            service_a.create_canonical_endpoint_for_project(
+                "project-a",
+                realm.id,
+                "10.31.0.10".parse()?,
+                "02:00:00:00:31:10".to_owned(),
+            ),
+            service_b.create_canonical_endpoint_for_project(
+                "project-a",
+                realm.id,
+                "10.31.0.10".parse()?,
+                "02:00:00:00:31:11".to_owned(),
+            )
+        );
+        assert_eq!(left.is_ok() as u8 + right.is_ok() as u8, 1);
+
+        let delete = service_a.delete_canonical_realm_for_project("project-a", realm.id);
+        let create = service_b.create_canonical_endpoint_for_project(
+            "project-a",
+            realm.id,
+            "10.31.0.11".parse()?,
+            "02:00:00:00:31:12".to_owned(),
+        );
+        let (delete_result, create_result) = tokio::join!(delete, create);
+        if delete_result.is_ok() {
+            assert!(create_result.is_err());
+            assert!(
+                service_a
+                    .reconstruct_canonical_network("project-a", network.id)
+                    .await?
+                    .realms
+                    .is_empty()
+            );
+        } else {
+            assert!(create_result.is_ok());
+            assert!(
+                service_a
+                    .reconstruct_canonical_network("project-a", network.id)
+                    .await?
+                    .realms
+                    .iter()
+                    .any(|value| value.id == realm.id)
+            );
+        }
         Ok(())
     }
 
