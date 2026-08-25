@@ -2,9 +2,9 @@
   "artifact_type": "o3k-p13-2a-provider-lifecycle-evidence-summary",
   "schema_version": 1,
   "run": {
-    "run_id": "471c000a-f409-401d-b01e-d2a6d030fda2",
+    "run_id": "942e5dbf-e79d-4999-9729-b0bdeac0be8b",
     "fresh_execution": true,
-    "o3k_head_sha": "983b63d03fdaf11b48293625304b95a8106f068f",
+    "o3k_head_sha": "be79949ee0310b3fce82945ae203dfee6fbee17c",
     "engine_version_output": "OpenTofu v1.12.6"
   },
   "toolchain": {
@@ -17,19 +17,29 @@
   },
   "trace": {
     "record_count": 59,
-    "canonical_json_sha256": "dc2b140ad03ef69a1311ce4a2d9d05b0a3c7e5806e52c10ecac43cee293aa2b7",
+    "canonical_json_sha256": "5684c5c93395bb339d1fe8dbfb8c4d62f8b9764aaf4db54134103b1fc154c64b",
     "raw_evidence": "ignored target/p13-2a output from the same run",
     "sanitized": true,
     "execution_engine": "OpenTofu 1.12.6",
     "provider_user_agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0",
     "provider_user_agent_is_not_engine_identity": true,
-    "terraform_cli_rejected_by_engine_version_check": true
+    "terraform_cli_rejected_by_engine_version_check": true,
+    "keypair_delete": {
+      "o3k_wire_status": 204,
+      "response_body": "empty",
+      "provider_accepted": true,
+      "provider_accepted_statuses": [202, 204],
+      "historical_prior_observation": 202
+    }
   },
   "keypair": {
     "create": "PASS",
     "read": "PASS",
     "post_apply_plan": "CONVERGED",
     "delete": "PASS",
+    "delete_wire_status": 204,
+    "provider_accepted": true,
+    "provider_accepted_statuses": [202, 204],
     "absence": "PASS",
     "import_by_name": "PASS",
     "post_import_plan": "CONVERGED"
