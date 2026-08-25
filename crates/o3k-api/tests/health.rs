@@ -1,4 +1,4 @@
-use axum::body::Body;
+use axum::body::{Body, HttpBody};
 use http::{HeaderValue, Method, Request, StatusCode, header};
 use o3k_compute::ComputeService;
 use o3k_domain::Ipv4Prefix;
@@ -1791,7 +1791,8 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
                 .body(Body::empty())?,
         )
         .await?;
-    assert_eq!(keypair_deleted.status(), StatusCode::ACCEPTED);
+    assert_eq!(keypair_deleted.status(), StatusCode::NO_CONTENT);
+    assert!(keypair_deleted.into_body().is_end_stream());
 
     let second_body = serde_json::json!({"server":{"name":"nova-failed-delete","image":{"id":"image-1"},"flavor":{"id":default_flavor_id},"networks":[{"uuid":port_id}]}});
     let second_created = o3k_api::router_with_state(state.clone())

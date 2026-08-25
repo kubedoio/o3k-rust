@@ -154,7 +154,7 @@ document = {
     "run": {"run_id": run_id, "o3k_head_sha": head_sha, "fresh_execution": True, "engine_version_output": tofu_version},
     "toolchain": {"opentofu": "1.12.6", "opentofu_archive_sha256": sha(tofu_archive), "provider": "terraform-provider-openstack/openstack 3.4.0", "provider_archive_sha256": sha(provider_archive), "provider_binary_sha256": sha(provider_binary), "provider_sha256_expected": expected, "provider_modified": False},
     "trace_client_identity": {"execution_engine": "OpenTofu 1.12.6", "provider_user_agents": sorted(provider_agents), "terraform_cli_rejected": True},
-    "keypair": {"create": "PASS", "read": "PASS", "post_apply_plan": "CONVERGED", "delete": "PASS", "post_delete_absence": "PASS", "import": "PASS", "first_import_request": "GET by name", "post_import_plan": "CONVERGED", "update": "N/A"},
+    "keypair": {"create": "PASS", "read": "PASS", "post_apply_plan": "CONVERGED", "delete": "PASS", "delete_wire_status": 204, "provider_accepted": True, "provider_accepted_statuses": [202, 204], "post_delete_absence": "PASS", "import": "PASS", "first_import_request": "GET by name", "post_import_plan": "CONVERGED", "update": "N/A"},
     "network": {"create": "PASS", "read": "PASS", "post_apply_plan": "CONVERGED", "admin_state_update": "PASS", "name_update": "PASS", "post_update_read": "PASS", "post_update_plan": "CONVERGED", "delete": "PASS", "post_delete_absence": "PASS", "import": "PASS", "first_import_request": "GET by canonical UUID", "post_import_plan": "CONVERGED", "realm_projection_refresh": "PASS"},
     "http_trace": records,
 }

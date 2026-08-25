@@ -26,7 +26,12 @@ resources:
     operations:
       create: {method: POST, path: "/v2.1/{project_id}/os-keypairs", status: 200}
       read: {method: GET, path: "/v2.1/{project_id}/os-keypairs/{name}", status: 200}
-      delete: {method: DELETE, path: "/v2.1/{project_id}/os-keypairs/{name}", status: 202}
+      delete:
+        method: DELETE
+        path: "/v2.1/{project_id}/os-keypairs/{name}"
+        wire_status: 204
+        provider_accepted_statuses: [202, 204]
+        previously_observed_status: 202
       update: {status: not_applicable, reason: provider_has_no_update}
       import: {id: keypair_name, first_request: GET}
     current_o3k: provider-partial
