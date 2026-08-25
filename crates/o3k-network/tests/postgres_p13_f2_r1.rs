@@ -168,3 +168,100 @@ async fn postgres_p13_f2_r1_reconstructs_and_recovers_realm_cleanup()
     let _ = std::fs::remove_dir_all(root);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires the configured PostgreSQL conformance database"]
+async fn postgres_p13_f3_fresh_runtime_reconstructs_policy_and_zero_realm_network()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = DATABASE_LOCK.lock().await;
+    let url = database_url();
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&url)
+        .await
+        .expect("connect PostgreSQL");
+    sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")
+        .execute(&pool)
+        .await
+        .expect("reset schema");
+    sqlx::query("CREATE SCHEMA public")
+        .execute(&pool)
+        .await
+        .expect("create schema");
+
+    let store_a = Arc::new(PostgresStore::connect_pool(pool.clone()).await?);
+    let root = runtime_root();
+    let service_a = NetworkService::open(&root, store_a.clone()).await?;
+    let project = "p13-f3-postgres";
+    let network = service_a
+        .create_canonical_network_for_project(project, "network".into())
+        .await?;
+    assert!(
+        service_a
+            .reconstruct_canonical_network(project, network.id)
+            .await?
+            .realms
+            .is_empty()
+    );
+    let realm_a = service_a
+        .create_canonical_realm_for_project(project, network.id, "10.50.0.0/24".into(), true)
+        .await?;
+    let realm_b = service_a
+        .create_canonical_realm_for_project(project, network.id, "10.50.0.0/24".into(), true)
+        .await?;
+    let endpoint_a = service_a
+        .create_canonical_endpoint_for_project(
+            project,
+            realm_a.id,
+            "10.50.0.10".parse()?,
+            "02:00:00:50:00:0a".into(),
+        )
+        .await?;
+    let endpoint_b = service_a
+        .create_canonical_endpoint_for_project(
+            project,
+            realm_b.id,
+            "10.50.0.10".parse()?,
+            "02:00:00:50:00:0b".into(),
+        )
+        .await?;
+    let policy = o3k_domain::PolicyIntent {
+        id: Uuid::now_v7(),
+        endpoint_id: endpoint_a.id,
+        direction: o3k_domain::PolicyDirection::Ingress,
+        protocol: o3k_domain::NetworkProtocol::Tcp,
+        ports: Some(o3k_domain::PortRange {
+            start: 443,
+            end: 443,
+        }),
+        source: None,
+        destination: None,
+        action: o3k_domain::PolicyAction::Allow,
+    };
+    service_a
+        .upsert_policy_for_project(project, network.id, policy.clone())
+        .await?;
+    drop(service_a);
+    drop(store_a);
+
+    let store_b = Arc::new(PostgresStore::connect_pool(pool.clone()).await?);
+    let service_b = NetworkService::open(&root, store_b.clone()).await?;
+    let snapshot = service_b
+        .reconstruct_canonical_network(project, network.id)
+        .await?;
+    assert_eq!(snapshot.network.id, network.id);
+    assert_eq!(snapshot.realms.len(), 2);
+    assert_eq!(snapshot.endpoints[&realm_a.id][0].id, endpoint_a.id);
+    assert_eq!(snapshot.endpoints[&realm_b.id][0].id, endpoint_b.id);
+    assert_eq!(
+        service_b
+            .list_policies_for_project(project, network.id)
+            .await?,
+        vec![policy]
+    );
+    drop(service_b);
+    drop(store_b);
+    pool.close().await;
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}

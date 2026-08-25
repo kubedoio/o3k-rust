@@ -264,9 +264,10 @@ profiles:
       7b4a352dd719607e72bfb0cad0749c38fe54686e.
       ADR-0176 and SPEC-0033 were accepted on 2026-08-24 against reviewed
       proposal baseline 9b5a74d9e470278c77907a5c3ca22a56af4fe64a. P13.1
-      discovery is complete, but the canonical Network/AddressRealm runtime
-      separation, migration, and zero-realm reconstruction are not implemented.
-      No Terraform lifecycle or runtime compatibility evidence is claimed.
+      provider discovery and canonical Network/AddressRealm runtime closure
+      are complete through P13.1F3. No Terraform managed-resource lifecycle
+      support claim is made; remaining provider failures are frozen P13.2
+      requirements.
     source_commit: 9b5a74d9e470278c77907a5c3ca22a56af4fe64a
     portable_evidence:
       - name: adr-0175-accepted
@@ -286,8 +287,8 @@ profiles:
         note: Accepted contract passes repository governance validation; this is not runtime evidence.
     protected_component_evidence:
       - name: iac-provider-harness
-        state: not-executed
-        note: P13.1 provider contract discovery not yet started.
+        state: passed
+        note: Real OpenTofu 1.12.6 and unmodified OpenStack provider 3.4.0 completed P13.1B data-source proof and P13.1C/F3 managed-resource rediscovery.
     full_profile_evidence:
       - name: iac-full-lifecycle-gate
         state: not-proven
@@ -295,13 +296,13 @@ profiles:
       Non-blocking for the first native alpha (v0.2.0-alpha.1). This profile
       extends native-rust-testlab but does not alter its release gate.
     blockers:
-      - P13.1F canonical Network/AddressRealm lifecycle implementation, persistence migration, and reconstruction
+      - P13.2 managed-resource implementation and lifecycle evidence
       - equivalent provider contract discovery gates before P13.3/P13.4 runtime work
       - P13.2-P13.7 implementation evidence as defined in SPEC-0032
     next_evidence_action: >-
-      Execute P13.1F: implement and validate canonical Network/AddressRealm
-      lifecycle separation, persistence migration, and zero-realm reconstruction;
-      then reassess P13.2 readiness.
+      Begin P13.2 only after its explicit implementation authorization; use the
+      frozen P13.2 managed-resource requirements without changing canonical
+      Network/AddressRealm authority.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)

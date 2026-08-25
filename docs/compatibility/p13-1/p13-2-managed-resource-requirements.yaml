@@ -1,8 +1,8 @@
 schema_version: 1
 artifact_type: o3k-p13-2-managed-resource-requirements
-phase: p13.1e
-phase_closure: p13.1e-architecture-accepted
-status: discovery-blocked-pending-canonical-implementation
+phase: p13.1f3
+phase_closure: p13.1f3-canonical-runtime-accepted
+status: p13.1-complete-p13.2-ready
 architecture_amendment:
   adr: docs/adr/ADR-0176-canonical-network-and-addressrealm-lifecycle-separation.md
   spec: docs/specs/SPEC-0033-canonical-network-addressrealm-lifecycle-v1.md
@@ -10,7 +10,7 @@ architecture_amendment:
   reviewed_proposal_baseline: 9b5a74d9e470278c77907a5c3ca22a56af4fe64a
   accepted_at: 2026-08-24
   implementation_authorized: false
-  p13_2_gate: P13.1F canonical-model implementation, migration, reconstruction, and evidence
+  p13_2_gate: P13.1 canonical runtime and provider rediscovery evidence complete
 source_provenance:
   provider: terraform-provider-openstack/openstack-3.4.0
   gophercloud: github.com/gophercloud/gophercloud/v2 v2.8.0
@@ -29,7 +29,8 @@ resources:
       delete: {method: DELETE, path: "/v2.1/{project_id}/os-keypairs/{name}", status: 202}
       update: {status: not_applicable, reason: provider_has_no_update}
       import: {id: keypair_name, first_request: GET}
-    current_o3k: provider-unverified
+    current_o3k: provider-partial
+    evidence_status: observed-create-read; full lifecycle remains P13.2
   openstack_networking_network_v2:
     attribute_subset:
       required: [name]
@@ -43,6 +44,7 @@ resources:
       delete: {method: DELETE, path: "/v2.0/networks/{id}", status: 204}
       import: {id: network_uuid, first_request: GET}
     current_o3k: provider-partial
+    evidence_status: observed-create-read; full lifecycle remains P13.2
     observed:
       - {method: POST, path: /v2.0/networks, status: 201, response: network envelope with id/name/status}
       - {method: GET, path: "/v2.0/networks/{id}", status: 200, response: network envelope}
@@ -70,7 +72,7 @@ resources:
         - zero-or-one AddressRealm: smallest P13 change, less extensible
         - zero-or-many AddressRealms: preserves P11 realm identity and future multiple-subnet support
         - distinct canonical subnet resource: clean separation, larger new domain surface
-      required_authority_change: satisfied by accepted ADR-0176 and SPEC-0033; runtime implementation remains P13.1F
+      required_authority_change: satisfied by accepted ADR-0176 and SPEC-0033; canonical runtime and restart proof are complete in P13.1F3
     operations:
       create: {method: POST, path: /v2.0/subnets, status: 201}
       read: {method: GET, path: "/v2.0/subnets/{id}", status: 200}
@@ -78,6 +80,7 @@ resources:
       delete: {method: DELETE, path: "/v2.0/subnets/{id}", status: 204}
       import: {id: subnet_uuid, first_request: GET}
     current_o3k: provider-partial
+    evidence_status: provider-blocked-at-create; canonical realm lifecycle independently proven
     observed:
       request: {method: POST, path: /v2.0/subnets, fields: [network_id, cidr, ip_version, enable_dhcp]}
       response: {status: 400, message: "invalid subnet request"}
@@ -101,6 +104,7 @@ resources:
     fixed_ip: provider_accepts_subnet_id_and_optional_ip_address
     security_groups: deferred_to_p13.3
     current_o3k: provider-partial
+    evidence_status: provider-blocked-by-subnet-create; canonical endpoint lifecycle independently proven
     observed:
       request: {method: POST, path: /v2.0/ports, fields: [network_id, name]}
       response: {status: 404, message: "network resource was not found"}
@@ -125,6 +129,7 @@ resources:
       import: {id: server_uuid, first_request: GET}
     operation_authority: Nova wire state; never an O3K native Operation response
     current_o3k: provider-partial
+    evidence_status: provider-blocked-at-Nova-create; canonical network/realm resolution independently proven
     observed:
       prerequisite: {method: GET, path: /v2.0/networks, query: "id={network_id}&status=ACTIVE", status: 200}
       create: {method: POST, path: "/v2.1/{project_id}/servers", status: 404, message: "network resource was not found"}
@@ -144,7 +149,7 @@ dependency_graph:
 architecture_decision:
   network_without_subnet:
     current_compatibility_projection: network_networks is independently persisted and can exist without network_subnets
-    current_canonical_model: NetworkIntent.realm is mandatory; canonical intent reconstruction currently requires a subnet
+    current_canonical_model: canonical Network is independent and reconstructs with zero or more AddressRealms
     decision: accepted-independent-network-zero-to-many-realms
     p13_2_gate: P13.1F implementation evidence and reconstruction/migration validation
   subnet_identity:
@@ -157,10 +162,13 @@ architecture_decision:
   current_model_audit:
     network_intent: mandatory single realm in crates/o3k-domain/src/network.rs
     compatibility_persistence: independent network_networks and network_subnets tables
-    reconstruction: crates/o3k-network/src/lib.rs currently returns NotFound when a network has no subnet
-    accepted_resolution: ADR-0176/SPEC-0033; no runtime implementation in P13.1E-ACCEPT
+    reconstruction: canonical rows reconstruct Network, Realms, Pools, Endpoints, and Policies after fresh runtime creation
+    accepted_resolution: ADR-0176/SPEC-0033 implemented and verified by P13.1F1/F2/F3 evidence
   runtime_status:
-    canonical_network_realm_separation: not_implemented
-    persistence_migration: not_implemented
-    zero_realm_reconstruction: not_implemented
-    next_prerequisite: P13.1F
+    canonical_network_realm_separation: implemented-and-verified
+    persistence_migration: implemented-and-verified
+    zero_realm_reconstruction: implemented-and-verified
+    policy_reconstruction: implemented-and-verified
+    realm_deletion_recovery: implemented-and-verified
+    provider_rediscovery: complete-with-p13-2-managed-resource-gaps
+    next_prerequisite: P13.2

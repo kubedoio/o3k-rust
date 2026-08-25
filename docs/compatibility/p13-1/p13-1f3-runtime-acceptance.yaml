@@ -1,0 +1,65 @@
+schema_version: 1
+artifact_type: o3k-p13-1f3-runtime-and-provider-acceptance
+phase: p13.1f3
+status: complete
+authority:
+  adr: docs/adr/ADR-0176-canonical-network-and-addressrealm-lifecycle-separation.md
+  spec: docs/specs/SPEC-0033-canonical-network-addressrealm-lifecycle-v1.md
+  provider_contract: docs/compatibility/p13-1/p13-2-managed-resource-requirements.yaml
+  canonical_state_source: canonical_networks/canonical_address_realms/canonical_address_pools/canonical_endpoints/canonical_network_policies
+storage:
+  sqlite:
+    result: passed
+    test: crates/o3k-network/tests/p13_f3_runtime_acceptance.rs::fresh_runtime_reconstructs_canonical_hierarchy_without_network_intent
+  postgresql:
+    result: passed
+    server: PostgreSQL 16.4
+    test: crates/o3k-network/tests/postgres_p13_f2_r1.rs::postgres_p13_f3_fresh_runtime_reconstructs_policy_and_zero_realm_network
+runtime_cases:
+  zero_realm_network_restart: passed
+  hierarchy_restart_network_realm_pool_endpoint_policy: passed
+  policy_reconstruction_through_endpoint_realm: passed
+  multiple_realms_with_overlapping_prefixes: passed
+  same_ip_in_distinct_realms: passed
+  realm_cleanup_restart_and_network_retention: passed
+  network_intent_required_for_authority: false
+  provider_binding_regenerated_on_restart: false
+provider_toolchain:
+  engine: OpenTofu 1.12.6
+  provider: terraform-provider-openstack/openstack 3.4.0
+  gophercloud: github.com/gophercloud/gophercloud/v2 v2.8.0
+  provider_sha256: 2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc
+  provider_modified: false
+provider_rediscovery:
+  data_sources:
+    result: passed
+    artifact: /tmp/p13-1b-f3-provider-contract.json
+    state_proven: true
+  managed_resources:
+    artifact: /tmp/p13-1c-f3-provider-contract.json
+    keypair:
+      status: provider-partial
+      observed: POST_and_GET_succeeded
+      remaining_scope: P13.2_delete_import_and_full_convergence
+    network:
+      status: provider-partial
+      observed: POST_and_GET_succeeded
+      remaining_scope: P13.2_update_delete_import_and_full_convergence
+    subnet:
+      status: p13-2-required
+      observed_status: 400
+      request: POST /v2.0/subnets
+      cause: provider_omits_name_and_current_handler_rejects_empty_name
+    port:
+      status: p13-2-required
+      observed_status: 404
+      request: POST /v2.0/ports
+      cause: bounded_discovery_subnet_failed_before_port_dependency
+    server:
+      status: p13-2-required
+      observed_status: 404
+      request: POST /v2.1/{project_id}/servers
+      cause: Nova_network_resolution_compatibility_gap_after_provider_network_lookup
+canonical_architecture_blocker_found: false
+remaining_failures_are_p13_2_or_later: true
+secrets_or_tokens_present: false
