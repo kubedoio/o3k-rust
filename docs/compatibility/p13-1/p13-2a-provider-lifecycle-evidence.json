@@ -2,9 +2,9 @@
   "artifact_type": "o3k-p13-2a-provider-lifecycle-evidence-summary",
   "schema_version": 1,
   "run": {
-    "run_id": "4d5ebc95-f0db-4b1f-bf21-b202c4929a5a",
+    "run_id": "1f8e50f0-3101-4b51-9e6e-a9003374de85",
     "fresh_execution": true,
-    "o3k_head_sha": "ca6aec509cdbb90fc84b74859927cac6752672bf",
+    "o3k_head_sha": "9eb9f99ca2ee9f65273c639133685bb11864073d",
     "engine_version_output": "OpenTofu v1.12.6"
   },
   "toolchain": {
@@ -17,7 +17,7 @@
   },
   "trace": {
     "record_count": 59,
-    "canonical_json_sha256": "7f2d0aabc1ceecd5ebecc2b79ec6b92b5ce2b551c9ff8720a6d3b27308d9cfba",
+    "canonical_json_sha256": "defe6f827d2c9d1eaf2f0ff3f5b0ce300790ec6a1ab1abeaa9e208afc83ee198",
     "raw_evidence": "ignored target/p13-2a output from the same run",
     "sanitized": true,
     "execution_engine": "OpenTofu 1.12.6",
