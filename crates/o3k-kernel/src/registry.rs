@@ -429,6 +429,7 @@ impl KernelRegistry {
                 mk_act("compute", "ListServers"),
                 mk_act("compute", "CreateServer"),
                 mk_act("compute", "ReadServer"),
+                mk_act("compute", "UpdateServer"),
                 mk_act("compute", "DeleteServer"),
                 mk_act("compute", "StopServer"),
                 mk_act("compute", "StartServer"),

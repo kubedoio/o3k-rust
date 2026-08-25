@@ -52,7 +52,7 @@ use crate::{
     compute::{
         create_flavor, create_keypair, create_server, delete_flavor, delete_keypair, delete_server,
         list_flavor_extra_specs, list_flavors, list_keypairs, list_servers, server_action,
-        show_flavor, show_keypair, show_server,
+        show_flavor, show_keypair, show_server, show_server_metadata, update_server,
     },
     identity::{check_token, issue_token, validate_token},
     image::{create_image, delete_image, download_image, list_images, show_image, upload_image},
@@ -336,8 +336,12 @@ pub fn router_with_state(state: AppState) -> Router {
         )
         .route("/v2.1/{project_id}/servers/detail", get(list_servers))
         .route(
+            "/v2.1/{project_id}/servers/{id}/metadata",
+            get(show_server_metadata),
+        )
+        .route(
             "/v2.1/{project_id}/servers/{id}",
-            get(show_server).delete(delete_server),
+            get(show_server).put(update_server).delete(delete_server),
         )
         .route(
             "/v2.1/{project_id}/servers/{id}/action",

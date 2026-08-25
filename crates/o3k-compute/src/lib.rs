@@ -2358,6 +2358,69 @@ impl ComputeService {
         Ok(server)
     }
 
+    /// Applies the bounded Nova in-place update supported by P13.2D.  The
+    /// canonical resource ledger is the merge base; compatibility callers
+    /// cannot update a stale projection or change server identity.
+    pub async fn update_server_name_for_auth(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+        name: String,
+    ) -> Result<Server, ComputeError> {
+        let action = ActionId::new("compute", "UpdateServer").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "UpdateServer".to_owned())
+        });
+        let target = ResourceTarget::instance(
+            ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+            ResourceId::new(id.as_uuid().to_string()).map_err(|_| ComputeError::InvalidRequest)?,
+            Some(auth.effective_scope().id().clone()),
+        );
+        if !self
+            .authorizer
+            .authorize(&AuthorizationRequest {
+                auth_context: auth,
+                action,
+                resource_target: target,
+            })
+            .is_allowed()
+        {
+            return Err(ComputeError::NotFound);
+        }
+        if name.trim().is_empty() {
+            return Err(ComputeError::InvalidRequest);
+        }
+        let resource =
+            self.store
+                .get_resource(id.as_uuid())
+                .await
+                .map_err(|error| match error {
+                    StoreError::ResourceNotFound => ComputeError::NotFound,
+                    other => ComputeError::Store(other),
+                })?;
+        if resource.kind != "compute_instance"
+            || resource.project_id != auth.effective_scope().id().as_str()
+        {
+            return Err(ComputeError::NotFound);
+        }
+        let mut request: CreateInstanceRequest =
+            serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
+        request.name = name;
+        let desired = serde_json::to_string(&request).map_err(|_| ComputeError::Conflict)?;
+        self.store
+            .update_resource(
+                resource.id,
+                resource.generation,
+                &desired,
+                &resource.observed_state,
+                resource.observed_generation,
+                resource.provider_id.as_deref(),
+            )
+            .await
+            .map_err(ComputeError::Store)?;
+        self.show_server(auth.effective_scope().id().as_str(), id)
+            .await
+    }
+
     /// Drives durable create convergence for a server whose create operation
     /// is stuck in a state that nothing else will ever advance: `Pending` (a
     /// crash between persisting the intent and the synchronous pass),

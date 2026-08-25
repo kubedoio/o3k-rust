@@ -169,6 +169,7 @@ impl StaticAuthorizer {
         reg("compute", "ListServers", "compute", "server", true);
         reg("compute", "CreateServer", "compute", "server", true);
         reg("compute", "ReadServer", "compute", "server", true);
+        reg("compute", "UpdateServer", "compute", "server", true);
         reg("compute", "DeleteServer", "compute", "server", true);
         reg("compute", "StopServer", "compute", "server", true);
         reg("compute", "StartServer", "compute", "server", true);

@@ -234,9 +234,9 @@ resources:
       create: implemented
       list: implemented
       show: implemented
-      update: missing
+      update: implemented
       delete: implemented
-    provider_evidence: provider-partial
+    provider_evidence: provider-lifecycle-verified-bounded
     p13_phase: p13.2
 
   # ============================================================

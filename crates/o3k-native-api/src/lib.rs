@@ -319,6 +319,7 @@ mod tests {
             actions: vec![
                 "compute:ListServers".to_owned(),
                 "compute:CreateServer".to_owned(),
+                "compute:UpdateServer".to_owned(),
             ],
             capabilities: vec![],
             dependencies: vec![],

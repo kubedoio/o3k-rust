@@ -133,15 +133,15 @@ resources:
       delete: {method: DELETE, path: "/v2.1/{project_id}/servers/{id}", status: 204}
       import: {id: server_uuid, first_request: GET}
     operation_authority: Nova wire state; never an O3K native Operation response
-    current_o3k: provider-partial
-    evidence_status: provider-blocked-at-Nova-create; canonical network/realm resolution independently proven
+    current_o3k: implemented-bounded-profile
+    evidence_status: provider-lifecycle-verified for the bounded P13.2D subset; security groups, volumes, floating IPs, and rich Nova fields remain deferred
     observed:
       prerequisite: {method: GET, path: /v2.0/networks, query: "id={network_id}&status=ACTIVE", status: 200}
-      create: {method: POST, path: "/v2.1/{project_id}/servers", status: 404, message: "network resource was not found"}
+      create: {method: POST, path: "/v2.1/{project_id}/servers", status: 202}
     remaining_gap:
-      classification: wrong-cross-service-resolution
-      required_implementation: resolve network identity/resource visibility for Nova create and continue source-defined polling discovery; no P13.1D runtime fix permitted
-      evidence_reference: target/p13-1/provider-contract.json
+      classification: deferred-profile-scope
+      required_implementation: security groups, floating IPs, volumes, and advanced Nova fields remain outside the bounded profile
+      evidence_reference: docs/compatibility/p13-2/p13-2d-provider-server-lifecycle-evidence.json
 dependency_graph:
   - [image_data_source, instance]
   - [flavor_data_source, instance]
