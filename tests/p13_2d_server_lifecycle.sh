@@ -7,11 +7,15 @@ password="${O3K_P13_PASSWORD:-p13-2d-disposable-password}"
 project_id="eba29e2d-53de-461d-ae91-ede7402713cb"
 port="${O3K_P13_PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
 work_dir="$(mktemp -d /tmp/o3k-p13-2d.XXXXXX)"; project_dir="$work_dir/project"; o3kd_pid=""
+database_env=()
+if [[ -n "${O3K_DATABASE_URL:-}" ]]; then
+  database_env=(O3K_DATABASE_BACKEND=postgres O3K_DATABASE_URL="$O3K_DATABASE_URL")
+fi
 mkdir -p "$project_dir"
 cleanup() { [[ -z "$o3kd_pid" ]] || { kill "$o3kd_pid" 2>/dev/null || true; wait "$o3kd_pid" 2>/dev/null || true; }; rm -rf "$work_dir"; }
 trap cleanup EXIT
 start() {
-  O3K_BOOTSTRAP_PASSWORD="$password" O3K_TOKEN_SIGNING_KEY="p13-2d-token-signing-key-012345678901234567890123" "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
+  env "${database_env[@]}" O3K_BOOTSTRAP_PASSWORD="$password" O3K_TOKEN_SIGNING_KEY="p13-2d-token-signing-key-012345678901234567890123" "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
   o3kd_pid=$!; for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1 && return; sleep .1; done; cat "$work_dir/o3kd.log" >&2; exit 1
 }
 start
