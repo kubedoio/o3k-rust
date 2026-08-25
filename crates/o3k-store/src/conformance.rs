@@ -1936,9 +1936,17 @@ mod tests {
     use crate::{PostgresStore, SqliteStore};
     use sqlx::{Connection, postgres::PgConnection};
 
-    async fn acquire_shared_postgres_test_lock(database_url: &str) -> Option<PgConnection> {
+    async fn prepare_shared_postgres_test_database(database_url: &str) -> Option<PgConnection> {
         let mut connection = PgConnection::connect(database_url).await.ok()?;
         sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
+            .execute(&mut connection)
+            .await
+            .ok()?;
+        sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")
+            .execute(&mut connection)
+            .await
+            .ok()?;
+        sqlx::query("CREATE SCHEMA public")
             .execute(&mut connection)
             .await
             .ok()?;
@@ -1955,7 +1963,7 @@ mod tests {
     async fn test_postgres_conformance() {
         let db_url = std::env::var("O3K_DATABASE_URL")
             .unwrap_or_else(|_| "postgres://o3k:password@127.0.0.1/o3k_test".to_owned());
-        if let Some(_database_guard) = acquire_shared_postgres_test_lock(&db_url).await {
+        if let Some(_database_guard) = prepare_shared_postgres_test_database(&db_url).await {
             let store = PostgresStore::connect(&db_url)
                 .await
                 .expect("connect to Postgres");

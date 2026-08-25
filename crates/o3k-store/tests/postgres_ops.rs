@@ -14,22 +14,31 @@ use o3k_store::{
     PostgresStore, QuotaRepository, ResourceRecord, StoreError, SubnetRecord,
 };
 
-async fn get_test_store() -> Option<(String, PostgresStore, PgConnection)> {
-    if let Ok(url) = env::var("O3K_DATABASE_URL") {
-        let mut database_guard = PgConnection::connect(&url).await.ok()?;
-        sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
-            .execute(&mut database_guard)
-            .await
-            .ok()?;
-        let store = PostgresStore::connect(&url).await.ok()?;
-        return Some((url, store, database_guard));
-    }
-    let default_url = "postgres://o3k:password@127.0.0.1/o3k_test".to_owned();
-    let mut database_guard = PgConnection::connect(&default_url).await.ok()?;
+async fn prepare_test_database(database_url: &str) -> Option<PgConnection> {
+    let mut database_guard = PgConnection::connect(database_url).await.ok()?;
     sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
         .execute(&mut database_guard)
         .await
         .ok()?;
+    sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")
+        .execute(&mut database_guard)
+        .await
+        .ok()?;
+    sqlx::query("CREATE SCHEMA public")
+        .execute(&mut database_guard)
+        .await
+        .ok()?;
+    Some(database_guard)
+}
+
+async fn get_test_store() -> Option<(String, PostgresStore, PgConnection)> {
+    if let Ok(url) = env::var("O3K_DATABASE_URL") {
+        let database_guard = prepare_test_database(&url).await?;
+        let store = PostgresStore::connect(&url).await.ok()?;
+        return Some((url, store, database_guard));
+    }
+    let default_url = "postgres://o3k:password@127.0.0.1/o3k_test".to_owned();
+    let database_guard = prepare_test_database(&default_url).await?;
     let store = PostgresStore::connect(&default_url).await.ok()?;
     Some((default_url, store, database_guard))
 }
