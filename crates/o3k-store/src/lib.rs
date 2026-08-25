@@ -253,6 +253,115 @@ pub struct NetworkIntentRecord {
     pub status: String,
 }
 
+/// Canonical policy desired state.  NetworkIntent payloads are migration input
+/// only; this row is the authority used by runtime reconstruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalNetworkPolicyRecord {
+    pub id: Uuid,
+    pub project_id: String,
+    pub endpoint_id: Uuid,
+    pub direction: String,
+    pub protocol: String,
+    pub port_min: Option<u16>,
+    pub port_max: Option<u16>,
+    pub source: Option<String>,
+    pub destination: Option<String>,
+    pub action: String,
+    pub generation: u64,
+    pub state: String,
+}
+
+fn legacy_policy_records(
+    payload: &str,
+    project_id: &str,
+) -> Result<Vec<CanonicalNetworkPolicyRecord>, StoreError> {
+    let value: serde_json::Value = serde_json::from_str(payload)
+        .map_err(|error| StoreError::Corrupt(format!("invalid network intent JSON: {error}")))?;
+    let Some(policies) = value.get("policies").and_then(serde_json::Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    policies
+        .iter()
+        .map(|policy| {
+            let id = policy
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| StoreError::Corrupt("legacy policy has no id".into()))?
+                .parse()
+                .map_err(StoreError::InvalidUuid)?;
+            let endpoint_id = policy
+                .get("endpoint_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| StoreError::Corrupt("legacy policy has no endpoint".into()))?
+                .parse()
+                .map_err(StoreError::InvalidUuid)?;
+            let ports = policy.get("ports").and_then(|ports| {
+                Some((ports.get("start")?.as_u64()?, ports.get("end")?.as_u64()?))
+            });
+            let prefix = |value: Option<&serde_json::Value>| -> Result<Option<String>, StoreError> {
+                let Some(value) = value.filter(|value| !value.is_null()) else {
+                    return Ok(None);
+                };
+                let network = value
+                    .get("network")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        StoreError::Corrupt("legacy policy prefix has no network".into())
+                    })?;
+                let prefix_len = value
+                    .get("prefix_len")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| {
+                        StoreError::Corrupt("legacy policy prefix has no length".into())
+                    })?;
+                if prefix_len > 32 {
+                    return Err(StoreError::Corrupt(
+                        "legacy policy prefix length is invalid".into(),
+                    ));
+                }
+                Ok(Some(format!("{network}/{prefix_len}")))
+            };
+            let (port_min, port_max) = match ports {
+                Some((start, end)) if start <= end && end <= u64::from(u16::MAX) => {
+                    (Some(start as u16), Some(end as u16))
+                }
+                Some(_) => {
+                    return Err(StoreError::Corrupt(
+                        "legacy policy port range is invalid".into(),
+                    ));
+                }
+                None => (None, None),
+            };
+            Ok(CanonicalNetworkPolicyRecord {
+                id,
+                project_id: project_id.to_owned(),
+                endpoint_id,
+                direction: policy
+                    .get("direction")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| StoreError::Corrupt("legacy policy has no direction".into()))?
+                    .to_owned(),
+                protocol: policy
+                    .get("protocol")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| StoreError::Corrupt("legacy policy has no protocol".into()))?
+                    .to_owned(),
+                port_min,
+                port_max,
+                source: prefix(policy.get("source"))?,
+                destination: prefix(policy.get("destination"))?,
+                action: policy
+                    .get("action")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| StoreError::Corrupt("legacy policy has no action".into()))?
+                    .to_owned(),
+                generation: 1,
+                state: "active".to_owned(),
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkAddressAllocationRecord {
     pub realm_id: Uuid,
@@ -1761,6 +1870,32 @@ pub trait NetworkRepository: Send + Sync + QuotaRepository {
         project_id: &str,
         endpoint_id: &Uuid,
     ) -> Result<(), StoreError>;
+    async fn upsert_canonical_policy(
+        &self,
+        policy: &CanonicalNetworkPolicyRecord,
+    ) -> Result<(), StoreError>;
+    async fn list_canonical_policies(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<CanonicalNetworkPolicyRecord>, StoreError>;
+    async fn delete_canonical_policy(
+        &self,
+        project_id: &str,
+        policy_id: &Uuid,
+    ) -> Result<(), StoreError>;
+    async fn begin_canonical_realm_deletion(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalAddressRealmRecord, StoreError>;
+    async fn finalize_canonical_realm_deletion(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), StoreError>;
     async fn delete_canonical_realm(
         &self,
         project_id: &str,
@@ -2400,12 +2535,12 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions', 'image_metadata', 'network_networks', 'network_subnets', 'network_ports', 'canonical_networks', 'canonical_address_realms', 'canonical_address_pools', 'canonical_endpoints', 'canonical_realm_encapsulation_bindings', 'placement_providers', 'placement_inventories', 'placement_allocations', 'placement_allocation_resources', 'placement_allocation_intents', 'placement_allocation_intent_resources', 'native_storage_backends', 'native_volumes', 'native_volume_attachments', 'native_snapshots')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions', 'image_metadata', 'network_networks', 'network_subnets', 'network_ports', 'canonical_networks', 'canonical_address_realms', 'canonical_address_pools', 'canonical_endpoints', 'canonical_network_policies', 'canonical_realm_encapsulation_bindings', 'placement_providers', 'placement_inventories', 'placement_allocations', 'placement_allocation_resources', 'placement_allocation_intents', 'placement_allocation_intent_resources', 'native_storage_backends', 'native_volumes', 'native_volume_attachments', 'native_snapshots')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 37 {
+        if table_count != 38 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
 
@@ -4069,6 +4204,14 @@ impl SqliteStore {
         project_id: &str,
         endpoint_id: &Uuid,
     ) -> Result<(), StoreError> {
+        sqlx::query(
+            "DELETE FROM canonical_network_policies WHERE endpoint_id = ? AND project_id = ?",
+        )
+        .bind(endpoint_id.to_string())
+        .bind(project_id)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
         let result = sqlx::query("DELETE FROM canonical_endpoints WHERE id = ? AND project_id = ?")
             .bind(endpoint_id.to_string())
             .bind(project_id)
@@ -4077,6 +4220,128 @@ impl SqliteStore {
             .map_err(StoreError::Database)?;
         if result.rows_affected() == 0 {
             return Err(StoreError::ResourceNotFound);
+        }
+        Ok(())
+    }
+
+    pub async fn upsert_canonical_policy(
+        &self,
+        policy: &CanonicalNetworkPolicyRecord,
+    ) -> Result<(), StoreError> {
+        let endpoint_project: String =
+            sqlx::query_scalar("SELECT project_id FROM canonical_endpoints WHERE id = ?")
+                .bind(policy.endpoint_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?
+                .ok_or(StoreError::ResourceNotFound)?;
+        if endpoint_project != policy.project_id {
+            return Err(StoreError::OwnershipConflict);
+        }
+        checked_generation(policy.generation)?;
+        sqlx::query(
+            "INSERT INTO canonical_network_policies (id, project_id, endpoint_id, direction, protocol, port_min, port_max, source, destination, action, generation, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, endpoint_id=excluded.endpoint_id, direction=excluded.direction, protocol=excluded.protocol, port_min=excluded.port_min, port_max=excluded.port_max, source=excluded.source, destination=excluded.destination, action=excluded.action, generation=excluded.generation, state=excluded.state",
+        )
+        .bind(policy.id.to_string())
+        .bind(&policy.project_id)
+        .bind(policy.endpoint_id.to_string())
+        .bind(&policy.direction)
+        .bind(&policy.protocol)
+        .bind(policy.port_min.map(i64::from))
+        .bind(policy.port_max.map(i64::from))
+        .bind(&policy.source)
+        .bind(&policy.destination)
+        .bind(&policy.action)
+        .bind(policy.generation as i64)
+        .bind(&policy.state)
+        .execute(&self.pool)
+        .await
+        .map_err(map_canonical_insert_error)
+        .map(|_| ())
+    }
+
+    pub async fn list_canonical_policies(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<CanonicalNetworkPolicyRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT p.id, p.project_id, p.endpoint_id, p.direction, p.protocol, p.port_min, p.port_max, p.source, p.destination, p.action, p.generation, p.state FROM canonical_network_policies p JOIN canonical_endpoints e ON e.id = p.endpoint_id JOIN canonical_address_realms r ON r.id = e.realm_id WHERE p.project_id = ? AND r.project_id = ? AND r.network_id = ? ORDER BY p.id",
+        )
+        .bind(project_id)
+        .bind(project_id)
+        .bind(network_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(canonical_policy_from_row).collect()
+    }
+
+    pub async fn delete_canonical_policy(
+        &self,
+        project_id: &str,
+        policy_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let result =
+            sqlx::query("DELETE FROM canonical_network_policies WHERE id = ? AND project_id = ?")
+                .bind(policy_id.to_string())
+                .bind(project_id)
+                .execute(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::ResourceNotFound);
+        }
+        Ok(())
+    }
+
+    pub async fn begin_canonical_realm_deletion(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalAddressRealmRecord, StoreError> {
+        let result = sqlx::query(
+            "UPDATE canonical_address_realms SET state = 'deleting', generation = generation + 1 WHERE id = ? AND project_id = ? AND generation = ? AND state = 'active' AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id)",
+        )
+        .bind(realm_id.to_string())
+        .bind(project_id)
+        .bind(checked_generation(expected_generation)?)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_canonical_realm(project_id, realm_id).await? {
+                Some(realm) if realm.state == "deleting" => Ok(realm),
+                Some(_) => Err(StoreError::NetworkInUse),
+                None => Err(StoreError::ResourceNotFound),
+            };
+        }
+        self.get_canonical_realm(project_id, realm_id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+
+    pub async fn finalize_canonical_realm_deletion(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "DELETE FROM canonical_address_realms WHERE id = ? AND project_id = ? AND generation = ? AND state = 'deleting' AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_network_policies p JOIN canonical_endpoints e ON e.id = p.endpoint_id WHERE e.realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_realm_encapsulation_bindings WHERE realm_id = canonical_address_realms.id)",
+        )
+        .bind(realm_id.to_string())
+        .bind(project_id)
+        .bind(checked_generation(expected_generation)?)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_canonical_realm(project_id, realm_id).await? {
+                Some(_) => Err(StoreError::NetworkInUse),
+                None => Err(StoreError::ResourceNotFound),
+            };
         }
         Ok(())
     }
@@ -4414,6 +4679,38 @@ impl SqliteStore {
             .execute(&mut *tx)
             .await
             .map_err(map_canonical_insert_error)?;
+        }
+        for intent in &intents {
+            let project_id: String = intent.get("project_id");
+            for policy in legacy_policy_records(intent.get("payload"), &project_id)? {
+                let endpoint_project: Option<String> =
+                    sqlx::query_scalar("SELECT project_id FROM canonical_endpoints WHERE id = ?")
+                        .bind(policy.endpoint_id.to_string())
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(StoreError::Database)?;
+                if endpoint_project.as_deref() != Some(project_id.as_str()) {
+                    return Err(StoreError::OwnershipConflict);
+                }
+                sqlx::query(
+                    "INSERT INTO canonical_network_policies (id, project_id, endpoint_id, direction, protocol, port_min, port_max, source, destination, action, generation, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+                )
+                .bind(policy.id.to_string())
+                .bind(&policy.project_id)
+                .bind(policy.endpoint_id.to_string())
+                .bind(&policy.direction)
+                .bind(&policy.protocol)
+                .bind(policy.port_min.map(i64::from))
+                .bind(policy.port_max.map(i64::from))
+                .bind(&policy.source)
+                .bind(&policy.destination)
+                .bind(&policy.action)
+                .bind(policy.generation as i64)
+                .bind(&policy.state)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_canonical_insert_error)?;
+            }
         }
         tx.commit().await.map_err(StoreError::Database)
     }
@@ -6082,6 +6379,36 @@ fn canonical_endpoint_from_row(
             .map_err(|_| StoreError::Corrupt("negative canonical generation".to_owned()))?,
         state: row.get("state"),
     })
+}
+
+fn canonical_policy_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<CanonicalNetworkPolicyRecord, StoreError> {
+    Ok(CanonicalNetworkPolicyRecord {
+        id: parse_uuid(row.get("id"))?,
+        project_id: row.get("project_id"),
+        endpoint_id: parse_uuid(row.get("endpoint_id"))?,
+        direction: row.get("direction"),
+        protocol: row.get("protocol"),
+        port_min: row
+            .get::<Option<i64>, _>("port_min")
+            .map(parse_port_min)
+            .transpose()?,
+        port_max: row
+            .get::<Option<i64>, _>("port_max")
+            .map(parse_port_min)
+            .transpose()?,
+        source: row.get("source"),
+        destination: row.get("destination"),
+        action: row.get("action"),
+        generation: u64::try_from(row.get::<i64, _>("generation"))
+            .map_err(|_| StoreError::Corrupt("invalid policy generation".into()))?,
+        state: row.get("state"),
+    })
+}
+
+fn parse_port_min(value: i64) -> Result<u16, StoreError> {
+    u16::try_from(value).map_err(|_| StoreError::Corrupt("invalid policy port".into()))
 }
 
 fn validate_network_intent(intent: &NetworkIntentRecord) -> Result<(), StoreError> {
@@ -7902,6 +8229,44 @@ impl NetworkRepository for SqliteStore {
         endpoint_id: &Uuid,
     ) -> Result<(), StoreError> {
         self.delete_canonical_endpoint(project_id, endpoint_id)
+            .await
+    }
+    async fn upsert_canonical_policy(
+        &self,
+        policy: &CanonicalNetworkPolicyRecord,
+    ) -> Result<(), StoreError> {
+        self.upsert_canonical_policy(policy).await
+    }
+    async fn list_canonical_policies(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<CanonicalNetworkPolicyRecord>, StoreError> {
+        self.list_canonical_policies(project_id, network_id).await
+    }
+    async fn delete_canonical_policy(
+        &self,
+        project_id: &str,
+        policy_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.delete_canonical_policy(project_id, policy_id).await
+    }
+    async fn begin_canonical_realm_deletion(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalAddressRealmRecord, StoreError> {
+        self.begin_canonical_realm_deletion(project_id, realm_id, expected_generation)
+            .await
+    }
+    async fn finalize_canonical_realm_deletion(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), StoreError> {
+        self.finalize_canonical_realm_deletion(project_id, realm_id, expected_generation)
             .await
     }
     async fn delete_canonical_realm(
@@ -12787,6 +13152,77 @@ mod tests {
                 .ok_or(StoreError::Corrupt("canonical endpoint missing".into()))?
                 .id,
             endpoint_id
+        );
+        let policy_id = Uuid::from_u128(0x205);
+        store
+            .insert_network_intent(&NetworkIntentRecord {
+                id: network_id,
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                payload: serde_json::json!({
+                    "id": network_id,
+                    "project_id": "project-a",
+                    "realm": {"id": realm_id},
+                    "policies": [{
+                        "id": policy_id,
+                        "endpoint_id": endpoint_id,
+                        "direction": "Ingress",
+                        "protocol": "Tcp",
+                        "ports": {"start": 443, "end": 443},
+                        "source": {"network": "198.51.100.0", "prefix_len": 24},
+                        "destination": null,
+                        "action": "Deny"
+                    }]
+                })
+                .to_string(),
+                plan_fingerprint_sha256: None,
+                status: "active".to_owned(),
+            })
+            .await?;
+        store.backfill_canonical_network_state().await?;
+        let policies = store
+            .list_canonical_policies("project-a", &network_id)
+            .await?;
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].id, policy_id);
+        assert_eq!(policies[0].endpoint_id, endpoint_id);
+
+        let invalid_network = Uuid::from_u128(0x206);
+        store
+            .insert_network_intent(&NetworkIntentRecord {
+                id: invalid_network,
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                payload: serde_json::json!({
+                    "id": invalid_network,
+                    "project_id": "project-a",
+                    "policies": [{
+                        "id": Uuid::from_u128(0x207),
+                        "endpoint_id": Uuid::from_u128(0x208),
+                        "direction": "Ingress",
+                        "protocol": "Tcp",
+                        "ports": {"start": 443, "end": 443},
+                        "source": null,
+                        "destination": null,
+                        "action": "Allow"
+                    }]
+                })
+                .to_string(),
+                plan_fingerprint_sha256: None,
+                status: "active".to_owned(),
+            })
+            .await?;
+        assert!(matches!(
+            store.backfill_canonical_network_state().await,
+            Err(StoreError::OwnershipConflict)
+                | Err(StoreError::ResourceNotFound)
+                | Err(StoreError::Corrupt(_))
+        ));
+        assert!(
+            store
+                .get_canonical_network("project-a", &invalid_network)
+                .await?
+                .is_none()
         );
 
         let conflict_network = Uuid::from_u128(0x203);

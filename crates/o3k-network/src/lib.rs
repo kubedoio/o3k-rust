@@ -4273,6 +4273,59 @@ fn validate_policy_shape(policy: &PolicyIntent) -> Result<(), NetworkError> {
     Ok(())
 }
 
+fn canonical_policy_record(
+    project_id: &str,
+    policy: &PolicyIntent,
+) -> o3k_store::CanonicalNetworkPolicyRecord {
+    let prefix = |value: Option<Ipv4Prefix>| {
+        value.map(|prefix| format!("{}/{}", prefix.network, prefix.prefix_len))
+    };
+    o3k_store::CanonicalNetworkPolicyRecord {
+        id: policy.id,
+        project_id: project_id.to_owned(),
+        endpoint_id: policy.endpoint_id,
+        direction: format!("{:?}", policy.direction),
+        protocol: format!("{:?}", policy.protocol),
+        port_min: policy.ports.map(|ports| ports.start),
+        port_max: policy.ports.map(|ports| ports.end),
+        source: prefix(policy.source),
+        destination: prefix(policy.destination),
+        action: format!("{:?}", policy.action),
+        generation: 1,
+        state: "active".to_owned(),
+    }
+}
+
+fn policy_from_canonical_record(
+    record: o3k_store::CanonicalNetworkPolicyRecord,
+) -> Result<PolicyIntent, NetworkError> {
+    let parse_prefix = |value: Option<String>| {
+        value
+            .as_deref()
+            .map(parse_security_group_prefix)
+            .transpose()
+    };
+    let policy = PolicyIntent {
+        id: record.id,
+        endpoint_id: record.endpoint_id,
+        direction: parse_security_group_direction(&record.direction)?,
+        protocol: parse_security_group_protocol(&record.protocol)?,
+        ports: record
+            .port_min
+            .zip(record.port_max)
+            .map(|(start, end)| PortRange { start, end }),
+        source: parse_prefix(record.source)?,
+        destination: parse_prefix(record.destination)?,
+        action: match record.action.as_str() {
+            "Allow" | "allow" => PolicyAction::Allow,
+            "Deny" | "deny" => PolicyAction::Deny,
+            _ => return Err(NetworkError::InvalidRequest),
+        },
+    };
+    validate_policy_shape(&policy)?;
+    Ok(policy)
+}
+
 /// Canonical binding state of a port on its selected host.
 ///
 /// The durable store persists the string projections (persistence
@@ -4574,9 +4627,22 @@ impl NetworkService {
         realm_id: Uuid,
     ) -> Result<(), NetworkError> {
         let _guard = self.lock.lock().await;
+        let realm = self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, &realm_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        let deleting = self
+            .inner
+            .repository
+            .begin_canonical_realm_deletion(project_id, &realm_id, realm.generation)
+            .await
+            .map_err(map_store_error)?;
         self.inner
             .repository
-            .delete_canonical_realm(project_id, &realm_id)
+            .finalize_canonical_realm_deletion(project_id, &realm_id, deleting.generation)
             .await
             .map_err(map_store_error)
     }
@@ -4606,6 +4672,9 @@ impl NetworkService {
             .await
             .map_err(map_store_error)?
             .ok_or(NetworkError::NotFound)?;
+        if realm.state != "active" {
+            return Err(NetworkError::Conflict);
+        }
         let realm_prefix = Ipv4Net::parse(&realm.prefix)?;
         if !realm_prefix.contains(pool_prefix_net.network)
             || pool_prefix_net.prefix < realm_prefix.prefix
@@ -5127,22 +5196,15 @@ impl NetworkService {
         {
             return Err(NetworkError::NotFound);
         }
-        let record = self
+        let mut policies = self
             .inner
             .repository
-            .get_network_intent(project_id, &network_id)
+            .list_canonical_policies(project_id, &network_id)
             .await
-            .map_err(map_store_error)?;
-        let mut policies = if let Some(record) = record {
-            let intent: NetworkIntent =
-                serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
-            if intent.id != network_id || intent.project_id != project_id {
-                return Err(NetworkError::InvalidRequest);
-            }
-            intent.policies
-        } else {
-            Vec::new()
-        };
+            .map_err(map_store_error)?
+            .into_iter()
+            .map(policy_from_canonical_record)
+            .collect::<Result<Vec<_>, _>>()?;
         for port in self
             .list_ports_for_project(project_id)
             .await?
@@ -5204,9 +5266,8 @@ impl NetworkService {
         Ok(policies)
     }
 
-    /// Adds or replaces one canonical policy rule and persists the complete
-    /// network intent under one generation-fenced store record. The record is
-    /// keyed by the public network ID; provider-native rules are never stored.
+    /// Adds or replaces one canonical policy rule. NetworkIntent is not
+    /// consulted or written; endpoint ownership establishes realm context.
     pub async fn upsert_policy_for_project(
         &self,
         project_id: &str,
@@ -5214,27 +5275,32 @@ impl NetworkService {
         policy: PolicyIntent,
     ) -> Result<PolicyIntent, NetworkError> {
         let _guard = self.lock().await;
-        let mut intent = self
-            .load_policy_intent_locked(project_id, network_id)
-            .await?;
-        if policy.endpoint_id.is_nil()
-            || !intent
-                .endpoints
-                .iter()
-                .any(|endpoint| endpoint.id == policy.endpoint_id)
-            || intent.policies.iter().any(|existing| {
-                existing.id == policy.id && existing.endpoint_id != policy.endpoint_id
-            })
-        {
+        if policy.endpoint_id.is_nil() {
             return Err(NetworkError::InvalidRequest);
         }
         validate_policy_shape(&policy)?;
-        intent.policies.retain(|existing| existing.id != policy.id);
-        intent.policies.push(policy.clone());
-        intent.policies.sort_by_key(|value| value.id);
-        intent.generation = intent.generation.saturating_add(1);
-        self.persist_policy_intent_locked(project_id, network_id, intent)
-            .await?;
+        let endpoint = self
+            .inner
+            .repository
+            .get_canonical_endpoint(project_id, &policy.endpoint_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        let realm = self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, &endpoint.realm_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::InvalidRequest)?;
+        if realm.network_id != network_id || realm.state != "active" {
+            return Err(NetworkError::Conflict);
+        }
+        self.inner
+            .repository
+            .upsert_canonical_policy(&canonical_policy_record(project_id, &policy))
+            .await
+            .map_err(map_store_error)?;
         Ok(policy)
     }
 
@@ -5245,204 +5311,31 @@ impl NetworkService {
         policy_id: Uuid,
     ) -> Result<(), NetworkError> {
         let _guard = self.lock().await;
-        let mut intent = self
-            .load_policy_intent_locked(project_id, network_id)
-            .await?;
-        let original = intent.policies.len();
-        intent.policies.retain(|policy| policy.id != policy_id);
-        if intent.policies.len() == original {
+        let exists = self
+            .list_policies_for_project(project_id, network_id)
+            .await?
+            .iter()
+            .any(|policy| policy.id == policy_id);
+        if !exists {
             return Err(NetworkError::NotFound);
         }
-        intent.generation = intent.generation.saturating_add(1);
-        self.persist_policy_intent_locked(project_id, network_id, intent)
+        self.inner
+            .repository
+            .delete_canonical_policy(project_id, &policy_id)
             .await
+            .map_err(map_store_error)
     }
 
-    /// Projects a successful provider observation onto the durable intent.
-    /// Dispatch alone is not success; callers invoke this only after the
-    /// executor returned an observed terminal success.
+    /// Compatibility hook retained for callers that report provider
+    /// realization. Canonical Network state is authoritative; this hook must
+    /// not mutate the transitional NetworkIntent payload.
     pub async fn mark_network_intent_active_for_project(
         &self,
         project_id: &str,
         network_id: Uuid,
     ) -> Result<(), NetworkError> {
-        let _guard = self.lock().await;
-        let Some(record) = self
-            .inner
-            .repository
-            .get_network_intent(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?
-        else {
-            return Err(NetworkError::NotFound);
-        };
-        let mut intent: NetworkIntent =
-            serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
-        intent.state = o3k_domain::NetworkIntentState::Active;
-        intent.generation = intent.generation.saturating_add(1);
-        let payload = serde_json::to_string(&intent).map_err(|_| NetworkError::InvalidRequest)?;
-        self.inner
-            .repository
-            .update_network_intent(
-                project_id,
-                &network_id,
-                record.generation,
-                &payload,
-                record.plan_fingerprint_sha256.as_deref(),
-                "active",
-            )
-            .await
-            .map_err(map_store_error)?;
-        Ok(())
-    }
-
-    async fn load_policy_intent_locked(
-        &self,
-        project_id: &str,
-        network_id: Uuid,
-    ) -> Result<NetworkIntent, NetworkError> {
-        let snapshot = self
-            .reconstruct_canonical_network(project_id, network_id)
+        self.get_canonical_network_for_project(project_id, network_id)
             .await?;
-        let record = self
-            .inner
-            .repository
-            .get_network_intent(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?;
-        let policies = record
-            .as_ref()
-            .map(|record| {
-                serde_json::from_str::<NetworkIntent>(&record.payload)
-                    .map(|intent| intent.policies)
-                    .map_err(NetworkError::CorruptMetadata)
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let mut referenced_realms = BTreeSet::new();
-        for policy in &policies {
-            let endpoint = snapshot
-                .endpoints
-                .values()
-                .flatten()
-                .find(|endpoint| endpoint.id == policy.endpoint_id)
-                .ok_or(NetworkError::InvalidRequest)?;
-            let realm = snapshot
-                .realms
-                .iter()
-                .find(|realm| realm.id == endpoint.realm_id)
-                .ok_or(NetworkError::InvalidRequest)?;
-            if realm.project_id != project_id || endpoint.project_id != project_id {
-                return Err(NetworkError::InvalidRequest);
-            }
-            referenced_realms.insert(realm.id);
-        }
-        let realm_id = if referenced_realms.len() == 1 {
-            *referenced_realms
-                .iter()
-                .next()
-                .ok_or(NetworkError::InvalidRequest)?
-        } else if policies.is_empty() && snapshot.realms.len() == 1 {
-            snapshot.realms[0].id
-        } else {
-            return Err(NetworkError::InvalidRequest);
-        };
-        let realm = snapshot
-            .realms
-            .iter()
-            .find(|realm| realm.id == realm_id)
-            .ok_or(NetworkError::NotFound)?;
-        let endpoints = snapshot
-            .endpoints
-            .get(&realm.id)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|endpoint| o3k_domain::EndpointIntent {
-                id: endpoint.id,
-                project_id: endpoint.project_id,
-                realm_id: endpoint.realm_id,
-                mac: endpoint.mac,
-                fixed_ip: endpoint.fixed_ip,
-                generation: endpoint.generation,
-            })
-            .collect();
-        let pools = snapshot.pools.get(&realm.id).cloned().unwrap_or_default();
-        Ok(NetworkIntent {
-            id: network_id,
-            project_id: project_id.to_owned(),
-            realm: AddressRealm {
-                id: realm.id,
-                network_id,
-                project_id: realm.project_id.clone(),
-                prefix: parse_security_group_prefix(&realm.prefix)?,
-                overlapping_prefixes: realm.overlapping_prefixes,
-            },
-            address_pools: pools
-                .into_iter()
-                .map(|pool| {
-                    Ok(o3k_domain::AddressPool {
-                        id: pool.id,
-                        realm_id: pool.realm_id,
-                        project_id: pool.project_id,
-                        prefix: parse_security_group_prefix(&pool.prefix)?,
-                        gateway: pool.gateway,
-                        first_usable: pool.first_usable,
-                        last_usable: pool.last_usable,
-                    })
-                })
-                .collect::<Result<Vec<_>, NetworkError>>()?,
-            endpoints,
-            routes: Vec::new(),
-            gateways: Vec::new(),
-            egress: Vec::new(),
-            public_addresses: Vec::new(),
-            policies,
-            generation: record
-                .map(|record| record.generation)
-                .unwrap_or(realm.generation),
-            state: o3k_domain::NetworkIntentState::Requested,
-        })
-    }
-
-    async fn persist_policy_intent_locked(
-        &self,
-        project_id: &str,
-        network_id: Uuid,
-        intent: NetworkIntent,
-    ) -> Result<(), NetworkError> {
-        let payload = serde_json::to_string(&intent).map_err(|_| NetworkError::InvalidRequest)?;
-        let fingerprint = format!("policy-generation-{}", intent.generation);
-        let repository = self.inner.repository.as_ref();
-        if let Some(existing) = repository
-            .get_network_intent(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?
-        {
-            repository
-                .update_network_intent(
-                    project_id,
-                    &network_id,
-                    existing.generation,
-                    &payload,
-                    Some(&fingerprint),
-                    existing.status.as_str(),
-                )
-                .await
-                .map_err(map_store_error)?;
-        } else {
-            repository
-                .insert_network_intent(&o3k_store::NetworkIntentRecord {
-                    id: network_id,
-                    project_id: project_id.to_owned(),
-                    generation: 1,
-                    payload,
-                    plan_fingerprint_sha256: Some(fingerprint),
-                    status: "requested".to_owned(),
-                })
-                .await
-                .map_err(map_store_error)?;
-        }
         Ok(())
     }
 
@@ -6813,7 +6706,7 @@ fn parse_security_group_prefix(value: &str) -> Result<Ipv4Prefix, NetworkError> 
 }
 
 fn parse_security_group_direction(value: &str) -> Result<PolicyDirection, NetworkError> {
-    match value {
+    match value.to_ascii_lowercase().as_str() {
         "ingress" => Ok(PolicyDirection::Ingress),
         "egress" => Ok(PolicyDirection::Egress),
         _ => Err(NetworkError::InvalidRequest),
@@ -6821,7 +6714,7 @@ fn parse_security_group_direction(value: &str) -> Result<PolicyDirection, Networ
 }
 
 fn parse_security_group_protocol(value: &str) -> Result<NetworkProtocol, NetworkError> {
-    match value {
+    match value.to_ascii_lowercase().as_str() {
         "any" => Ok(NetworkProtocol::Any),
         "tcp" => Ok(NetworkProtocol::Tcp),
         "udp" => Ok(NetworkProtocol::Udp),
@@ -7053,6 +6946,76 @@ mod tests {
         let _ = fs::remove_file(&sqlite_path);
         let _ = fs::remove_file(format!("{sqlite_path}-wal"));
         let _ = fs::remove_file(format!("{sqlite_path}-shm"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn realm_deletion_is_fenced_when_provider_binding_remains()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("realm-deletion-fence");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let network = service
+            .create_canonical_network_for_project("project-a", "fenced".to_owned())
+            .await?;
+        let realm = service
+            .create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.30.0.0/24".to_owned(),
+                false,
+            )
+            .await?;
+        store
+            .insert_canonical_realm_binding(&o3k_store::CanonicalRealmBindingRecord {
+                fabric_domain_id: "fabric-a".to_owned(),
+                realm_id: realm.id,
+                provider_kind: "geneve".to_owned(),
+                provider_segment_id: 300,
+                binding_generation: 1,
+                state: "active".to_owned(),
+            })
+            .await?;
+
+        assert!(matches!(
+            service
+                .delete_canonical_realm_for_project("project-a", realm.id)
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+        let deleting = store
+            .get_canonical_realm("project-a", &realm.id)
+            .await?
+            .ok_or("realm disappeared during fenced deletion")?;
+        assert_eq!(deleting.state, "deleting");
+        assert!(matches!(
+            service
+                .create_canonical_endpoint_for_project(
+                    "project-a",
+                    realm.id,
+                    "10.30.0.10".parse()?,
+                    "02:00:00:30:00:10".to_owned(),
+                )
+                .await,
+            Err(NetworkError::InvalidRequest) | Err(NetworkError::Conflict)
+        ));
+        assert!(matches!(
+            service
+                .delete_canonical_realm_for_project("project-a", realm.id)
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+        assert!(
+            service
+                .get_canonical_network_for_project("project-a", network.id)
+                .await
+                .is_ok()
+        );
+        let _ = fs::remove_dir_all(path);
+        let _ = fs::remove_file(sqlite_path);
         Ok(())
     }
 
@@ -7986,12 +7949,11 @@ mod tests {
                 .await?,
             vec![policy.clone()]
         );
-        let record = store
-            .get_network_intent(project, &network.id)
-            .await?
-            .ok_or("policy intent not persisted")?;
-        assert_eq!(record.status, "requested");
-        assert!(record.payload.contains(&policy_id.to_string()));
+        let canonical = store.list_canonical_policies(project, &network.id).await?;
+        assert_eq!(canonical.len(), 1);
+        assert_eq!(canonical[0].id, policy_id);
+        let legacy = store.get_network_intent(project, &network.id).await?;
+        assert!(!legacy.is_some_and(|record| record.payload.contains(&policy_id.to_string())));
 
         let compiled = compile_attachment_plan(AttachmentPlanInput {
             endpoint_id: port.id,

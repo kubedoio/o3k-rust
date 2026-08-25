@@ -11,15 +11,15 @@ use o3k_kernel::{
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
-    CanonicalNetworkRecord, CanonicalOperationRecord, ComputeRepository, ControllerEpoch,
-    ControllerId, ControllerSession, CoordinationRepository, DatabaseHealth, DurableStore,
-    FencingToken, IdempotencyReservation, IdempotencyReservationRequest, IdentityRepository,
-    ImageMetadataRecord, ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayUpdate,
-    ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
-    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
-    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    LeaseAcquireOutcome, NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord,
-    NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
+    CanonicalNetworkPolicyRecord, CanonicalNetworkRecord, CanonicalOperationRecord,
+    ComputeRepository, ControllerEpoch, ControllerId, ControllerSession, CoordinationRepository,
+    DatabaseHealth, DurableStore, FencingToken, IdempotencyReservation,
+    IdempotencyReservationRequest, IdentityRepository, ImageMetadataRecord, ImageOverlayIdentity,
+    ImageOverlayOwnershipRecord, ImageOverlayUpdate, ImageRepository, KeypairRecord,
+    KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord,
+    KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord,
+    KeystoneUserRecord, LeaseAcquireOutcome, NetworkAddressAllocationRecord, NetworkIntentRecord,
+    NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
     PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository, PortRecord,
     PostgresStore, ProviderReference, RelationshipRepository, ResourceRecord,
@@ -1484,6 +1484,69 @@ impl NetworkRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.delete_canonical_endpoint(project_id, endpoint_id).await,
             Self::Postgres(s) => s.delete_canonical_endpoint(project_id, endpoint_id).await,
+        }
+    }
+    async fn upsert_canonical_policy(
+        &self,
+        policy: &CanonicalNetworkPolicyRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.upsert_canonical_policy(policy).await,
+            Self::Postgres(s) => s.upsert_canonical_policy(policy).await,
+        }
+    }
+    async fn list_canonical_policies(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<CanonicalNetworkPolicyRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_canonical_policies(project_id, network_id).await,
+            Self::Postgres(s) => s.list_canonical_policies(project_id, network_id).await,
+        }
+    }
+    async fn delete_canonical_policy(
+        &self,
+        project_id: &str,
+        policy_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.delete_canonical_policy(project_id, policy_id).await,
+            Self::Postgres(s) => s.delete_canonical_policy(project_id, policy_id).await,
+        }
+    }
+    async fn begin_canonical_realm_deletion(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalAddressRealmRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.begin_canonical_realm_deletion(project_id, realm_id, expected_generation)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.begin_canonical_realm_deletion(project_id, realm_id, expected_generation)
+                    .await
+            }
+        }
+    }
+    async fn finalize_canonical_realm_deletion(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.finalize_canonical_realm_deletion(project_id, realm_id, expected_generation)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.finalize_canonical_realm_deletion(project_id, realm_id, expected_generation)
+                    .await
+            }
         }
     }
     async fn delete_canonical_realm(

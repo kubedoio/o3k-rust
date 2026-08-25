@@ -48,6 +48,7 @@ async fn seed_legacy_state(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid) {
     let realm_a = Uuid::from_u128(0x1311);
     let realm_b = Uuid::from_u128(0x1312);
     let endpoint_a = Uuid::from_u128(0x1321);
+    let policy_a = Uuid::from_u128(0x1323);
 
     sqlx::query(
         "INSERT INTO network_networks (id, name, project_id, status) VALUES ($1, $2, $3, $4), ($5, $6, $7, $8)",
@@ -69,7 +70,7 @@ async fn seed_legacy_state(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid) {
     )
     .bind(network_a.to_string())
     .bind("project-a")
-    .bind(format!(r#"{{"id":"{}"}}"#, network_a))
+    .bind(format!(r#"{{"id":"{}","project_id":"project-a","realm":{{"id":"{}"}},"policies":[{{"id":"{}","endpoint_id":"{}","direction":"Ingress","protocol":"Tcp","ports":{{"start":443,"end":443}},"source":{{"network":"198.51.100.0","prefix_len":24}},"destination":null,"action":"Deny"}}]}}"#, network_a, realm_a, policy_a, endpoint_a))
     .execute(pool)
     .await
     .expect("legacy network intent");
@@ -174,6 +175,13 @@ async fn postgres_p13_f1_migrates_and_reopens_canonical_network_state() {
     assert_eq!(endpoints.len(), 1);
     assert_eq!(endpoints[0].id, endpoint_a);
     assert_eq!(endpoints[0].fixed_ip.to_string(), "10.0.0.10");
+    let policies = store
+        .list_canonical_policies("project-a", &network_a)
+        .await
+        .expect("list migrated policies");
+    assert_eq!(policies.len(), 1);
+    assert_eq!(policies[0].id, Uuid::from_u128(0x1323));
+    assert_eq!(policies[0].endpoint_id, endpoint_a);
 
     let overlap = store
         .list_canonical_realms("project-b", &network_b)
@@ -232,6 +240,11 @@ async fn postgres_p13_f1_migrates_and_reopens_canonical_network_state() {
         .delete_canonical_realm("project-a", &realm_a)
         .await
         .expect_err("dependent pool/endpoint blocks realm deletion");
+    sqlx::query("DELETE FROM canonical_network_policies WHERE endpoint_id = (SELECT id FROM canonical_endpoints WHERE realm_id = $1)")
+        .bind(realm_a.to_string())
+        .execute(&pool)
+        .await
+        .expect("remove canonical policies");
     sqlx::query("DELETE FROM canonical_endpoints WHERE realm_id = $1")
         .bind(realm_a.to_string())
         .execute(reopened.pool())
