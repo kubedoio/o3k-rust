@@ -1166,6 +1166,8 @@ pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
         gateway_ip: Ipv4Addr::from_str("192.168.1.1").unwrap(),
         allocation_start: Ipv4Addr::from_str("192.168.1.10").unwrap(),
         allocation_end: Ipv4Addr::from_str("192.168.1.200").unwrap(),
+        ip_version: 4,
+        enable_dhcp: true,
     };
     store.insert_subnet(&sub).await.expect("insert_subnet");
 
@@ -1590,6 +1592,8 @@ pub async fn test_duplicate_port_ip_mac_conflict<S: StoreUnderTest>(store: Arc<S
         gateway_ip: Ipv4Addr::from_str("192.168.1.1").unwrap(),
         allocation_start: Ipv4Addr::from_str("192.168.1.10").unwrap(),
         allocation_end: Ipv4Addr::from_str("192.168.1.200").unwrap(),
+        ip_version: 4,
+        enable_dhcp: true,
     };
     store.insert_subnet(&subnet).await.expect("insert_subnet");
 

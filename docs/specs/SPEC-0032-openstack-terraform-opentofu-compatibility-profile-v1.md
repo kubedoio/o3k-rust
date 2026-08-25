@@ -179,8 +179,9 @@ verification.
 - `DELETE /v2.0/subnets/{id}` (delete)
 - `PUT /v2.0/subnets/{id}` (update)
 
-Already implemented for create/list/show/delete. Update may need additional
-verification.
+P13.2B implements the bounded create/list/show/update/delete projection onto
+canonical AddressRealm and AddressPool state. Provider verification remains a
+separate evidence gate.
 
 ### openstack_networking_port_v2
 

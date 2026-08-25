@@ -84,15 +84,15 @@ resources:
       update: {method: PUT, path: "/v2.0/subnets/{id}", status: 200}
       delete: {method: DELETE, path: "/v2.0/subnets/{id}", status: 204}
       import: {id: subnet_uuid, first_request: GET}
-    current_o3k: provider-partial
-    evidence_status: provider-blocked-at-create; canonical realm lifecycle independently proven
+    current_o3k: implemented-bounded-profile
+    evidence_status: P13.2B implementation; real-provider evidence pending
     observed:
       request: {method: POST, path: /v2.0/subnets, fields: [network_id, cidr, ip_version, enable_dhcp]}
       response: {status: 400, message: "invalid subnet request"}
-      reason: provider omits name; current O3K compatibility handler forwards an empty name and rejects it
+      reason: historical P13.1 observation before P13.2B remediation
     remaining_gap:
-      classification: wrong-request-semantics
-      required_implementation: define provider-compatible subnet name/default semantics only after canonical architecture amendment; no P13.1D runtime fix permitted
+      classification: historical-observation
+      required_implementation: provider-compatible omitted-name semantics are implemented in P13.2B
       evidence_reference: target/p13-1/provider-contract.json
   openstack_networking_port_v2:
     attribute_subset:

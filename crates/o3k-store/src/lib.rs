@@ -198,6 +198,8 @@ pub struct SubnetRecord {
     pub gateway_ip: Ipv4Addr,
     pub allocation_start: Ipv4Addr,
     pub allocation_end: Ipv4Addr,
+    pub ip_version: u8,
+    pub enable_dhcp: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1870,6 +1872,12 @@ pub trait NetworkRepository: Send + Sync + DurableStore + QuotaRepository {
         &self,
         pool: &CanonicalAddressPoolRecord,
     ) -> Result<(), StoreError>;
+    async fn insert_subnet_bundle(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+        pool: &CanonicalAddressPoolRecord,
+        subnet: &SubnetRecord,
+    ) -> Result<(), StoreError>;
     async fn list_canonical_pools(
         &self,
         project_id: &str,
@@ -1880,6 +1888,13 @@ pub trait NetworkRepository: Send + Sync + DurableStore + QuotaRepository {
         project_id: &str,
         pool_id: &Uuid,
     ) -> Result<(), StoreError>;
+    async fn update_canonical_pool(
+        &self,
+        project_id: &str,
+        pool_id: &Uuid,
+        expected_generation: u64,
+        gateway: Option<Ipv4Addr>,
+    ) -> Result<CanonicalAddressPoolRecord, StoreError>;
     async fn insert_canonical_endpoint(
         &self,
         endpoint: &CanonicalEndpointRecord,
@@ -1999,6 +2014,14 @@ pub trait NetworkRepository: Send + Sync + DurableStore + QuotaRepository {
         id: &Uuid,
     ) -> Result<Option<SubnetRecord>, StoreError>;
     async fn delete_subnet(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError>;
+    async fn delete_subnet_bundle(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError>;
+    async fn update_subnet(&self, subnet: &SubnetRecord) -> Result<(), StoreError>;
+    async fn update_subnet_bundle(
+        &self,
+        subnet: &SubnetRecord,
+        pool_id: &Uuid,
+        expected_pool_generation: u64,
+    ) -> Result<(), StoreError>;
 
     async fn insert_port(&self, port: &PortRecord) -> Result<(), StoreError>;
     async fn list_ports(&self, project_id: &str) -> Result<Vec<PortRecord>, StoreError>;
@@ -4205,6 +4228,58 @@ impl SqliteStore {
         .map(|_| ())
     }
 
+    pub async fn insert_subnet_bundle(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+        pool: &CanonicalAddressPoolRecord,
+        subnet: &SubnetRecord,
+    ) -> Result<(), StoreError> {
+        validate_canonical_state(&realm.state)?;
+        validate_canonical_state(&pool.state)?;
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        sqlx::query("UPDATE canonical_networks SET generation = generation WHERE id = ? AND project_id = ? AND state = 'active'")
+            .bind(realm.network_id.to_string())
+            .bind(&realm.project_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        let owner: Option<String> = sqlx::query_scalar(
+            "SELECT project_id FROM canonical_networks WHERE id = ? AND state = 'active'",
+        )
+        .bind(realm.network_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        if owner.as_deref() != Some(realm.project_id.as_str())
+            || realm.project_id != pool.project_id
+            || realm.project_id != subnet.project_id
+            || realm.id != subnet.id
+        {
+            return Err(StoreError::OwnershipConflict);
+        }
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM canonical_address_realms WHERE network_id = ? AND project_id = ? AND state = 'active'",
+        )
+        .bind(realm.network_id.to_string())
+        .bind(&realm.project_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        if count != 0 {
+            return Err(StoreError::NetworkInUse);
+        }
+        sqlx::query("INSERT INTO canonical_address_realms (id, network_id, project_id, prefix, overlapping_prefixes, generation, state) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind(realm.id.to_string()).bind(realm.network_id.to_string()).bind(&realm.project_id).bind(&realm.prefix).bind(realm.overlapping_prefixes).bind(checked_generation(realm.generation)?).bind(&realm.state)
+            .execute(&mut *tx).await.map_err(map_canonical_insert_error)?;
+        sqlx::query("INSERT INTO canonical_address_pools (id, realm_id, project_id, prefix, gateway, first_usable, last_usable, generation, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(pool.id.to_string()).bind(pool.realm_id.to_string()).bind(&pool.project_id).bind(&pool.prefix).bind(pool.gateway.map(|v| v.to_string())).bind(pool.first_usable.to_string()).bind(pool.last_usable.to_string()).bind(checked_generation(pool.generation)?).bind(&pool.state)
+            .execute(&mut *tx).await.map_err(map_canonical_insert_error)?;
+        sqlx::query("INSERT INTO network_subnets (id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end, ip_version, enable_dhcp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(subnet.id.to_string()).bind(subnet.network_id.to_string()).bind(&subnet.name).bind(&subnet.project_id).bind(&subnet.cidr).bind(subnet.gateway_ip.to_string()).bind(subnet.allocation_start.to_string()).bind(subnet.allocation_end.to_string()).bind(i64::from(subnet.ip_version)).bind(subnet.enable_dhcp)
+            .execute(&mut *tx).await.map_err(map_canonical_insert_error)?;
+        tx.commit().await.map_err(StoreError::Database)
+    }
+
     pub async fn list_canonical_pools(
         &self,
         project_id: &str,
@@ -4237,6 +4312,36 @@ impl SqliteStore {
             return Err(StoreError::ResourceNotFound);
         }
         Ok(())
+    }
+
+    pub async fn update_canonical_pool(
+        &self,
+        project_id: &str,
+        pool_id: &Uuid,
+        expected_generation: u64,
+        gateway: Option<Ipv4Addr>,
+    ) -> Result<CanonicalAddressPoolRecord, StoreError> {
+        let result = sqlx::query(
+            "UPDATE canonical_address_pools SET gateway = ?, generation = generation + 1 WHERE id = ? AND project_id = ? AND generation = ? AND state = 'active'",
+        )
+        .bind(gateway.map(|value| value.to_string()))
+        .bind(pool_id.to_string())
+        .bind(project_id)
+        .bind(checked_generation(expected_generation)?)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration);
+        }
+        let row = sqlx::query("SELECT id, realm_id, project_id, prefix, gateway, first_usable, last_usable, generation, state FROM canonical_address_pools WHERE id = ? AND project_id = ?")
+            .bind(pool_id.to_string())
+            .bind(project_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::ResourceNotFound)?;
+        canonical_pool_from_row(&row)
     }
 
     pub async fn insert_canonical_endpoint(
@@ -4865,7 +4970,7 @@ impl SqliteStore {
 
     pub async fn insert_subnet(&self, subnet: &SubnetRecord) -> Result<(), StoreError> {
         let result = sqlx::query(
-            "INSERT INTO network_subnets (id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO network_subnets (id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end, ip_version, enable_dhcp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(subnet.id.to_string())
         .bind(subnet.network_id.to_string())
@@ -4875,6 +4980,8 @@ impl SqliteStore {
         .bind(subnet.gateway_ip.to_string())
         .bind(subnet.allocation_start.to_string())
         .bind(subnet.allocation_end.to_string())
+        .bind(i64::from(subnet.ip_version))
+        .bind(subnet.enable_dhcp)
         .execute(&self.pool)
         .await;
         match result {
@@ -4888,7 +4995,7 @@ impl SqliteStore {
 
     pub async fn list_subnets(&self, project_id: &str) -> Result<Vec<SubnetRecord>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end FROM network_subnets WHERE project_id = ? ORDER BY rowid",
+            "SELECT id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end, ip_version, enable_dhcp FROM network_subnets WHERE project_id = ? ORDER BY id",
         )
         .bind(project_id)
         .fetch_all(&self.pool)
@@ -4903,7 +5010,7 @@ impl SqliteStore {
         network_id: &Uuid,
     ) -> Result<Vec<SubnetRecord>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end FROM network_subnets WHERE project_id = ? AND network_id = ? ORDER BY rowid",
+            "SELECT id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end, ip_version, enable_dhcp FROM network_subnets WHERE project_id = ? AND network_id = ? ORDER BY id",
         )
         .bind(project_id)
         .bind(network_id.to_string())
@@ -4919,7 +5026,7 @@ impl SqliteStore {
         id: &Uuid,
     ) -> Result<Option<SubnetRecord>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end FROM network_subnets WHERE id = ? AND project_id = ?",
+            "SELECT id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end, ip_version, enable_dhcp FROM network_subnets WHERE id = ? AND project_id = ?",
         )
         .bind(id.to_string())
         .bind(project_id)
@@ -4943,6 +5050,101 @@ impl SqliteStore {
             };
         }
         Ok(())
+    }
+
+    pub async fn update_subnet(&self, subnet: &SubnetRecord) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "UPDATE network_subnets SET name = ?, gateway_ip = ?, allocation_start = ?, allocation_end = ?, ip_version = ?, enable_dhcp = ? WHERE id = ? AND project_id = ?",
+        )
+        .bind(&subnet.name)
+        .bind(subnet.gateway_ip.to_string())
+        .bind(subnet.allocation_start.to_string())
+        .bind(subnet.allocation_end.to_string())
+        .bind(i64::from(subnet.ip_version))
+        .bind(subnet.enable_dhcp)
+        .bind(subnet.id.to_string())
+        .bind(&subnet.project_id)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NetworkNotFound);
+        }
+        Ok(())
+    }
+
+    pub async fn delete_subnet_bundle(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let endpoints: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM canonical_endpoints WHERE realm_id = ? AND project_id = ?",
+        )
+        .bind(id.to_string())
+        .bind(project_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        if endpoints != 0 {
+            return Err(StoreError::NetworkInUse);
+        }
+        let realm: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM canonical_address_realms WHERE id = ? AND project_id = ?",
+        )
+        .bind(id.to_string())
+        .bind(project_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        if realm.is_some() {
+            sqlx::query(
+                "DELETE FROM canonical_address_pools WHERE realm_id = ? AND project_id = ?",
+            )
+            .bind(id.to_string())
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+            let result = sqlx::query("DELETE FROM canonical_address_realms WHERE id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id)")
+                .bind(id.to_string()).bind(project_id).execute(&mut *tx).await.map_err(StoreError::Database)?;
+            if result.rows_affected() == 0 {
+                return Err(StoreError::NetworkInUse);
+            }
+        }
+        sqlx::query("DELETE FROM network_subnets WHERE id = ? AND project_id = ?")
+            .bind(id.to_string())
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)
+    }
+
+    pub async fn update_subnet_bundle(
+        &self,
+        subnet: &SubnetRecord,
+        pool_id: &Uuid,
+        expected_pool_generation: u64,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let pool = sqlx::query("UPDATE canonical_address_pools SET gateway = ?, generation = generation + 1 WHERE id = ? AND project_id = ? AND generation = ? AND state = 'active'")
+            .bind(subnet.gateway_ip.to_string())
+            .bind(pool_id.to_string())
+            .bind(&subnet.project_id)
+            .bind(checked_generation(expected_pool_generation)?)
+            .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if pool.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration);
+        }
+        let metadata = sqlx::query("UPDATE network_subnets SET name = ?, gateway_ip = ?, allocation_start = ?, allocation_end = ?, ip_version = ?, enable_dhcp = ? WHERE id = ? AND project_id = ?")
+            .bind(&subnet.name).bind(subnet.gateway_ip.to_string()).bind(subnet.allocation_start.to_string()).bind(subnet.allocation_end.to_string()).bind(i64::from(subnet.ip_version)).bind(subnet.enable_dhcp).bind(subnet.id.to_string()).bind(&subnet.project_id)
+            .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if metadata.rows_affected() == 0 {
+            return Err(StoreError::ResourceNotFound);
+        }
+        tx.commit().await.map_err(StoreError::Database)
     }
 
     pub async fn insert_port(&self, port: &PortRecord) -> Result<(), StoreError> {
@@ -6678,6 +6880,9 @@ fn subnet_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SubnetRecord, StoreE
             .get::<String, _>("allocation_end")
             .parse()
             .map_err(|_| StoreError::Corrupt("invalid IPv4 address in durable state".to_owned()))?,
+        ip_version: u8::try_from(row.get::<i64, _>("ip_version"))
+            .map_err(|_| StoreError::Corrupt("invalid subnet IP version".to_owned()))?,
+        enable_dhcp: row.get("enable_dhcp"),
     })
 }
 
@@ -8412,6 +8617,14 @@ impl NetworkRepository for SqliteStore {
     ) -> Result<(), StoreError> {
         self.insert_canonical_pool(pool).await
     }
+    async fn insert_subnet_bundle(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+        pool: &CanonicalAddressPoolRecord,
+        subnet: &SubnetRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_subnet_bundle(realm, pool, subnet).await
+    }
     async fn list_canonical_pools(
         &self,
         project_id: &str,
@@ -8425,6 +8638,16 @@ impl NetworkRepository for SqliteStore {
         pool_id: &Uuid,
     ) -> Result<(), StoreError> {
         self.delete_canonical_pool(project_id, pool_id).await
+    }
+    async fn update_canonical_pool(
+        &self,
+        project_id: &str,
+        pool_id: &Uuid,
+        expected_generation: u64,
+        gateway: Option<Ipv4Addr>,
+    ) -> Result<CanonicalAddressPoolRecord, StoreError> {
+        self.update_canonical_pool(project_id, pool_id, expected_generation, gateway)
+            .await
     }
     async fn insert_canonical_endpoint(
         &self,
@@ -8628,6 +8851,21 @@ impl NetworkRepository for SqliteStore {
 
     async fn delete_subnet(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
         self.delete_subnet(project_id, id).await
+    }
+    async fn update_subnet(&self, subnet: &SubnetRecord) -> Result<(), StoreError> {
+        self.update_subnet(subnet).await
+    }
+    async fn delete_subnet_bundle(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        self.delete_subnet_bundle(project_id, id).await
+    }
+    async fn update_subnet_bundle(
+        &self,
+        subnet: &SubnetRecord,
+        pool_id: &Uuid,
+        expected_pool_generation: u64,
+    ) -> Result<(), StoreError> {
+        self.update_subnet_bundle(subnet, pool_id, expected_pool_generation)
+            .await
     }
 
     async fn insert_port(&self, port: &PortRecord) -> Result<(), StoreError> {
@@ -9651,6 +9889,8 @@ pub async fn run_network_repository_conformance<S: NetworkRepository>(
         gateway_ip: Ipv4Addr::new(10, 0, 1, 1),
         allocation_start: Ipv4Addr::new(10, 0, 1, 10),
         allocation_end: Ipv4Addr::new(10, 0, 1, 200),
+        ip_version: 4,
+        enable_dhcp: true,
     };
     repository.insert_subnet(&subnet).await?;
     assert_eq!(
@@ -9670,6 +9910,8 @@ pub async fn run_network_repository_conformance<S: NetworkRepository>(
         gateway_ip: Ipv4Addr::new(10, 0, 2, 1),
         allocation_start: Ipv4Addr::new(10, 0, 2, 10),
         allocation_end: Ipv4Addr::new(10, 0, 2, 200),
+        ip_version: 4,
+        enable_dhcp: true,
     };
     repository.insert_subnet(&second_subnet).await?;
     assert_eq!(
@@ -9694,6 +9936,8 @@ pub async fn run_network_repository_conformance<S: NetworkRepository>(
         gateway_ip: Ipv4Addr::new(10, 0, 3, 1),
         allocation_start: Ipv4Addr::new(10, 0, 3, 10),
         allocation_end: Ipv4Addr::new(10, 0, 3, 200),
+        ip_version: 4,
+        enable_dhcp: true,
     };
     repository.insert_subnet(&foreign_subnet).await?;
     // Subnets of other networks on the same project stay out of the list.
@@ -9716,6 +9960,8 @@ pub async fn run_network_repository_conformance<S: NetworkRepository>(
         gateway_ip: Ipv4Addr::new(10, 0, 1, 1),
         allocation_start: Ipv4Addr::new(10, 0, 1, 10),
         allocation_end: Ipv4Addr::new(10, 0, 1, 200),
+        ip_version: 4,
+        enable_dhcp: true,
     };
     assert!(matches!(
         repository.insert_subnet(&duplicate_cidr).await,
@@ -9738,6 +9984,8 @@ pub async fn run_network_repository_conformance<S: NetworkRepository>(
         gateway_ip: Ipv4Addr::new(10, 0, 4, 1),
         allocation_start: Ipv4Addr::new(10, 0, 4, 10),
         allocation_end: Ipv4Addr::new(10, 0, 4, 200),
+        ip_version: 4,
+        enable_dhcp: true,
     };
     repository.insert_subnet(&port_subnet).await?;
     let port = PortRecord {
@@ -11673,6 +11921,8 @@ mod tests {
             gateway_ip: Ipv4Addr::new(10, 0, 9, 1),
             allocation_start: Ipv4Addr::new(10, 0, 9, 10),
             allocation_end: Ipv4Addr::new(10, 0, 9, 200),
+            ip_version: 4,
+            enable_dhcp: true,
         };
         let port = PortRecord {
             id: Uuid::now_v7(),
@@ -13349,6 +13599,8 @@ mod tests {
                 gateway_ip: "10.1.0.1".parse()?,
                 allocation_start: "10.1.0.2".parse()?,
                 allocation_end: "10.1.0.254".parse()?,
+                ip_version: 4,
+                enable_dhcp: true,
             })
             .await?;
         store
@@ -13482,6 +13734,8 @@ mod tests {
                 gateway_ip: "10.2.0.1".parse()?,
                 allocation_start: "10.2.0.2".parse()?,
                 allocation_end: "10.2.0.254".parse()?,
+                ip_version: 4,
+                enable_dhcp: true,
             })
             .await?;
         assert!(matches!(

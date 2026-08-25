@@ -1498,6 +1498,18 @@ impl NetworkRepository for O3kStore {
             Self::Postgres(s) => s.list_canonical_pools(project_id, realm_id).await,
         }
     }
+
+    async fn insert_subnet_bundle(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+        pool: &CanonicalAddressPoolRecord,
+        subnet: &SubnetRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_subnet_bundle(realm, pool, subnet).await,
+            Self::Postgres(s) => s.insert_subnet_bundle(realm, pool, subnet).await,
+        }
+    }
     async fn delete_canonical_pool(
         &self,
         project_id: &str,
@@ -1506,6 +1518,25 @@ impl NetworkRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.delete_canonical_pool(project_id, pool_id).await,
             Self::Postgres(s) => s.delete_canonical_pool(project_id, pool_id).await,
+        }
+    }
+
+    async fn update_canonical_pool(
+        &self,
+        project_id: &str,
+        pool_id: &Uuid,
+        expected_generation: u64,
+        gateway: Option<std::net::Ipv4Addr>,
+    ) -> Result<CanonicalAddressPoolRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.update_canonical_pool(project_id, pool_id, expected_generation, gateway)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.update_canonical_pool(project_id, pool_id, expected_generation, gateway)
+                    .await
+            }
         }
     }
     async fn insert_canonical_endpoint(
@@ -1827,6 +1858,38 @@ impl NetworkRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.delete_subnet(project_id, id).await,
             Self::Postgres(s) => s.delete_subnet(project_id, id).await,
+        }
+    }
+
+    async fn update_subnet(&self, subnet: &SubnetRecord) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.update_subnet(subnet).await,
+            Self::Postgres(s) => s.update_subnet(subnet).await,
+        }
+    }
+
+    async fn delete_subnet_bundle(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.delete_subnet_bundle(project_id, id).await,
+            Self::Postgres(s) => s.delete_subnet_bundle(project_id, id).await,
+        }
+    }
+
+    async fn update_subnet_bundle(
+        &self,
+        subnet: &SubnetRecord,
+        pool_id: &Uuid,
+        expected_pool_generation: u64,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.update_subnet_bundle(subnet, pool_id, expected_pool_generation)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.update_subnet_bundle(subnet, pool_id, expected_pool_generation)
+                    .await
+            }
         }
     }
 

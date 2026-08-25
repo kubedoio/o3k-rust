@@ -6618,9 +6618,6 @@ impl NetworkService {
         allocation_start: Option<Ipv4Addr>,
         allocation_end: Option<Ipv4Addr>,
     ) -> Result<SubnetRecord, NetworkError> {
-        if name.trim().is_empty() {
-            return Err(NetworkError::InvalidRequest);
-        }
         let net = Ipv4Net::parse(&cidr)?;
         let cidr = net.canonical();
         let gateway = gateway_ip.unwrap_or(net.first_host());
@@ -6639,17 +6636,6 @@ impl NetworkService {
         let _guard = self.lock().await;
         self.get_canonical_network_for_project(project_id, network_id)
             .await?;
-        if self
-            .inner
-            .repository
-            .list_canonical_realms(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?
-            .iter()
-            .any(|realm| realm.prefix == cidr)
-        {
-            return Err(NetworkError::Conflict);
-        }
         let subnet = SubnetRecord {
             id: Uuid::now_v7(),
             network_id,
@@ -6659,6 +6645,8 @@ impl NetworkService {
             gateway_ip: gateway,
             allocation_start: start,
             allocation_end: end,
+            ip_version: 4,
+            enable_dhcp: true,
         };
         let scope =
             OwnershipScope::project(ScopeId::new_unchecked(project_id.to_owned()), None, None);
@@ -6685,6 +6673,23 @@ impl NetworkService {
                 other => map_store_error(other),
             })?;
 
+        if self
+            .inner
+            .repository
+            .list_canonical_realms(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .iter()
+            .any(|realm| realm.state == "active")
+        {
+            let _ = self
+                .inner
+                .repository
+                .release_reservation(&quota_res.id)
+                .await;
+            return Err(NetworkError::Conflict);
+        }
+
         let realm = o3k_store::CanonicalAddressRealmRecord {
             id: subnet.id,
             network_id: subnet.network_id,
@@ -6705,51 +6710,22 @@ impl NetworkService {
             generation: 1,
             state: "active".to_owned(),
         };
-        match self.inner.repository.insert_canonical_realm(&realm).await {
-            Ok(()) => match self.inner.repository.insert_canonical_pool(&pool).await {
-                Ok(()) => match self.inner.repository.insert_subnet(&subnet).await {
-                    Ok(()) => {
-                        let _ = self
-                            .inner
-                            .repository
-                            .commit_reservation(&quota_res.id)
-                            .await;
-                        Ok(subnet)
-                    }
-                    Err(error) => {
-                        let _ = self
-                            .inner
-                            .repository
-                            .delete_canonical_pool(project_id, &pool.id)
-                            .await;
-                        let _ = self
-                            .inner
-                            .repository
-                            .delete_canonical_realm(project_id, &realm.id)
-                            .await;
-                        let _ = self
-                            .inner
-                            .repository
-                            .release_reservation(&quota_res.id)
-                            .await;
-                        Err(map_store_error(error))
-                    }
-                },
-                Err(error) => {
-                    let _ = self
-                        .inner
-                        .repository
-                        .delete_canonical_realm(project_id, &realm.id)
-                        .await;
-                    let _ = self
-                        .inner
-                        .repository
-                        .release_reservation(&quota_res.id)
-                        .await;
-                    Err(map_store_error(error))
-                }
-            },
-            Err(o3k_store::StoreError::ResourceAlreadyExists) => {
+        match self
+            .inner
+            .repository
+            .insert_subnet_bundle(&realm, &pool, &subnet)
+            .await
+        {
+            Ok(()) => {
+                let _ = self
+                    .inner
+                    .repository
+                    .commit_reservation(&quota_res.id)
+                    .await;
+                Ok(subnet)
+            }
+            Err(o3k_store::StoreError::NetworkInUse)
+            | Err(o3k_store::StoreError::ResourceAlreadyExists) => {
                 let _ = self
                     .inner
                     .repository
@@ -6868,6 +6844,103 @@ impl NetworkService {
         self.project_canonical_subnet(project_id, &realm).await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_subnet(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+        name: Option<String>,
+        gateway_ip: Option<Ipv4Addr>,
+        enable_dhcp: Option<bool>,
+        network_id: Option<Uuid>,
+        cidr: Option<String>,
+        ip_version: Option<u8>,
+    ) -> Result<SubnetRecord, NetworkError> {
+        let action = ActionId::new("network", "UpdateSubnet").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "UpdateSubnet".to_owned())
+        });
+        let request = AuthorizationRequest {
+            auth_context: auth,
+            action,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("network", "subnet").map_err(|_| NetworkError::InvalidRequest)?,
+                ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&request).is_allowed() {
+            return Err(NetworkError::NotFound);
+        }
+        if network_id.is_some() || cidr.is_some() || ip_version.is_some_and(|v| v != 4) {
+            return Err(NetworkError::InvalidRequest);
+        }
+        self.update_subnet_for_project(
+            auth.effective_scope().id().as_str(),
+            id,
+            name,
+            gateway_ip,
+            enable_dhcp,
+        )
+        .await
+    }
+
+    async fn update_subnet_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        name: Option<String>,
+        gateway_ip: Option<Ipv4Addr>,
+        enable_dhcp: Option<bool>,
+    ) -> Result<SubnetRecord, NetworkError> {
+        let realm = self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        let pool = self
+            .inner
+            .repository
+            .list_canonical_pools(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+            .into_iter()
+            .next()
+            .ok_or(NetworkError::InvalidRequest)?;
+        let current = self.project_canonical_subnet(project_id, &realm).await?;
+        let gateway = gateway_ip.unwrap_or(current.gateway_ip);
+        let net = Ipv4Net::parse(&realm.prefix)?;
+        if !net.contains(gateway) || gateway == net.network || gateway == net.broadcast {
+            return Err(NetworkError::InvalidRequest);
+        }
+        if (u32::from(pool.first_usable)..=u32::from(pool.last_usable))
+            .contains(&u32::from(gateway))
+        {
+            return Err(NetworkError::Conflict);
+        }
+        let updated = SubnetRecord {
+            name: name.unwrap_or(current.name),
+            gateway_ip: gateway,
+            enable_dhcp: enable_dhcp.unwrap_or(current.enable_dhcp),
+            ..current
+        };
+        if gateway != pool.gateway.unwrap_or(gateway) {
+            self.inner
+                .repository
+                .update_subnet_bundle(&updated, &pool.id, pool.generation)
+                .await
+                .map_err(map_store_error)?;
+        } else {
+            self.inner
+                .repository
+                .update_subnet(&updated)
+                .await
+                .map_err(map_store_error)?;
+        }
+        self.get_subnet_for_project(project_id, id).await
+    }
+
     async fn project_canonical_subnet(
         &self,
         project_id: &str,
@@ -6891,12 +6964,20 @@ impl NetworkService {
         Ok(SubnetRecord {
             id: realm.id,
             network_id: realm.network_id,
-            name: metadata.map(|value| value.name).unwrap_or_default(),
+            name: metadata
+                .as_ref()
+                .map(|value| value.name.clone())
+                .unwrap_or_default(),
             project_id: realm.project_id.clone(),
             cidr: realm.prefix.clone(),
             gateway_ip: pool.gateway.ok_or(NetworkError::InvalidRequest)?,
             allocation_start: pool.first_usable,
             allocation_end: pool.last_usable,
+            ip_version: 4,
+            enable_dhcp: metadata
+                .as_ref()
+                .map(|value| value.enable_dhcp)
+                .unwrap_or(true),
         })
     }
 
@@ -6961,41 +7042,21 @@ impl NetworkService {
             .await
             .map_err(map_store_error)?
             .is_some();
-        if let Some(realm) = self
+        let realm_exists = self
             .inner
             .repository
             .get_canonical_realm(project_id, &id)
             .await
             .map_err(map_store_error)?
-        {
-            for pool in self
-                .inner
-                .repository
-                .list_canonical_pools(project_id, &realm.id)
-                .await
-                .map_err(map_store_error)?
-            {
-                self.inner
-                    .repository
-                    .delete_canonical_pool(project_id, &pool.id)
-                    .await
-                    .map_err(map_store_error)?;
-            }
-            self.inner
-                .repository
-                .delete_canonical_realm(project_id, &realm.id)
-                .await
-                .map_err(map_store_error)?;
-        } else if !metadata_exists {
+            .is_some();
+        if !metadata_exists && !realm_exists {
             return Err(NetworkError::NotFound);
         }
-        if metadata_exists {
-            self.inner
-                .repository
-                .delete_subnet(project_id, &id)
-                .await
-                .map_err(map_store_error)?;
-        }
+        self.inner
+            .repository
+            .delete_subnet_bundle(project_id, &id)
+            .await
+            .map_err(map_store_error)?;
         let _ = self
             .inner
             .repository
@@ -7711,6 +7772,8 @@ async fn import_legacy_metadata(
             gateway_ip: subnet.gateway_ip,
             allocation_start: subnet.allocation_start,
             allocation_end: subnet.allocation_end,
+            ip_version: 4,
+            enable_dhcp: true,
         };
         match repository.insert_subnet(&record).await {
             Ok(()) | Err(o3k_store::StoreError::ResourceAlreadyExists) => {}

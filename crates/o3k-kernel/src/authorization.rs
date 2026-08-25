@@ -149,6 +149,7 @@ impl StaticAuthorizer {
         reg("network", "ListSubnets", "network", "subnet", true);
         reg("network", "CreateSubnet", "network", "subnet", true);
         reg("network", "ReadSubnet", "network", "subnet", true);
+        reg("network", "UpdateSubnet", "network", "subnet", true);
         reg("network", "DeleteSubnet", "network", "subnet", true);
         reg("network", "ListPorts", "network", "port", true);
         reg("network", "CreatePort", "network", "port", true);

@@ -205,14 +205,14 @@ resources:
     known_deviations:
       - One subnet and one allocation pool per network in initial profile.
       - One-to-one mapping to canonical AddressRealm is proven for the bounded
-        canonical runtime; managed Terraform lifecycle remains P13.2 work.
+        canonical runtime; managed Terraform lifecycle is bounded to P13.2B.
     route_evidence:
       create: implemented
       list: implemented
       show: implemented
-      update: missing
+      update: implemented (name, gateway_ip, enable_dhcp)
       delete: implemented
-    provider_evidence: provider-partial
+    provider_evidence: implementation-complete-real-provider-gate-pending
     p13_phase: p13.2
 
   - resource: openstack_networking_port_v2

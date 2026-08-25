@@ -368,6 +368,7 @@ impl KernelRegistry {
                 mk_act("network", "ListSubnets"),
                 mk_act("network", "CreateSubnet"),
                 mk_act("network", "ReadSubnet"),
+                mk_act("network", "UpdateSubnet"),
                 mk_act("network", "DeleteSubnet"),
                 mk_act("network", "ListPorts"),
                 mk_act("network", "CreatePort"),

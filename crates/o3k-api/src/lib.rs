@@ -65,7 +65,7 @@ use crate::{
         list_network_policies, list_networks, list_ports, list_security_group_rules,
         list_security_groups, list_subnets, show_floating_ip, show_network, show_network_policy,
         show_port, show_security_group, show_security_group_rule, show_subnet, update_floating_ip,
-        update_network, update_network_policy, update_port, update_security_group,
+        update_network, update_network_policy, update_port, update_security_group, update_subnet,
     },
     placement::placement_discovery,
     volume_attachment::{
@@ -262,7 +262,10 @@ pub fn router_with_state(state: AppState) -> Router {
             get(show_network).put(update_network).delete(delete_network),
         )
         .route("/v2.0/subnets", get(list_subnets).post(create_subnet))
-        .route("/v2.0/subnets/{id}", get(show_subnet).delete(delete_subnet))
+        .route(
+            "/v2.0/subnets/{id}",
+            get(show_subnet).put(update_subnet).delete(delete_subnet),
+        )
         .route("/v2.0/ports", get(list_ports).post(create_port))
         .route(
             "/v2.0/ports/{id}",
