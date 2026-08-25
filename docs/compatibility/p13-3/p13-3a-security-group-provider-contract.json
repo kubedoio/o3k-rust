@@ -1,0 +1,1283 @@
+{
+  "architecture_findings": [
+    {
+      "condition": "NetworkPolicy lacks an independent policy identity and lifecycle suitable for an unattached Security Group",
+      "minimum_amendment": "define a durable project-owned canonical policy resource with independent UUID/generation/state and rule-parent relation, or explicitly accept a reconstructable projection mapping that cannot become authority",
+      "severity": "BLOCKER"
+    },
+    {
+      "condition": "canonical PolicyIntent requires endpoint_id while a Security Group can exist before attachment",
+      "minimum_amendment": "separate group policy identity from endpoint-targeted compiled PolicyIntent and define attachment compilation semantics",
+      "severity": "HIGH"
+    }
+  ],
+  "artifact_type": "o3k-p13-3a-security-group-provider-contract",
+  "bounded_candidate_subset": {
+    "rule": [
+      "parent security_group_id",
+      "IPv4",
+      "ingress/egress",
+      "tcp/udp/icmp/any",
+      "valid port ranges where protocol permits",
+      "remote_ip_prefix",
+      "UUID import",
+      "create/read/list/delete"
+    ],
+    "security_group": [
+      "name",
+      "description",
+      "project ownership",
+      "stateful=true only",
+      "delete_default_rules=true",
+      "UUID import",
+      "CRUD"
+    ]
+  },
+  "canonical_mapping_review": {
+    "current_fit": "blocked",
+    "reason": "PolicyIntent is endpoint-scoped and has no independent NetworkPolicy identity; current SecurityGroupRecord/SecurityGroupRuleRecord rows are compatibility projection state, not an independent canonical policy lifecycle",
+    "rule": "proposed projection to canonical NetworkPolicy rule",
+    "security_group": "proposed projection to canonical NetworkPolicy"
+  },
+  "deferred": [
+    "stateful=false",
+    "IPv6",
+    "remote_group_id",
+    "remote_address_group_id",
+    "arbitrary protocol numbers",
+    "tags",
+    "policy attachment extension",
+    "Neutron default-rule materialization unless canonical default semantics are frozen"
+  ],
+  "http_contract": {
+    "rule": {
+      "create": [
+        "POST /v2.0/security-group-rules -> 201"
+      ],
+      "delete": [
+        "DELETE /v2.0/security-group-rules/{id} -> 202 or 204"
+      ],
+      "list": [
+        "GET /v2.0/security-group-rules -> 200"
+      ],
+      "read": [
+        "GET /v2.0/security-group-rules/{id} -> 200"
+      ]
+    },
+    "security_group": {
+      "create": [
+        "POST /v2.0/security-groups -> 201"
+      ],
+      "default_rules": "Gophercloud documents default IPv4 and IPv6 rules; provider re-reads and deletes each when delete_default_rules=true",
+      "delete": [
+        "DELETE /v2.0/security-groups/{id} -> 202 or 204"
+      ],
+      "list": [
+        "GET /v2.0/security-groups -> 200"
+      ],
+      "read": [
+        "GET /v2.0/security-groups/{id} -> 200"
+      ],
+      "update": [
+        "PUT /v2.0/security-groups/{id} -> 200"
+      ]
+    }
+  },
+  "minimal_hcl": {
+    "rule": {
+      "direction": "ingress",
+      "ethertype": "IPv4",
+      "port_range_max": 22,
+      "port_range_min": 22,
+      "protocol": "tcp",
+      "remote_ip_prefix": "198.51.100.0/24"
+    },
+    "security_group": {
+      "delete_default_rules": true,
+      "description": "P13.3A discovery",
+      "name": "p13-3a-sg"
+    }
+  },
+  "observed_execution": {
+    "apply_exit_status": 0,
+    "destroy_exit_status": 0,
+    "provider_error": "",
+    "trace": [
+      {
+        "method": "POST",
+        "ordinal": 0,
+        "path": "/v3/auth/tokens",
+        "query": "",
+        "request_body": {
+          "captured": true,
+          "content_length": 214,
+          "json": {
+            "auth": {
+              "identity": {
+                "methods": [
+                  "password"
+                ],
+                "password": "<redacted>"
+              },
+              "scope": {
+                "project": {
+                  "id": "eba29e2d-53de-461d-ae91-ede7402713cb"
+                }
+              }
+            }
+          },
+          "sha256": "80062bc78d70f9096461cd1bf7390682353186b2db06ff06607ad5dd02d1bb14"
+        },
+        "request_content_type": "application/json",
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "content-length": "214",
+          "content-type": "application/json",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0"
+        },
+        "resource": "auth",
+        "response_body": {
+          "captured": true,
+          "content_length": 2408,
+          "json": {
+            "token": {
+              "catalog": [
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb"
+                    }
+                  ],
+                  "id": "compute",
+                  "name": "compute",
+                  "type": "compute"
+                },
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v3"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v3"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v3"
+                    }
+                  ],
+                  "id": "identity",
+                  "name": "identity",
+                  "type": "identity"
+                },
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    }
+                  ],
+                  "id": "image",
+                  "name": "image",
+                  "type": "image"
+                },
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    }
+                  ],
+                  "id": "network",
+                  "name": "network",
+                  "type": "network"
+                },
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/placement"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/placement"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/placement"
+                    }
+                  ],
+                  "id": "placement",
+                  "name": "placement",
+                  "type": "placement"
+                }
+              ],
+              "expires_at": "2026-08-25T21:37:43Z",
+              "issued_at": "2026-08-25T20:37:43Z",
+              "methods": [
+                "password"
+              ],
+              "project": {
+                "domain": {
+                  "id": "default",
+                  "name": "Default"
+                },
+                "id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "name": "admin"
+              },
+              "roles": [
+                {
+                  "id": "admin",
+                  "name": "admin"
+                },
+                {
+                  "id": "member",
+                  "name": "member"
+                }
+              ],
+              "user": {
+                "domain": {
+                  "id": "default",
+                  "name": "Default"
+                },
+                "id": "bootstrap-user",
+                "name": "admin",
+                "password_expires_at": "<redacted>"
+              }
+            }
+          },
+          "sha256": "9982b53bdec4705793bb8ae84c6591d2cf2dac7612688658ffbc797711846c9b"
+        },
+        "response_headers": {
+          "content-type": "application/json",
+          "vary": "X-Auth-Token",
+          "x-subject-token": "<redacted>"
+        },
+        "status": 201
+      },
+      {
+        "method": "POST",
+        "ordinal": 1,
+        "path": "/v2.0/security-groups",
+        "query": "",
+        "request_body": {
+          "captured": true,
+          "content_length": 72,
+          "json": {
+            "security_group": {
+              "description": "P13.3A discovery",
+              "name": "p13-3a-sg"
+            }
+          },
+          "sha256": "bd054af80cb1f4029ed360a4f8a9f662f6ff8bc458fa07bf57ae61b7068883c9"
+        },
+        "request_content_type": "application/json",
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "content-length": "72",
+          "content-type": "application/json",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0",
+          "x-auth-token": "<redacted>"
+        },
+        "resource": "openstack-compatibility",
+        "response_body": {
+          "captured": true,
+          "content_length": 194,
+          "json": {
+            "security_group": {
+              "description": "P13.3A discovery",
+              "id": "01a03aa4-ae8d-7762-986a-27512d837e66",
+              "name": "p13-3a-sg",
+              "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+              "security_group_rules": []
+            }
+          },
+          "sha256": "ffa408ef8a034e85ee6f87148ca3a314103a1451b6fb16a0f4fc2fe86aefddb8"
+        },
+        "response_headers": {
+          "content-type": "application/json"
+        },
+        "status": 201
+      },
+      {
+        "method": "GET",
+        "ordinal": 2,
+        "path": "/v2.0/security-groups/01a03aa4-ae8d-7762-986a-27512d837e66",
+        "query": "",
+        "request_body": {
+          "captured": false,
+          "content_length": null,
+          "reason": "non-json-or-unbounded"
+        },
+        "request_content_type": null,
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0",
+          "x-auth-token": "<redacted>"
+        },
+        "resource": "openstack-compatibility",
+        "response_body": {
+          "captured": true,
+          "content_length": 194,
+          "json": {
+            "security_group": {
+              "description": "P13.3A discovery",
+              "id": "01a03aa4-ae8d-7762-986a-27512d837e66",
+              "name": "p13-3a-sg",
+              "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+              "security_group_rules": []
+            }
+          },
+          "sha256": "ffa408ef8a034e85ee6f87148ca3a314103a1451b6fb16a0f4fc2fe86aefddb8"
+        },
+        "response_headers": {
+          "content-type": "application/json"
+        },
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "ordinal": 3,
+        "path": "/v2.0/security-groups/01a03aa4-ae8d-7762-986a-27512d837e66",
+        "query": "",
+        "request_body": {
+          "captured": false,
+          "content_length": null,
+          "reason": "non-json-or-unbounded"
+        },
+        "request_content_type": null,
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0",
+          "x-auth-token": "<redacted>"
+        },
+        "resource": "openstack-compatibility",
+        "response_body": {
+          "captured": true,
+          "content_length": 194,
+          "json": {
+            "security_group": {
+              "description": "P13.3A discovery",
+              "id": "01a03aa4-ae8d-7762-986a-27512d837e66",
+              "name": "p13-3a-sg",
+              "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+              "security_group_rules": []
+            }
+          },
+          "sha256": "ffa408ef8a034e85ee6f87148ca3a314103a1451b6fb16a0f4fc2fe86aefddb8"
+        },
+        "response_headers": {
+          "content-type": "application/json"
+        },
+        "status": 200
+      },
+      {
+        "method": "POST",
+        "ordinal": 4,
+        "path": "/v2.0/security-group-rules",
+        "query": "",
+        "request_body": {
+          "captured": true,
+          "content_length": 219,
+          "json": {
+            "security_group_rule": {
+              "direction": "ingress",
+              "ethertype": "IPv4",
+              "port_range_max": 22,
+              "port_range_min": 22,
+              "protocol": "tcp",
+              "remote_ip_prefix": "198.51.100.0/24",
+              "security_group_id": "01a03aa4-ae8d-7762-986a-27512d837e66"
+            }
+          },
+          "sha256": "53544ce5a1bc3d90a3491dfc30e44383e74ee9ff4b22d18a582458269443d681"
+        },
+        "request_content_type": "application/json",
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "content-length": "219",
+          "content-type": "application/json",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0",
+          "x-auth-token": "<redacted>"
+        },
+        "resource": "openstack-compatibility",
+        "response_body": {
+          "captured": true,
+          "content_length": 338,
+          "json": {
+            "security_group_rule": {
+              "direction": "ingress",
+              "ethertype": "IPv4",
+              "id": "01a03aa4-aea2-7713-884c-3560ee0915ec",
+              "port_range_max": 22,
+              "port_range_min": 22,
+              "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+              "protocol": "tcp",
+              "remote_group_id": null,
+              "remote_ip_prefix": "198.51.100.0/24",
+              "security_group_id": "01a03aa4-ae8d-7762-986a-27512d837e66"
+            }
+          },
+          "sha256": "b31106f180c8ab50b8e419bd9c45822dc119bd6bfe13109c5534b8ab1d221be7"
+        },
+        "response_headers": {
+          "content-type": "application/json"
+        },
+        "status": 201
+      },
+      {
+        "method": "GET",
+        "ordinal": 5,
+        "path": "/v2.0/security-group-rules/01a03aa4-aea2-7713-884c-3560ee0915ec",
+        "query": "",
+        "request_body": {
+          "captured": false,
+          "content_length": null,
+          "reason": "non-json-or-unbounded"
+        },
+        "request_content_type": null,
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0",
+          "x-auth-token": "<redacted>"
+        },
+        "resource": "openstack-compatibility",
+        "response_body": {
+          "captured": true,
+          "content_length": 338,
+          "json": {
+            "security_group_rule": {
+              "direction": "ingress",
+              "ethertype": "IPv4",
+              "id": "01a03aa4-aea2-7713-884c-3560ee0915ec",
+              "port_range_max": 22,
+              "port_range_min": 22,
+              "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+              "protocol": "tcp",
+              "remote_group_id": null,
+              "remote_ip_prefix": "198.51.100.0/24",
+              "security_group_id": "01a03aa4-ae8d-7762-986a-27512d837e66"
+            }
+          },
+          "sha256": "b31106f180c8ab50b8e419bd9c45822dc119bd6bfe13109c5534b8ab1d221be7"
+        },
+        "response_headers": {
+          "content-type": "application/json"
+        },
+        "status": 200
+      },
+      {
+        "method": "POST",
+        "ordinal": 6,
+        "path": "/v3/auth/tokens",
+        "query": "",
+        "request_body": {
+          "captured": true,
+          "content_length": 214,
+          "json": {
+            "auth": {
+              "identity": {
+                "methods": [
+                  "password"
+                ],
+                "password": "<redacted>"
+              },
+              "scope": {
+                "project": {
+                  "id": "eba29e2d-53de-461d-ae91-ede7402713cb"
+                }
+              }
+            }
+          },
+          "sha256": "80062bc78d70f9096461cd1bf7390682353186b2db06ff06607ad5dd02d1bb14"
+        },
+        "request_content_type": "application/json",
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "content-length": "214",
+          "content-type": "application/json",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0"
+        },
+        "resource": "auth",
+        "response_body": {
+          "captured": true,
+          "content_length": 2408,
+          "json": {
+            "token": {
+              "catalog": [
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb"
+                    }
+                  ],
+                  "id": "compute",
+                  "name": "compute",
+                  "type": "compute"
+                },
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v3"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v3"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v3"
+                    }
+                  ],
+                  "id": "identity",
+                  "name": "identity",
+                  "type": "identity"
+                },
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    }
+                  ],
+                  "id": "image",
+                  "name": "image",
+                  "type": "image"
+                },
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    }
+                  ],
+                  "id": "network",
+                  "name": "network",
+                  "type": "network"
+                },
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/placement"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/placement"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/placement"
+                    }
+                  ],
+                  "id": "placement",
+                  "name": "placement",
+                  "type": "placement"
+                }
+              ],
+              "expires_at": "2026-08-25T21:37:46Z",
+              "issued_at": "2026-08-25T20:37:46Z",
+              "methods": [
+                "password"
+              ],
+              "project": {
+                "domain": {
+                  "id": "default",
+                  "name": "Default"
+                },
+                "id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "name": "admin"
+              },
+              "roles": [
+                {
+                  "id": "admin",
+                  "name": "admin"
+                },
+                {
+                  "id": "member",
+                  "name": "member"
+                }
+              ],
+              "user": {
+                "domain": {
+                  "id": "default",
+                  "name": "Default"
+                },
+                "id": "bootstrap-user",
+                "name": "admin",
+                "password_expires_at": "<redacted>"
+              }
+            }
+          },
+          "sha256": "46f8dfbdfc7866fb290f3fc9b2da88d5cef082f7bb9d4d4529a9a135ad351a7f"
+        },
+        "response_headers": {
+          "content-type": "application/json",
+          "vary": "X-Auth-Token",
+          "x-subject-token": "<redacted>"
+        },
+        "status": 201
+      },
+      {
+        "method": "GET",
+        "ordinal": 7,
+        "path": "/v2.0/security-groups/01a03aa4-ae8d-7762-986a-27512d837e66",
+        "query": "",
+        "request_body": {
+          "captured": false,
+          "content_length": null,
+          "reason": "non-json-or-unbounded"
+        },
+        "request_content_type": null,
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0",
+          "x-auth-token": "<redacted>"
+        },
+        "resource": "openstack-compatibility",
+        "response_body": {
+          "captured": true,
+          "content_length": 508,
+          "json": {
+            "security_group": {
+              "description": "P13.3A discovery",
+              "id": "01a03aa4-ae8d-7762-986a-27512d837e66",
+              "name": "p13-3a-sg",
+              "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+              "security_group_rules": [
+                {
+                  "direction": "ingress",
+                  "ethertype": "IPv4",
+                  "id": "01a03aa4-aea2-7713-884c-3560ee0915ec",
+                  "port_range_max": 22,
+                  "port_range_min": 22,
+                  "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                  "protocol": "tcp",
+                  "remote_group_id": null,
+                  "remote_ip_prefix": "198.51.100.0/24",
+                  "security_group_id": "01a03aa4-ae8d-7762-986a-27512d837e66"
+                }
+              ]
+            }
+          },
+          "sha256": "75b30940ebc3dc7c15564f29ec21eb237ece00379f2cc6d21c10fa7aecf4edc0"
+        },
+        "response_headers": {
+          "content-type": "application/json"
+        },
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "ordinal": 8,
+        "path": "/v2.0/security-group-rules/01a03aa4-aea2-7713-884c-3560ee0915ec",
+        "query": "",
+        "request_body": {
+          "captured": false,
+          "content_length": null,
+          "reason": "non-json-or-unbounded"
+        },
+        "request_content_type": null,
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0",
+          "x-auth-token": "<redacted>"
+        },
+        "resource": "openstack-compatibility",
+        "response_body": {
+          "captured": true,
+          "content_length": 338,
+          "json": {
+            "security_group_rule": {
+              "direction": "ingress",
+              "ethertype": "IPv4",
+              "id": "01a03aa4-aea2-7713-884c-3560ee0915ec",
+              "port_range_max": 22,
+              "port_range_min": 22,
+              "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+              "protocol": "tcp",
+              "remote_group_id": null,
+              "remote_ip_prefix": "198.51.100.0/24",
+              "security_group_id": "01a03aa4-ae8d-7762-986a-27512d837e66"
+            }
+          },
+          "sha256": "b31106f180c8ab50b8e419bd9c45822dc119bd6bfe13109c5534b8ab1d221be7"
+        },
+        "response_headers": {
+          "content-type": "application/json"
+        },
+        "status": 200
+      },
+      {
+        "method": "POST",
+        "ordinal": 9,
+        "path": "/v3/auth/tokens",
+        "query": "",
+        "request_body": {
+          "captured": true,
+          "content_length": 214,
+          "json": {
+            "auth": {
+              "identity": {
+                "methods": [
+                  "password"
+                ],
+                "password": "<redacted>"
+              },
+              "scope": {
+                "project": {
+                  "id": "eba29e2d-53de-461d-ae91-ede7402713cb"
+                }
+              }
+            }
+          },
+          "sha256": "80062bc78d70f9096461cd1bf7390682353186b2db06ff06607ad5dd02d1bb14"
+        },
+        "request_content_type": "application/json",
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "content-length": "214",
+          "content-type": "application/json",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0"
+        },
+        "resource": "auth",
+        "response_body": {
+          "captured": true,
+          "content_length": 2408,
+          "json": {
+            "token": {
+              "catalog": [
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb"
+                    }
+                  ],
+                  "id": "compute",
+                  "name": "compute",
+                  "type": "compute"
+                },
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v3"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v3"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/v3"
+                    }
+                  ],
+                  "id": "identity",
+                  "name": "identity",
+                  "type": "identity"
+                },
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    }
+                  ],
+                  "id": "image",
+                  "name": "image",
+                  "type": "image"
+                },
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/"
+                    }
+                  ],
+                  "id": "network",
+                  "name": "network",
+                  "type": "network"
+                },
+                {
+                  "endpoints": [
+                    {
+                      "interface": "public",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/placement"
+                    },
+                    {
+                      "interface": "internal",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/placement"
+                    },
+                    {
+                      "interface": "admin",
+                      "region": "RegionOne",
+                      "region_id": "RegionOne",
+                      "url": "http://127.0.0.1:45481/placement"
+                    }
+                  ],
+                  "id": "placement",
+                  "name": "placement",
+                  "type": "placement"
+                }
+              ],
+              "expires_at": "2026-08-25T21:37:49Z",
+              "issued_at": "2026-08-25T20:37:49Z",
+              "methods": [
+                "password"
+              ],
+              "project": {
+                "domain": {
+                  "id": "default",
+                  "name": "Default"
+                },
+                "id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "name": "admin"
+              },
+              "roles": [
+                {
+                  "id": "admin",
+                  "name": "admin"
+                },
+                {
+                  "id": "member",
+                  "name": "member"
+                }
+              ],
+              "user": {
+                "domain": {
+                  "id": "default",
+                  "name": "Default"
+                },
+                "id": "bootstrap-user",
+                "name": "admin",
+                "password_expires_at": "<redacted>"
+              }
+            }
+          },
+          "sha256": "10cf979e41fe868c6ed6a30bde4e3670647e509155ab1acb58867cf39248d0d3"
+        },
+        "response_headers": {
+          "content-type": "application/json",
+          "vary": "X-Auth-Token",
+          "x-subject-token": "<redacted>"
+        },
+        "status": 201
+      },
+      {
+        "method": "DELETE",
+        "ordinal": 10,
+        "path": "/v2.0/security-group-rules/01a03aa4-aea2-7713-884c-3560ee0915ec",
+        "query": "",
+        "request_body": {
+          "captured": false,
+          "content_length": null,
+          "reason": "non-json-or-unbounded"
+        },
+        "request_content_type": null,
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0",
+          "x-auth-token": "<redacted>"
+        },
+        "resource": "openstack-compatibility",
+        "response_body": null,
+        "response_headers": {},
+        "status": 204
+      },
+      {
+        "method": "GET",
+        "ordinal": 11,
+        "path": "/v2.0/security-group-rules/01a03aa4-aea2-7713-884c-3560ee0915ec",
+        "query": "",
+        "request_body": {
+          "captured": false,
+          "content_length": null,
+          "reason": "non-json-or-unbounded"
+        },
+        "request_content_type": null,
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0",
+          "x-auth-token": "<redacted>"
+        },
+        "resource": "openstack-compatibility",
+        "response_body": {
+          "captured": true,
+          "content_length": 85,
+          "json": {
+            "error": {
+              "code": 404,
+              "message": "network resource was not found",
+              "title": "Not Found"
+            }
+          },
+          "sha256": "5e63628ae8813efc4232474ffaea6103cd25294174b0cb288ade9f28bdb8d033"
+        },
+        "response_headers": {
+          "content-type": "application/json"
+        },
+        "status": 404
+      },
+      {
+        "method": "DELETE",
+        "ordinal": 12,
+        "path": "/v2.0/security-groups/01a03aa4-ae8d-7762-986a-27512d837e66",
+        "query": "",
+        "request_body": {
+          "captured": false,
+          "content_length": null,
+          "reason": "non-json-or-unbounded"
+        },
+        "request_content_type": null,
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0",
+          "x-auth-token": "<redacted>"
+        },
+        "resource": "openstack-compatibility",
+        "response_body": null,
+        "response_headers": {},
+        "status": 204
+      },
+      {
+        "method": "GET",
+        "ordinal": 13,
+        "path": "/v2.0/security-groups/01a03aa4-ae8d-7762-986a-27512d837e66",
+        "query": "",
+        "request_body": {
+          "captured": false,
+          "content_length": null,
+          "reason": "non-json-or-unbounded"
+        },
+        "request_content_type": null,
+        "request_headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip",
+          "cache-control": "no-cache",
+          "host": "127.0.0.1:45481",
+          "user-agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0",
+          "x-auth-token": "<redacted>"
+        },
+        "resource": "openstack-compatibility",
+        "response_body": {
+          "captured": true,
+          "content_length": 85,
+          "json": {
+            "error": {
+              "code": 404,
+              "message": "network resource was not found",
+              "title": "Not Found"
+            }
+          },
+          "sha256": "5e63628ae8813efc4232474ffaea6103cd25294174b0cb288ade9f28bdb8d033"
+        },
+        "response_headers": {
+          "content-type": "application/json"
+        },
+        "status": 404
+      }
+    ],
+    "trace_record_count": 14
+  },
+  "phase": "p13.3a",
+  "provider_schema": {
+    "rule": {
+      "force_new": [
+        "description",
+        "protocol",
+        "port_range_min",
+        "port_range_max",
+        "remote_ip_prefix",
+        "remote_group_id",
+        "remote_address_group_id",
+        "tenant_id",
+        "region"
+      ],
+      "import": "UUID",
+      "optional_computed": [
+        "protocol",
+        "port_range_min",
+        "port_range_max",
+        "remote_ip_prefix",
+        "remote_group_id",
+        "remote_address_group_id"
+      ],
+      "required": [
+        "security_group_id",
+        "direction",
+        "ethertype"
+      ]
+    },
+    "security_group": {
+      "computed": [
+        "description",
+        "tenant_id",
+        "stateful",
+        "region",
+        "all_tags"
+      ],
+      "force_new": [
+        "region",
+        "tenant_id",
+        "delete_default_rules"
+      ],
+      "import": "UUID",
+      "optional": [
+        "description",
+        "delete_default_rules",
+        "stateful",
+        "tenant_id",
+        "region",
+        "tags"
+      ],
+      "required": [
+        "name"
+      ],
+      "updateable": [
+        "name",
+        "description",
+        "stateful",
+        "tags"
+      ]
+    }
+  },
+  "provider_source": {
+    "gophercloud_commit": "0f5d6e5",
+    "gophercloud_paths": [
+      "openstack/networking/v2/extensions/security/groups/requests.go",
+      "openstack/networking/v2/extensions/security/rules/requests.go"
+    ],
+    "gophercloud_version": "v2.8.0",
+    "provider_commit": "4fd8eba1f85edfdc7aed2d17bae3f3c814abad41",
+    "provider_paths": [
+      "openstack/resource_openstack_networking_secgroup_v2.go",
+      "openstack/resource_openstack_networking_secgroup_rule_v2.go"
+    ]
+  },
+  "redaction": {
+    "raw_trace": "ignored temporary output",
+    "sanitized": true,
+    "secret_headers_redacted": true
+  },
+  "run": {
+    "engine_version_output": "OpenTofu v1.12.6",
+    "fresh_execution": true,
+    "o3k_head_sha": "a4babb24c5f569c10e15f1a55205cb9c3ee963bf",
+    "run_id": "1b25687a-807c-4c28-a3db-6be3394eb502"
+  },
+  "schema_version": 1,
+  "status": "discovery_complete_architecture_gate_blocked",
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+    "provider_modified": false,
+    "provider_sha256_expected": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc"
+  }
+}
