@@ -1,0 +1,59 @@
+{
+  "phase": "P13.2D",
+  "resource": "openstack_compute_instance_v2",
+  "profile": "p13-iac-compatibility-v1",
+  "run_id": "d8a4b4c3-1402-4f21-8954-611564ca05d2",
+  "tested_implementation_sha": "78217c1616910b282448a608486eb22ae9fe6033",
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+    "provider_modified": false
+  },
+  "configuration": {
+    "server": ["name", "image_id", "flavor_id", "power_state", "network.uuid"],
+    "networking": ["canonical Network", "one active canonical AddressRealm", "server-owned canonical Endpoint"]
+  },
+  "lifecycle": {
+    "prerequisite_image_read": "PASS",
+    "prerequisite_flavor_read": "PASS",
+    "network_create": "PASS",
+    "subnet_create": "PASS",
+    "create": {"status": 202, "result": "PASS"},
+    "poll": {"states": ["BUILD", "ACTIVE"], "result": "PASS"},
+    "read": {"status": 200, "result": "PASS"},
+    "post_apply_plan": "CONVERGED",
+    "rename_update": {"status": 200, "result": "PASS"},
+    "post_update_plan": "CONVERGED",
+    "import": {"first_request": "GET /v2.1/{project_id}/servers/{id}", "result": "PASS"},
+    "post_import_plan": "CONVERGED after provider import state normalization",
+    "reboot": {"action": "reboot", "result": "PASS"},
+    "stop": {"action": "os-stop", "terminal_state": "SHUTOFF", "result": "PASS"},
+    "start": {"action": "os-start", "terminal_state": "ACTIVE", "result": "PASS"},
+    "restart_refresh": "CONVERGED",
+    "delete": {"status": 204, "result": "PASS"},
+    "post_delete": "ABSENT",
+    "parent_network_and_subnet_retained_until_fixture_teardown": "PASS",
+    "fixture_teardown": "PASS"
+  },
+  "canonical_projection": {
+    "server_identity": "canonical compute:server UUID",
+    "network_authority": "canonical Network",
+    "realm_resolution": "exactly one active Realm; zero or ambiguous Realm rejected",
+    "endpoint_authority": "canonical Endpoint",
+    "fixed_ip_and_mac": "stable across refresh, update, import, and restart refresh",
+    "terraform_authority_introduced": false,
+    "security_groups_started": false,
+    "floating_ip_started": false,
+    "volume_lifecycle_started": false
+  },
+  "evidence_provenance": {
+    "execution_command": "tests/p13_2d_server_lifecycle.sh",
+    "sanitized": true,
+    "raw_trace_committed": false,
+    "secrets_redacted": true,
+    "provider_unmodified": true
+  }
+}
