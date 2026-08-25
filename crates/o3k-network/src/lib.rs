@@ -7082,6 +7082,9 @@ impl NetworkService {
         name: String,
         requested_fixed_ip: Option<(Uuid, Option<Ipv4Addr>)>,
     ) -> Result<PortRecord, NetworkError> {
+        if name.starts_with("o3k-server:") {
+            return Err(NetworkError::InvalidRequest);
+        }
         let ns = ServiceNamespace::new("network")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
         let act = ActionId::new("network", "CreatePort").unwrap_or_else(|_| {
@@ -7418,6 +7421,10 @@ impl NetworkService {
         id: Uuid,
         name: String,
     ) -> Result<PortRecord, NetworkError> {
+        let current = self.get_port_for_project(project_id, id).await?;
+        if current.name.starts_with("o3k-server:") {
+            return Err(NetworkError::Conflict);
+        }
         self.inner
             .repository
             .update_port_name(project_id, &id, &name)
@@ -8987,6 +8994,33 @@ mod tests {
                 .await,
             Err(NetworkError::InvalidRequest)
         ));
+        assert!(matches!(
+            setup
+                .create_port_with_fixed_ip(
+                    &auth("project-a"),
+                    network.id,
+                    "o3k-server:project-a:spoof".to_owned(),
+                    Some((subnet.id, None)),
+                )
+                .await,
+            Err(NetworkError::InvalidRequest)
+        ));
+        let server_port = setup
+            .create_port_for_project(
+                "project-a",
+                network.id,
+                "o3k-server:project-a:owned".to_owned(),
+            )
+            .await?;
+        assert!(matches!(
+            setup
+                .update_port_name_for_project("project-a", server_port.id, "renamed".to_owned(),)
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+        setup
+            .delete_port_for_project("project-a", server_port.id)
+            .await?;
         drop(setup);
         drop(setup_store);
 
