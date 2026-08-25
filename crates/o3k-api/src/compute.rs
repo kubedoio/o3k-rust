@@ -914,12 +914,29 @@ pub(crate) async fn create_server(
         }
         Err(error) => {
             if let Some(network_service) = state.network.as_ref() {
+                let durable_network_ids = match service
+                    .server_network_ids_for_auth(&auth, ServerId::from_uuid(server_id))
+                    .await
+                {
+                    Ok(network_ids) => Some(network_ids),
+                    Err(ComputeError::NotFound) => None,
+                    Err(lookup_error) => {
+                        tracing::error!(
+                            %lookup_error,
+                            %server_id,
+                            "server create outcome could not be checked before endpoint compensation"
+                        );
+                        return keystone_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Internal Server Error",
+                            "server create outcome could not be recovered",
+                        );
+                    }
+                };
                 for port_id in owned_network_ids {
-                    let preserve_for_durable_server = service
-                        .server_network_ids_for_auth(&auth, ServerId::from_uuid(server_id))
-                        .await
-                        .map(|network_ids| network_ids.iter().any(|id| id == &port_id))
-                        .unwrap_or(false);
+                    let preserve_for_durable_server = durable_network_ids
+                        .as_ref()
+                        .is_some_and(|network_ids| network_ids.iter().any(|id| id == &port_id));
                     if preserve_for_durable_server {
                         tracing::warn!(
                             server_id = %server_id,
@@ -1083,7 +1100,8 @@ pub(crate) async fn delete_server(
             .iter()
             .filter_map(|port_id| port_id.parse::<uuid::Uuid>().ok())
             .collect::<Vec<_>>(),
-        Err(_) => Vec::new(),
+        Err(ComputeError::NotFound) => Vec::new(),
+        Err(error) => return compute_error(error),
     };
     match service
         .delete_server_for_auth(&auth, ServerId::from_uuid(id))

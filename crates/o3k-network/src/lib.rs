@@ -7191,9 +7191,8 @@ impl NetworkService {
         while candidate <= end {
             let address = Ipv4Addr::from(candidate);
             if address != gateway
-                && (explicit_ip.is_some()
-                    || (candidate >= u32::from(pool.first_usable)
-                        && candidate <= u32::from(pool.last_usable)))
+                && candidate >= u32::from(pool.first_usable)
+                && candidate <= u32::from(pool.last_usable)
             {
                 let id = Uuid::now_v7();
                 let port = PortRecord {
@@ -8977,6 +8976,17 @@ mod tests {
                 None,
             )
             .await?;
+        assert!(matches!(
+            setup
+                .create_port_with_fixed_ip(
+                    &auth("project-a"),
+                    network.id,
+                    "outside-pool".to_owned(),
+                    Some((subnet.id, Some(Ipv4Addr::new(203, 0, 113, 5)))),
+                )
+                .await,
+            Err(NetworkError::InvalidRequest)
+        ));
         drop(setup);
         drop(setup_store);
 
