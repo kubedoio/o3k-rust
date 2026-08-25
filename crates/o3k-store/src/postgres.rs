@@ -86,6 +86,50 @@ impl PostgresStore {
         rows.iter().map(canonical_network_from_pg_row).collect()
     }
 
+    pub async fn update_canonical_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        name: &str,
+    ) -> Result<CanonicalNetworkRecord, StoreError> {
+        if name.trim().is_empty() {
+            return Err(StoreError::ResourceNotFound);
+        }
+        if sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM canonical_networks WHERE project_id = $1 AND name = $2 AND id <> $3",
+        )
+        .bind(project_id)
+        .bind(name)
+        .bind(id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::Database)?
+            != 0
+        {
+            return Err(StoreError::ResourceAlreadyExists);
+        }
+        let result = sqlx::query(
+            "UPDATE canonical_networks SET name = $1, generation = generation + 1 WHERE id = $2 AND project_id = $3 AND generation = $4 AND state = 'active'",
+        )
+        .bind(name)
+        .bind(id.to_string())
+        .bind(project_id)
+        .bind(crate::checked_generation(expected_generation)?)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_canonical_network(project_id, id).await? {
+                Some(_) => Err(StoreError::StaleGeneration),
+                None => Err(StoreError::ResourceNotFound),
+            };
+        }
+        self.get_canonical_network(project_id, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+
     pub async fn delete_canonical_network(
         &self,
         project_id: &str,
@@ -3891,6 +3935,16 @@ impl NetworkRepository for PostgresStore {
         project_id: &str,
     ) -> Result<Vec<CanonicalNetworkRecord>, StoreError> {
         self.list_canonical_networks(project_id).await
+    }
+    async fn update_canonical_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        name: &str,
+    ) -> Result<CanonicalNetworkRecord, StoreError> {
+        self.update_canonical_network(project_id, id, expected_generation, name)
+            .await
     }
     async fn insert_canonical_realm(
         &self,

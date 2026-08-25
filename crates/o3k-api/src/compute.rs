@@ -630,7 +630,7 @@ pub(crate) async fn delete_keypair(
         Err(response) => return response,
     };
     match service.delete_keypair_for_auth(&auth, &name).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
         Err(error) => compute_error(error),
     }
 }

@@ -6430,6 +6430,44 @@ impl NetworkService {
             .ok_or(NetworkError::NotFound)
     }
 
+    pub async fn update_network(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+        name: String,
+    ) -> Result<NetworkRecord, NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(auth, "UpdateNetwork", "network", Some(id), None)
+            .await?;
+        if name.trim().is_empty() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let project_id = auth.effective_scope().id().as_str();
+        let current = self
+            .inner
+            .repository
+            .get_canonical_network(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        let result = self
+            .inner
+            .repository
+            .update_canonical_network(project_id, &id, current.generation, &name)
+            .await
+            .map(canonical_network_projection)
+            .map_err(map_store_error);
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            Some(id),
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
     pub async fn delete_network(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
         let ns = ServiceNamespace::new("network")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));

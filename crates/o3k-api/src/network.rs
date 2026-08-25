@@ -26,6 +26,16 @@ pub(crate) struct NetworkRequestBody {
 pub(crate) struct CreateNetworkRequest {
     name: String,
 }
+#[derive(serde::Deserialize)]
+pub(crate) struct UpdateNetworkRequestBody {
+    network: UpdateNetworkRequest,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct UpdateNetworkRequest {
+    name: Option<String>,
+    #[serde(default)]
+    admin_state_up: Option<bool>,
+}
 #[derive(serde::Serialize)]
 pub(crate) struct NetworkEnvelope {
     network: NetworkResponse,
@@ -39,15 +49,23 @@ pub(crate) struct NetworkResponse {
     id: String,
     name: String,
     project_id: String,
+    tenant_id: String,
     status: String,
+    admin_state_up: bool,
+    mtu: u32,
+    subnets: Vec<String>,
 }
 
 pub(crate) fn network_response(value: NetworkRecord) -> NetworkResponse {
     NetworkResponse {
         id: value.id.to_string(),
         name: value.name,
+        tenant_id: value.project_id.clone(),
         project_id: value.project_id,
         status: value.status,
+        admin_state_up: true,
+        mtu: 1500,
+        subnets: Vec::new(),
     }
 }
 
@@ -1664,6 +1682,50 @@ pub(crate) async fn show_network(
         Err(response) => return response,
     };
     match service.get_network(&auth, id).await {
+        Ok(value) => Json(NetworkEnvelope {
+            network: network_response(value),
+        })
+        .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn update_network(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+    request: Result<Json<UpdateNetworkRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid network request",
+        );
+    };
+    if body.network.admin_state_up == Some(false) {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "admin_state_up=false is not supported by this profile",
+        );
+    }
+    let Some(name) = body.network.name else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "network name is required",
+        );
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.update_network(&auth, id, name).await {
         Ok(value) => Json(NetworkEnvelope {
             network: network_response(value),
         })

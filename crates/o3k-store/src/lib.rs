@@ -1843,6 +1843,13 @@ pub trait NetworkRepository: Send + Sync + DurableStore + QuotaRepository {
         &self,
         project_id: &str,
     ) -> Result<Vec<CanonicalNetworkRecord>, StoreError>;
+    async fn update_canonical_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        name: &str,
+    ) -> Result<CanonicalNetworkRecord, StoreError>;
     async fn insert_canonical_realm(
         &self,
         realm: &CanonicalAddressRealmRecord,
@@ -4023,6 +4030,50 @@ impl SqliteStore {
         .await
         .map_err(StoreError::Database)?;
         rows.iter().map(canonical_network_from_row).collect()
+    }
+
+    pub async fn update_canonical_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        name: &str,
+    ) -> Result<CanonicalNetworkRecord, StoreError> {
+        if name.trim().is_empty() {
+            return Err(StoreError::ResourceNotFound);
+        }
+        if sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM canonical_networks WHERE project_id = ? AND name = ? AND id <> ?",
+        )
+        .bind(project_id)
+        .bind(name)
+        .bind(id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::Database)?
+            != 0
+        {
+            return Err(StoreError::ResourceAlreadyExists);
+        }
+        let result = sqlx::query(
+            "UPDATE canonical_networks SET name = ?, generation = generation + 1 WHERE id = ? AND project_id = ? AND generation = ? AND state = 'active'",
+        )
+        .bind(name)
+        .bind(id.to_string())
+        .bind(project_id)
+        .bind(checked_generation(expected_generation)?)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_canonical_network(project_id, id).await? {
+                Some(_) => Err(StoreError::StaleGeneration),
+                None => Err(StoreError::ResourceNotFound),
+            };
+        }
+        self.get_canonical_network(project_id, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
     }
 
     pub async fn delete_canonical_network(
@@ -8307,6 +8358,16 @@ impl NetworkRepository for SqliteStore {
         project_id: &str,
     ) -> Result<Vec<CanonicalNetworkRecord>, StoreError> {
         self.list_canonical_networks(project_id).await
+    }
+    async fn update_canonical_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        name: &str,
+    ) -> Result<CanonicalNetworkRecord, StoreError> {
+        self.update_canonical_network(project_id, id, expected_generation, name)
+            .await
     }
     async fn insert_canonical_realm(
         &self,

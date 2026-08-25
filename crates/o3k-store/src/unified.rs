@@ -1419,6 +1419,24 @@ impl NetworkRepository for O3kStore {
             Self::Postgres(s) => s.list_canonical_networks(project_id).await,
         }
     }
+    async fn update_canonical_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        name: &str,
+    ) -> Result<CanonicalNetworkRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.update_canonical_network(project_id, id, expected_generation, name)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.update_canonical_network(project_id, id, expected_generation, name)
+                    .await
+            }
+        }
+    }
     async fn insert_canonical_realm(
         &self,
         realm: &CanonicalAddressRealmRecord,

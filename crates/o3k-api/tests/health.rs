@@ -1232,6 +1232,23 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
         .as_str()
         .ok_or_else(|| std::io::Error::other("network id missing"))?
         .to_owned();
+    let renamed = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v2.0/networks/{network_id}"))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"network":{"name":"flat-renamed","admin_state_up":true}}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(renamed.status(), StatusCode::OK);
+    let renamed_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(renamed.into_body(), 4096).await?)?;
+    assert_eq!(renamed_json["network"]["id"], network_id);
+    assert_eq!(renamed_json["network"]["name"], "flat-renamed");
     let body =
         serde_json::json!({"subnet":{"name":"lab","network_id":network_id,"cidr":"192.0.2.0/29"}});
     let response = o3k_api::router_with_state(state.clone())
@@ -1626,7 +1643,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
                 .body(Body::empty())?,
         )
         .await?;
-    assert_eq!(keypair_deleted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(keypair_deleted.status(), StatusCode::ACCEPTED);
 
     let second_body = serde_json::json!({"server":{"name":"nova-failed-delete","image":{"id":"image-1"},"flavor":{"id":default_flavor_id},"networks":[{"uuid":port_id}]}});
     let second_created = o3k_api::router_with_state(state.clone())
