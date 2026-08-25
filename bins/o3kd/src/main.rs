@@ -582,7 +582,7 @@ impl DaemonCreateResolver {
                 let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
                 let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
                     endpoint_id: port.id,
-                    realm_id: port.network_id,
+                    realm_id: port.subnet_id.ok_or(ProviderError::InvalidRequest)?,
                     project_id: &request.project_id,
                     mac: &port.mac_address,
                     fixed_ip: port.fixed_ip,
@@ -2038,9 +2038,10 @@ mod tests {
             .resolve_network(&unresolved, "compute-1", "epoch-1")
             .await;
         assert!(failed.is_err());
-        let after = network
-            .get_port_for_project("project-a", unresolved_port.id)
-            .await?;
+        let after = store
+            .get_port("project-a", &unresolved_port.id)
+            .await?
+            .ok_or("legacy projection disappeared")?;
         assert_eq!(after.binding_host, None);
         assert_eq!(after.binding_state, None);
         drop(resolver);

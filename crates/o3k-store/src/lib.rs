@@ -1751,6 +1751,11 @@ pub trait NetworkRepository: Send + Sync + QuotaRepository {
         project_id: &str,
         realm_id: &Uuid,
     ) -> Result<Vec<CanonicalEndpointRecord>, StoreError>;
+    async fn get_canonical_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<Option<CanonicalEndpointRecord>, StoreError>;
     async fn delete_canonical_endpoint(
         &self,
         project_id: &str,
@@ -4047,6 +4052,16 @@ impl SqliteStore {
         .await
         .map_err(StoreError::Database)?;
         rows.iter().map(canonical_endpoint_from_row).collect()
+    }
+
+    pub async fn get_canonical_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<Option<CanonicalEndpointRecord>, StoreError> {
+        let row = sqlx::query("SELECT id, realm_id, project_id, fixed_ip, mac, generation, state FROM canonical_endpoints WHERE id = ? AND project_id = ?")
+            .bind(endpoint_id.to_string()).bind(project_id).fetch_optional(&self.pool).await.map_err(StoreError::Database)?;
+        row.as_ref().map(canonical_endpoint_from_row).transpose()
     }
 
     pub async fn delete_canonical_endpoint(
@@ -7873,6 +7888,13 @@ impl NetworkRepository for SqliteStore {
         realm_id: &Uuid,
     ) -> Result<Vec<CanonicalEndpointRecord>, StoreError> {
         self.list_canonical_endpoints(project_id, realm_id).await
+    }
+    async fn get_canonical_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<Option<CanonicalEndpointRecord>, StoreError> {
+        self.get_canonical_endpoint(project_id, endpoint_id).await
     }
     async fn delete_canonical_endpoint(
         &self,

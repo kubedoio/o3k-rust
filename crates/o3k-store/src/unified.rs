@@ -1466,6 +1466,16 @@ impl NetworkRepository for O3kStore {
             Self::Postgres(s) => s.list_canonical_endpoints(project_id, realm_id).await,
         }
     }
+    async fn get_canonical_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<Option<CanonicalEndpointRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_canonical_endpoint(project_id, endpoint_id).await,
+            Self::Postgres(s) => s.get_canonical_endpoint(project_id, endpoint_id).await,
+        }
+    }
     async fn delete_canonical_endpoint(
         &self,
         project_id: &str,

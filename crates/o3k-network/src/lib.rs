@@ -5120,7 +5120,7 @@ impl NetworkService {
         if self
             .inner
             .repository
-            .get_network(project_id, &network_id)
+            .get_canonical_network(project_id, &network_id)
             .await
             .map_err(map_store_error)?
             .is_none()
@@ -5144,11 +5144,10 @@ impl NetworkService {
             Vec::new()
         };
         for port in self
-            .inner
-            .repository
-            .list_ports_for_network(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?
+            .list_ports_for_project(project_id)
+            .await?
+            .into_iter()
+            .filter(|port| port.network_id == network_id)
         {
             let bindings = self
                 .inner
@@ -5302,92 +5301,106 @@ impl NetworkService {
         project_id: &str,
         network_id: Uuid,
     ) -> Result<NetworkIntent, NetworkError> {
-        if self
-            .inner
-            .repository
-            .get_network(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?
-            .is_none()
-        {
-            return Err(NetworkError::NotFound);
-        }
-        if let Some(record) = self
+        let snapshot = self
+            .reconstruct_canonical_network(project_id, network_id)
+            .await?;
+        let record = self
             .inner
             .repository
             .get_network_intent(project_id, &network_id)
             .await
-            .map_err(map_store_error)?
-        {
-            let intent: NetworkIntent =
-                serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
-            if intent.id != network_id || intent.project_id != project_id {
+            .map_err(map_store_error)?;
+        let policies = record
+            .as_ref()
+            .map(|record| {
+                serde_json::from_str::<NetworkIntent>(&record.payload)
+                    .map(|intent| intent.policies)
+                    .map_err(NetworkError::CorruptMetadata)
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let mut referenced_realms = BTreeSet::new();
+        for policy in &policies {
+            let endpoint = snapshot
+                .endpoints
+                .values()
+                .flatten()
+                .find(|endpoint| endpoint.id == policy.endpoint_id)
+                .ok_or(NetworkError::InvalidRequest)?;
+            let realm = snapshot
+                .realms
+                .iter()
+                .find(|realm| realm.id == endpoint.realm_id)
+                .ok_or(NetworkError::InvalidRequest)?;
+            if realm.project_id != project_id || endpoint.project_id != project_id {
                 return Err(NetworkError::InvalidRequest);
             }
-            return Ok(intent);
+            referenced_realms.insert(realm.id);
         }
-        let subnet = self
-            .inner
-            .repository
-            .list_subnets_for_network(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?
-            .into_iter()
-            .next()
+        let realm_id = if referenced_realms.len() == 1 {
+            *referenced_realms
+                .iter()
+                .next()
+                .ok_or(NetworkError::InvalidRequest)?
+        } else if policies.is_empty() && snapshot.realms.len() == 1 {
+            snapshot.realms[0].id
+        } else {
+            return Err(NetworkError::InvalidRequest);
+        };
+        let realm = snapshot
+            .realms
+            .iter()
+            .find(|realm| realm.id == realm_id)
             .ok_or(NetworkError::NotFound)?;
-        let (network, prefix_len) = subnet
-            .cidr
-            .split_once('/')
-            .ok_or(NetworkError::InvalidRequest)?;
-        let prefix = o3k_domain::Ipv4Prefix::new(
-            network.parse().map_err(|_| NetworkError::InvalidRequest)?,
-            prefix_len
-                .parse()
-                .map_err(|_| NetworkError::InvalidRequest)?,
-        )
-        .ok_or(NetworkError::InvalidRequest)?;
-        let ports = self
-            .inner
-            .repository
-            .list_ports_for_network(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?;
+        let endpoints = snapshot
+            .endpoints
+            .get(&realm.id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|endpoint| o3k_domain::EndpointIntent {
+                id: endpoint.id,
+                project_id: endpoint.project_id,
+                realm_id: endpoint.realm_id,
+                mac: endpoint.mac,
+                fixed_ip: endpoint.fixed_ip,
+                generation: endpoint.generation,
+            })
+            .collect();
+        let pools = snapshot.pools.get(&realm.id).cloned().unwrap_or_default();
         Ok(NetworkIntent {
             id: network_id,
             project_id: project_id.to_owned(),
             realm: AddressRealm {
-                id: network_id,
+                id: realm.id,
                 network_id,
-                project_id: project_id.to_owned(),
-                prefix,
-                overlapping_prefixes: false,
+                project_id: realm.project_id.clone(),
+                prefix: parse_security_group_prefix(&realm.prefix)?,
+                overlapping_prefixes: realm.overlapping_prefixes,
             },
-            address_pools: vec![o3k_domain::AddressPool {
-                id: subnet.id,
-                realm_id: network_id,
-                project_id: project_id.to_owned(),
-                prefix,
-                gateway: Some(subnet.gateway_ip),
-                first_usable: subnet.allocation_start,
-                last_usable: subnet.allocation_end,
-            }],
-            endpoints: ports
+            address_pools: pools
                 .into_iter()
-                .map(|port| o3k_domain::EndpointIntent {
-                    id: port.id,
-                    project_id: port.project_id,
-                    realm_id: port.subnet_id.unwrap_or(network_id),
-                    mac: port.mac_address,
-                    fixed_ip: port.fixed_ip,
-                    generation: 1,
+                .map(|pool| {
+                    Ok(o3k_domain::AddressPool {
+                        id: pool.id,
+                        realm_id: pool.realm_id,
+                        project_id: pool.project_id,
+                        prefix: parse_security_group_prefix(&pool.prefix)?,
+                        gateway: pool.gateway,
+                        first_usable: pool.first_usable,
+                        last_usable: pool.last_usable,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, NetworkError>>()?,
+            endpoints,
             routes: Vec::new(),
             gateways: Vec::new(),
             egress: Vec::new(),
             public_addresses: Vec::new(),
-            policies: Vec::new(),
-            generation: 1,
+            policies,
+            generation: record
+                .map(|record| record.generation)
+                .unwrap_or(realm.generation),
             state: o3k_domain::NetworkIntentState::Requested,
         })
     }
@@ -5690,24 +5703,16 @@ impl NetworkService {
             return Err(NetworkError::InvalidRequest);
         }
         let _guard = self.lock().await;
+        self.get_canonical_network_for_project(project_id, network_id)
+            .await?;
         if self
             .inner
             .repository
-            .get_network(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?
-            .is_none()
-        {
-            return Err(NetworkError::NotFound);
-        }
-        if self
-            .inner
-            .repository
-            .list_subnets_for_network(project_id, &network_id)
+            .list_canonical_realms(project_id, &network_id)
             .await
             .map_err(map_store_error)?
             .iter()
-            .any(|subnet| subnet.cidr == cidr)
+            .any(|realm| realm.prefix == cidr)
         {
             return Err(NetworkError::Conflict);
         }
@@ -5862,11 +5867,25 @@ impl NetworkService {
         &self,
         project_id: &str,
     ) -> Result<Vec<SubnetRecord>, NetworkError> {
-        self.inner
+        let networks = self
+            .inner
             .repository
-            .list_subnets(project_id)
+            .list_canonical_networks(project_id)
             .await
-            .map_err(map_store_error)
+            .map_err(map_store_error)?;
+        let mut result = Vec::new();
+        for network in networks {
+            for realm in self
+                .inner
+                .repository
+                .list_canonical_realms(project_id, &network.id)
+                .await
+                .map_err(map_store_error)?
+            {
+                result.push(self.project_canonical_subnet(project_id, &realm).await?);
+            }
+        }
+        Ok(result)
     }
 
     pub async fn get_subnet(
@@ -5905,12 +5924,46 @@ impl NetworkService {
         project_id: &str,
         id: Uuid,
     ) -> Result<SubnetRecord, NetworkError> {
-        self.inner
+        let realm = self
+            .inner
             .repository
-            .get_subnet(project_id, &id)
+            .get_canonical_realm(project_id, &id)
             .await
             .map_err(map_store_error)?
-            .ok_or(NetworkError::NotFound)
+            .ok_or(NetworkError::NotFound)?;
+        self.project_canonical_subnet(project_id, &realm).await
+    }
+
+    async fn project_canonical_subnet(
+        &self,
+        project_id: &str,
+        realm: &o3k_store::CanonicalAddressRealmRecord,
+    ) -> Result<SubnetRecord, NetworkError> {
+        let pool = self
+            .inner
+            .repository
+            .list_canonical_pools(project_id, &realm.id)
+            .await
+            .map_err(map_store_error)?
+            .into_iter()
+            .next()
+            .ok_or(NetworkError::InvalidRequest)?;
+        let metadata = self
+            .inner
+            .repository
+            .get_subnet(project_id, &realm.id)
+            .await
+            .map_err(map_store_error)?;
+        Ok(SubnetRecord {
+            id: realm.id,
+            network_id: realm.network_id,
+            name: metadata.map(|value| value.name).unwrap_or_default(),
+            project_id: realm.project_id.clone(),
+            cidr: realm.prefix.clone(),
+            gateway_ip: pool.gateway.ok_or(NetworkError::InvalidRequest)?,
+            allocation_start: pool.first_usable,
+            allocation_end: pool.last_usable,
+        })
     }
 
     pub async fn delete_subnet(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
@@ -5967,11 +6020,13 @@ impl NetworkService {
         id: Uuid,
     ) -> Result<(), NetworkError> {
         let _guard = self.lock().await;
-        self.inner
+        let metadata_exists = self
+            .inner
             .repository
-            .delete_subnet(project_id, &id)
+            .get_subnet(project_id, &id)
             .await
-            .map_err(map_store_error)?;
+            .map_err(map_store_error)?
+            .is_some();
         if let Some(realm) = self
             .inner
             .repository
@@ -5995,6 +6050,15 @@ impl NetworkService {
             self.inner
                 .repository
                 .delete_canonical_realm(project_id, &realm.id)
+                .await
+                .map_err(map_store_error)?;
+        } else if !metadata_exists {
+            return Err(NetworkError::NotFound);
+        }
+        if metadata_exists {
+            self.inner
+                .repository
+                .delete_subnet(project_id, &id)
                 .await
                 .map_err(map_store_error)?;
         }
@@ -6068,20 +6132,24 @@ impl NetworkService {
             return Err(NetworkError::InvalidRequest);
         }
         let _guard = self.lock().await;
-        if self
+        self.get_canonical_network_for_project(project_id, network_id)
+            .await?;
+        let realms = self
             .inner
             .repository
-            .get_network(project_id, &network_id)
+            .list_canonical_realms(project_id, &network_id)
             .await
-            .map_err(map_store_error)?
-            .is_none()
-        {
-            return Err(NetworkError::NotFound);
-        }
-        let subnet = self
+            .map_err(map_store_error)?;
+        let realm = match realms.as_slice() {
+            [] => return Err(NetworkError::NotFound),
+            [realm] if realm.state == "active" => realm,
+            [_] => return Err(NetworkError::Conflict),
+            _ => return Err(NetworkError::InvalidRequest),
+        };
+        let pool = self
             .inner
             .repository
-            .list_subnets_for_network(project_id, &network_id)
+            .list_canonical_pools(project_id, &realm.id)
             .await
             .map_err(map_store_error)?
             .into_iter()
@@ -6090,15 +6158,15 @@ impl NetworkService {
         let used: HashSet<Ipv4Addr> = self
             .inner
             .repository
-            .list_ports_for_network(project_id, &network_id)
+            .list_canonical_endpoints(project_id, &realm.id)
             .await
             .map_err(map_store_error)?
             .into_iter()
-            .map(|port| port.fixed_ip)
+            .map(|endpoint| endpoint.fixed_ip)
             .collect();
-        let mut candidate = u32::from(subnet.allocation_start);
-        let end = u32::from(subnet.allocation_end);
-        let gateway = subnet.gateway_ip;
+        let mut candidate = u32::from(pool.first_usable);
+        let end = u32::from(pool.last_usable);
+        let gateway = pool.gateway.ok_or(NetworkError::InvalidRequest)?;
         while candidate <= end {
             let address = Ipv4Addr::from(candidate);
             if address != gateway && !used.contains(&address) {
@@ -6106,7 +6174,7 @@ impl NetworkService {
                 let port = PortRecord {
                     id,
                     network_id,
-                    subnet_id: Some(subnet.id),
+                    subnet_id: Some(realm.id),
                     project_id: project_id.to_owned(),
                     name: name.clone(),
                     mac_address: deterministic_port_mac(id),
@@ -6145,7 +6213,7 @@ impl NetworkService {
 
                 let endpoint = o3k_store::CanonicalEndpointRecord {
                     id: port.id,
-                    realm_id: subnet.id,
+                    realm_id: realm.id,
                     project_id: project_id.to_owned(),
                     fixed_ip: port.fixed_ip,
                     mac: port.mac_address.clone(),
@@ -6233,11 +6301,36 @@ impl NetworkService {
         &self,
         project_id: &str,
     ) -> Result<Vec<PortRecord>, NetworkError> {
-        self.inner
+        let networks = self
+            .inner
             .repository
-            .list_ports(project_id)
+            .list_canonical_networks(project_id)
             .await
-            .map_err(map_store_error)
+            .map_err(map_store_error)?;
+        let mut result = Vec::new();
+        for network in networks {
+            for realm in self
+                .inner
+                .repository
+                .list_canonical_realms(project_id, &network.id)
+                .await
+                .map_err(map_store_error)?
+            {
+                for endpoint in self
+                    .inner
+                    .repository
+                    .list_canonical_endpoints(project_id, &realm.id)
+                    .await
+                    .map_err(map_store_error)?
+                {
+                    result.push(
+                        self.project_canonical_port(project_id, &realm, &endpoint)
+                            .await?,
+                    );
+                }
+            }
+        }
+        Ok(result)
     }
 
     pub async fn get_port(&self, auth: &AuthContext, id: Uuid) -> Result<PortRecord, NetworkError> {
@@ -6272,12 +6365,53 @@ impl NetworkService {
         project_id: &str,
         id: Uuid,
     ) -> Result<PortRecord, NetworkError> {
-        self.inner
+        let endpoint = self
+            .inner
             .repository
-            .get_port(project_id, &id)
+            .get_canonical_endpoint(project_id, &id)
             .await
             .map_err(map_store_error)?
-            .ok_or(NetworkError::NotFound)
+            .ok_or(NetworkError::NotFound)?;
+        let realm = self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, &endpoint.realm_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        self.project_canonical_port(project_id, &realm, &endpoint)
+            .await
+    }
+
+    async fn project_canonical_port(
+        &self,
+        project_id: &str,
+        realm: &o3k_store::CanonicalAddressRealmRecord,
+        endpoint: &o3k_store::CanonicalEndpointRecord,
+    ) -> Result<PortRecord, NetworkError> {
+        let metadata = self
+            .inner
+            .repository
+            .get_port(project_id, &endpoint.id)
+            .await
+            .map_err(map_store_error)?;
+        Ok(PortRecord {
+            id: endpoint.id,
+            network_id: realm.network_id,
+            subnet_id: Some(realm.id),
+            project_id: endpoint.project_id.clone(),
+            name: metadata
+                .as_ref()
+                .map(|value| value.name.clone())
+                .unwrap_or_default(),
+            mac_address: endpoint.mac.clone(),
+            fixed_ip: endpoint.fixed_ip,
+            status: endpoint.state.to_ascii_uppercase(),
+            binding_host: metadata
+                .as_ref()
+                .and_then(|value| value.binding_host.clone()),
+            binding_state: metadata.and_then(|value| value.binding_state),
+        })
     }
 
     /// Internal owner lookup used by canonical dependency authorization. It
@@ -6345,16 +6479,25 @@ impl NetworkService {
         id: Uuid,
     ) -> Result<(), NetworkError> {
         let _guard = self.lock().await;
-        self.inner
-            .repository
-            .delete_port(project_id, &id)
-            .await
-            .map_err(map_store_error)?;
-        let _ = self
+        let metadata_exists = self
             .inner
             .repository
+            .get_port(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+            .is_some();
+        self.inner
+            .repository
             .delete_canonical_endpoint(project_id, &id)
-            .await;
+            .await
+            .map_err(map_store_error)?;
+        if metadata_exists {
+            self.inner
+                .repository
+                .delete_port(project_id, &id)
+                .await
+                .map_err(map_store_error)?;
+        }
         let _ = self
             .inner
             .repository
@@ -6843,6 +6986,69 @@ mod tests {
         ));
         drop(reopened);
         drop(reopened_store);
+        fs::remove_dir_all(path)?;
+        let _ = fs::remove_file(&sqlite_path);
+        let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+        let _ = fs::remove_file(format!("{sqlite_path}-shm"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_reads_do_not_require_projection_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("canonical-reads");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store).await?;
+        let network = service
+            .create_canonical_network_for_project("project-a", "canonical".to_owned())
+            .await?;
+        let realm = service
+            .create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.20.0.0/24".to_owned(),
+                false,
+            )
+            .await?;
+        let _pool = service
+            .create_canonical_pool_for_project(
+                "project-a",
+                realm.id,
+                "10.20.0.0/24".to_owned(),
+                Some("10.20.0.1".parse()?),
+                "10.20.0.2".parse()?,
+                "10.20.0.254".parse()?,
+            )
+            .await?;
+        let endpoint = service
+            .create_canonical_endpoint_for_project(
+                "project-a",
+                realm.id,
+                "10.20.0.10".parse()?,
+                "02:00:00:20:00:10".to_owned(),
+            )
+            .await?;
+
+        let subnet = service
+            .get_subnet_for_project("project-a", realm.id)
+            .await?;
+        assert_eq!(subnet.id, realm.id);
+        assert_eq!(subnet.network_id, network.id);
+        assert!(subnet.name.is_empty());
+
+        let port = service
+            .get_port_for_project("project-a", endpoint.id)
+            .await?;
+        assert_eq!(port.id, endpoint.id);
+        assert_eq!(port.subnet_id, Some(realm.id));
+        assert_eq!(port.fixed_ip, endpoint.fixed_ip);
+        assert_eq!(port.mac_address, endpoint.mac);
+        assert!(port.name.is_empty());
+
+        drop(service);
         fs::remove_dir_all(path)?;
         let _ = fs::remove_file(&sqlite_path);
         let _ = fs::remove_file(format!("{sqlite_path}-wal"));
