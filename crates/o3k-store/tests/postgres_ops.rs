@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use sqlx::{Connection, postgres::PgConnection};
 use std::env;
 use std::net::Ipv4Addr;
 use std::process::Command;
@@ -13,19 +14,29 @@ use o3k_store::{
     PostgresStore, QuotaRepository, ResourceRecord, StoreError, SubnetRecord,
 };
 
-async fn get_test_store() -> Option<(String, PostgresStore)> {
+async fn get_test_store() -> Option<(String, PostgresStore, PgConnection)> {
     if let Ok(url) = env::var("O3K_DATABASE_URL") {
+        let mut database_guard = PgConnection::connect(&url).await.ok()?;
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
+            .execute(&mut database_guard)
+            .await
+            .ok()?;
         let store = PostgresStore::connect(&url).await.ok()?;
-        return Some((url, store));
+        return Some((url, store, database_guard));
     }
     let default_url = "postgres://o3k:password@127.0.0.1/o3k_test".to_owned();
+    let mut database_guard = PgConnection::connect(&default_url).await.ok()?;
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
+        .execute(&mut database_guard)
+        .await
+        .ok()?;
     let store = PostgresStore::connect(&default_url).await.ok()?;
-    Some((default_url, store))
+    Some((default_url, store, database_guard))
 }
 
 #[tokio::test]
 async fn test_postgres_backup_and_restore() {
-    let (db_url, store) = match get_test_store().await {
+    let (db_url, store, _database_guard) = match get_test_store().await {
         Some(pair) => pair,
         None => {
             eprintln!("Skipping test_postgres_backup_and_restore: no Postgres instance available");
@@ -274,7 +285,7 @@ async fn test_postgres_backup_and_restore() {
 
 #[tokio::test]
 async fn test_postgres_error_mapping_and_no_leakage() {
-    let (_db_url, store) = match get_test_store().await {
+    let (_db_url, store, _database_guard) = match get_test_store().await {
         Some(pair) => pair,
         None => {
             eprintln!(
