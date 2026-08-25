@@ -86,6 +86,28 @@ impl PostgresStore {
         rows.iter().map(canonical_network_from_pg_row).collect()
     }
 
+    pub async fn delete_canonical_network(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "DELETE FROM canonical_networks WHERE id = $1 AND project_id = $2 AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE network_id = canonical_networks.id)",
+        )
+        .bind(network_id.to_string())
+        .bind(project_id)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_canonical_network(project_id, network_id).await? {
+                Some(_) => Err(StoreError::NetworkInUse),
+                None => Err(StoreError::NetworkNotFound),
+            };
+        }
+        Ok(())
+    }
+
     pub async fn insert_canonical_realm(
         &self,
         realm: &CanonicalAddressRealmRecord,
@@ -218,6 +240,24 @@ impl PostgresStore {
         rows.iter().map(canonical_pool_from_pg_row).collect()
     }
 
+    pub async fn delete_canonical_pool(
+        &self,
+        project_id: &str,
+        pool_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let result =
+            sqlx::query("DELETE FROM canonical_address_pools WHERE id = $1 AND project_id = $2")
+                .bind(pool_id.to_string())
+                .bind(project_id)
+                .execute(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::ResourceNotFound);
+        }
+        Ok(())
+    }
+
     pub async fn insert_canonical_endpoint(
         &self,
         endpoint: &CanonicalEndpointRecord,
@@ -262,6 +302,24 @@ impl PostgresStore {
         .await
         .map_err(StoreError::Database)?;
         rows.iter().map(canonical_endpoint_from_pg_row).collect()
+    }
+
+    pub async fn delete_canonical_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let result =
+            sqlx::query("DELETE FROM canonical_endpoints WHERE id = $1 AND project_id = $2")
+                .bind(endpoint_id.to_string())
+                .bind(project_id)
+                .execute(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::ResourceNotFound);
+        }
+        Ok(())
     }
 
     pub async fn insert_canonical_realm_binding(
@@ -3515,6 +3573,103 @@ fn parse_pg_image(row: &PgRow) -> Result<ImageMetadataRecord, StoreError> {
 
 #[async_trait]
 impl NetworkRepository for PostgresStore {
+    async fn insert_canonical_network(
+        &self,
+        network: &CanonicalNetworkRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_canonical_network(network).await
+    }
+    async fn get_canonical_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalNetworkRecord>, StoreError> {
+        self.get_canonical_network(project_id, id).await
+    }
+    async fn list_canonical_networks(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<CanonicalNetworkRecord>, StoreError> {
+        self.list_canonical_networks(project_id).await
+    }
+    async fn insert_canonical_realm(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_canonical_realm(realm).await
+    }
+    async fn get_canonical_realm(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalAddressRealmRecord>, StoreError> {
+        self.get_canonical_realm(project_id, id).await
+    }
+    async fn list_canonical_realms(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        self.list_canonical_realms(project_id, network_id).await
+    }
+    async fn insert_canonical_pool(
+        &self,
+        pool: &CanonicalAddressPoolRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_canonical_pool(pool).await
+    }
+    async fn list_canonical_pools(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<Vec<CanonicalAddressPoolRecord>, StoreError> {
+        self.list_canonical_pools(project_id, realm_id).await
+    }
+    async fn delete_canonical_pool(
+        &self,
+        project_id: &str,
+        pool_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.delete_canonical_pool(project_id, pool_id).await
+    }
+    async fn insert_canonical_endpoint(
+        &self,
+        endpoint: &CanonicalEndpointRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_canonical_endpoint(endpoint).await
+    }
+    async fn list_canonical_endpoints(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<Vec<CanonicalEndpointRecord>, StoreError> {
+        self.list_canonical_endpoints(project_id, realm_id).await
+    }
+    async fn delete_canonical_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.delete_canonical_endpoint(project_id, endpoint_id)
+            .await
+    }
+    async fn delete_canonical_realm(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.delete_canonical_realm(project_id, realm_id).await
+    }
+    async fn delete_canonical_network(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.delete_canonical_network(project_id, network_id).await
+    }
+    async fn backfill_canonical_network_state(&self) -> Result<(), StoreError> {
+        self.backfill_canonical_network_state().await
+    }
     async fn allocate_network_address(
         &self,
         realm_id: &Uuid,
