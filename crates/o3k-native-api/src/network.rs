@@ -3,9 +3,9 @@
 //! Exposes canonical O3K Network resources (`network:address_realm`)
 //! through the accepted `NativeResourceV1` wire envelope.
 //!
-//! The canonical address realm read path uses durable NetworkIntent records.
-//! Each accepted native NetworkIntent exposes exactly one embedded
-//! `o3k_domain::AddressRealm`; this is not a Neutron compatibility resource.
+//! The canonical address realm read path uses durable canonical Network and
+//! AddressRealm records. NetworkIntent is only a transitional derived/execution
+//! aggregate and is not a source of native resource authority.
 
 use axum::{
     Json,

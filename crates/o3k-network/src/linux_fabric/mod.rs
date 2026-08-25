@@ -524,6 +524,7 @@ mod tests {
     fn plan() -> NamespacedRoutedFabricPlan {
         let realm = AddressRealm {
             id: Uuid::from_u128(11),
+            network_id: Uuid::from_u128(12),
             project_id: "project-a".to_owned(),
             prefix: Ipv4Prefix::new("10.40.1.0".parse().expect("ip"), 24).expect("prefix"),
             overlapping_prefixes: false,

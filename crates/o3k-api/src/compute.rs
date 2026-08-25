@@ -470,6 +470,29 @@ pub(crate) async fn show_flavor(
     }
 }
 
+/// Returns the standard Nova extra-specs collection for a flavor. O3K's
+/// bounded flavor model has no custom extra specifications, so the read-only
+/// compatibility projection is an empty collection. The flavor lookup still
+/// performs normal project authorization and existence checks.
+pub(crate) async fn list_flavor_extra_specs(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((project_id, id)): Path<(String, uuid::Uuid)>,
+) -> axum::response::Response {
+    let auth = match project_auth_context(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.flavor_for_auth(&auth, id).await {
+        Ok(_) => Json(serde_json::json!({"extra_specs": {}})).into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
 pub(crate) async fn delete_flavor(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,

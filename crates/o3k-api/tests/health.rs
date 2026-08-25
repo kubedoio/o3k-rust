@@ -888,8 +888,8 @@ async fn keystone_catalog_contains_all_testlab_services_and_consistent_urls()
         .collect();
     assert_eq!(services.len(), 6);
     assert_eq!(services["identity"], "http://testlab.example.invalid/v3");
-    assert_eq!(services["image"], "http://testlab.example.invalid/v2");
-    assert_eq!(services["network"], "http://testlab.example.invalid/v2.0");
+    assert_eq!(services["image"], "http://testlab.example.invalid/");
+    assert_eq!(services["network"], "http://testlab.example.invalid/");
     assert_eq!(
         services["compute"],
         "http://testlab.example.invalid/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb"
@@ -1411,6 +1411,38 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         .as_str()
         .ok_or_else(|| std::io::Error::other("default flavor missing"))?
         .to_owned();
+    let extra_specs = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors/{default_flavor_id}/os-extra_specs"
+                ))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(extra_specs.status(), StatusCode::OK);
+    let extra_specs_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(extra_specs.into_body(), 4096).await?)?;
+    assert_eq!(extra_specs_json, serde_json::json!({"extra_specs": {}}));
+    let missing_extra_specs = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors/00000000-0000-0000-0000-000000000099/os-extra_specs")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(missing_extra_specs.status(), StatusCode::NOT_FOUND);
+    let foreign_extra_specs = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2.1/foreign-project/flavors/00000000-0000-0000-0000-000000000001/os-extra_specs")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(foreign_extra_specs.status(), StatusCode::NOT_FOUND);
     let custom_flavor = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()

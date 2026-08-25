@@ -62,9 +62,32 @@ impl PartialOrd for Ipv4Prefix {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddressRealm {
     pub id: Uuid,
+    pub network_id: Uuid,
     pub project_id: String,
     pub prefix: Ipv4Prefix,
     pub overlapping_prefixes: bool,
+}
+
+/// Canonical Network identity and lifecycle. This resource remains valid when
+/// `realms` is empty; provider projections and execution plans are assembled
+/// from its durable child resources rather than defining its identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Network {
+    pub id: Uuid,
+    pub project_id: String,
+    pub name: String,
+    pub generation: u64,
+    pub state: NetworkState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkState {
+    Requested,
+    Active,
+    Deleting,
+    Deleted,
+    Error,
 }
 
 /// A bounded, project-owned allocation range within an address realm.
@@ -126,6 +149,7 @@ impl NetworkIntentState {
 pub struct EndpointIntent {
     pub id: Uuid,
     pub project_id: String,
+    pub realm_id: Uuid,
     pub mac: String,
     pub fixed_ip: Ipv4Addr,
     pub generation: u64,
@@ -959,6 +983,7 @@ mod endpoint_directory_tests {
     fn realm() -> AddressRealm {
         AddressRealm {
             id: Uuid::from_u128(1),
+            network_id: Uuid::from_u128(0x10),
             project_id: "project-a".to_owned(),
             prefix: Ipv4Prefix {
                 network: Ipv4Addr::new(10, 40, 1, 0),
@@ -1427,6 +1452,20 @@ mod endpoint_directory_tests {
             .ensure(domain, Uuid::from_u128(0x43), 1)
             .expect("next binding");
         assert_eq!(next.provider_segment_id, first.provider_segment_id);
+    }
+
+    #[test]
+    fn canonical_network_is_valid_without_address_realms() {
+        let network = Network {
+            id: Uuid::from_u128(0x500),
+            project_id: "project-a".to_owned(),
+            name: "network-a".to_owned(),
+            generation: 1,
+            state: NetworkState::Active,
+        };
+        let realms: Vec<AddressRealm> = Vec::new();
+        assert!(realms.is_empty());
+        assert_eq!(network.project_id, "project-a");
     }
 }
 

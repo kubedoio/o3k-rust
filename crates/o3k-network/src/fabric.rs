@@ -185,6 +185,7 @@ mod tests {
     fn plan(directory_generation: u64) -> NodeNetworkPlan {
         let realm = AddressRealm {
             id: Uuid::from_u128(1),
+            network_id: Uuid::from_u128(10),
             project_id: "project-a".to_owned(),
             prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 40, 1, 0), 24).expect("prefix"),
             overlapping_prefixes: false,

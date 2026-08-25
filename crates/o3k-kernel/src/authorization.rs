@@ -222,6 +222,52 @@ impl StaticAuthorizer {
             "address_realm",
             true,
         );
+        reg(
+            "network",
+            "CreateAddressRealm",
+            "network",
+            "address_realm",
+            true,
+        );
+        reg(
+            "network",
+            "DeleteAddressRealm",
+            "network",
+            "address_realm",
+            true,
+        );
+        reg(
+            "network",
+            "ListAddressPools",
+            "network",
+            "address_pool",
+            true,
+        );
+        reg(
+            "network",
+            "CreateAddressPool",
+            "network",
+            "address_pool",
+            true,
+        );
+        reg(
+            "network",
+            "ReadAddressPool",
+            "network",
+            "address_pool",
+            true,
+        );
+        reg(
+            "network",
+            "DeleteAddressPool",
+            "network",
+            "address_pool",
+            true,
+        );
+        reg("network", "ListEndpoints", "network", "endpoint", true);
+        reg("network", "CreateEndpoint", "network", "endpoint", true);
+        reg("network", "ReadEndpoint", "network", "endpoint", true);
+        reg("network", "DeleteEndpoint", "network", "endpoint", true);
     }
 }
 

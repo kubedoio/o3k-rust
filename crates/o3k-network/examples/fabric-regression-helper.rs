@@ -82,6 +82,7 @@ fn build_realm_plan(
 
     let realm = AddressRealm {
         id: realm_id,
+        network_id: Uuid::from_u128(0xfeed),
         project_id: "fabric-regression".to_owned(),
         prefix,
         overlapping_prefixes: true,

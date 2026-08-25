@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "profile": "p13-iac-compatibility-v1",
+  "phase": "p13.1a",
+  "engine": {
+    "name": "OpenTofu",
+    "version": "1.12.6",
+    "source": "https://github.com/opentofu/opentofu/releases/tag/v1.12.6",
+    "release_asset": "tofu_1.12.6_linux_amd64.tar.gz",
+    "sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec"
+  },
+  "provider": {
+    "name": "terraform-provider-openstack/openstack",
+    "version": "3.4.0",
+    "source": "https://github.com/terraform-provider-openstack/terraform-provider-openstack/tree/v3.4.0",
+    "release_asset": "terraform-provider-openstack_3.4.0_linux_amd64.zip",
+    "license": "Apache-2.0",
+    "modified": false
+  },
+  "dependencies": {
+    "github.com/gophercloud/gophercloud/v2": "v2.8.0",
+    "github.com/gophercloud/utils/v2": "v2.0.0-20250710092215-8f6f0255f600"
+  },
+  "platform": "linux_amd64",
+  "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
+  "provider_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc"
+}

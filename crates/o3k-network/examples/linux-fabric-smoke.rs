@@ -20,6 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let realm = AddressRealm {
         id: Uuid::from_u128(0x1100),
+        network_id: Uuid::from_u128(0x1101),
         project_id: "fabric-smoke".to_owned(),
         prefix: Ipv4Prefix::new("10.250.1.0".parse()?, 24).ok_or("invalid prefix")?,
         overlapping_prefixes: false,

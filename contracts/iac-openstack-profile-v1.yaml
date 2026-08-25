@@ -65,9 +65,40 @@ resources:
     route_evidence:
       list: implemented
       show: implemented
-    provider_evidence: provider-unverified
-    p13_phase: p13.0
-    notes: Already implemented in existing compatibility surface.
+    provider_evidence: provider-verified
+    provider_attribute_subset:
+      - id
+      - name
+      - region
+      - tags
+      - container_format
+      - disk_format
+      - min_disk_gb
+      - min_ram_mb
+      - owner
+      - protected
+      - visibility
+      - checksum
+      - size_bytes
+      - metadata
+      - created_at
+      - updated_at
+      - file
+      - schema
+      - hidden
+      - properties
+      - member_status
+      - most_recent
+      - name_regex
+      - size_max
+      - size_min
+      - sort
+      - tag
+    p13_phase: p13.1
+    notes: >-
+      Verified with OpenTofu 1.12.6 and unmodified
+      terraform-provider-openstack/openstack 3.4.0 using the catalog service
+      root plus Gophercloud's v2 ResourceBase composition.
 
   - resource: openstack_compute_flavor_v2
     type: data
@@ -78,14 +109,34 @@ resources:
     required_operations:
       - GET /v2.1/{tenant}/flavors
       - GET /v2.1/{tenant}/flavors/{id}
+      - GET /v2.1/{tenant}/flavors/{id}/os-extra_specs
     known_deviations:
-      - Extra specifications are out of scope.
+      - Custom extra specifications and extra-spec write operations are out of scope; the bounded read returns an empty standard collection.
     route_evidence:
       list: implemented
       show: implemented
-    provider_evidence: provider-unverified
-    p13_phase: p13.0
-    notes: Already implemented in existing compatibility surface.
+      extra_specs: implemented
+    provider_evidence: provider-verified
+    provider_attribute_subset:
+      - id
+      - flavor_id
+      - name
+      - description
+      - region
+      - disk
+      - ram
+      - rx_tx_factor
+      - swap
+      - vcpus
+      - is_public
+      - extra_specs
+      - min_disk
+      - min_ram
+    p13_phase: p13.1
+    notes: >-
+      Verified with OpenTofu 1.12.6 and unmodified
+      terraform-provider-openstack/openstack 3.4.0. The bounded flavor model
+      returns extra_specs as an empty map.
 
   # ============================================================
   # Managed — core compute
@@ -109,7 +160,7 @@ resources:
       list: implemented
       show: implemented
       delete: implemented
-    provider_evidence: provider-unverified
+    provider_evidence: provider-partial
     p13_phase: p13.2
 
   # ============================================================
@@ -136,7 +187,7 @@ resources:
       show: implemented
       update: missing
       delete: implemented
-    provider_evidence: provider-unverified
+    provider_evidence: provider-partial
     p13_phase: p13.2
 
   - resource: openstack_networking_subnet_v2
@@ -144,7 +195,7 @@ resources:
     service: network
     api: neutron-v2
     canonical_mapping: network:subnet / AddressRealm
-    projection: pending-p13.1
+    projection: one-to-one
     required_operations:
       - POST /v2.0/subnets
       - GET /v2.0/subnets/{id}
@@ -153,16 +204,15 @@ resources:
       - DELETE /v2.0/subnets/{id}
     known_deviations:
       - One subnet and one allocation pool per network in initial profile.
-      - One-to-one mapping to AddressRealm/subnet is the target, but
-        lifecycle/cardinality must be verified against real provider behavior
-        in P13.1 before being frozen.
+      - One-to-one mapping to canonical AddressRealm is proven for the bounded
+        canonical runtime; managed Terraform lifecycle remains P13.2 work.
     route_evidence:
       create: implemented
       list: implemented
       show: implemented
       update: missing
       delete: implemented
-    provider_evidence: provider-unverified
+    provider_evidence: provider-partial
     p13_phase: p13.2
 
   - resource: openstack_networking_port_v2
@@ -186,7 +236,7 @@ resources:
       show: implemented
       update: missing
       delete: implemented
-    provider_evidence: provider-unverified
+    provider_evidence: provider-partial
     p13_phase: p13.2
 
   # ============================================================
@@ -215,7 +265,7 @@ resources:
       update: missing
       action: implemented
       delete: implemented
-    provider_evidence: provider-unverified
+    provider_evidence: provider-partial
     p13_phase: p13.2
 
   # ============================================================

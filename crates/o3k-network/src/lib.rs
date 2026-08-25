@@ -14,8 +14,8 @@ use o3k_domain::{
 };
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
-    LimitKey, LimitValue, NoopAuditSink, OwnershipScope, ResourceAmount, ResourceId,
-    ResourceTarget, ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
+    DecisionReason, LimitKey, LimitValue, NoopAuditSink, OwnershipScope, ResourceAmount,
+    ResourceId, ResourceTarget, ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -170,6 +170,7 @@ mod p9_plan_tests {
             project_id: "project-a".to_owned(),
             realm: AddressRealm {
                 id: Uuid::from_u128(2),
+                network_id: id,
                 project_id: "project-a".to_owned(),
                 prefix: prefix("10.0.0.0", 24),
                 overlapping_prefixes: false,
@@ -178,6 +179,7 @@ mod p9_plan_tests {
             endpoints: vec![EndpointIntent {
                 id: Uuid::from_u128(3),
                 project_id: "project-a".to_owned(),
+                realm_id: Uuid::from_u128(2),
                 mac: "02:00:00:00:00:03".to_owned(),
                 fixed_ip: Ipv4Addr::new(10, 0, 0, 3),
                 generation: 4,
@@ -343,6 +345,7 @@ mod p9_plan_tests {
     fn plan_rejects_overlap_before_provider_mutation() {
         let existing = AddressRealm {
             id: Uuid::from_u128(7),
+            network_id: Uuid::from_u128(70),
             project_id: "project-b".to_owned(),
             prefix: prefix("10.0.0.0", 16),
             overlapping_prefixes: false,
@@ -364,6 +367,7 @@ mod p9_plan_tests {
     fn geneve_capability_allows_overlap_only_when_realm_and_provider_opt_in() {
         let existing = AddressRealm {
             id: Uuid::from_u128(7),
+            network_id: Uuid::from_u128(70),
             project_id: "project-b".to_owned(),
             prefix: prefix("10.0.0.0", 16),
             overlapping_prefixes: false,
@@ -396,6 +400,7 @@ mod p9_plan_tests {
                 &missing_encapsulation,
                 &[AddressRealm {
                     id: Uuid::from_u128(7),
+                    network_id: Uuid::from_u128(70),
                     project_id: "project-b".to_owned(),
                     prefix: prefix("10.0.0.0", 16),
                     overlapping_prefixes: false,
@@ -646,6 +651,7 @@ mod p9_plan_tests {
         duplicate_address.endpoints.push(EndpointIntent {
             id: Uuid::from_u128(99),
             project_id: duplicate_address.project_id.clone(),
+            realm_id: duplicate_address.realm.id,
             mac: "02:00:00:00:00:99".to_owned(),
             fixed_ip: Ipv4Addr::new(10, 0, 0, 3),
             generation: 1,
@@ -666,6 +672,7 @@ mod p9_plan_tests {
         duplicate_mac.endpoints.push(EndpointIntent {
             id: Uuid::from_u128(99),
             project_id: duplicate_mac.project_id.clone(),
+            realm_id: duplicate_mac.realm.id,
             mac: duplicate_mac.endpoints[0].mac.clone(),
             fixed_ip: Ipv4Addr::new(10, 0, 0, 99),
             generation: 1,
@@ -3905,6 +3912,7 @@ pub fn compile_attachment_plan(
         project_id: project_id.to_owned(),
         realm: AddressRealm {
             id: realm_id,
+            network_id: endpoint_id,
             project_id: project_id.to_owned(),
             prefix,
             overlapping_prefixes: false,
@@ -3913,6 +3921,7 @@ pub fn compile_attachment_plan(
         endpoints: vec![o3k_domain::EndpointIntent {
             id: endpoint_id,
             project_id: project_id.to_owned(),
+            realm_id,
             mac: mac.to_owned(),
             fixed_ip,
             generation: 1,
@@ -4264,6 +4273,59 @@ fn validate_policy_shape(policy: &PolicyIntent) -> Result<(), NetworkError> {
     Ok(())
 }
 
+fn canonical_policy_record(
+    project_id: &str,
+    policy: &PolicyIntent,
+) -> o3k_store::CanonicalNetworkPolicyRecord {
+    let prefix = |value: Option<Ipv4Prefix>| {
+        value.map(|prefix| format!("{}/{}", prefix.network, prefix.prefix_len))
+    };
+    o3k_store::CanonicalNetworkPolicyRecord {
+        id: policy.id,
+        project_id: project_id.to_owned(),
+        endpoint_id: policy.endpoint_id,
+        direction: format!("{:?}", policy.direction),
+        protocol: format!("{:?}", policy.protocol),
+        port_min: policy.ports.map(|ports| ports.start),
+        port_max: policy.ports.map(|ports| ports.end),
+        source: prefix(policy.source),
+        destination: prefix(policy.destination),
+        action: format!("{:?}", policy.action),
+        generation: 1,
+        state: "active".to_owned(),
+    }
+}
+
+fn policy_from_canonical_record(
+    record: o3k_store::CanonicalNetworkPolicyRecord,
+) -> Result<PolicyIntent, NetworkError> {
+    let parse_prefix = |value: Option<String>| {
+        value
+            .as_deref()
+            .map(parse_security_group_prefix)
+            .transpose()
+    };
+    let policy = PolicyIntent {
+        id: record.id,
+        endpoint_id: record.endpoint_id,
+        direction: parse_security_group_direction(&record.direction)?,
+        protocol: parse_security_group_protocol(&record.protocol)?,
+        ports: record
+            .port_min
+            .zip(record.port_max)
+            .map(|(start, end)| PortRange { start, end }),
+        source: parse_prefix(record.source)?,
+        destination: parse_prefix(record.destination)?,
+        action: match record.action.as_str() {
+            "Allow" | "allow" => PolicyAction::Allow,
+            "Deny" | "deny" => PolicyAction::Deny,
+            _ => return Err(NetworkError::InvalidRequest),
+        },
+    };
+    validate_policy_shape(&policy)?;
+    Ok(policy)
+}
+
 /// Canonical binding state of a port on its selected host.
 ///
 /// The durable store persists the string projections (persistence
@@ -4334,8 +4396,11 @@ pub enum NetworkError {
 fn map_store_error(error: o3k_store::StoreError) -> NetworkError {
     match error {
         o3k_store::StoreError::ResourceAlreadyExists => NetworkError::Conflict,
-        o3k_store::StoreError::NetworkNotFound => NetworkError::NotFound,
+        o3k_store::StoreError::NetworkNotFound | o3k_store::StoreError::ResourceNotFound => {
+            NetworkError::NotFound
+        }
         o3k_store::StoreError::NetworkInUse => NetworkError::Conflict,
+        o3k_store::StoreError::OwnershipConflict => NetworkError::InvalidRequest,
         o3k_store::StoreError::QuotaExceeded {
             key,
             limit,
@@ -4352,6 +4417,69 @@ fn map_store_error(error: o3k_store::StoreError) -> NetworkError {
     }
 }
 
+fn realm_delete_operation(
+    project_id: &str,
+    realm_id: Uuid,
+) -> Result<
+    (
+        o3k_store::OperationRecord,
+        o3k_store::CanonicalOperationRecord,
+        o3k_store::IdempotencyReservationRequest,
+    ),
+    NetworkError,
+> {
+    let action =
+        ActionId::new("network", "DeleteRealm").map_err(|_| NetworkError::InvalidRequest)?;
+    let resource_type =
+        ResourceType::new("network", "address_realm").map_err(|_| NetworkError::InvalidRequest)?;
+    let operation_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:network:realm-delete:{project_id}:{realm_id}").as_bytes(),
+    );
+    let scope = OwnershipScope::project(ScopeId::new_unchecked(project_id.to_owned()), None, None);
+    let kernel = o3k_kernel::Operation::new(
+        operation_id,
+        "network",
+        action.clone(),
+        "o3k:network-service",
+        scope,
+        resource_type.clone(),
+        Some(ResourceId::new_unchecked(realm_id.to_string())),
+        None,
+    );
+    let canonical = o3k_store::CanonicalOperationRecord::from_kernel_operation(&kernel)
+        .map_err(map_store_error)?;
+    let operation = o3k_store::OperationRecord {
+        id: operation_id,
+        resource_id: realm_id,
+        kind: "lifecycle:realm-delete".to_owned(),
+        state: o3k_store::OperationState::Pending,
+        provider_operation_id: None,
+        error_category: None,
+        error_message: None,
+    };
+    let request = o3k_store::IdempotencyReservationRequest::from_semantics(
+        project_id,
+        action.to_string(),
+        format!("canonical:realm-delete:{realm_id}"),
+        &resource_type.to_string(),
+        Some(&realm_id.to_string()),
+        &serde_json::json!({"realm_id": realm_id}),
+        operation_id,
+    )
+    .map_err(map_store_error)?;
+    Ok((operation, canonical, request))
+}
+
+fn canonical_network_projection(network: o3k_store::CanonicalNetworkRecord) -> NetworkRecord {
+    NetworkRecord {
+        id: network.id,
+        name: network.name,
+        project_id: network.project_id,
+        status: network.state.to_ascii_uppercase(),
+    }
+}
+
 #[derive(Clone)]
 pub struct NetworkService {
     inner: Arc<Inner>,
@@ -4363,6 +4491,36 @@ pub struct NetworkService {
 struct Inner {
     root: PathBuf,
     repository: Arc<dyn o3k_store::NetworkRepository>,
+}
+
+/// Canonical network reconstruction result.  Compatibility projections and
+/// provider plans are derived from this durable graph; they are never used to
+/// recover missing canonical children.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalNetworkSnapshot {
+    pub network: o3k_store::CanonicalNetworkRecord,
+    pub realms: Vec<o3k_store::CanonicalAddressRealmRecord>,
+    pub pools: BTreeMap<Uuid, Vec<o3k_store::CanonicalAddressPoolRecord>>,
+    pub endpoints: BTreeMap<Uuid, Vec<o3k_store::CanonicalEndpointRecord>>,
+}
+
+/// Result of observing one provider-owned Realm cleanup identity.  A Realm
+/// remains canonical while the provider outcome is present or unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RealmCleanupObservation {
+    Absent(o3k_store::CanonicalRealmBindingRecord),
+    Present(o3k_store::CanonicalRealmBindingRecord),
+    Unknown {
+        binding: o3k_store::CanonicalRealmBindingRecord,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RealmCleanupProgress {
+    Deleting { operation_id: Uuid, generation: u64 },
+    AwaitingObservation { operation_id: Uuid, generation: u64 },
+    Removed { operation_id: Uuid },
 }
 
 impl NetworkService {
@@ -4381,12 +4539,19 @@ impl NetworkService {
         if inner.root.join("metadata.json").exists() {
             import_legacy_metadata(&inner.root, inner.repository.as_ref()).await?;
         }
-        Ok(Self {
+        inner
+            .repository
+            .backfill_canonical_network_state()
+            .await
+            .map_err(map_store_error)?;
+        let service = Self {
             inner,
             lock: Arc::new(tokio::sync::Mutex::new(())),
             authorizer: Arc::new(StaticAuthorizer::standard()),
             audit_sink: Arc::new(NoopAuditSink),
-        })
+        };
+        service.recover_realm_deletion_operations().await?;
+        Ok(service)
     }
 
     #[must_use]
@@ -4399,6 +4564,1226 @@ impl NetworkService {
     pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
         self.audit_sink = audit_sink;
         self
+    }
+
+    async fn authorize_canonical_action(
+        &self,
+        auth: &AuthContext,
+        action_name: &str,
+        resource_name: &str,
+        resource_id: Option<Uuid>,
+        parent: Option<(&str, Uuid)>,
+    ) -> Result<(ServiceNamespace, ActionId, ResourceType), NetworkError> {
+        let namespace = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let action =
+            ActionId::new("network", action_name).map_err(|_| NetworkError::InvalidRequest)?;
+        let resource_type = ResourceType::new("network", resource_name)
+            .map_err(|_| NetworkError::InvalidRequest)?;
+        let owner_scope = match resource_id {
+            Some(id) => self
+                .inner
+                .repository
+                .get_canonical_owner(resource_name, &id)
+                .await
+                .map_err(map_store_error)?
+                .ok_or(NetworkError::NotFound)?,
+            None => match parent {
+                Some((parent_name, parent_id)) => self
+                    .inner
+                    .repository
+                    .get_canonical_owner(parent_name, &parent_id)
+                    .await
+                    .map_err(map_store_error)?
+                    .ok_or(NetworkError::NotFound)?,
+                None => auth.effective_scope().id().as_str().to_owned(),
+            },
+        };
+        let owner_scope = ScopeId::new(owner_scope).map_err(|_| NetworkError::InvalidRequest)?;
+        let target = match resource_id {
+            Some(id) => ResourceTarget::instance(
+                resource_type.clone(),
+                ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
+                Some(owner_scope.clone()),
+            ),
+            None => ResourceTarget::collection(resource_type.clone(), Some(owner_scope.clone())),
+        };
+        let decision = self.authorizer.authorize(&AuthorizationRequest {
+            auth_context: auth,
+            action: action.clone(),
+            resource_target: target,
+        });
+        if !decision.is_allowed() {
+            self.audit_sink.record(
+                &AuditEvent::from_auth(
+                    auth,
+                    namespace.clone(),
+                    action.clone(),
+                    AuditOutcome::Denied,
+                )
+                .with_resource(
+                    resource_type.clone(),
+                    resource_id.and_then(|id| ResourceId::new(id.to_string()).ok()),
+                    Some(OwnershipScope::project(owner_scope, None, None)),
+                )
+                .with_decision(decision.clone())
+                .with_reason("unauthorized"),
+            );
+            return Err(match decision.reason() {
+                DecisionReason::ScopeMismatch | DecisionReason::MissingOwnership => {
+                    NetworkError::NotFound
+                }
+                _ => NetworkError::Unauthorized,
+            });
+        }
+        Ok((namespace, action, resource_type))
+    }
+
+    fn audit_canonical_result(
+        &self,
+        auth: &AuthContext,
+        namespace: ServiceNamespace,
+        action: ActionId,
+        resource_type: ResourceType,
+        resource_id: Option<Uuid>,
+        result: Result<(), &NetworkError>,
+    ) {
+        let outcome = if result.is_ok() {
+            AuditOutcome::Succeeded
+        } else {
+            AuditOutcome::Failed
+        };
+        let mut event = AuditEvent::from_auth(auth, namespace, action, outcome).with_resource(
+            resource_type,
+            resource_id.and_then(|id| ResourceId::new(id.to_string()).ok()),
+            Some(auth.effective_scope().clone()),
+        );
+        if let Err(error) = result {
+            event = event.with_reason(error.to_string());
+        }
+        self.audit_sink.record(&event);
+    }
+
+    async fn recover_realm_deletion_operations(&self) -> Result<(), NetworkError> {
+        let operations = self
+            .inner
+            .repository
+            .list_non_terminal_lifecycle_operations()
+            .await
+            .map_err(map_store_error)?;
+        for operation in operations {
+            if operation.kind != "lifecycle:realm-delete" {
+                continue;
+            }
+            let canonical = self
+                .inner
+                .repository
+                .get_canonical_operation(operation.id)
+                .await
+                .map_err(map_store_error)?;
+            let realm_id = canonical
+                .resource_id
+                .as_deref()
+                .ok_or(NetworkError::InvalidRequest)?
+                .parse::<Uuid>()
+                .map_err(|_| NetworkError::InvalidRequest)?;
+            let realm = self
+                .inner
+                .repository
+                .get_canonical_realm(&canonical.owner_scope, &realm_id)
+                .await
+                .map_err(map_store_error)?;
+            let Some(realm) = realm else {
+                let update = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                    o3k_kernel::OperationState::Succeeded,
+                    canonical.attempt.saturating_add(1),
+                    canonical.started_at.clone(),
+                    Some(
+                        canonical
+                            .started_at
+                            .clone()
+                            .unwrap_or_else(|| canonical.created_at.clone()),
+                    ),
+                    None,
+                )
+                .map_err(map_store_error)?;
+                self.inner
+                    .repository
+                    .update_canonical_operation_lifecycle(operation.id, &update)
+                    .await
+                    .map_err(map_store_error)?;
+                continue;
+            };
+            if realm.state == "active" {
+                let deleting = match self
+                    .inner
+                    .repository
+                    .begin_canonical_realm_deletion(
+                        &canonical.owner_scope,
+                        &realm_id,
+                        realm.generation,
+                    )
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(o3k_store::StoreError::NetworkInUse) => {
+                        let update = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                            o3k_kernel::OperationState::Retryable,
+                            canonical.attempt.saturating_add(1),
+                            canonical.started_at.clone(),
+                            None,
+                            Some("realm still has canonical dependents".to_owned()),
+                        )
+                        .map_err(map_store_error)?;
+                        self.inner
+                            .repository
+                            .update_canonical_operation_lifecycle(operation.id, &update)
+                            .await
+                            .map_err(map_store_error)?;
+                        continue;
+                    }
+                    Err(error) => return Err(map_store_error(error)),
+                };
+                self.inner
+                    .repository
+                    .update_resource(
+                        realm_id,
+                        i64::try_from(realm.generation)
+                            .map_err(|_| NetworkError::InvalidRequest)?,
+                        "deleting",
+                        "deleting",
+                        i64::try_from(deleting.generation)
+                            .map_err(|_| NetworkError::InvalidRequest)?,
+                        None,
+                    )
+                    .await
+                    .map_err(map_store_error)?;
+                let update = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                    o3k_kernel::OperationState::Running,
+                    canonical.attempt.saturating_add(1),
+                    Some(
+                        canonical
+                            .started_at
+                            .clone()
+                            .unwrap_or_else(|| canonical.created_at.clone()),
+                    ),
+                    None,
+                    None,
+                )
+                .map_err(map_store_error)?;
+                self.inner
+                    .repository
+                    .update_canonical_operation_lifecycle(operation.id, &update)
+                    .await
+                    .map_err(map_store_error)?;
+                debug_assert_eq!(deleting.state, "deleting");
+            }
+        }
+        Ok(())
+    }
+
+    /// Creates only the canonical Network row.  Address realms, pools and
+    /// endpoints are independent child resources and are intentionally not
+    /// synthesized here.
+    pub async fn create_canonical_network_for_project(
+        &self,
+        project_id: &str,
+        name: String,
+    ) -> Result<o3k_store::CanonicalNetworkRecord, NetworkError> {
+        if project_id.trim().is_empty() || name.trim().is_empty() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let _guard = self.lock.lock().await;
+        if self
+            .inner
+            .repository
+            .list_canonical_networks(project_id)
+            .await
+            .map_err(map_store_error)?
+            .iter()
+            .any(|network| network.name == name)
+        {
+            return Err(NetworkError::Conflict);
+        }
+        let network = o3k_store::CanonicalNetworkRecord {
+            id: Uuid::now_v7(),
+            project_id: project_id.to_owned(),
+            name,
+            generation: 1,
+            state: "active".to_owned(),
+        };
+        self.inner
+            .repository
+            .insert_canonical_network(&network)
+            .await
+            .map_err(map_store_error)?;
+        Ok(network)
+    }
+
+    /// Authenticated entry point for canonical Network creation. The
+    /// project-scoped primitive remains intentionally separate for internal
+    /// reconciliation and migration callers.
+    pub async fn create_canonical_network(
+        &self,
+        auth: &AuthContext,
+        name: String,
+    ) -> Result<o3k_store::CanonicalNetworkRecord, NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(auth, "CreateNetwork", "network", None, None)
+            .await?;
+        let result = self
+            .create_canonical_network_for_project(auth.effective_scope().id().as_str(), name)
+            .await;
+        let audit_result = result.as_ref().map(|_| ());
+        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
+        result
+    }
+
+    pub async fn get_canonical_network_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<o3k_store::CanonicalNetworkRecord, NetworkError> {
+        self.inner
+            .repository
+            .get_canonical_network(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)
+    }
+
+    pub async fn get_canonical_network(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+    ) -> Result<o3k_store::CanonicalNetworkRecord, NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(auth, "ReadNetwork", "network", Some(id), None)
+            .await?;
+        let result = self
+            .get_canonical_network_for_project(auth.effective_scope().id().as_str(), id)
+            .await;
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            Some(id),
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
+    pub async fn list_canonical_networks_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<o3k_store::CanonicalNetworkRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_canonical_networks(project_id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_canonical_networks(
+        &self,
+        auth: &AuthContext,
+    ) -> Result<Vec<o3k_store::CanonicalNetworkRecord>, NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(auth, "ListNetworks", "network", None, None)
+            .await?;
+        let result = self
+            .list_canonical_networks_for_project(auth.effective_scope().id().as_str())
+            .await;
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            None,
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
+    pub async fn delete_canonical_network_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock.lock().await;
+        self.inner
+            .repository
+            .delete_canonical_network(project_id, &id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn delete_canonical_network(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(auth, "DeleteNetwork", "network", Some(id), None)
+            .await?;
+        let result = self
+            .delete_canonical_network_for_project(auth.effective_scope().id().as_str(), id)
+            .await;
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            Some(id),
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
+    pub async fn create_canonical_realm_for_project(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+        prefix: String,
+        overlapping_prefixes: bool,
+    ) -> Result<o3k_store::CanonicalAddressRealmRecord, NetworkError> {
+        let prefix = Ipv4Net::parse(&prefix)?.canonical();
+        let _guard = self.lock.lock().await;
+        let network = self
+            .inner
+            .repository
+            .get_canonical_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        if network.state != "active" {
+            return Err(NetworkError::Conflict);
+        }
+        let realm = o3k_store::CanonicalAddressRealmRecord {
+            id: Uuid::now_v7(),
+            network_id,
+            project_id: project_id.to_owned(),
+            prefix,
+            overlapping_prefixes,
+            generation: 1,
+            state: "active".to_owned(),
+        };
+        self.inner
+            .repository
+            .insert_canonical_realm(&realm)
+            .await
+            .map_err(map_store_error)?;
+        if let Err(error) = self
+            .inner
+            .repository
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: realm.id,
+                kind: "network:address_realm".to_owned(),
+                project_id: realm.project_id.clone(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: realm.state.clone(),
+                observed_state: realm.state.clone(),
+                provider_id: None,
+            })
+            .await
+        {
+            let _ = self
+                .inner
+                .repository
+                .delete_canonical_realm(project_id, &realm.id)
+                .await;
+            return Err(map_store_error(error));
+        }
+        Ok(realm)
+    }
+
+    pub async fn create_canonical_realm(
+        &self,
+        auth: &AuthContext,
+        network_id: Uuid,
+        prefix: String,
+        overlapping_prefixes: bool,
+    ) -> Result<o3k_store::CanonicalAddressRealmRecord, NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(
+                auth,
+                "CreateAddressRealm",
+                "address_realm",
+                None,
+                Some(("network", network_id)),
+            )
+            .await?;
+        let result = self
+            .create_canonical_realm_for_project(
+                auth.effective_scope().id().as_str(),
+                network_id,
+                prefix,
+                overlapping_prefixes,
+            )
+            .await;
+        let audit_result = result.as_ref().map(|_| ());
+        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
+        result
+    }
+
+    pub async fn list_canonical_realms_for_project(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+    ) -> Result<Vec<o3k_store::CanonicalAddressRealmRecord>, NetworkError> {
+        if self
+            .get_canonical_network_for_project(project_id, network_id)
+            .await
+            .is_err()
+        {
+            return Err(NetworkError::NotFound);
+        }
+        self.inner
+            .repository
+            .list_canonical_realms(project_id, &network_id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_canonical_realms(
+        &self,
+        auth: &AuthContext,
+        network_id: Uuid,
+    ) -> Result<Vec<o3k_store::CanonicalAddressRealmRecord>, NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(
+                auth,
+                "ListAddressRealms",
+                "address_realm",
+                None,
+                Some(("network", network_id)),
+            )
+            .await?;
+        let result = self
+            .list_canonical_realms_for_project(auth.effective_scope().id().as_str(), network_id)
+            .await;
+        let audit_result = result.as_ref().map(|_| ());
+        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
+        result
+    }
+
+    pub async fn get_canonical_realm(
+        &self,
+        auth: &AuthContext,
+        realm_id: Uuid,
+    ) -> Result<o3k_store::CanonicalAddressRealmRecord, NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(
+                auth,
+                "ReadAddressRealm",
+                "address_realm",
+                Some(realm_id),
+                None,
+            )
+            .await?;
+        let result = self
+            .inner
+            .repository
+            .get_canonical_realm(auth.effective_scope().id().as_str(), &realm_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound);
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            Some(realm_id),
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
+    pub async fn delete_canonical_realm_for_project(
+        &self,
+        project_id: &str,
+        realm_id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let progress = self
+            .begin_canonical_realm_deletion_for_project(project_id, realm_id)
+            .await?;
+        let operation_id = match progress {
+            RealmCleanupProgress::Deleting { operation_id, .. }
+            | RealmCleanupProgress::AwaitingObservation { operation_id, .. }
+            | RealmCleanupProgress::Removed { operation_id } => operation_id,
+        };
+        let bindings = self
+            .inner
+            .repository
+            .list_canonical_realm_bindings(&realm_id)
+            .await
+            .map_err(map_store_error)?;
+        if bindings.is_empty() {
+            match self
+                .observe_canonical_realm_cleanup_for_project(project_id, realm_id, Vec::new())
+                .await?
+            {
+                RealmCleanupProgress::Removed { .. } => Ok(()),
+                _ => Err(NetworkError::Conflict),
+            }
+        } else {
+            // No provider observation is available at this service boundary;
+            // retaining Deleting is the safe result. A provider/reconciler
+            // must call the explicit observation method before final removal.
+            let _ = operation_id;
+            Err(NetworkError::Conflict)
+        }
+    }
+
+    pub async fn delete_canonical_realm(
+        &self,
+        auth: &AuthContext,
+        realm_id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(
+                auth,
+                "DeleteAddressRealm",
+                "address_realm",
+                Some(realm_id),
+                None,
+            )
+            .await?;
+        let result = self
+            .delete_canonical_realm_for_project(auth.effective_scope().id().as_str(), realm_id)
+            .await;
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            Some(realm_id),
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
+    /// Durably accepts a Realm deletion before any provider mutation. The
+    /// operation identity is deterministic, so retries join the same
+    /// workflow even after a process restart.
+    pub async fn begin_canonical_realm_deletion_for_project(
+        &self,
+        project_id: &str,
+        realm_id: Uuid,
+    ) -> Result<RealmCleanupProgress, NetworkError> {
+        let _guard = self.lock.lock().await;
+        let realm = self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, &realm_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        let (operation, canonical, request) = realm_delete_operation(project_id, realm_id)?;
+        let accepted = self
+            .inner
+            .repository
+            .create_or_replay_canonical_scoped_operation(&operation, &canonical, &request)
+            .await
+            .map_err(map_store_error)?;
+        let operation_id = match accepted {
+            o3k_store::IdempotencyReservation::Conflict => return Err(NetworkError::Conflict),
+            o3k_store::IdempotencyReservation::Created(id)
+            | o3k_store::IdempotencyReservation::ExistingEquivalent(id) => id,
+        };
+        if realm.state == "deleting" {
+            return Ok(RealmCleanupProgress::AwaitingObservation {
+                operation_id,
+                generation: realm.generation,
+            });
+        }
+        if realm.state != "active" {
+            let _ = self
+                .inner
+                .repository
+                .update_operation(
+                    operation_id,
+                    o3k_store::OperationState::Failed,
+                    None,
+                    Some("invalid_state"),
+                    Some("Realm is not deletable in its current lifecycle state"),
+                )
+                .await;
+            return Err(NetworkError::Conflict);
+        }
+        let deleting = match self
+            .inner
+            .repository
+            .begin_canonical_realm_deletion(project_id, &realm_id, realm.generation)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let state = if matches!(error, o3k_store::StoreError::NetworkInUse) {
+                    o3k_store::OperationState::Retryable
+                } else {
+                    o3k_store::OperationState::Failed
+                };
+                let _ = self
+                    .inner
+                    .repository
+                    .update_operation(
+                        operation_id,
+                        state,
+                        None,
+                        Some("rejected"),
+                        Some(&error.to_string()),
+                    )
+                    .await;
+                return Err(map_store_error(error));
+            }
+        };
+        self.inner
+            .repository
+            .update_resource(
+                realm_id,
+                i64::try_from(realm.generation).map_err(|_| NetworkError::InvalidRequest)?,
+                "deleting",
+                "deleting",
+                i64::try_from(deleting.generation).map_err(|_| NetworkError::InvalidRequest)?,
+                None,
+            )
+            .await
+            .map_err(map_store_error)?;
+        let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+            o3k_kernel::OperationState::Running,
+            1,
+            Some(canonical.created_at.clone()),
+            None,
+            None,
+        )
+        .map_err(map_store_error)?;
+        self.inner
+            .repository
+            .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+            .await
+            .map_err(map_store_error)?;
+        Ok(RealmCleanupProgress::Deleting {
+            operation_id,
+            generation: deleting.generation,
+        })
+    }
+
+    /// Applies a provider observation to a durable Realm deletion. Every
+    /// current binding must be identified exactly; absent observations remove
+    /// only the matching owned binding after generation validation.
+    pub async fn observe_canonical_realm_cleanup_for_project(
+        &self,
+        project_id: &str,
+        realm_id: Uuid,
+        observations: Vec<RealmCleanupObservation>,
+    ) -> Result<RealmCleanupProgress, NetworkError> {
+        let _guard = self.lock.lock().await;
+        let realm = self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, &realm_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        if realm.state != "deleting" {
+            return Err(NetworkError::Conflict);
+        }
+        let (operation, _, _) = realm_delete_operation(project_id, realm_id)?;
+        let operation_record = self
+            .inner
+            .repository
+            .get_operation(operation.id)
+            .await
+            .map_err(map_store_error)?;
+        let canonical = self
+            .inner
+            .repository
+            .get_canonical_operation(operation.id)
+            .await
+            .map_err(map_store_error)?;
+        if operation_record.resource_id != realm_id
+            || canonical.owner_scope != project_id
+            || canonical.resource_id.as_deref() != Some(&realm_id.to_string())
+        {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let bindings = self
+            .inner
+            .repository
+            .list_canonical_realm_bindings(&realm_id)
+            .await
+            .map_err(map_store_error)?;
+        if observations.len() != bindings.len() {
+            return Err(NetworkError::Conflict);
+        }
+        let same_binding =
+            |left: &o3k_store::CanonicalRealmBindingRecord,
+             right: &o3k_store::CanonicalRealmBindingRecord| {
+                left == right && left.realm_id == realm_id
+            };
+        for binding in &bindings {
+            let matching: Vec<_> = observations
+                .iter()
+                .filter(|observation| match observation {
+                    RealmCleanupObservation::Absent(value)
+                    | RealmCleanupObservation::Present(value) => same_binding(binding, value),
+                    RealmCleanupObservation::Unknown { binding: value, .. } => {
+                        same_binding(binding, value)
+                    }
+                })
+                .collect();
+            if matching.len() != 1 {
+                return Err(NetworkError::Conflict);
+            }
+            match matching[0] {
+                RealmCleanupObservation::Unknown { reason, .. } => {
+                    let update = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                        o3k_kernel::OperationState::UnknownOutcome,
+                        canonical.attempt.saturating_add(1),
+                        canonical.started_at.clone(),
+                        None,
+                        Some(reason.clone()),
+                    )
+                    .map_err(map_store_error)?;
+                    self.inner
+                        .repository
+                        .update_canonical_operation_lifecycle(operation.id, &update)
+                        .await
+                        .map_err(map_store_error)?;
+                    return Ok(RealmCleanupProgress::AwaitingObservation {
+                        operation_id: operation.id,
+                        generation: realm.generation,
+                    });
+                }
+                RealmCleanupObservation::Present(_) => {
+                    let update = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                        o3k_kernel::OperationState::Retryable,
+                        canonical.attempt.saturating_add(1),
+                        canonical.started_at.clone(),
+                        None,
+                        Some("owned provider Realm state is still present".to_owned()),
+                    )
+                    .map_err(map_store_error)?;
+                    self.inner
+                        .repository
+                        .update_canonical_operation_lifecycle(operation.id, &update)
+                        .await
+                        .map_err(map_store_error)?;
+                    return Ok(RealmCleanupProgress::AwaitingObservation {
+                        operation_id: operation.id,
+                        generation: realm.generation,
+                    });
+                }
+                RealmCleanupObservation::Absent(_) => {}
+            }
+        }
+        for binding in bindings {
+            self.inner
+                .repository
+                .delete_canonical_realm_binding(&binding, realm.generation)
+                .await
+                .map_err(map_store_error)?;
+        }
+        self.inner
+            .repository
+            .finalize_canonical_realm_deletion(project_id, &realm_id, realm.generation)
+            .await
+            .map_err(map_store_error)?;
+        let _ = self
+            .inner
+            .repository
+            .update_resource(
+                realm_id,
+                i64::try_from(realm.generation).map_err(|_| NetworkError::InvalidRequest)?,
+                "deleted",
+                "deleted",
+                i64::try_from(realm.generation).map_err(|_| NetworkError::InvalidRequest)?,
+                None,
+            )
+            .await;
+        let update = o3k_store::CanonicalOperationLifecycleUpdate::new(
+            o3k_kernel::OperationState::Succeeded,
+            canonical.attempt.saturating_add(1),
+            canonical.started_at.clone(),
+            Some(
+                canonical
+                    .started_at
+                    .clone()
+                    .unwrap_or_else(|| canonical.created_at.clone()),
+            ),
+            None,
+        )
+        .map_err(map_store_error)?;
+        self.inner
+            .repository
+            .update_canonical_operation_lifecycle(operation.id, &update)
+            .await
+            .map_err(map_store_error)?;
+        Ok(RealmCleanupProgress::Removed {
+            operation_id: operation.id,
+        })
+    }
+
+    pub async fn create_canonical_pool_for_project(
+        &self,
+        project_id: &str,
+        realm_id: Uuid,
+        prefix: String,
+        gateway: Option<Ipv4Addr>,
+        first_usable: Ipv4Addr,
+        last_usable: Ipv4Addr,
+    ) -> Result<o3k_store::CanonicalAddressPoolRecord, NetworkError> {
+        let pool_prefix_net = Ipv4Net::parse(&prefix)?;
+        let pool_prefix = pool_prefix_net.canonical();
+        if first_usable > last_usable
+            || !pool_prefix_net.contains(first_usable)
+            || !pool_prefix_net.contains(last_usable)
+        {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let _guard = self.lock.lock().await;
+        let realm = self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, &realm_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        if realm.state != "active" {
+            return Err(NetworkError::Conflict);
+        }
+        let realm_prefix = Ipv4Net::parse(&realm.prefix)?;
+        if !realm_prefix.contains(pool_prefix_net.network)
+            || pool_prefix_net.prefix < realm_prefix.prefix
+        {
+            return Err(NetworkError::InvalidRequest);
+        }
+        if gateway.is_some_and(|value| !pool_prefix_net.contains(value)) {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let pool = o3k_store::CanonicalAddressPoolRecord {
+            id: Uuid::now_v7(),
+            realm_id,
+            project_id: project_id.to_owned(),
+            prefix: pool_prefix,
+            gateway,
+            first_usable,
+            last_usable,
+            generation: 1,
+            state: "active".to_owned(),
+        };
+        self.inner
+            .repository
+            .insert_canonical_pool(&pool)
+            .await
+            .map_err(map_store_error)?;
+        Ok(pool)
+    }
+
+    pub async fn create_canonical_pool(
+        &self,
+        auth: &AuthContext,
+        realm_id: Uuid,
+        prefix: String,
+        gateway: Option<Ipv4Addr>,
+        first_usable: Ipv4Addr,
+        last_usable: Ipv4Addr,
+    ) -> Result<o3k_store::CanonicalAddressPoolRecord, NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(
+                auth,
+                "CreateAddressPool",
+                "address_pool",
+                None,
+                Some(("address_realm", realm_id)),
+            )
+            .await?;
+        let result = self
+            .create_canonical_pool_for_project(
+                auth.effective_scope().id().as_str(),
+                realm_id,
+                prefix,
+                gateway,
+                first_usable,
+                last_usable,
+            )
+            .await;
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            None,
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
+    pub async fn list_canonical_pools(
+        &self,
+        auth: &AuthContext,
+        realm_id: Uuid,
+    ) -> Result<Vec<o3k_store::CanonicalAddressPoolRecord>, NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(
+                auth,
+                "ListAddressPools",
+                "address_pool",
+                None,
+                Some(("address_realm", realm_id)),
+            )
+            .await?;
+        let result = self
+            .inner
+            .repository
+            .list_canonical_pools(auth.effective_scope().id().as_str(), &realm_id)
+            .await
+            .map_err(map_store_error);
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            None,
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
+    pub async fn delete_canonical_pool(
+        &self,
+        auth: &AuthContext,
+        pool_id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(
+                auth,
+                "DeleteAddressPool",
+                "address_pool",
+                Some(pool_id),
+                None,
+            )
+            .await?;
+        let result = self
+            .inner
+            .repository
+            .delete_canonical_pool(auth.effective_scope().id().as_str(), &pool_id)
+            .await
+            .map_err(map_store_error);
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            Some(pool_id),
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
+    pub async fn create_canonical_endpoint_for_project(
+        &self,
+        project_id: &str,
+        realm_id: Uuid,
+        fixed_ip: Ipv4Addr,
+        mac: String,
+    ) -> Result<o3k_store::CanonicalEndpointRecord, NetworkError> {
+        if mac.trim().is_empty() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let _guard = self.lock.lock().await;
+        let realm = self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, &realm_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        if !Ipv4Net::parse(&realm.prefix)?.contains(fixed_ip) || realm.state != "active" {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let endpoint = o3k_store::CanonicalEndpointRecord {
+            id: Uuid::now_v7(),
+            realm_id,
+            project_id: project_id.to_owned(),
+            fixed_ip,
+            mac,
+            generation: 1,
+            state: "active".to_owned(),
+        };
+        self.inner
+            .repository
+            .insert_canonical_endpoint(&endpoint)
+            .await
+            .map_err(map_store_error)?;
+        Ok(endpoint)
+    }
+
+    pub async fn create_canonical_endpoint(
+        &self,
+        auth: &AuthContext,
+        realm_id: Uuid,
+        fixed_ip: Ipv4Addr,
+        mac: String,
+    ) -> Result<o3k_store::CanonicalEndpointRecord, NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(
+                auth,
+                "CreateEndpoint",
+                "endpoint",
+                None,
+                Some(("address_realm", realm_id)),
+            )
+            .await?;
+        let result = self
+            .create_canonical_endpoint_for_project(
+                auth.effective_scope().id().as_str(),
+                realm_id,
+                fixed_ip,
+                mac,
+            )
+            .await;
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            None,
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
+    pub async fn list_canonical_endpoints(
+        &self,
+        auth: &AuthContext,
+        realm_id: Uuid,
+    ) -> Result<Vec<o3k_store::CanonicalEndpointRecord>, NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(
+                auth,
+                "ListEndpoints",
+                "endpoint",
+                None,
+                Some(("address_realm", realm_id)),
+            )
+            .await?;
+        let result = self
+            .inner
+            .repository
+            .list_canonical_endpoints(auth.effective_scope().id().as_str(), &realm_id)
+            .await
+            .map_err(map_store_error);
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            None,
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
+    pub async fn get_canonical_endpoint(
+        &self,
+        auth: &AuthContext,
+        endpoint_id: Uuid,
+    ) -> Result<o3k_store::CanonicalEndpointRecord, NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(auth, "ReadEndpoint", "endpoint", Some(endpoint_id), None)
+            .await?;
+        let result = self
+            .inner
+            .repository
+            .get_canonical_endpoint(auth.effective_scope().id().as_str(), &endpoint_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound);
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            Some(endpoint_id),
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
+    pub async fn delete_canonical_endpoint(
+        &self,
+        auth: &AuthContext,
+        endpoint_id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(auth, "DeleteEndpoint", "endpoint", Some(endpoint_id), None)
+            .await?;
+        let result = self
+            .inner
+            .repository
+            .delete_canonical_endpoint(auth.effective_scope().id().as_str(), &endpoint_id)
+            .await
+            .map_err(map_store_error);
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            Some(endpoint_id),
+            result.as_ref().map(|_| ()),
+        );
+        result
+    }
+
+    /// Reconstructs canonical execution inputs from durable rows. Empty child
+    /// collections are valid and never become NotFound or placeholder realms.
+    pub async fn reconstruct_canonical_network(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+    ) -> Result<CanonicalNetworkSnapshot, NetworkError> {
+        let network = self
+            .get_canonical_network_for_project(project_id, network_id)
+            .await?;
+        let realms = self
+            .inner
+            .repository
+            .list_canonical_realms(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?;
+        let mut pools = BTreeMap::new();
+        let mut endpoints = BTreeMap::new();
+        for realm in &realms {
+            if realm.network_id != network.id || realm.project_id != network.project_id {
+                return Err(NetworkError::InvalidRequest);
+            }
+            pools.insert(
+                realm.id,
+                self.inner
+                    .repository
+                    .list_canonical_pools(project_id, &realm.id)
+                    .await
+                    .map_err(map_store_error)?,
+            );
+            endpoints.insert(
+                realm.id,
+                self.inner
+                    .repository
+                    .list_canonical_endpoints(project_id, &realm.id)
+                    .await
+                    .map_err(map_store_error)?,
+            );
+        }
+        Ok(CanonicalNetworkSnapshot {
+            network,
+            realms,
+            pools,
+            endpoints,
+        })
     }
 
     pub async fn create_network(
@@ -4465,7 +5850,7 @@ impl NetworkService {
         if self
             .inner
             .repository
-            .list_networks(project_id)
+            .list_canonical_networks(project_id)
             .await
             .map_err(map_store_error)?
             .iter()
@@ -4478,6 +5863,13 @@ impl NetworkService {
             name,
             project_id: project_id.to_owned(),
             status: "ACTIVE".to_owned(),
+        };
+        let canonical = o3k_store::CanonicalNetworkRecord {
+            id: network.id,
+            project_id: network.project_id.clone(),
+            name: network.name.clone(),
+            generation: 1,
+            state: "active".to_owned(),
         };
         let scope =
             OwnershipScope::project(ScopeId::new_unchecked(project_id.to_owned()), None, None);
@@ -4504,8 +5896,26 @@ impl NetworkService {
                 other => map_store_error(other),
             })?;
 
-        match self.inner.repository.insert_network(&network).await {
+        match self
+            .inner
+            .repository
+            .insert_canonical_network(&canonical)
+            .await
+        {
             Ok(()) => {
+                if let Err(error) = self.inner.repository.insert_network(&network).await {
+                    let _ = self
+                        .inner
+                        .repository
+                        .delete_canonical_network(project_id, &network.id)
+                        .await;
+                    let _ = self
+                        .inner
+                        .repository
+                        .release_reservation(&quota_res.id)
+                        .await;
+                    return Err(map_store_error(error));
+                }
                 let _ = self
                     .inner
                     .repository
@@ -4777,35 +6187,27 @@ impl NetworkService {
         if self
             .inner
             .repository
-            .get_network(project_id, &network_id)
+            .get_canonical_network(project_id, &network_id)
             .await
             .map_err(map_store_error)?
             .is_none()
         {
             return Err(NetworkError::NotFound);
         }
-        let record = self
+        let mut policies = self
             .inner
             .repository
-            .get_network_intent(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?;
-        let mut policies = if let Some(record) = record {
-            let intent: NetworkIntent =
-                serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
-            if intent.id != network_id || intent.project_id != project_id {
-                return Err(NetworkError::InvalidRequest);
-            }
-            intent.policies
-        } else {
-            Vec::new()
-        };
-        for port in self
-            .inner
-            .repository
-            .list_ports_for_network(project_id, &network_id)
+            .list_canonical_policies(project_id, &network_id)
             .await
             .map_err(map_store_error)?
+            .into_iter()
+            .map(policy_from_canonical_record)
+            .collect::<Result<Vec<_>, _>>()?;
+        for port in self
+            .list_ports_for_project(project_id)
+            .await?
+            .into_iter()
+            .filter(|port| port.network_id == network_id)
         {
             let bindings = self
                 .inner
@@ -4862,9 +6264,8 @@ impl NetworkService {
         Ok(policies)
     }
 
-    /// Adds or replaces one canonical policy rule and persists the complete
-    /// network intent under one generation-fenced store record. The record is
-    /// keyed by the public network ID; provider-native rules are never stored.
+    /// Adds or replaces one canonical policy rule. NetworkIntent is not
+    /// consulted or written; endpoint ownership establishes realm context.
     pub async fn upsert_policy_for_project(
         &self,
         project_id: &str,
@@ -4872,27 +6273,32 @@ impl NetworkService {
         policy: PolicyIntent,
     ) -> Result<PolicyIntent, NetworkError> {
         let _guard = self.lock().await;
-        let mut intent = self
-            .load_policy_intent_locked(project_id, network_id)
-            .await?;
-        if policy.endpoint_id.is_nil()
-            || !intent
-                .endpoints
-                .iter()
-                .any(|endpoint| endpoint.id == policy.endpoint_id)
-            || intent.policies.iter().any(|existing| {
-                existing.id == policy.id && existing.endpoint_id != policy.endpoint_id
-            })
-        {
+        if policy.endpoint_id.is_nil() {
             return Err(NetworkError::InvalidRequest);
         }
         validate_policy_shape(&policy)?;
-        intent.policies.retain(|existing| existing.id != policy.id);
-        intent.policies.push(policy.clone());
-        intent.policies.sort_by_key(|value| value.id);
-        intent.generation = intent.generation.saturating_add(1);
-        self.persist_policy_intent_locked(project_id, network_id, intent)
-            .await?;
+        let endpoint = self
+            .inner
+            .repository
+            .get_canonical_endpoint(project_id, &policy.endpoint_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        let realm = self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, &endpoint.realm_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::InvalidRequest)?;
+        if realm.network_id != network_id || realm.state != "active" {
+            return Err(NetworkError::Conflict);
+        }
+        self.inner
+            .repository
+            .upsert_canonical_policy(&canonical_policy_record(project_id, &policy))
+            .await
+            .map_err(map_store_error)?;
         Ok(policy)
     }
 
@@ -4903,188 +6309,31 @@ impl NetworkService {
         policy_id: Uuid,
     ) -> Result<(), NetworkError> {
         let _guard = self.lock().await;
-        let mut intent = self
-            .load_policy_intent_locked(project_id, network_id)
-            .await?;
-        let original = intent.policies.len();
-        intent.policies.retain(|policy| policy.id != policy_id);
-        if intent.policies.len() == original {
+        let exists = self
+            .list_policies_for_project(project_id, network_id)
+            .await?
+            .iter()
+            .any(|policy| policy.id == policy_id);
+        if !exists {
             return Err(NetworkError::NotFound);
         }
-        intent.generation = intent.generation.saturating_add(1);
-        self.persist_policy_intent_locked(project_id, network_id, intent)
+        self.inner
+            .repository
+            .delete_canonical_policy(project_id, &policy_id)
             .await
+            .map_err(map_store_error)
     }
 
-    /// Projects a successful provider observation onto the durable intent.
-    /// Dispatch alone is not success; callers invoke this only after the
-    /// executor returned an observed terminal success.
+    /// Compatibility hook retained for callers that report provider
+    /// realization. Canonical Network state is authoritative; this hook must
+    /// not mutate the transitional NetworkIntent payload.
     pub async fn mark_network_intent_active_for_project(
         &self,
         project_id: &str,
         network_id: Uuid,
     ) -> Result<(), NetworkError> {
-        let _guard = self.lock().await;
-        let Some(record) = self
-            .inner
-            .repository
-            .get_network_intent(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?
-        else {
-            return Err(NetworkError::NotFound);
-        };
-        let mut intent: NetworkIntent =
-            serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
-        intent.state = o3k_domain::NetworkIntentState::Active;
-        intent.generation = intent.generation.saturating_add(1);
-        let payload = serde_json::to_string(&intent).map_err(|_| NetworkError::InvalidRequest)?;
-        self.inner
-            .repository
-            .update_network_intent(
-                project_id,
-                &network_id,
-                record.generation,
-                &payload,
-                record.plan_fingerprint_sha256.as_deref(),
-                "active",
-            )
-            .await
-            .map_err(map_store_error)?;
-        Ok(())
-    }
-
-    async fn load_policy_intent_locked(
-        &self,
-        project_id: &str,
-        network_id: Uuid,
-    ) -> Result<NetworkIntent, NetworkError> {
-        if self
-            .inner
-            .repository
-            .get_network(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?
-            .is_none()
-        {
-            return Err(NetworkError::NotFound);
-        }
-        if let Some(record) = self
-            .inner
-            .repository
-            .get_network_intent(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?
-        {
-            let intent: NetworkIntent =
-                serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
-            if intent.id != network_id || intent.project_id != project_id {
-                return Err(NetworkError::InvalidRequest);
-            }
-            return Ok(intent);
-        }
-        let subnet = self
-            .inner
-            .repository
-            .list_subnets_for_network(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?
-            .into_iter()
-            .next()
-            .ok_or(NetworkError::NotFound)?;
-        let (network, prefix_len) = subnet
-            .cidr
-            .split_once('/')
-            .ok_or(NetworkError::InvalidRequest)?;
-        let prefix = o3k_domain::Ipv4Prefix::new(
-            network.parse().map_err(|_| NetworkError::InvalidRequest)?,
-            prefix_len
-                .parse()
-                .map_err(|_| NetworkError::InvalidRequest)?,
-        )
-        .ok_or(NetworkError::InvalidRequest)?;
-        let ports = self
-            .inner
-            .repository
-            .list_ports_for_network(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?;
-        Ok(NetworkIntent {
-            id: network_id,
-            project_id: project_id.to_owned(),
-            realm: AddressRealm {
-                id: network_id,
-                project_id: project_id.to_owned(),
-                prefix,
-                overlapping_prefixes: false,
-            },
-            address_pools: vec![o3k_domain::AddressPool {
-                id: subnet.id,
-                realm_id: network_id,
-                project_id: project_id.to_owned(),
-                prefix,
-                gateway: Some(subnet.gateway_ip),
-                first_usable: subnet.allocation_start,
-                last_usable: subnet.allocation_end,
-            }],
-            endpoints: ports
-                .into_iter()
-                .map(|port| o3k_domain::EndpointIntent {
-                    id: port.id,
-                    project_id: port.project_id,
-                    mac: port.mac_address,
-                    fixed_ip: port.fixed_ip,
-                    generation: 1,
-                })
-                .collect(),
-            routes: Vec::new(),
-            gateways: Vec::new(),
-            egress: Vec::new(),
-            public_addresses: Vec::new(),
-            policies: Vec::new(),
-            generation: 1,
-            state: o3k_domain::NetworkIntentState::Requested,
-        })
-    }
-
-    async fn persist_policy_intent_locked(
-        &self,
-        project_id: &str,
-        network_id: Uuid,
-        intent: NetworkIntent,
-    ) -> Result<(), NetworkError> {
-        let payload = serde_json::to_string(&intent).map_err(|_| NetworkError::InvalidRequest)?;
-        let fingerprint = format!("policy-generation-{}", intent.generation);
-        let repository = self.inner.repository.as_ref();
-        if let Some(existing) = repository
-            .get_network_intent(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?
-        {
-            repository
-                .update_network_intent(
-                    project_id,
-                    &network_id,
-                    existing.generation,
-                    &payload,
-                    Some(&fingerprint),
-                    existing.status.as_str(),
-                )
-                .await
-                .map_err(map_store_error)?;
-        } else {
-            repository
-                .insert_network_intent(&o3k_store::NetworkIntentRecord {
-                    id: network_id,
-                    project_id: project_id.to_owned(),
-                    generation: 1,
-                    payload,
-                    plan_fingerprint_sha256: Some(fingerprint),
-                    status: "requested".to_owned(),
-                })
-                .await
-                .map_err(map_store_error)?;
-        }
+        self.get_canonical_network_for_project(project_id, network_id)
+            .await?;
         Ok(())
     }
 
@@ -5124,8 +6373,14 @@ impl NetworkService {
     ) -> Result<Vec<NetworkRecord>, NetworkError> {
         self.inner
             .repository
-            .list_networks(project_id)
+            .list_canonical_networks(project_id)
             .await
+            .map(|networks| {
+                networks
+                    .into_iter()
+                    .map(canonical_network_projection)
+                    .collect()
+            })
             .map_err(map_store_error)
     }
 
@@ -5168,8 +6423,9 @@ impl NetworkService {
     ) -> Result<NetworkRecord, NetworkError> {
         self.inner
             .repository
-            .get_network(project_id, &id)
+            .get_canonical_network(project_id, &id)
             .await
+            .map(|network| network.map(canonical_network_projection))
             .map_err(map_store_error)?
             .ok_or(NetworkError::NotFound)
     }
@@ -5231,9 +6487,10 @@ impl NetworkService {
         let _guard = self.lock().await;
         self.inner
             .repository
-            .delete_network(project_id, &id)
+            .delete_canonical_network(project_id, &id)
             .await
             .map_err(map_store_error)?;
+        let _ = self.inner.repository.delete_network(project_id, &id).await;
         let _ = self
             .inner
             .repository
@@ -5337,24 +6594,16 @@ impl NetworkService {
             return Err(NetworkError::InvalidRequest);
         }
         let _guard = self.lock().await;
+        self.get_canonical_network_for_project(project_id, network_id)
+            .await?;
         if self
             .inner
             .repository
-            .get_network(project_id, &network_id)
-            .await
-            .map_err(map_store_error)?
-            .is_none()
-        {
-            return Err(NetworkError::NotFound);
-        }
-        if self
-            .inner
-            .repository
-            .list_subnets_for_network(project_id, &network_id)
+            .list_canonical_realms(project_id, &network_id)
             .await
             .map_err(map_store_error)?
             .iter()
-            .any(|subnet| subnet.cidr == cidr)
+            .any(|realm| realm.prefix == cidr)
         {
             return Err(NetworkError::Conflict);
         }
@@ -5393,15 +6642,70 @@ impl NetworkService {
                 other => map_store_error(other),
             })?;
 
-        match self.inner.repository.insert_subnet(&subnet).await {
-            Ok(()) => {
-                let _ = self
-                    .inner
-                    .repository
-                    .commit_reservation(&quota_res.id)
-                    .await;
-                Ok(subnet)
-            }
+        let realm = o3k_store::CanonicalAddressRealmRecord {
+            id: subnet.id,
+            network_id: subnet.network_id,
+            project_id: subnet.project_id.clone(),
+            prefix: subnet.cidr.clone(),
+            overlapping_prefixes: false,
+            generation: 1,
+            state: "active".to_owned(),
+        };
+        let pool = o3k_store::CanonicalAddressPoolRecord {
+            id: Uuid::now_v7(),
+            realm_id: realm.id,
+            project_id: realm.project_id.clone(),
+            prefix: realm.prefix.clone(),
+            gateway: Some(subnet.gateway_ip),
+            first_usable: subnet.allocation_start,
+            last_usable: subnet.allocation_end,
+            generation: 1,
+            state: "active".to_owned(),
+        };
+        match self.inner.repository.insert_canonical_realm(&realm).await {
+            Ok(()) => match self.inner.repository.insert_canonical_pool(&pool).await {
+                Ok(()) => match self.inner.repository.insert_subnet(&subnet).await {
+                    Ok(()) => {
+                        let _ = self
+                            .inner
+                            .repository
+                            .commit_reservation(&quota_res.id)
+                            .await;
+                        Ok(subnet)
+                    }
+                    Err(error) => {
+                        let _ = self
+                            .inner
+                            .repository
+                            .delete_canonical_pool(project_id, &pool.id)
+                            .await;
+                        let _ = self
+                            .inner
+                            .repository
+                            .delete_canonical_realm(project_id, &realm.id)
+                            .await;
+                        let _ = self
+                            .inner
+                            .repository
+                            .release_reservation(&quota_res.id)
+                            .await;
+                        Err(map_store_error(error))
+                    }
+                },
+                Err(error) => {
+                    let _ = self
+                        .inner
+                        .repository
+                        .delete_canonical_realm(project_id, &realm.id)
+                        .await;
+                    let _ = self
+                        .inner
+                        .repository
+                        .release_reservation(&quota_res.id)
+                        .await;
+                    Err(map_store_error(error))
+                }
+            },
             Err(o3k_store::StoreError::ResourceAlreadyExists) => {
                 let _ = self
                     .inner
@@ -5454,11 +6758,25 @@ impl NetworkService {
         &self,
         project_id: &str,
     ) -> Result<Vec<SubnetRecord>, NetworkError> {
-        self.inner
+        let networks = self
+            .inner
             .repository
-            .list_subnets(project_id)
+            .list_canonical_networks(project_id)
             .await
-            .map_err(map_store_error)
+            .map_err(map_store_error)?;
+        let mut result = Vec::new();
+        for network in networks {
+            for realm in self
+                .inner
+                .repository
+                .list_canonical_realms(project_id, &network.id)
+                .await
+                .map_err(map_store_error)?
+            {
+                result.push(self.project_canonical_subnet(project_id, &realm).await?);
+            }
+        }
+        Ok(result)
     }
 
     pub async fn get_subnet(
@@ -5497,12 +6815,46 @@ impl NetworkService {
         project_id: &str,
         id: Uuid,
     ) -> Result<SubnetRecord, NetworkError> {
-        self.inner
+        let realm = self
+            .inner
             .repository
-            .get_subnet(project_id, &id)
+            .get_canonical_realm(project_id, &id)
             .await
             .map_err(map_store_error)?
-            .ok_or(NetworkError::NotFound)
+            .ok_or(NetworkError::NotFound)?;
+        self.project_canonical_subnet(project_id, &realm).await
+    }
+
+    async fn project_canonical_subnet(
+        &self,
+        project_id: &str,
+        realm: &o3k_store::CanonicalAddressRealmRecord,
+    ) -> Result<SubnetRecord, NetworkError> {
+        let pool = self
+            .inner
+            .repository
+            .list_canonical_pools(project_id, &realm.id)
+            .await
+            .map_err(map_store_error)?
+            .into_iter()
+            .next()
+            .ok_or(NetworkError::InvalidRequest)?;
+        let metadata = self
+            .inner
+            .repository
+            .get_subnet(project_id, &realm.id)
+            .await
+            .map_err(map_store_error)?;
+        Ok(SubnetRecord {
+            id: realm.id,
+            network_id: realm.network_id,
+            name: metadata.map(|value| value.name).unwrap_or_default(),
+            project_id: realm.project_id.clone(),
+            cidr: realm.prefix.clone(),
+            gateway_ip: pool.gateway.ok_or(NetworkError::InvalidRequest)?,
+            allocation_start: pool.first_usable,
+            allocation_end: pool.last_usable,
+        })
     }
 
     pub async fn delete_subnet(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
@@ -5559,11 +6911,48 @@ impl NetworkService {
         id: Uuid,
     ) -> Result<(), NetworkError> {
         let _guard = self.lock().await;
-        self.inner
+        let metadata_exists = self
+            .inner
             .repository
-            .delete_subnet(project_id, &id)
+            .get_subnet(project_id, &id)
             .await
-            .map_err(map_store_error)?;
+            .map_err(map_store_error)?
+            .is_some();
+        if let Some(realm) = self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+        {
+            for pool in self
+                .inner
+                .repository
+                .list_canonical_pools(project_id, &realm.id)
+                .await
+                .map_err(map_store_error)?
+            {
+                self.inner
+                    .repository
+                    .delete_canonical_pool(project_id, &pool.id)
+                    .await
+                    .map_err(map_store_error)?;
+            }
+            self.inner
+                .repository
+                .delete_canonical_realm(project_id, &realm.id)
+                .await
+                .map_err(map_store_error)?;
+        } else if !metadata_exists {
+            return Err(NetworkError::NotFound);
+        }
+        if metadata_exists {
+            self.inner
+                .repository
+                .delete_subnet(project_id, &id)
+                .await
+                .map_err(map_store_error)?;
+        }
         let _ = self
             .inner
             .repository
@@ -5634,20 +7023,24 @@ impl NetworkService {
             return Err(NetworkError::InvalidRequest);
         }
         let _guard = self.lock().await;
-        if self
+        self.get_canonical_network_for_project(project_id, network_id)
+            .await?;
+        let realms = self
             .inner
             .repository
-            .get_network(project_id, &network_id)
+            .list_canonical_realms(project_id, &network_id)
             .await
-            .map_err(map_store_error)?
-            .is_none()
-        {
-            return Err(NetworkError::NotFound);
-        }
-        let subnet = self
+            .map_err(map_store_error)?;
+        let realm = match realms.as_slice() {
+            [] => return Err(NetworkError::NotFound),
+            [realm] if realm.state == "active" => realm,
+            [_] => return Err(NetworkError::Conflict),
+            _ => return Err(NetworkError::InvalidRequest),
+        };
+        let pool = self
             .inner
             .repository
-            .list_subnets_for_network(project_id, &network_id)
+            .list_canonical_pools(project_id, &realm.id)
             .await
             .map_err(map_store_error)?
             .into_iter()
@@ -5656,15 +7049,15 @@ impl NetworkService {
         let used: HashSet<Ipv4Addr> = self
             .inner
             .repository
-            .list_ports_for_network(project_id, &network_id)
+            .list_canonical_endpoints(project_id, &realm.id)
             .await
             .map_err(map_store_error)?
             .into_iter()
-            .map(|port| port.fixed_ip)
+            .map(|endpoint| endpoint.fixed_ip)
             .collect();
-        let mut candidate = u32::from(subnet.allocation_start);
-        let end = u32::from(subnet.allocation_end);
-        let gateway = subnet.gateway_ip;
+        let mut candidate = u32::from(pool.first_usable);
+        let end = u32::from(pool.last_usable);
+        let gateway = pool.gateway.ok_or(NetworkError::InvalidRequest)?;
         while candidate <= end {
             let address = Ipv4Addr::from(candidate);
             if address != gateway && !used.contains(&address) {
@@ -5672,7 +7065,7 @@ impl NetworkService {
                 let port = PortRecord {
                     id,
                     network_id,
-                    subnet_id: Some(subnet.id),
+                    subnet_id: Some(realm.id),
                     project_id: project_id.to_owned(),
                     name: name.clone(),
                     mac_address: deterministic_port_mac(id),
@@ -5709,15 +7102,44 @@ impl NetworkService {
                         other => map_store_error(other),
                     })?;
 
-                match self.inner.repository.insert_port(&port).await {
-                    Ok(()) => {
-                        let _ = self
-                            .inner
-                            .repository
-                            .commit_reservation(&quota_res.id)
-                            .await;
-                        return Ok(port);
-                    }
+                let endpoint = o3k_store::CanonicalEndpointRecord {
+                    id: port.id,
+                    realm_id: realm.id,
+                    project_id: project_id.to_owned(),
+                    fixed_ip: port.fixed_ip,
+                    mac: port.mac_address.clone(),
+                    generation: 1,
+                    state: "active".to_owned(),
+                };
+                match self
+                    .inner
+                    .repository
+                    .insert_canonical_endpoint(&endpoint)
+                    .await
+                {
+                    Ok(()) => match self.inner.repository.insert_port(&port).await {
+                        Ok(()) => {
+                            let _ = self
+                                .inner
+                                .repository
+                                .commit_reservation(&quota_res.id)
+                                .await;
+                            return Ok(port);
+                        }
+                        Err(error) => {
+                            let _ = self
+                                .inner
+                                .repository
+                                .delete_canonical_endpoint(project_id, &endpoint.id)
+                                .await;
+                            let _ = self
+                                .inner
+                                .repository
+                                .release_reservation(&quota_res.id)
+                                .await;
+                            return Err(map_store_error(error));
+                        }
+                    },
                     Err(o3k_store::StoreError::ResourceAlreadyExists) => {
                         let _ = self
                             .inner
@@ -5770,11 +7192,36 @@ impl NetworkService {
         &self,
         project_id: &str,
     ) -> Result<Vec<PortRecord>, NetworkError> {
-        self.inner
+        let networks = self
+            .inner
             .repository
-            .list_ports(project_id)
+            .list_canonical_networks(project_id)
             .await
-            .map_err(map_store_error)
+            .map_err(map_store_error)?;
+        let mut result = Vec::new();
+        for network in networks {
+            for realm in self
+                .inner
+                .repository
+                .list_canonical_realms(project_id, &network.id)
+                .await
+                .map_err(map_store_error)?
+            {
+                for endpoint in self
+                    .inner
+                    .repository
+                    .list_canonical_endpoints(project_id, &realm.id)
+                    .await
+                    .map_err(map_store_error)?
+                {
+                    result.push(
+                        self.project_canonical_port(project_id, &realm, &endpoint)
+                            .await?,
+                    );
+                }
+            }
+        }
+        Ok(result)
     }
 
     pub async fn get_port(&self, auth: &AuthContext, id: Uuid) -> Result<PortRecord, NetworkError> {
@@ -5809,12 +7256,53 @@ impl NetworkService {
         project_id: &str,
         id: Uuid,
     ) -> Result<PortRecord, NetworkError> {
-        self.inner
+        let endpoint = self
+            .inner
             .repository
-            .get_port(project_id, &id)
+            .get_canonical_endpoint(project_id, &id)
             .await
             .map_err(map_store_error)?
-            .ok_or(NetworkError::NotFound)
+            .ok_or(NetworkError::NotFound)?;
+        let realm = self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, &endpoint.realm_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        self.project_canonical_port(project_id, &realm, &endpoint)
+            .await
+    }
+
+    async fn project_canonical_port(
+        &self,
+        project_id: &str,
+        realm: &o3k_store::CanonicalAddressRealmRecord,
+        endpoint: &o3k_store::CanonicalEndpointRecord,
+    ) -> Result<PortRecord, NetworkError> {
+        let metadata = self
+            .inner
+            .repository
+            .get_port(project_id, &endpoint.id)
+            .await
+            .map_err(map_store_error)?;
+        Ok(PortRecord {
+            id: endpoint.id,
+            network_id: realm.network_id,
+            subnet_id: Some(realm.id),
+            project_id: endpoint.project_id.clone(),
+            name: metadata
+                .as_ref()
+                .map(|value| value.name.clone())
+                .unwrap_or_default(),
+            mac_address: endpoint.mac.clone(),
+            fixed_ip: endpoint.fixed_ip,
+            status: endpoint.state.to_ascii_uppercase(),
+            binding_host: metadata
+                .as_ref()
+                .and_then(|value| value.binding_host.clone()),
+            binding_state: metadata.and_then(|value| value.binding_state),
+        })
     }
 
     /// Internal owner lookup used by canonical dependency authorization. It
@@ -5882,11 +7370,25 @@ impl NetworkService {
         id: Uuid,
     ) -> Result<(), NetworkError> {
         let _guard = self.lock().await;
+        let metadata_exists = self
+            .inner
+            .repository
+            .get_port(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+            .is_some();
         self.inner
             .repository
-            .delete_port(project_id, &id)
+            .delete_canonical_endpoint(project_id, &id)
             .await
             .map_err(map_store_error)?;
+        if metadata_exists {
+            self.inner
+                .repository
+                .delete_port(project_id, &id)
+                .await
+                .map_err(map_store_error)?;
+        }
         let _ = self
             .inner
             .repository
@@ -6202,7 +7704,7 @@ fn parse_security_group_prefix(value: &str) -> Result<Ipv4Prefix, NetworkError> 
 }
 
 fn parse_security_group_direction(value: &str) -> Result<PolicyDirection, NetworkError> {
-    match value {
+    match value.to_ascii_lowercase().as_str() {
         "ingress" => Ok(PolicyDirection::Ingress),
         "egress" => Ok(PolicyDirection::Egress),
         _ => Err(NetworkError::InvalidRequest),
@@ -6210,7 +7712,7 @@ fn parse_security_group_direction(value: &str) -> Result<PolicyDirection, Networ
 }
 
 fn parse_security_group_protocol(value: &str) -> Result<NetworkProtocol, NetworkError> {
-    match value {
+    match value.to_ascii_lowercase().as_str() {
         "any" => Ok(NetworkProtocol::Any),
         "tcp" => Ok(NetworkProtocol::Tcp),
         "udp" => Ok(NetworkProtocol::Udp),
@@ -6232,6 +7734,7 @@ fn deterministic_port_mac(port_id: Uuid) -> String {
 mod tests {
     use super::*;
     use o3k_domain::PolicyAction;
+    use o3k_store::DurableStore;
 
     fn auth(project_id: &str) -> AuthContext {
         AuthContext::new(
@@ -6256,6 +7759,721 @@ mod tests {
 
     fn root(label: &str) -> PathBuf {
         PathBuf::from(format!("/tmp/o3k-network-{label}-{}", std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn canonical_service_reconstructs_zero_and_multiple_realms()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("canonical-runtime");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let network = service
+            .create_canonical_network_for_project("project-a", "canonical".to_owned())
+            .await?;
+        let empty = service
+            .reconstruct_canonical_network("project-a", network.id)
+            .await?;
+        assert!(empty.realms.is_empty());
+
+        let realm_a = service
+            .create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.0.0.0/24".to_owned(),
+                true,
+            )
+            .await?;
+        let realm_b = service
+            .create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.0.0.0/24".to_owned(),
+                true,
+            )
+            .await?;
+        let realm_c = service
+            .create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.1.0.0/24".to_owned(),
+                false,
+            )
+            .await?;
+        let pool = service
+            .create_canonical_pool_for_project(
+                "project-a",
+                realm_a.id,
+                "10.0.0.0/24".to_owned(),
+                Some("10.0.0.1".parse()?),
+                "10.0.0.2".parse()?,
+                "10.0.0.254".parse()?,
+            )
+            .await?;
+        let endpoint_a = service
+            .create_canonical_endpoint_for_project(
+                "project-a",
+                realm_a.id,
+                "10.0.0.10".parse()?,
+                "02:00:00:00:00:10".to_owned(),
+            )
+            .await?;
+        let endpoint_b = service
+            .create_canonical_endpoint_for_project(
+                "project-a",
+                realm_b.id,
+                "10.0.0.10".parse()?,
+                "02:00:00:00:00:11".to_owned(),
+            )
+            .await?;
+        assert_eq!(endpoint_a.fixed_ip, endpoint_b.fixed_ip);
+        assert!(matches!(
+            service
+                .create_canonical_endpoint_for_project(
+                    "project-a",
+                    realm_a.id,
+                    endpoint_a.fixed_ip,
+                    "02:00:00:00:00:12".to_owned()
+                )
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+        assert!(matches!(
+            service
+                .delete_canonical_realm_for_project("project-a", realm_a.id)
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+        drop(service);
+        drop(store);
+
+        let reopened_store =
+            Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let snapshot = reopened
+            .reconstruct_canonical_network("project-a", network.id)
+            .await?;
+        assert_eq!(snapshot.network.id, network.id);
+        assert_eq!(snapshot.realms.len(), 3);
+        assert_eq!(snapshot.pools[&realm_a.id], vec![pool]);
+        assert_eq!(snapshot.endpoints[&realm_a.id], vec![endpoint_a]);
+        reopened
+            .delete_canonical_realm_for_project("project-a", realm_c.id)
+            .await?;
+        assert_eq!(
+            reopened
+                .reconstruct_canonical_network("project-a", network.id)
+                .await?
+                .realms
+                .len(),
+            2
+        );
+        assert!(matches!(
+            reopened
+                .delete_canonical_network_for_project("project-a", network.id)
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+        drop(reopened);
+        drop(reopened_store);
+        fs::remove_dir_all(path)?;
+        let _ = fs::remove_file(&sqlite_path);
+        let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+        let _ = fs::remove_file(format!("{sqlite_path}-shm"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_reads_do_not_require_projection_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("canonical-reads");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store).await?;
+        let network = service
+            .create_canonical_network_for_project("project-a", "canonical".to_owned())
+            .await?;
+        let realm = service
+            .create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.20.0.0/24".to_owned(),
+                false,
+            )
+            .await?;
+        let _pool = service
+            .create_canonical_pool_for_project(
+                "project-a",
+                realm.id,
+                "10.20.0.0/24".to_owned(),
+                Some("10.20.0.1".parse()?),
+                "10.20.0.2".parse()?,
+                "10.20.0.254".parse()?,
+            )
+            .await?;
+        let endpoint = service
+            .create_canonical_endpoint_for_project(
+                "project-a",
+                realm.id,
+                "10.20.0.10".parse()?,
+                "02:00:00:20:00:10".to_owned(),
+            )
+            .await?;
+
+        let subnet = service
+            .get_subnet_for_project("project-a", realm.id)
+            .await?;
+        assert_eq!(subnet.id, realm.id);
+        assert_eq!(subnet.network_id, network.id);
+        assert!(subnet.name.is_empty());
+
+        let port = service
+            .get_port_for_project("project-a", endpoint.id)
+            .await?;
+        assert_eq!(port.id, endpoint.id);
+        assert_eq!(port.subnet_id, Some(realm.id));
+        assert_eq!(port.fixed_ip, endpoint.fixed_ip);
+        assert_eq!(port.mac_address, endpoint.mac);
+        assert!(port.name.is_empty());
+
+        drop(service);
+        fs::remove_dir_all(path)?;
+        let _ = fs::remove_file(&sqlite_path);
+        let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+        let _ = fs::remove_file(format!("{sqlite_path}-shm"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authenticated_canonical_entry_points_enforce_scope_and_audit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("canonical-auth");
+        let _ = fs::remove_dir_all(&path);
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let sink = Arc::new(o3k_kernel::MemoryAuditSink::new());
+        let service = NetworkService::open(&path, store)
+            .await?
+            .with_audit_sink(sink.clone());
+        let network = service
+            .create_canonical_network(&auth("project-a"), "authorized".to_owned())
+            .await?;
+        let realm = service
+            .create_canonical_realm(
+                &auth("project-a"),
+                network.id,
+                "10.30.0.0/24".to_owned(),
+                false,
+            )
+            .await?;
+        assert!(matches!(
+            service
+                .delete_canonical_realm(&auth("project-b"), realm.id)
+                .await,
+            Err(NetworkError::NotFound)
+        ));
+        let events = sink.events();
+        assert!(events.iter().any(|event| {
+            event.action.to_string() == "network:DeleteAddressRealm"
+                && event.outcome == AuditOutcome::Denied
+                && event
+                    .resource_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() == realm.id.to_string())
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authenticated_parent_actions_use_canonical_owner_and_audit_outcomes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("canonical-auth-matrix");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let sink = Arc::new(o3k_kernel::MemoryAuditSink::new());
+        let service = NetworkService::open(&path, store)
+            .await?
+            .with_audit_sink(sink.clone());
+        let network = service
+            .create_canonical_network(&auth("project-a"), "matrix".to_owned())
+            .await?;
+        let realm = service
+            .create_canonical_realm(
+                &auth("project-a"),
+                network.id,
+                "10.32.0.0/24".to_owned(),
+                false,
+            )
+            .await?;
+
+        assert!(matches!(
+            service
+                .create_canonical_realm(
+                    &auth("project-b"),
+                    network.id,
+                    "10.33.0.0/24".to_owned(),
+                    false,
+                )
+                .await,
+            Err(NetworkError::NotFound)
+        ));
+        assert!(matches!(
+            service
+                .create_canonical_pool(
+                    &auth("project-b"),
+                    realm.id,
+                    "10.32.0.0/24".to_owned(),
+                    Some("10.32.0.1".parse()?),
+                    "10.32.0.2".parse()?,
+                    "10.32.0.254".parse()?,
+                )
+                .await,
+            Err(NetworkError::NotFound)
+        ));
+        assert!(matches!(
+            service
+                .create_canonical_endpoint(
+                    &auth("project-b"),
+                    realm.id,
+                    "10.32.0.10".parse()?,
+                    "02:00:00:32:00:10".to_owned(),
+                )
+                .await,
+            Err(NetworkError::NotFound)
+        ));
+
+        let pool = service
+            .create_canonical_pool(
+                &auth("project-a"),
+                realm.id,
+                "10.32.0.0/24".to_owned(),
+                Some("10.32.0.1".parse()?),
+                "10.32.0.2".parse()?,
+                "10.32.0.254".parse()?,
+            )
+            .await?;
+        assert_eq!(
+            service
+                .list_canonical_pools(&auth("project-a"), realm.id)
+                .await?
+                .len(),
+            1
+        );
+        assert!(matches!(
+            service
+                .list_canonical_pools(&auth("project-b"), realm.id)
+                .await,
+            Err(NetworkError::NotFound)
+        ));
+        let endpoint = service
+            .create_canonical_endpoint(
+                &auth("project-a"),
+                realm.id,
+                "10.32.0.10".parse()?,
+                "02:00:00:32:00:10".to_owned(),
+            )
+            .await?;
+        assert_eq!(
+            service
+                .get_canonical_realm(&auth("project-a"), realm.id)
+                .await?
+                .id,
+            realm.id
+        );
+        assert_eq!(
+            service
+                .list_canonical_endpoints(&auth("project-a"), realm.id)
+                .await?
+                .len(),
+            1
+        );
+        assert_eq!(
+            service
+                .get_canonical_endpoint(&auth("project-a"), endpoint.id)
+                .await?
+                .id,
+            endpoint.id
+        );
+        assert!(matches!(
+            service
+                .get_canonical_endpoint(&auth("project-b"), endpoint.id)
+                .await,
+            Err(NetworkError::NotFound)
+        ));
+        assert!(matches!(
+            service
+                .create_canonical_network(&auth("project-a"), "matrix".to_owned())
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+
+        let events = sink.events();
+        let denied = events
+            .iter()
+            .filter(|event| event.outcome == AuditOutcome::Denied)
+            .collect::<Vec<_>>();
+        assert!(denied.len() >= 3);
+        assert!(denied.iter().all(|event| {
+            event
+                .authorization_decision
+                .as_ref()
+                .is_some_and(|decision| {
+                    decision.reason() == &o3k_kernel::DecisionReason::ScopeMismatch
+                })
+                && event
+                    .owner_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.id().as_str() == "project-a")
+        }));
+        assert!(events.iter().any(|event| {
+            event.action.to_string() == "network:CreateNetwork"
+                && event.outcome == AuditOutcome::Failed
+        }));
+        assert!(events.iter().any(|event| {
+            event.action.to_string() == "network:CreateEndpoint"
+                && event.outcome == AuditOutcome::Succeeded
+        }));
+        service
+            .delete_canonical_endpoint(&auth("project-a"), endpoint.id)
+            .await?;
+        service
+            .delete_canonical_pool(&auth("project-a"), pool.id)
+            .await?;
+        service
+            .delete_canonical_realm(&auth("project-a"), realm.id)
+            .await?;
+        service
+            .delete_canonical_network(&auth("project-a"), network.id)
+            .await?;
+        let final_events = sink.events();
+        assert!(final_events.iter().any(|event| {
+            event.action.to_string() == "network:DeleteNetwork"
+                && event.outcome == AuditOutcome::Succeeded
+        }));
+        let _ = fs::remove_dir_all(path);
+        let _ = fs::remove_file(sqlite_path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn independent_services_preserve_canonical_endpoint_and_realm_races()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("canonical-races");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store_a = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let store_b = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service_a = NetworkService::open(&path, store_a).await?;
+        let service_b = NetworkService::open(&path, store_b).await?;
+        let network = service_a
+            .create_canonical_network_for_project("project-a", "races".to_owned())
+            .await?;
+        let realm = service_a
+            .create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.31.0.0/24".to_owned(),
+                false,
+            )
+            .await?;
+        let (left, right) = tokio::join!(
+            service_a.create_canonical_endpoint_for_project(
+                "project-a",
+                realm.id,
+                "10.31.0.10".parse()?,
+                "02:00:00:00:31:10".to_owned(),
+            ),
+            service_b.create_canonical_endpoint_for_project(
+                "project-a",
+                realm.id,
+                "10.31.0.10".parse()?,
+                "02:00:00:00:31:11".to_owned(),
+            )
+        );
+        assert_eq!(left.is_ok() as u8 + right.is_ok() as u8, 1);
+
+        let delete = service_a.delete_canonical_realm_for_project("project-a", realm.id);
+        let create = service_b.create_canonical_endpoint_for_project(
+            "project-a",
+            realm.id,
+            "10.31.0.11".parse()?,
+            "02:00:00:00:31:12".to_owned(),
+        );
+        let (delete_result, create_result) = tokio::join!(delete, create);
+        if delete_result.is_ok() {
+            assert!(create_result.is_err());
+            assert!(
+                service_a
+                    .reconstruct_canonical_network("project-a", network.id)
+                    .await?
+                    .realms
+                    .is_empty()
+            );
+        } else {
+            assert!(create_result.is_ok());
+            assert!(
+                service_a
+                    .reconstruct_canonical_network("project-a", network.id)
+                    .await?
+                    .realms
+                    .iter()
+                    .any(|value| value.id == realm.id)
+            );
+        }
+        let _ = fs::remove_dir_all(path);
+        let _ = fs::remove_file(sqlite_path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn independent_services_preserve_network_realm_races()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("canonical-network-realm-races");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store_a = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let store_b = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service_a = NetworkService::open(&path, store_a).await?;
+        let service_b = NetworkService::open(&path, store_b).await?;
+        let network = service_a
+            .create_canonical_network_for_project("project-a", "parent-race".to_owned())
+            .await?;
+
+        let (first, second) = tokio::join!(
+            service_a.create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.34.0.0/24".to_owned(),
+                false,
+            ),
+            service_b.create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.35.0.0/24".to_owned(),
+                false,
+            )
+        );
+        let created = [first, second]
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        assert_eq!(created.len(), 2);
+        let realms = service_a
+            .reconstruct_canonical_network("project-a", network.id)
+            .await?
+            .realms;
+        assert_eq!(realms.len(), 2);
+        assert!(realms.iter().all(|realm| realm.network_id == network.id));
+
+        let (delete, create) = tokio::join!(
+            service_a.delete_canonical_network_for_project("project-a", network.id),
+            service_b.create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.36.0.0/24".to_owned(),
+                false,
+            )
+        );
+        assert!(delete.is_err());
+        assert!(create.is_ok());
+        let snapshot = service_a
+            .reconstruct_canonical_network("project-a", network.id)
+            .await?;
+        assert!(
+            snapshot
+                .realms
+                .iter()
+                .all(|realm| realm.network_id == snapshot.network.id)
+        );
+        let _ = fs::remove_dir_all(path);
+        let _ = fs::remove_file(sqlite_path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn realm_deletion_is_fenced_when_provider_binding_remains()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("realm-deletion-fence");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let network = service
+            .create_canonical_network_for_project("project-a", "fenced".to_owned())
+            .await?;
+        let realm = service
+            .create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.30.0.0/24".to_owned(),
+                false,
+            )
+            .await?;
+        store
+            .insert_canonical_realm_binding(&o3k_store::CanonicalRealmBindingRecord {
+                fabric_domain_id: "fabric-a".to_owned(),
+                realm_id: realm.id,
+                provider_kind: "geneve".to_owned(),
+                provider_segment_id: 300,
+                binding_generation: 1,
+                state: "active".to_owned(),
+            })
+            .await?;
+
+        assert!(matches!(
+            service
+                .delete_canonical_realm_for_project("project-a", realm.id)
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+        let deleting = store
+            .get_canonical_realm("project-a", &realm.id)
+            .await?
+            .ok_or("realm disappeared during fenced deletion")?;
+        assert_eq!(deleting.state, "deleting");
+        assert!(matches!(
+            service
+                .create_canonical_endpoint_for_project(
+                    "project-a",
+                    realm.id,
+                    "10.30.0.10".parse()?,
+                    "02:00:00:30:00:10".to_owned(),
+                )
+                .await,
+            Err(NetworkError::InvalidRequest) | Err(NetworkError::Conflict)
+        ));
+        assert!(matches!(
+            service
+                .delete_canonical_realm_for_project("project-a", realm.id)
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+        assert!(
+            service
+                .get_canonical_network_for_project("project-a", network.id)
+                .await
+                .is_ok()
+        );
+        let _ = fs::remove_dir_all(path);
+        let _ = fs::remove_file(sqlite_path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn realm_cleanup_unknown_outcome_replays_and_finalizes_after_observation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("realm-cleanup-recovery");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let network = service
+            .create_canonical_network_for_project("project-a", "recovery".to_owned())
+            .await?;
+        let realm = service
+            .create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "10.31.0.0/24".to_owned(),
+                false,
+            )
+            .await?;
+        let binding = o3k_store::CanonicalRealmBindingRecord {
+            fabric_domain_id: "fabric-a".to_owned(),
+            realm_id: realm.id,
+            provider_kind: "geneve".to_owned(),
+            provider_segment_id: 301,
+            binding_generation: 1,
+            state: "active".to_owned(),
+        };
+        store.insert_canonical_realm_binding(&binding).await?;
+
+        assert!(matches!(
+            service
+                .delete_canonical_realm_for_project("project-a", realm.id)
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+        let first = service
+            .begin_canonical_realm_deletion_for_project("project-a", realm.id)
+            .await?;
+        let operation_id = match first {
+            RealmCleanupProgress::AwaitingObservation { operation_id, .. } => operation_id,
+            _ => return Err("unexpected replay progress".into()),
+        };
+        let unknown = service
+            .observe_canonical_realm_cleanup_for_project(
+                "project-a",
+                realm.id,
+                vec![RealmCleanupObservation::Unknown {
+                    binding: binding.clone(),
+                    reason: "provider response lost".to_owned(),
+                }],
+            )
+            .await?;
+        assert!(matches!(
+            unknown,
+            RealmCleanupProgress::AwaitingObservation { .. }
+        ));
+        assert_eq!(
+            store.get_canonical_operation(operation_id).await?.state,
+            o3k_store::OperationState::UnknownOutcome
+        );
+
+        drop(service);
+        let reopened_store =
+            Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let replay = reopened
+            .begin_canonical_realm_deletion_for_project("project-a", realm.id)
+            .await?;
+        assert!(matches!(
+            replay,
+            RealmCleanupProgress::AwaitingObservation { operation_id: id, .. } if id == operation_id
+        ));
+        let present = reopened
+            .observe_canonical_realm_cleanup_for_project(
+                "project-a",
+                realm.id,
+                vec![RealmCleanupObservation::Present(binding.clone())],
+            )
+            .await?;
+        assert!(matches!(
+            present,
+            RealmCleanupProgress::AwaitingObservation { .. }
+        ));
+        let removed = reopened
+            .observe_canonical_realm_cleanup_for_project(
+                "project-a",
+                realm.id,
+                vec![RealmCleanupObservation::Absent(binding)],
+            )
+            .await?;
+        assert_eq!(removed, RealmCleanupProgress::Removed { operation_id });
+        assert!(
+            reopened
+                .get_canonical_network_for_project("project-a", network.id)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            reopened
+                .reconstruct_canonical_network("project-a", network.id)
+                .await,
+            Ok(snapshot) if snapshot.realms.is_empty()
+        ));
+        let _ = fs::remove_dir_all(path);
+        let _ = fs::remove_file(sqlite_path);
+        Ok(())
     }
 
     #[tokio::test]
@@ -7188,12 +9406,11 @@ mod tests {
                 .await?,
             vec![policy.clone()]
         );
-        let record = store
-            .get_network_intent(project, &network.id)
-            .await?
-            .ok_or("policy intent not persisted")?;
-        assert_eq!(record.status, "requested");
-        assert!(record.payload.contains(&policy_id.to_string()));
+        let canonical = store.list_canonical_policies(project, &network.id).await?;
+        assert_eq!(canonical.len(), 1);
+        assert_eq!(canonical[0].id, policy_id);
+        let legacy = store.get_network_intent(project, &network.id).await?;
+        assert!(!legacy.is_some_and(|record| record.payload.contains(&policy_id.to_string())));
 
         let compiled = compile_attachment_plan(AttachmentPlanInput {
             endpoint_id: port.id,

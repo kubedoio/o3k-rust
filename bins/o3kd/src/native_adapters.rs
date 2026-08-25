@@ -89,6 +89,7 @@ impl o3k_native_api::operation::OperationReader for OperationReaderAdapter {
     }
 }
 
+#[cfg(test)]
 fn network_intent_state_wire(state: o3k_domain::NetworkIntentState) -> &'static str {
     match state {
         o3k_domain::NetworkIntentState::Requested => "requested",
@@ -96,15 +97,6 @@ fn network_intent_state_wire(state: o3k_domain::NetworkIntentState) -> &'static 
         o3k_domain::NetworkIntentState::Deleting => "deleting",
         o3k_domain::NetworkIntentState::Error => "error",
     }
-}
-
-fn network_intent_identity_valid(
-    record: &o3k_store::NetworkIntentRecord,
-    intent: &o3k_domain::NetworkIntent,
-) -> bool {
-    record.id == intent.id
-        && record.project_id == intent.project_id
-        && intent.realm.project_id == record.project_id
 }
 
 #[cfg(test)]
@@ -2257,39 +2249,38 @@ impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
         ) {
             return Err(NativeReadError::Forbidden);
         }
-        match self
+        let networks = self
             .store
-            .list_network_intents(project_id)
+            .list_canonical_networks(project_id)
             .await
-        {
-            Ok(records) => records
-                .into_iter()
-                .map(|record| {
-                    let intent: o3k_domain::NetworkIntent =
-                        serde_json::from_str(&record.payload).map_err(|e| {
-                            tracing::error!(error = %e, network_intent_id = %record.id, "invalid canonical network intent payload");
-                            NativeReadError::Internal
-                        })?;
-                    if !network_intent_identity_valid(&record, &intent) {
-                        tracing::error!(network_intent_id = %record.id, "canonical network intent identity mismatch");
-                        return Err(NativeReadError::Internal);
-                    }
-                    Ok(AddressRealmItem {
-                        id: intent.realm.id.to_string(),
-                        project_id: intent.realm.project_id,
-                        prefix: format!("{}/{}", intent.realm.prefix.network, intent.realm.prefix.prefix_len),
-                        overlapping_prefixes: intent.realm.overlapping_prefixes,
-                        created_at: None,
-                        generation: i64::try_from(intent.generation).map_err(|_| NativeReadError::Internal)?,
-                        state: network_intent_state_wire(intent.state).to_owned(),
-                    })
-                })
-                .collect(),
-            Err(e) => {
+            .map_err(|e| {
                 tracing::error!(error = %e, project_id = %project_id, "native address realm list failed");
-                Err(NativeReadError::Internal)
+                NativeReadError::Internal
+            })?;
+        let mut items = Vec::new();
+        for network in networks {
+            let realms = self
+                .store
+                .list_canonical_realms(project_id, &network.id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, network_id = %network.id, "native address realm list failed");
+                    NativeReadError::Internal
+                })?;
+            for realm in realms {
+                items.push(AddressRealmItem {
+                    id: realm.id.to_string(),
+                    project_id: realm.project_id,
+                    prefix: realm.prefix,
+                    overlapping_prefixes: realm.overlapping_prefixes,
+                    created_at: None,
+                    generation: i64::try_from(realm.generation)
+                        .map_err(|_| NativeReadError::Internal)?,
+                    state: realm.state,
+                });
             }
         }
+        Ok(items)
     }
 
     async fn show_address_realm(
@@ -2308,36 +2299,33 @@ impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
         ) {
             return Err(NativeReadError::Forbidden);
         }
-        match self.store.list_network_intents(project_id).await {
-            Ok(records) => {
-                let Some(record) = records.into_iter().find(|record| {
-                    serde_json::from_str::<o3k_domain::NetworkIntent>(&record.payload)
-                        .map(|intent| intent.realm.id == id)
-                        .unwrap_or(false)
-                }) else {
-                    return Err(NativeReadError::NotFound);
-                };
-                let intent: o3k_domain::NetworkIntent =
-                    serde_json::from_str(&record.payload).map_err(|_| NativeReadError::Internal)?;
-                if !network_intent_identity_valid(&record, &intent) || intent.realm.id != id {
-                    return Err(NativeReadError::Internal);
-                }
-                Ok(AddressRealmItem {
-                    id: intent.realm.id.to_string(),
-                    project_id: intent.realm.project_id,
-                    prefix: format!(
-                        "{}/{}",
-                        intent.realm.prefix.network, intent.realm.prefix.prefix_len
-                    ),
-                    overlapping_prefixes: intent.realm.overlapping_prefixes,
+        let networks = self
+            .store
+            .list_canonical_networks(project_id)
+            .await
+            .map_err(|_| NativeReadError::Internal)?;
+        for network in networks {
+            if let Some(realm) = self
+                .store
+                .list_canonical_realms(project_id, &network.id)
+                .await
+                .map_err(|_| NativeReadError::Internal)?
+                .into_iter()
+                .find(|realm| realm.id == id)
+            {
+                return Ok(AddressRealmItem {
+                    id: realm.id.to_string(),
+                    project_id: realm.project_id,
+                    prefix: realm.prefix,
+                    overlapping_prefixes: realm.overlapping_prefixes,
                     created_at: None,
-                    generation: i64::try_from(intent.generation)
+                    generation: i64::try_from(realm.generation)
                         .map_err(|_| NativeReadError::Internal)?,
-                    state: network_intent_state_wire(intent.state).to_owned(),
-                })
+                    state: realm.state,
+                });
             }
-            Err(_) => Err(NativeReadError::Internal),
         }
+        Err(NativeReadError::NotFound)
     }
 }
 

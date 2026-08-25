@@ -658,8 +658,12 @@ pub async fn seed_identity_defaults(
 
     let mut services: Vec<(&str, &str, &str, String)> = vec![
         ("identity", "identity", "identity", format!("{base}/v3")),
-        ("image", "image", "image", format!("{base}/v2")),
-        ("network", "network", "network", format!("{base}/v2.0")),
+        // The standard Gophercloud image client appends `/v2/` to the
+        // catalog service root when constructing its ResourceBase.
+        ("image", "image", "image", format!("{base}/")),
+        // The pinned Gophercloud NewNetworkV2 client appends `/v2.0/` to
+        // this catalog service root when constructing ResourceBase.
+        ("network", "network", "network", format!("{base}/")),
         (
             "compute",
             "compute",

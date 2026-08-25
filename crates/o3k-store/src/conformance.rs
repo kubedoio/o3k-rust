@@ -1934,6 +1934,24 @@ pub async fn test_coordination_repository<S: StoreUnderTest>(store: Arc<S>) {
 mod tests {
     use super::*;
     use crate::{PostgresStore, SqliteStore};
+    use sqlx::{Connection, postgres::PgConnection};
+
+    async fn prepare_shared_postgres_test_database(database_url: &str) -> Option<PgConnection> {
+        let mut connection = PgConnection::connect(database_url).await.ok()?;
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended('o3k-shared-test-database', 0))")
+            .execute(&mut connection)
+            .await
+            .ok()?;
+        sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")
+            .execute(&mut connection)
+            .await
+            .ok()?;
+        sqlx::query("CREATE SCHEMA public")
+            .execute(&mut connection)
+            .await
+            .ok()?;
+        Some(connection)
+    }
 
     #[tokio::test]
     async fn test_sqlite_conformance() {
@@ -1943,18 +1961,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_postgres_conformance() {
-        if let Ok(db_url) = std::env::var("O3K_DATABASE_URL") {
+        let db_url = std::env::var("O3K_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://o3k:password@127.0.0.1/o3k_test".to_owned());
+        if let Some(_database_guard) = prepare_shared_postgres_test_database(&db_url).await {
             let store = PostgresStore::connect(&db_url)
                 .await
                 .expect("connect to Postgres");
-            store
-                .clean_tables_for_testing()
-                .await
-                .expect("clean tables");
-            run_all_conformance_tests(Arc::new(store)).await;
-        } else if let Ok(store) =
-            PostgresStore::connect("postgres://o3k:password@127.0.0.1/o3k_test").await
-        {
             store
                 .clean_tables_for_testing()
                 .await
