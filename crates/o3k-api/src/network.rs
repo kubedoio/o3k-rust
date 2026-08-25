@@ -2176,13 +2176,12 @@ pub(crate) async fn update_port(
             "security groups are deferred by this profile",
         );
     }
-    if let Some(name) = body.port.name {
-        if let Err(error) = service
+    if let Some(name) = body.port.name
+        && let Err(error) = service
             .update_port_name_for_project(project, id, name)
             .await
-        {
-            return network_error(error);
-        }
+    {
+        return network_error(error);
     }
     match service.get_port_for_project(project, id).await {
         Ok(value) => Json(PortEnvelope {
