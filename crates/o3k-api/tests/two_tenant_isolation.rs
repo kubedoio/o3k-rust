@@ -239,6 +239,33 @@ async fn two_tenant_path_and_resource_isolation() -> Result<(), Box<dyn std::err
         .await?;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
+    // A foreign project cannot mutate the network by UUID.
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v2.0/networks/{net_id}"))
+                .header("x-auth-token", &harness.token_b)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"network":{"name":"stolen"}}"#))?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2.0/networks/{net_id}"))
+                .header("x-auth-token", &harness.token_b)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
     // 7. Tenant A Token with Tenant B path -> 404 Not Found (OpenStack concealed scope denial)
     let resp = harness
         .app
@@ -281,6 +308,20 @@ async fn two_tenant_path_and_resource_isolation() -> Result<(), Box<dyn std::err
         .oneshot(
             Request::builder()
                 .method(Method::GET)
+                .uri(format!("/v2.1/{PROJECT_B}/os-keypairs/key-a"))
+                .header("x-auth-token", &harness.token_b)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // A foreign project cannot delete the keypair by its name.
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
                 .uri(format!("/v2.1/{PROJECT_B}/os-keypairs/key-a"))
                 .header("x-auth-token", &harness.token_b)
                 .body(Body::empty())?,

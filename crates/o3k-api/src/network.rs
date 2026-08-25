@@ -26,6 +26,17 @@ pub(crate) struct NetworkRequestBody {
 pub(crate) struct CreateNetworkRequest {
     name: String,
 }
+#[derive(serde::Deserialize)]
+pub(crate) struct UpdateNetworkRequestBody {
+    network: UpdateNetworkRequest,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateNetworkRequest {
+    name: Option<String>,
+    #[serde(default)]
+    admin_state_up: Option<bool>,
+}
 #[derive(serde::Serialize)]
 pub(crate) struct NetworkEnvelope {
     network: NetworkResponse,
@@ -39,16 +50,42 @@ pub(crate) struct NetworkResponse {
     id: String,
     name: String,
     project_id: String,
+    tenant_id: String,
     status: String,
+    admin_state_up: bool,
+    mtu: u32,
+    subnets: Vec<String>,
 }
 
-pub(crate) fn network_response(value: NetworkRecord) -> NetworkResponse {
+pub(crate) fn network_response(
+    value: NetworkRecord,
+    admin_state_up: bool,
+    subnet_ids: Vec<Uuid>,
+) -> NetworkResponse {
     NetworkResponse {
         id: value.id.to_string(),
         name: value.name,
+        tenant_id: value.project_id.clone(),
         project_id: value.project_id,
         status: value.status,
+        admin_state_up,
+        mtu: 1500,
+        subnets: subnet_ids.into_iter().map(|id| id.to_string()).collect(),
     }
+}
+
+async fn canonical_network_response(
+    service: &NetworkService,
+    value: NetworkRecord,
+) -> Result<NetworkResponse, NetworkError> {
+    let snapshot = service
+        .reconstruct_canonical_network(&value.project_id, value.id)
+        .await?;
+    Ok(network_response(
+        value,
+        snapshot.network.admin_state_up,
+        snapshot.realms.into_iter().map(|realm| realm.id).collect(),
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -1618,13 +1655,10 @@ pub(crate) async fn create_network(
         );
     };
     match service.create_network(&auth, body.network.name).await {
-        Ok(value) => (
-            StatusCode::CREATED,
-            Json(NetworkEnvelope {
-                network: network_response(value),
-            }),
-        )
-            .into_response(),
+        Ok(value) => match canonical_network_response(service, value).await {
+            Ok(network) => (StatusCode::CREATED, Json(NetworkEnvelope { network })).into_response(),
+            Err(error) => network_error(error),
+        },
         Err(error) => network_error(error),
     }
 }
@@ -1642,10 +1676,16 @@ pub(crate) async fn list_networks(
         Err(response) => return response,
     };
     match service.list_networks(&auth).await {
-        Ok(values) => Json(NetworkList {
-            networks: values.into_iter().map(network_response).collect(),
-        })
-        .into_response(),
+        Ok(values) => {
+            let mut networks = Vec::with_capacity(values.len());
+            for value in values {
+                match canonical_network_response(service, value).await {
+                    Ok(network) => networks.push(network),
+                    Err(error) => return network_error(error),
+                }
+            }
+            Json(NetworkList { networks }).into_response()
+        }
         Err(error) => network_error(error),
     }
 }
@@ -1664,10 +1704,43 @@ pub(crate) async fn show_network(
         Err(response) => return response,
     };
     match service.get_network(&auth, id).await {
-        Ok(value) => Json(NetworkEnvelope {
-            network: network_response(value),
-        })
-        .into_response(),
+        Ok(value) => match canonical_network_response(service, value).await {
+            Ok(network) => Json(NetworkEnvelope { network }).into_response(),
+            Err(error) => network_error(error),
+        },
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn update_network(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+    request: Result<Json<UpdateNetworkRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid network request",
+        );
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service
+        .update_network(&auth, id, body.network.name, body.network.admin_state_up)
+        .await
+    {
+        Ok(value) => match canonical_network_response(service, value).await {
+            Ok(network) => Json(NetworkEnvelope { network }).into_response(),
+            Err(error) => network_error(error),
+        },
         Err(error) => network_error(error),
     }
 }

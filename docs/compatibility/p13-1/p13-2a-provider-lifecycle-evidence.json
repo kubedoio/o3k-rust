@@ -1,0 +1,61 @@
+{
+  "artifact_type": "o3k-p13-2a-provider-lifecycle-evidence-summary",
+  "schema_version": 1,
+  "run": {
+    "run_id": "942e5dbf-e79d-4999-9729-b0bdeac0be8b",
+    "fresh_execution": true,
+    "o3k_head_sha": "be79949ee0310b3fce82945ae203dfee6fbee17c",
+    "engine_version_output": "OpenTofu v1.12.6"
+  },
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+    "provider_modified": false
+  },
+  "trace": {
+    "record_count": 59,
+    "canonical_json_sha256": "5684c5c93395bb339d1fe8dbfb8c4d62f8b9764aaf4db54134103b1fc154c64b",
+    "raw_evidence": "ignored target/p13-2a output from the same run",
+    "sanitized": true,
+    "execution_engine": "OpenTofu 1.12.6",
+    "provider_user_agent": "HashiCorp Terraform/1.13.0 (+https://www.terraform.io) Terraform Plugin SDK/v2.38.1 Terraform Provider OpenStack/3.4.0 gophercloud/v2.8.0",
+    "provider_user_agent_is_not_engine_identity": true,
+    "terraform_cli_rejected_by_engine_version_check": true,
+    "keypair_delete": {
+      "o3k_wire_status": 204,
+      "response_body": "empty",
+      "provider_accepted": true,
+      "provider_accepted_statuses": [202, 204],
+      "historical_prior_observation": 202
+    }
+  },
+  "keypair": {
+    "create": "PASS",
+    "read": "PASS",
+    "post_apply_plan": "CONVERGED",
+    "delete": "PASS",
+    "delete_wire_status": 204,
+    "provider_accepted": true,
+    "provider_accepted_statuses": [202, 204],
+    "absence": "PASS",
+    "import_by_name": "PASS",
+    "post_import_plan": "CONVERGED"
+  },
+  "network": {
+    "create": "PASS",
+    "read": "PASS",
+    "post_apply_plan": "CONVERGED",
+    "admin_state_update": "PASS",
+    "name_update": "PASS",
+    "post_update_read": "PASS",
+    "post_update_plan": "CONVERGED",
+    "delete": "PASS",
+    "absence": "PASS",
+    "import_by_uuid": "PASS",
+    "post_import_plan": "CONVERGED",
+    "network_with_realm_projection_refresh": "PASS"
+  }
+}

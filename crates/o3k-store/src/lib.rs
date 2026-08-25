@@ -138,6 +138,7 @@ pub struct CanonicalNetworkRecord {
     pub id: Uuid,
     pub project_id: String,
     pub name: String,
+    pub admin_state_up: bool,
     pub generation: u64,
     pub state: String,
 }
@@ -1843,6 +1844,14 @@ pub trait NetworkRepository: Send + Sync + DurableStore + QuotaRepository {
         &self,
         project_id: &str,
     ) -> Result<Vec<CanonicalNetworkRecord>, StoreError>;
+    async fn update_canonical_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        name: &str,
+        admin_state_up: bool,
+    ) -> Result<CanonicalNetworkRecord, StoreError>;
     async fn insert_canonical_realm(
         &self,
         realm: &CanonicalAddressRealmRecord,
@@ -3982,11 +3991,12 @@ impl SqliteStore {
         validate_canonical_state(&network.state)?;
         let generation = checked_generation(network.generation)?;
         sqlx::query(
-            "INSERT INTO canonical_networks (id, project_id, name, generation, state) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO canonical_networks (id, project_id, name, admin_state_up, generation, state) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(network.id.to_string())
         .bind(&network.project_id)
         .bind(&network.name)
+        .bind(network.admin_state_up)
         .bind(generation)
         .bind(&network.state)
         .execute(&self.pool)
@@ -4001,7 +4011,7 @@ impl SqliteStore {
         id: &Uuid,
     ) -> Result<Option<CanonicalNetworkRecord>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, project_id, name, generation, state FROM canonical_networks WHERE id = ? AND project_id = ?",
+            "SELECT id, project_id, name, admin_state_up, generation, state FROM canonical_networks WHERE id = ? AND project_id = ?",
         )
         .bind(id.to_string())
         .bind(project_id)
@@ -4016,13 +4026,69 @@ impl SqliteStore {
         project_id: &str,
     ) -> Result<Vec<CanonicalNetworkRecord>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, project_id, name, generation, state FROM canonical_networks WHERE project_id = ? ORDER BY id",
+            "SELECT id, project_id, name, admin_state_up, generation, state FROM canonical_networks WHERE project_id = ? ORDER BY id",
         )
         .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .map_err(StoreError::Database)?;
         rows.iter().map(canonical_network_from_row).collect()
+    }
+
+    pub async fn update_canonical_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        name: &str,
+        admin_state_up: bool,
+    ) -> Result<CanonicalNetworkRecord, StoreError> {
+        if name.trim().is_empty() {
+            return Err(StoreError::ResourceNotFound);
+        }
+        if sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM canonical_networks WHERE project_id = ? AND name = ? AND id <> ?",
+        )
+        .bind(project_id)
+        .bind(name)
+        .bind(id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::Database)?
+            != 0
+        {
+            return Err(StoreError::ResourceAlreadyExists);
+        }
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let result = sqlx::query(
+            "UPDATE canonical_networks SET name = ?, admin_state_up = ?, generation = generation + 1 WHERE id = ? AND project_id = ? AND generation = ? AND state = 'active'",
+        )
+        .bind(name)
+        .bind(admin_state_up)
+        .bind(id.to_string())
+        .bind(project_id)
+        .bind(checked_generation(expected_generation)?)
+        .execute(&mut *transaction)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            transaction.rollback().await.map_err(StoreError::Database)?;
+            return match self.get_canonical_network(project_id, id).await? {
+                Some(_) => Err(StoreError::StaleGeneration),
+                None => Err(StoreError::ResourceNotFound),
+            };
+        }
+        sqlx::query("UPDATE network_networks SET name = ? WHERE id = ? AND project_id = ?")
+            .bind(name)
+            .bind(id.to_string())
+            .bind(project_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        transaction.commit().await.map_err(StoreError::Database)?;
+        self.get_canonical_network(project_id, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
     }
 
     pub async fn delete_canonical_network(
@@ -4493,7 +4559,7 @@ impl SqliteStore {
         id: &Uuid,
     ) -> Result<Option<CanonicalNetworkRecord>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, project_id, name, generation, state FROM canonical_networks WHERE id = ?",
+            "SELECT id, project_id, name, admin_state_up, generation, state FROM canonical_networks WHERE id = ?",
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -6377,6 +6443,7 @@ fn canonical_network_from_row(
         id: parse_uuid(row.get("id"))?,
         project_id: row.get("project_id"),
         name: row.get("name"),
+        admin_state_up: row.get("admin_state_up"),
         generation: u64::try_from(generation)
             .map_err(|_| StoreError::Corrupt("negative canonical generation".to_owned()))?,
         state: row.get("state"),
@@ -8307,6 +8374,17 @@ impl NetworkRepository for SqliteStore {
         project_id: &str,
     ) -> Result<Vec<CanonicalNetworkRecord>, StoreError> {
         self.list_canonical_networks(project_id).await
+    }
+    async fn update_canonical_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        name: &str,
+        admin_state_up: bool,
+    ) -> Result<CanonicalNetworkRecord, StoreError> {
+        self.update_canonical_network(project_id, id, expected_generation, name, admin_state_up)
+            .await
     }
     async fn insert_canonical_realm(
         &self,
@@ -13160,6 +13238,7 @@ mod tests {
             id: Uuid::from_u128(0x100),
             project_id: "project-a".to_owned(),
             name: "network-a".to_owned(),
+            admin_state_up: true,
             generation: 7,
             state: "active".to_owned(),
         };

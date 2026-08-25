@@ -1,4 +1,4 @@
-use axum::body::Body;
+use axum::body::{Body, HttpBody};
 use http::{HeaderValue, Method, Request, StatusCode, header};
 use o3k_compute::ComputeService;
 use o3k_domain::Ipv4Prefix;
@@ -1232,6 +1232,67 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
         .as_str()
         .ok_or_else(|| std::io::Error::other("network id missing"))?
         .to_owned();
+    let renamed = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v2.0/networks/{network_id}"))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"network":{"name":"flat-renamed","admin_state_up":true}}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(renamed.status(), StatusCode::OK);
+    let renamed_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(renamed.into_body(), 4096).await?)?;
+    assert_eq!(renamed_json["network"]["id"], network_id);
+    assert_eq!(renamed_json["network"]["name"], "flat-renamed");
+    assert_eq!(renamed_json["network"]["admin_state_up"], true);
+    let admin_only = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v2.0/networks/{network_id}"))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"network":{"admin_state_up":false}}"#))?,
+        )
+        .await?;
+    assert_eq!(admin_only.status(), StatusCode::OK);
+    let admin_only_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(admin_only.into_body(), 4096).await?)?;
+    assert_eq!(admin_only_json["network"]["name"], "flat-renamed");
+    assert_eq!(admin_only_json["network"]["admin_state_up"], false);
+    let both = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v2.0/networks/{network_id}"))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"network":{"name":"flat-final","admin_state_up":true}}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(both.status(), StatusCode::OK);
+    let both_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(both.into_body(), 4096).await?)?;
+    assert_eq!(both_json["network"]["name"], "flat-final");
+    assert_eq!(both_json["network"]["admin_state_up"], true);
+    let invalid_name = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v2.0/networks/{network_id}"))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"network":{"name":""}}"#))?,
+        )
+        .await?;
+    assert_eq!(invalid_name.status(), StatusCode::BAD_REQUEST);
     let body =
         serde_json::json!({"subnet":{"name":"lab","network_id":network_id,"cidr":"192.0.2.0/29"}});
     let response = o3k_api::router_with_state(state.clone())
@@ -1248,6 +1309,21 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
     let subnet: Value =
         serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4096).await?)?;
     assert_eq!(subnet["subnet"]["gateway_ip"], "192.0.2.1");
+    let network_after_subnet = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v2.0/networks/{network_id}"))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    let network_after_subnet_json: Value = serde_json::from_slice(
+        &axum::body::to_bytes(network_after_subnet.into_body(), 4096).await?,
+    )?;
+    assert_eq!(
+        network_after_subnet_json["network"]["subnets"],
+        serde_json::json!([subnet["subnet"]["id"]])
+    );
     let unsupported_pools = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -1323,6 +1399,95 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
         )
         .await?;
     assert_eq!(delete_network.status(), StatusCode::NO_CONTENT);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn neutron_network_projection_reports_zero_and_multiple_realms()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::path::PathBuf::from(format!(
+        "/tmp/o3k-api-network-projection-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let identity = test_service("http://127.0.0.1:8080").await?;
+    let store = std::sync::Arc::new(o3k_store::testkit::open_memory().await?);
+    let network = NetworkService::open(&root, store).await?;
+    let project_id = "eba29e2d-53de-461d-ae91-ede7402713cb";
+    let network_record = network
+        .create_canonical_network_for_project(project_id, "projection".to_owned())
+        .await?;
+    let realm_a = network
+        .create_canonical_realm_for_project(
+            project_id,
+            network_record.id,
+            "10.40.0.0/24".to_owned(),
+            false,
+        )
+        .await?;
+    let realm_b = network
+        .create_canonical_realm_for_project(
+            project_id,
+            network_record.id,
+            "10.41.0.0/24".to_owned(),
+            false,
+        )
+        .await?;
+    let state = o3k_api::AppState::new()
+        .with_identity(identity)
+        .with_network(network.clone());
+    let auth_body = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
+    let token_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(auth_body.to_string()))?,
+        )
+        .await?;
+    let token = token_response
+        .headers()
+        .get("x-subject-token")
+        .ok_or("token missing")?
+        .to_str()?
+        .to_owned();
+
+    let zero_network = network
+        .create_canonical_network_for_project(project_id, "zero".to_owned())
+        .await?;
+    let zero_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v2.0/networks/{}", zero_network.id))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    let zero_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(zero_response.into_body(), 4096).await?)?;
+    assert_eq!(zero_json["network"]["subnets"], serde_json::json!([]));
+
+    let response = o3k_api::router_with_state(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v2.0/networks/{}", network_record.id))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4096).await?)?;
+    assert_eq!(
+        json["network"]["subnets"],
+        serde_json::json!([realm_a.id.to_string(), realm_b.id.to_string()])
+    );
+    assert!(json["network"]["subnets"].as_array().is_some_and(|ids| {
+        ids.windows(2)
+            .all(|pair| pair[0].as_str().unwrap_or_default() < pair[1].as_str().unwrap_or_default())
+    }));
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
@@ -1627,6 +1792,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         )
         .await?;
     assert_eq!(keypair_deleted.status(), StatusCode::NO_CONTENT);
+    assert!(keypair_deleted.into_body().is_end_stream());
 
     let second_body = serde_json::json!({"server":{"name":"nova-failed-delete","image":{"id":"image-1"},"flavor":{"id":default_flavor_id},"networks":[{"uuid":port_id}]}});
     let second_created = o3k_api::router_with_state(state.clone())

@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use o3k_store::{CanonicalNetworkRecord, PostgresStore, StoreError};
+use o3k_store::{CanonicalNetworkRecord, NetworkRepository, PostgresStore, StoreError};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -139,6 +139,7 @@ async fn postgres_p13_f1_migrates_and_reopens_canonical_network_state() {
             id: network_a,
             project_id: "project-a".into(),
             name: "network-a".into(),
+            admin_state_up: true,
             generation: 7,
             state: "active".into(),
         }
@@ -346,4 +347,112 @@ async fn postgres_p13_f1_invalid_legacy_state_fails_closed() {
         .execute(&pool)
         .await
         .expect("restore public schema");
+}
+
+#[tokio::test]
+#[ignore = "requires the configured PostgreSQL conformance database"]
+async fn postgres_p13_2a_network_rename_updates_projection_and_reopens() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let url = database_url();
+    let pool = fresh_pool(&url).await;
+    let network_id = Uuid::from_u128(0x13a1);
+
+    let store = PostgresStore::connect_pool(pool.clone())
+        .await
+        .expect("migrate store");
+    store
+        .insert_network(&o3k_store::NetworkRecord {
+            id: network_id,
+            name: "before".into(),
+            project_id: "project-a".into(),
+            status: "ACTIVE".into(),
+        })
+        .await
+        .expect("legacy projection");
+    store
+        .insert_canonical_network(&CanonicalNetworkRecord {
+            id: network_id,
+            project_id: "project-a".into(),
+            name: "before".into(),
+            admin_state_up: true,
+            generation: 1,
+            state: "active".into(),
+        })
+        .await
+        .expect("canonical network");
+    let realm_a = Uuid::from_u128(0x13a2);
+    let realm_b = Uuid::from_u128(0x13a3);
+    for (id, prefix) in [(realm_a, "198.51.100.0/24"), (realm_b, "198.51.101.0/24")] {
+        store
+            .insert_canonical_realm(&o3k_store::CanonicalAddressRealmRecord {
+                id,
+                network_id,
+                project_id: "project-a".into(),
+                prefix: prefix.into(),
+                overlapping_prefixes: false,
+                generation: 1,
+                state: "active".into(),
+            })
+            .await
+            .expect("canonical realm");
+    }
+
+    let renamed = store
+        .update_canonical_network("project-a", &network_id, 1, "after", false)
+        .await
+        .expect("atomic canonical/projection rename");
+    assert_eq!(renamed.name, "after");
+    assert!(!renamed.admin_state_up);
+    assert_eq!(
+        store
+            .get_network("project-a", &network_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .name,
+        "after"
+    );
+    assert_eq!(
+        store
+            .list_canonical_realms("project-a", &network_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|realm| realm.id)
+            .collect::<Vec<_>>(),
+        vec![realm_a, realm_b]
+    );
+
+    drop(store);
+    let reopened = PostgresStore::connect(&url).await.expect("reopen store");
+    let restored = reopened
+        .get_canonical_network("project-a", &network_id)
+        .await
+        .expect("reopened canonical network")
+        .expect("canonical network exists");
+    assert_eq!(restored.name, "after");
+    assert!(!restored.admin_state_up);
+    assert_eq!(
+        reopened
+            .get_network("project-a", &network_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .name,
+        "after"
+    );
+    assert_eq!(
+        reopened
+            .list_canonical_realms("project-a", &network_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|realm| realm.id)
+            .collect::<Vec<_>>(),
+        vec![realm_a, realm_b]
+    );
+    reopened
+        .clean_tables_for_testing()
+        .await
+        .expect("clean test database");
 }

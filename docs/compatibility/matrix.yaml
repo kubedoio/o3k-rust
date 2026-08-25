@@ -112,6 +112,19 @@ entries:
     executable_tests:
       - crates/o3k-api/tests/health.rs::neutron_network_subnet_port_lifecycle_is_deterministic
     status: implemented
+  - service: network
+    operation: network_update
+    api_version: neutron-v2
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/network/v2/index.html#update-network
+    supported_fields: [name, admin_state_up]
+    known_deviations:
+      - Only name and admin_state_up are mutable in the bounded P13 profile; deferred network attributes remain unsupported.
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::neutron_network_subnet_port_lifecycle_is_deterministic
+      - crates/o3k-api/tests/two_tenant_isolation.rs::two_tenant_path_and_resource_isolation
+    status: implemented
   - service: subnet_create
     operation: subnet_create
     api_version: neutron-v2

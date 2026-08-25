@@ -4809,6 +4809,7 @@ impl NetworkService {
             id: Uuid::now_v7(),
             project_id: project_id.to_owned(),
             name,
+            admin_state_up: true,
             generation: 1,
             state: "active".to_owned(),
         };
@@ -5868,6 +5869,7 @@ impl NetworkService {
             id: network.id,
             project_id: network.project_id.clone(),
             name: network.name.clone(),
+            admin_state_up: true,
             generation: 1,
             state: "active".to_owned(),
         };
@@ -6428,6 +6430,47 @@ impl NetworkService {
             .map(|network| network.map(canonical_network_projection))
             .map_err(map_store_error)?
             .ok_or(NetworkError::NotFound)
+    }
+
+    pub async fn update_network(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+        name: Option<String>,
+        admin_state_up: Option<bool>,
+    ) -> Result<NetworkRecord, NetworkError> {
+        let (namespace, action, resource_type) = self
+            .authorize_canonical_action(auth, "UpdateNetwork", "network", Some(id), None)
+            .await?;
+        if name.as_deref().is_some_and(|value| value.trim().is_empty()) {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let project_id = auth.effective_scope().id().as_str();
+        let current = self
+            .inner
+            .repository
+            .get_canonical_network(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        let name = name.unwrap_or_else(|| current.name.clone());
+        let admin_state_up = admin_state_up.unwrap_or(current.admin_state_up);
+        let result = self
+            .inner
+            .repository
+            .update_canonical_network(project_id, &id, current.generation, &name, admin_state_up)
+            .await
+            .map(canonical_network_projection)
+            .map_err(map_store_error);
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            Some(id),
+            result.as_ref().map(|_| ()),
+        );
+        result
     }
 
     pub async fn delete_network(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
@@ -7882,6 +7925,67 @@ mod tests {
         let _ = fs::remove_file(&sqlite_path);
         let _ = fs::remove_file(format!("{sqlite_path}-wal"));
         let _ = fs::remove_file(format!("{sqlite_path}-shm"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn network_rename_updates_projection_and_reopens_with_new_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("rename-restart");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let identity = auth("project-a");
+        let network = service
+            .create_network(&identity, "before".to_owned())
+            .await?;
+        let renamed = service
+            .update_network(&identity, network.id, Some("after".to_owned()), Some(false))
+            .await?;
+        assert_eq!(renamed.id, network.id);
+        assert_eq!(renamed.name, "after");
+        let canonical = store
+            .get_canonical_network("project-a", &network.id)
+            .await?
+            .ok_or("canonical network after rename")?;
+        assert!(!canonical.admin_state_up);
+        assert_eq!(
+            store
+                .get_network("project-a", &network.id)
+                .await?
+                .map(|n| n.name),
+            Some("after".to_owned())
+        );
+
+        drop(service);
+        drop(store);
+        let reopened_store =
+            Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let restored = reopened.get_network(&identity, network.id).await?;
+        assert_eq!(restored.id, network.id);
+        assert_eq!(restored.project_id, "project-a");
+        assert_eq!(restored.name, "after");
+        let restored_canonical = reopened_store
+            .get_canonical_network("project-a", &network.id)
+            .await?
+            .ok_or("canonical network after restart")?;
+        assert!(!restored_canonical.admin_state_up);
+        assert_eq!(
+            reopened_store
+                .get_network("project-a", &network.id)
+                .await?
+                .map(|n| n.name),
+            Some("after".to_owned())
+        );
+        assert!(
+            reopened_store
+                .get_network("project-a", &network.id)
+                .await?
+                .is_some()
+        );
         Ok(())
     }
 

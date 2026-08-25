@@ -17,8 +17,11 @@ implementation source.
 
 - Keypairs require `public_key` for the bounded profile. `private_key` and
   provider key generation are optional/computed paths and are explicitly
-  deferred. Read uses `keypairs.Get` by the stored keypair name; delete accepts
-  the Gophercloud delete result and has no update path.
+  deferred. Read uses `keypairs.Get` by the stored keypair name; delete uses
+  Gophercloud v2.8.0's default accepted codes `[202, 204]` and has no update
+  path. O3K selects `204 No Content` as its wire response; the earlier P13.1
+  observation of `202` remains historical evidence, not an exclusive client
+  requirement.
 - Networks send the provider-expanded `name` plus optional values present in
   the schema. `admin_state_up` and `shared` are in-place updates; `tenant_id`,
   `external`, and provider/network type fields are replacement or computed
