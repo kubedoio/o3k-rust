@@ -12,7 +12,7 @@ use axum::{
 use o3k_compute::{ComputeError, ComputeService, Flavor, Server};
 use o3k_console::ConsoleError;
 use o3k_domain::{ServerId, ServerState};
-use o3k_network::NetworkService;
+use o3k_network::{NetworkError, NetworkService};
 use o3k_provider::{ConfigDriveRequest, InstanceAction};
 use serde::Serialize;
 
@@ -788,6 +788,7 @@ pub(crate) async fn create_server(
         .and_then(|value| value.to_str().ok())
         .unwrap_or(&body.server.name)
         .to_owned();
+    let server_id = ComputeService::server_id_for_create(&project_id, &idempotency);
     let mut owned_network_ids = Vec::new();
     let mut network_ids = Vec::with_capacity(networks.len());
     if let Some(network_service) = state.network.as_ref() {
@@ -879,14 +880,28 @@ pub(crate) async fn create_server(
     match result {
         Ok(server) => {
             if let Some(network_service) = state.network.as_ref() {
+                let mut cleanup_failed = false;
                 for port_id in &owned_network_ids {
                     if !server.network_ids.iter().any(|id| id == port_id)
                         && let Ok(port_id) = port_id.parse()
-                    {
-                        let _ = network_service
+                        && let Err(error) = network_service
                             .delete_port_for_project(&project_id, port_id)
-                            .await;
+                            .await
+                    {
+                        cleanup_failed = true;
+                        tracing::error!(
+                            %error,
+                            %port_id,
+                            "server create cleanup could not remove unused endpoint"
+                        );
                     }
+                }
+                if cleanup_failed {
+                    return keystone_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal Server Error",
+                        "server network cleanup failed",
+                    );
                 }
             }
             (
@@ -900,10 +915,34 @@ pub(crate) async fn create_server(
         Err(error) => {
             if let Some(network_service) = state.network.as_ref() {
                 for port_id in owned_network_ids {
-                    if let Ok(port_id) = port_id.parse() {
-                        let _ = network_service
+                    let preserve_for_durable_server = service
+                        .server_network_ids_for_auth(&auth, ServerId::from_uuid(server_id))
+                        .await
+                        .map(|network_ids| network_ids.iter().any(|id| id == &port_id))
+                        .unwrap_or(false);
+                    if preserve_for_durable_server {
+                        tracing::warn!(
+                            server_id = %server_id,
+                            port_id,
+                            "retaining server endpoint for durable create reconciliation"
+                        );
+                        continue;
+                    }
+                    if let Ok(port_id) = port_id.parse()
+                        && let Err(cleanup_error) = network_service
                             .delete_port_for_project(&project_id, port_id)
-                            .await;
+                            .await
+                    {
+                        tracing::error!(
+                            %cleanup_error,
+                            %port_id,
+                            "server create compensation could not remove owned endpoint"
+                        );
+                        return keystone_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Internal Server Error",
+                            "server network compensation failed",
+                        );
                     }
                 }
             }
@@ -1037,11 +1076,10 @@ pub(crate) async fn delete_server(
         Err(response) => return response,
     };
     let owned_ports = match service
-        .show_server_for_auth(&auth, ServerId::from_uuid(id))
+        .server_network_ids_for_auth(&auth, ServerId::from_uuid(id))
         .await
     {
-        Ok(server) => server
-            .network_ids
+        Ok(network_ids) => network_ids
             .iter()
             .filter_map(|port_id| port_id.parse::<uuid::Uuid>().ok())
             .collect::<Vec<_>>(),
@@ -1063,16 +1101,42 @@ pub(crate) async fn delete_server(
                 );
             }
             if let Some(network_service) = state.network.as_ref() {
+                let mut cleanup_failed = false;
                 for port_id in owned_ports {
-                    if let Ok(port) = network_service
+                    match network_service
                         .get_port_for_project(&project_id, port_id)
                         .await
-                        && port.name.starts_with(&format!("o3k-server:{project_id}:"))
                     {
-                        let _ = network_service
-                            .delete_port_for_project(&project_id, port_id)
-                            .await;
+                        Ok(port) if port.name.starts_with(&format!("o3k-server:{project_id}:")) => {
+                            if let Err(error) = network_service
+                                .delete_port_for_project(&project_id, port_id)
+                                .await
+                            {
+                                cleanup_failed = true;
+                                tracing::error!(
+                                    %error,
+                                    %port_id,
+                                    "server-owned endpoint cleanup failed"
+                                );
+                            }
+                        }
+                        Ok(_) | Err(NetworkError::NotFound) => {}
+                        Err(error) => {
+                            cleanup_failed = true;
+                            tracing::error!(
+                                %error,
+                                %port_id,
+                                "server-owned endpoint lookup failed during cleanup"
+                            );
+                        }
                     }
+                }
+                if cleanup_failed {
+                    return keystone_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal Server Error",
+                        "server network cleanup failed",
+                    );
                 }
             }
             StatusCode::NO_CONTENT.into_response()
