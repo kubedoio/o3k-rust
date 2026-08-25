@@ -1381,6 +1381,16 @@ impl ImageRepository for O3kStore {
 
 #[async_trait]
 impl NetworkRepository for O3kStore {
+    async fn get_canonical_owner(
+        &self,
+        resource_name: &str,
+        id: &Uuid,
+    ) -> Result<Option<String>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_canonical_owner(resource_name, id).await,
+            Self::Postgres(s) => s.get_canonical_owner(resource_name, id).await,
+        }
+    }
     async fn insert_canonical_network(
         &self,
         network: &CanonicalNetworkRecord,

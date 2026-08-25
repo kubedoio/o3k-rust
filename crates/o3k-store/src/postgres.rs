@@ -3850,6 +3850,29 @@ fn parse_pg_image(row: &PgRow) -> Result<ImageMetadataRecord, StoreError> {
 
 #[async_trait]
 impl NetworkRepository for PostgresStore {
+    async fn get_canonical_owner(
+        &self,
+        resource_name: &str,
+        id: &Uuid,
+    ) -> Result<Option<String>, StoreError> {
+        let table = match resource_name {
+            "network" => "canonical_networks",
+            "address_realm" => "canonical_address_realms",
+            "address_pool" => "canonical_address_pools",
+            "endpoint" => "canonical_endpoints",
+            _ => {
+                return Err(StoreError::Corrupt(
+                    "unknown canonical resource type".into(),
+                ));
+            }
+        };
+        let query = format!("SELECT project_id FROM {table} WHERE id = $1");
+        sqlx::query_scalar(&query)
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)
+    }
     async fn insert_canonical_network(
         &self,
         network: &CanonicalNetworkRecord,

@@ -1822,6 +1822,14 @@ pub trait ImageRepository: Send + Sync + QuotaRepository {
 /// the concrete `SqliteStore` adapter.
 #[async_trait]
 pub trait NetworkRepository: Send + Sync + DurableStore + QuotaRepository {
+    /// Resolves canonical ownership for authorization without exposing an
+    /// unscoped public read API. The network service uses this only to build
+    /// an authorization target before applying project non-disclosure.
+    async fn get_canonical_owner(
+        &self,
+        resource_name: &str,
+        id: &Uuid,
+    ) -> Result<Option<String>, StoreError>;
     async fn insert_canonical_network(
         &self,
         network: &CanonicalNetworkRecord,
@@ -8258,6 +8266,29 @@ impl ImageRepository for SqliteStore {
 
 #[async_trait]
 impl NetworkRepository for SqliteStore {
+    async fn get_canonical_owner(
+        &self,
+        resource_name: &str,
+        id: &Uuid,
+    ) -> Result<Option<String>, StoreError> {
+        let table = match resource_name {
+            "network" => "canonical_networks",
+            "address_realm" => "canonical_address_realms",
+            "address_pool" => "canonical_address_pools",
+            "endpoint" => "canonical_endpoints",
+            _ => {
+                return Err(StoreError::Corrupt(
+                    "unknown canonical resource type".into(),
+                ));
+            }
+        };
+        let query = format!("SELECT project_id FROM {table} WHERE id = ?");
+        sqlx::query_scalar(&query)
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)
+    }
     async fn insert_canonical_network(
         &self,
         network: &CanonicalNetworkRecord,
