@@ -11,16 +11,18 @@ use o3k_kernel::{
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
-    CanonicalNetworkPolicyRecord, CanonicalNetworkRecord, CanonicalOperationRecord,
-    CanonicalRealmBindingRecord, ComputeRepository, ControllerEpoch, ControllerId,
-    ControllerSession, CoordinationRepository, DatabaseHealth, DurableStore, FencingToken,
-    IdempotencyReservation, IdempotencyReservationRequest, IdentityRepository, ImageMetadataRecord,
-    ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayUpdate, ImageRepository,
-    KeypairRecord, KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord,
-    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
-    KeystoneServiceRecord, KeystoneUserRecord, LeaseAcquireOutcome, NetworkAddressAllocationRecord,
-    NetworkIntentRecord, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord,
-    OperationState, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    CanonicalNetworkPolicyRecord, CanonicalNetworkPolicyRuleRecord, CanonicalNetworkRecord,
+    CanonicalOperationRecord, CanonicalPolicyAttachmentRecord, CanonicalPolicyRepository,
+    CanonicalRealmBindingRecord, CanonicalReusableNetworkPolicyRecord, ComputeRepository,
+    ControllerEpoch, ControllerId, ControllerSession, CoordinationRepository, DatabaseHealth,
+    DurableStore, FencingToken, IdempotencyReservation, IdempotencyReservationRequest,
+    IdentityRepository, ImageMetadataRecord, ImageOverlayIdentity, ImageOverlayOwnershipRecord,
+    ImageOverlayUpdate, ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
+    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
+    LeaseAcquireOutcome, NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord,
+    NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
+    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository, PortRecord,
     PostgresStore, ProviderReference, RelationshipRepository, ResourceRecord,
     ResourceRelationshipRecord, SecurityGroupBindingRecord, SecurityGroupRecord,
@@ -77,6 +79,152 @@ impl RelationshipRepository for O3kStore {
     ) -> Result<ResourceRelationshipRecord, StoreError> {
         self.set_relationship_state(parent_resource_id, slot, state)
             .await
+    }
+}
+
+#[async_trait]
+impl CanonicalPolicyRepository for O3kStore {
+    async fn insert_reusable_policy(
+        &self,
+        p: &CanonicalReusableNetworkPolicyRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_reusable_policy(p).await,
+            Self::Postgres(s) => s.insert_reusable_policy(p).await,
+        }
+    }
+    async fn get_reusable_policy(
+        &self,
+        project: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalReusableNetworkPolicyRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_reusable_policy(project, id).await,
+            Self::Postgres(s) => s.get_reusable_policy(project, id).await,
+        }
+    }
+    async fn list_reusable_policies(
+        &self,
+        project: &str,
+    ) -> Result<Vec<CanonicalReusableNetworkPolicyRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_reusable_policies(project).await,
+            Self::Postgres(s) => s.list_reusable_policies(project).await,
+        }
+    }
+    async fn update_reusable_policy(
+        &self,
+        p: &CanonicalReusableNetworkPolicyRecord,
+        generation: u64,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.update_reusable_policy(p, generation).await,
+            Self::Postgres(s) => s.update_reusable_policy(p, generation).await,
+        }
+    }
+    async fn transition_reusable_policy_state(
+        &self,
+        project: &str,
+        id: &Uuid,
+        generation: u64,
+        state: &str,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.transition_reusable_policy_state(project, id, generation, state)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.transition_reusable_policy_state(project, id, generation, state)
+                    .await
+            }
+        }
+    }
+    async fn delete_reusable_policy(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.delete_reusable_policy(project, id).await,
+            Self::Postgres(s) => s.delete_reusable_policy(project, id).await,
+        }
+    }
+    async fn insert_policy_rule(
+        &self,
+        r: &CanonicalNetworkPolicyRuleRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_policy_rule(r).await,
+            Self::Postgres(s) => s.insert_policy_rule(r).await,
+        }
+    }
+    async fn get_policy_rule(
+        &self,
+        project: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_policy_rule(project, id).await,
+            Self::Postgres(s) => s.get_policy_rule(project, id).await,
+        }
+    }
+    async fn list_policy_rules(
+        &self,
+        project: &str,
+        policy: &Uuid,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_policy_rules(project, policy).await,
+            Self::Postgres(s) => s.list_policy_rules(project, policy).await,
+        }
+    }
+    async fn delete_policy_rule(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.delete_policy_rule(project, id).await,
+            Self::Postgres(s) => s.delete_policy_rule(project, id).await,
+        }
+    }
+    async fn insert_policy_attachment(
+        &self,
+        a: &CanonicalPolicyAttachmentRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_policy_attachment(a).await,
+            Self::Postgres(s) => s.insert_policy_attachment(a).await,
+        }
+    }
+    async fn get_policy_attachment(
+        &self,
+        project: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalPolicyAttachmentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_policy_attachment(project, id).await,
+            Self::Postgres(s) => s.get_policy_attachment(project, id).await,
+        }
+    }
+    async fn list_policy_attachments(
+        &self,
+        project: &str,
+        policy: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_policy_attachments(project, policy).await,
+            Self::Postgres(s) => s.list_policy_attachments(project, policy).await,
+        }
+    }
+    async fn list_endpoint_policy_attachments(
+        &self,
+        project: &str,
+        endpoint: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_endpoint_policy_attachments(project, endpoint).await,
+            Self::Postgres(s) => s.list_endpoint_policy_attachments(project, endpoint).await,
+        }
+    }
+    async fn delete_policy_attachment(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.delete_policy_attachment(project, id).await,
+            Self::Postgres(s) => s.delete_policy_attachment(project, id).await,
+        }
     }
 }
 

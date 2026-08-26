@@ -1,0 +1,1140 @@
+//! Persistence for the reusable, provider-independent NetworkPolicy model.
+//!
+//! This is intentionally separate from `canonical_network_policies`, which is
+//! the legacy endpoint-scoped PolicyIntent persistence used by P9/P11.
+
+use async_trait::async_trait;
+use sqlx::Row;
+use uuid::Uuid;
+
+use crate::{
+    CanonicalNetworkPolicyRuleRecord, CanonicalPolicyAttachmentRecord,
+    CanonicalReusableNetworkPolicyRecord, StoreError, checked_generation,
+    map_canonical_insert_error, parse_uuid, validate_canonical_state,
+};
+
+const POLICY_COLUMNS: &str = "id, project_id, name, description, stateful_mode, unmatched_action, generation, state, created_at, updated_at";
+const RULE_COLUMNS: &str = "id, policy_id, project_id, direction, address_family, protocol, port_min, port_max, remote_selector, action, state, generation, enforcement_key";
+const ATTACHMENT_COLUMNS: &str = "id, policy_id, endpoint_id, project_id, state, generation";
+
+#[async_trait]
+pub trait CanonicalPolicyRepository {
+    async fn insert_reusable_policy(
+        &self,
+        policy: &CanonicalReusableNetworkPolicyRecord,
+    ) -> Result<(), StoreError>;
+    async fn get_reusable_policy(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalReusableNetworkPolicyRecord>, StoreError>;
+    async fn list_reusable_policies(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<CanonicalReusableNetworkPolicyRecord>, StoreError>;
+    async fn update_reusable_policy(
+        &self,
+        policy: &CanonicalReusableNetworkPolicyRecord,
+        expected_generation: u64,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError>;
+    async fn transition_reusable_policy_state(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        state: &str,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError>;
+    async fn delete_reusable_policy(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError>;
+    async fn insert_policy_rule(
+        &self,
+        rule: &CanonicalNetworkPolicyRuleRecord,
+    ) -> Result<(), StoreError>;
+    async fn get_policy_rule(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalNetworkPolicyRuleRecord>, StoreError>;
+    async fn list_policy_rules(
+        &self,
+        project_id: &str,
+        policy_id: &Uuid,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError>;
+    async fn delete_policy_rule(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError>;
+    async fn insert_policy_attachment(
+        &self,
+        attachment: &CanonicalPolicyAttachmentRecord,
+    ) -> Result<(), StoreError>;
+    async fn get_policy_attachment(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalPolicyAttachmentRecord>, StoreError>;
+    async fn list_policy_attachments(
+        &self,
+        project_id: &str,
+        policy_id: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError>;
+    async fn list_endpoint_policy_attachments(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError>;
+    async fn delete_policy_attachment(&self, project_id: &str, id: &Uuid)
+    -> Result<(), StoreError>;
+}
+
+fn validate_policy(policy: &CanonicalReusableNetworkPolicyRecord) -> Result<i64, StoreError> {
+    if policy.id.is_nil() || policy.project_id.trim().is_empty() {
+        return Err(StoreError::Corrupt(
+            "invalid reusable policy identity".into(),
+        ));
+    }
+    if !matches!(policy.stateful_mode.as_str(), "Stateful" | "Stateless")
+        || !matches!(policy.unmatched_action.as_str(), "Allow" | "Deny")
+    {
+        return Err(StoreError::Corrupt(
+            "invalid reusable policy mode or unmatched action".into(),
+        ));
+    }
+    validate_canonical_state(&policy.state)?;
+    checked_generation(policy.generation)
+}
+
+fn validate_rule(rule: &CanonicalNetworkPolicyRuleRecord) -> Result<i64, StoreError> {
+    if rule.id.is_nil()
+        || rule.policy_id.is_nil()
+        || rule.project_id.trim().is_empty()
+        || rule.enforcement_key.trim().is_empty()
+    {
+        return Err(StoreError::Corrupt(
+            "invalid reusable policy rule identity".into(),
+        ));
+    }
+    if !matches!(rule.direction.as_str(), "Ingress" | "Egress")
+        || !matches!(rule.address_family.as_str(), "Ipv4" | "Ipv6")
+        || !matches!(rule.protocol.as_str(), "Any" | "Tcp" | "Udp" | "Icmp")
+        || !matches!(rule.action.as_str(), "Allow" | "Deny")
+    {
+        return Err(StoreError::Corrupt(
+            "invalid reusable policy rule semantics".into(),
+        ));
+    }
+    if rule.port_min.is_some() != rule.port_max.is_some()
+        || rule
+            .port_min
+            .zip(rule.port_max)
+            .is_some_and(|(min, max)| min > max)
+        || (rule.port_min.is_some() && matches!(rule.protocol.as_str(), "Any" | "Icmp"))
+    {
+        return Err(StoreError::Corrupt(
+            "invalid reusable policy rule port range".into(),
+        ));
+    }
+    if rule.address_family == "Ipv6"
+        || rule
+            .remote_selector
+            .as_deref()
+            .is_some_and(|v| v.contains(':'))
+    {
+        return Err(StoreError::Corrupt(
+            "IPv6 policy rules are architecture-ready but not enabled".into(),
+        ));
+    }
+    if let Some(selector) = &rule.remote_selector {
+        let (address, prefix_len) = selector.split_once('/').ok_or_else(|| {
+            StoreError::Corrupt("policy remote selector is missing prefix length".into())
+        })?;
+        let prefix_len: u8 = prefix_len
+            .parse()
+            .map_err(|_| StoreError::Corrupt("invalid policy remote selector length".into()))?;
+        let address: std::net::Ipv4Addr = address
+            .parse()
+            .map_err(|_| StoreError::Corrupt("invalid policy remote selector address".into()))?;
+        let prefix = o3k_domain::Ipv4Prefix::new(address, prefix_len)
+            .ok_or_else(|| StoreError::Corrupt("invalid policy remote selector prefix".into()))?;
+        if prefix.network != address {
+            return Err(StoreError::Corrupt(
+                "policy remote selector is not canonical".into(),
+            ));
+        }
+    }
+    let expected_key = format!(
+        "{}|{}|{}|{}|{}|{}",
+        rule.direction,
+        rule.address_family,
+        rule.protocol,
+        rule.port_min
+            .zip(rule.port_max)
+            .map_or_else(|| "-".to_owned(), |(min, max)| format!("{min}-{max}")),
+        rule.remote_selector.as_deref().unwrap_or("-"),
+        rule.action
+    );
+    if rule.enforcement_key != expected_key {
+        return Err(StoreError::Corrupt(
+            "policy rule enforcement key is not normalized".into(),
+        ));
+    }
+    validate_canonical_state(&rule.state)?;
+    checked_generation(rule.generation)
+}
+
+fn validate_attachment(attachment: &CanonicalPolicyAttachmentRecord) -> Result<i64, StoreError> {
+    if attachment.id.is_nil()
+        || attachment.policy_id.is_nil()
+        || attachment.endpoint_id.is_nil()
+        || attachment.project_id.trim().is_empty()
+    {
+        return Err(StoreError::Corrupt(
+            "invalid policy attachment identity".into(),
+        ));
+    }
+    validate_canonical_state(&attachment.state)?;
+    checked_generation(attachment.generation)
+}
+
+fn sqlite_policy(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+    Ok(CanonicalReusableNetworkPolicyRecord {
+        id: parse_uuid(row.get("id"))?,
+        project_id: row.get("project_id"),
+        name: row.get("name"),
+        description: row.get("description"),
+        stateful_mode: row.get("stateful_mode"),
+        unmatched_action: row.get("unmatched_action"),
+        generation: u64::try_from(row.get::<i64, _>("generation"))
+            .map_err(|_| StoreError::Corrupt("negative policy generation".into()))?,
+        state: row.get("state"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+fn sqlite_rule(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<CanonicalNetworkPolicyRuleRecord, StoreError> {
+    Ok(CanonicalNetworkPolicyRuleRecord {
+        id: parse_uuid(row.get("id"))?,
+        policy_id: parse_uuid(row.get("policy_id"))?,
+        project_id: row.get("project_id"),
+        direction: row.get("direction"),
+        address_family: row.get("address_family"),
+        protocol: row.get("protocol"),
+        port_min: row
+            .get::<Option<i64>, _>("port_min")
+            .map(|v| u16::try_from(v).map_err(|_| StoreError::Corrupt("invalid rule port".into())))
+            .transpose()?,
+        port_max: row
+            .get::<Option<i64>, _>("port_max")
+            .map(|v| u16::try_from(v).map_err(|_| StoreError::Corrupt("invalid rule port".into())))
+            .transpose()?,
+        remote_selector: row.get("remote_selector"),
+        action: row.get("action"),
+        state: row.get("state"),
+        generation: u64::try_from(row.get::<i64, _>("generation"))
+            .map_err(|_| StoreError::Corrupt("negative rule generation".into()))?,
+        enforcement_key: row.get("enforcement_key"),
+    })
+}
+fn sqlite_attachment(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<CanonicalPolicyAttachmentRecord, StoreError> {
+    Ok(CanonicalPolicyAttachmentRecord {
+        id: parse_uuid(row.get("id"))?,
+        policy_id: parse_uuid(row.get("policy_id"))?,
+        endpoint_id: parse_uuid(row.get("endpoint_id"))?,
+        project_id: row.get("project_id"),
+        state: row.get("state"),
+        generation: u64::try_from(row.get::<i64, _>("generation"))
+            .map_err(|_| StoreError::Corrupt("negative attachment generation".into()))?,
+    })
+}
+
+impl crate::SqliteStore {
+    pub async fn insert_reusable_policy(
+        &self,
+        p: &CanonicalReusableNetworkPolicyRecord,
+    ) -> Result<(), StoreError> {
+        let generation = validate_policy(p)?;
+        sqlx::query("INSERT INTO canonical_reusable_network_policies (id, project_id, name, description, stateful_mode, unmatched_action, generation, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(p.id.to_string()).bind(&p.project_id).bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(generation).bind(&p.state).bind(&p.created_at).bind(&p.updated_at).execute(&self.pool).await.map_err(map_canonical_insert_error).map(|_| ())
+    }
+    pub async fn get_reusable_policy(
+        &self,
+        project: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalReusableNetworkPolicyRecord>, StoreError> {
+        sqlx::query(&format!("SELECT {POLICY_COLUMNS} FROM canonical_reusable_network_policies WHERE id = ? AND project_id = ?")).bind(id.to_string()).bind(project).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.as_ref().map(sqlite_policy).transpose()
+    }
+    pub async fn list_reusable_policies(
+        &self,
+        project: &str,
+    ) -> Result<Vec<CanonicalReusableNetworkPolicyRecord>, StoreError> {
+        let rows=sqlx::query(&format!("SELECT {POLICY_COLUMNS} FROM canonical_reusable_network_policies WHERE project_id = ? ORDER BY id")).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(sqlite_policy).collect()
+    }
+    pub async fn update_reusable_policy(
+        &self,
+        p: &CanonicalReusableNetworkPolicyRecord,
+        expected: u64,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+        let new_gen = validate_policy(p)?;
+        if p.generation != expected.saturating_add(1) {
+            return Err(StoreError::Corrupt(
+                "policy update generation must increment by one".into(),
+            ));
+        }
+        let incompatible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM canonical_policy_attachments a JOIN canonical_policy_attachments other ON other.endpoint_id=a.endpoint_id AND other.policy_id<>a.policy_id AND other.state='active' JOIN canonical_reusable_network_policies other_policy ON other_policy.id=other.policy_id WHERE a.policy_id=? AND a.state='active' AND other_policy.unmatched_action<>?")
+            .bind(p.id.to_string()).bind(&p.unmatched_action).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+        if incompatible != 0 {
+            return Err(StoreError::PolicyCompositionConflict);
+        }
+        let result=sqlx::query("UPDATE canonical_reusable_network_policies SET name=?, description=?, stateful_mode=?, unmatched_action=?, generation=?, state=?, updated_at=? WHERE id=? AND project_id=? AND generation=?").bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(new_gen).bind(&p.state).bind(&p.updated_at).bind(p.id.to_string()).bind(&p.project_id).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_reusable_policy(&p.project_id, &p.id).await? {
+                Some(_) => Err(StoreError::StaleGeneration),
+                None => Err(StoreError::ResourceNotFound),
+            };
+        }
+        self.get_reusable_policy(&p.project_id, &p.id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+    pub async fn transition_reusable_policy_state(
+        &self,
+        project: &str,
+        id: &Uuid,
+        expected: u64,
+        state: &str,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+        validate_canonical_state(state)?;
+        let result = sqlx::query("UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=?")
+            .bind(state).bind(id.to_string()).bind(project).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_reusable_policy(project, id).await? {
+                Some(_) => Err(StoreError::StaleGeneration),
+                None => Err(StoreError::ResourceNotFound),
+            };
+        }
+        self.get_reusable_policy(project, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+    pub async fn delete_reusable_policy(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
+        let child:i64=sqlx::query_scalar("SELECT COUNT(*) FROM canonical_network_policy_rules WHERE policy_id=? AND state IN ('requested','active','deleting')").bind(id.to_string()).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+        let attached:i64=sqlx::query_scalar("SELECT COUNT(*) FROM canonical_policy_attachments WHERE policy_id=? AND state IN ('requested','active','deleting')").bind(id.to_string()).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+        if child + attached > 0 {
+            return Err(StoreError::NetworkInUse);
+        }
+        let result = sqlx::query(
+            "DELETE FROM canonical_reusable_network_policies WHERE id=? AND project_id=?",
+        )
+        .bind(id.to_string())
+        .bind(project)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::ResourceNotFound);
+        }
+        Ok(())
+    }
+    pub async fn insert_policy_rule(
+        &self,
+        r: &CanonicalNetworkPolicyRuleRecord,
+    ) -> Result<(), StoreError> {
+        let generation = validate_rule(r)?;
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let parent = sqlx::query(
+            "SELECT project_id, state FROM canonical_reusable_network_policies WHERE id=?",
+        )
+        .bind(r.policy_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::ResourceNotFound)?;
+        if parent.get::<String, _>("project_id") != r.project_id
+            || parent.get::<String, _>("state") != "active"
+        {
+            return Err(StoreError::OwnershipConflict);
+        }
+        sqlx::query("INSERT INTO canonical_network_policy_rules (id, policy_id, project_id, direction, address_family, protocol, port_min, port_max, remote_selector, action, state, generation, enforcement_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(r.id.to_string()).bind(r.policy_id.to_string()).bind(&r.project_id).bind(&r.direction).bind(&r.address_family).bind(&r.protocol).bind(r.port_min.map(i64::from)).bind(r.port_max.map(i64::from)).bind(&r.remote_selector).bind(&r.action).bind(&r.state).bind(generation).bind(&r.enforcement_key).execute(&mut *tx).await.map_err(map_canonical_insert_error)?;
+        tx.commit().await.map_err(StoreError::Database)
+    }
+    pub async fn get_policy_rule(
+        &self,
+        project: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        sqlx::query(&format!(
+            "SELECT {RULE_COLUMNS} FROM canonical_network_policy_rules WHERE id=? AND project_id=?"
+        ))
+        .bind(id.to_string())
+        .bind(project)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?
+        .as_ref()
+        .map(sqlite_rule)
+        .transpose()
+    }
+    pub async fn list_policy_rules(
+        &self,
+        project: &str,
+        policy: &Uuid,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        let rows=sqlx::query(&format!("SELECT {RULE_COLUMNS} FROM canonical_network_policy_rules WHERE policy_id=? AND project_id=? ORDER BY id")).bind(policy.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(sqlite_rule).collect()
+    }
+    pub async fn delete_policy_rule(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
+        let r =
+            sqlx::query("DELETE FROM canonical_network_policy_rules WHERE id=? AND project_id=?")
+                .bind(id.to_string())
+                .bind(project)
+                .execute(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+        if r.rows_affected() == 0 {
+            Err(StoreError::ResourceNotFound)
+        } else {
+            Ok(())
+        }
+    }
+    pub async fn insert_policy_attachment(
+        &self,
+        a: &CanonicalPolicyAttachmentRecord,
+    ) -> Result<(), StoreError> {
+        let generation = validate_attachment(a)?;
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let p = sqlx::query(
+            "SELECT project_id,state,unmatched_action FROM canonical_reusable_network_policies WHERE id=?",
+        )
+        .bind(a.policy_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::ResourceNotFound)?;
+        if p.get::<String, _>("project_id") != a.project_id
+            || p.get::<String, _>("state") != "active"
+        {
+            return Err(StoreError::OwnershipConflict);
+        }
+        let incompatible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM canonical_policy_attachments a JOIN canonical_reusable_network_policies existing ON existing.id=a.policy_id WHERE a.endpoint_id=? AND a.state='active' AND existing.unmatched_action <> ?")
+            .bind(a.endpoint_id.to_string())
+            .bind(p.get::<String, _>("unmatched_action"))
+            .fetch_one(&mut *tx).await.map_err(StoreError::Database)?;
+        if incompatible != 0 {
+            return Err(StoreError::PolicyCompositionConflict);
+        }
+        let e = sqlx::query("SELECT project_id FROM canonical_endpoints WHERE id=?")
+            .bind(a.endpoint_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::ResourceNotFound)?;
+        if e.get::<String, _>("project_id") != a.project_id {
+            return Err(StoreError::OwnershipConflict);
+        }
+        sqlx::query("INSERT INTO canonical_policy_attachments (id,policy_id,endpoint_id,project_id,state,generation) VALUES (?,?,?,?,?,?)").bind(a.id.to_string()).bind(a.policy_id.to_string()).bind(a.endpoint_id.to_string()).bind(&a.project_id).bind(&a.state).bind(generation).execute(&mut *tx).await.map_err(map_canonical_insert_error)?;
+        tx.commit().await.map_err(StoreError::Database)
+    }
+    pub async fn get_policy_attachment(
+        &self,
+        project: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalPolicyAttachmentRecord>, StoreError> {
+        sqlx::query(&format!("SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE id=? AND project_id=?")).bind(id.to_string()).bind(project).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.as_ref().map(sqlite_attachment).transpose()
+    }
+    pub async fn list_policy_attachments(
+        &self,
+        project: &str,
+        policy: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        let rows=sqlx::query(&format!("SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE policy_id=? AND project_id=? ORDER BY id")).bind(policy.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(sqlite_attachment).collect()
+    }
+    pub async fn list_endpoint_policy_attachments(
+        &self,
+        project: &str,
+        endpoint: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        let rows=sqlx::query(&format!("SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE endpoint_id=? AND project_id=? ORDER BY id")).bind(endpoint.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(sqlite_attachment).collect()
+    }
+    pub async fn delete_policy_attachment(
+        &self,
+        project: &str,
+        id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let r = sqlx::query("DELETE FROM canonical_policy_attachments WHERE id=? AND project_id=?")
+            .bind(id.to_string())
+            .bind(project)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        if r.rows_affected() == 0 {
+            Err(StoreError::ResourceNotFound)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[async_trait]
+impl CanonicalPolicyRepository for crate::SqliteStore {
+    async fn insert_reusable_policy(
+        &self,
+        p: &CanonicalReusableNetworkPolicyRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_reusable_policy(p).await
+    }
+    async fn get_reusable_policy(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Option<CanonicalReusableNetworkPolicyRecord>, StoreError> {
+        self.get_reusable_policy(p, i).await
+    }
+    async fn list_reusable_policies(
+        &self,
+        p: &str,
+    ) -> Result<Vec<CanonicalReusableNetworkPolicyRecord>, StoreError> {
+        self.list_reusable_policies(p).await
+    }
+    async fn update_reusable_policy(
+        &self,
+        p: &CanonicalReusableNetworkPolicyRecord,
+        g: u64,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+        self.update_reusable_policy(p, g).await
+    }
+    async fn transition_reusable_policy_state(
+        &self,
+        p: &str,
+        i: &Uuid,
+        g: u64,
+        s: &str,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+        self.transition_reusable_policy_state(p, i, g, s).await
+    }
+    async fn delete_reusable_policy(&self, p: &str, i: &Uuid) -> Result<(), StoreError> {
+        self.delete_reusable_policy(p, i).await
+    }
+    async fn insert_policy_rule(
+        &self,
+        r: &CanonicalNetworkPolicyRuleRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_policy_rule(r).await
+    }
+    async fn get_policy_rule(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Option<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        self.get_policy_rule(p, i).await
+    }
+    async fn list_policy_rules(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        self.list_policy_rules(p, i).await
+    }
+    async fn delete_policy_rule(&self, p: &str, i: &Uuid) -> Result<(), StoreError> {
+        self.delete_policy_rule(p, i).await
+    }
+    async fn insert_policy_attachment(
+        &self,
+        a: &CanonicalPolicyAttachmentRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_policy_attachment(a).await
+    }
+    async fn get_policy_attachment(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Option<CanonicalPolicyAttachmentRecord>, StoreError> {
+        self.get_policy_attachment(p, i).await
+    }
+    async fn list_policy_attachments(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        self.list_policy_attachments(p, i).await
+    }
+    async fn list_endpoint_policy_attachments(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        self.list_endpoint_policy_attachments(p, i).await
+    }
+    async fn delete_policy_attachment(&self, p: &str, i: &Uuid) -> Result<(), StoreError> {
+        self.delete_policy_attachment(p, i).await
+    }
+}
+
+fn pg_policy(
+    row: &sqlx::postgres::PgRow,
+) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+    Ok(CanonicalReusableNetworkPolicyRecord {
+        id: parse_uuid(row.get("id"))?,
+        project_id: row.get("project_id"),
+        name: row.get("name"),
+        description: row.get("description"),
+        stateful_mode: row.get("stateful_mode"),
+        unmatched_action: row.get("unmatched_action"),
+        generation: u64::try_from(row.get::<i64, _>("generation"))
+            .map_err(|_| StoreError::Corrupt("negative policy generation".into()))?,
+        state: row.get("state"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+fn pg_rule(row: &sqlx::postgres::PgRow) -> Result<CanonicalNetworkPolicyRuleRecord, StoreError> {
+    Ok(CanonicalNetworkPolicyRuleRecord {
+        id: parse_uuid(row.get("id"))?,
+        policy_id: parse_uuid(row.get("policy_id"))?,
+        project_id: row.get("project_id"),
+        direction: row.get("direction"),
+        address_family: row.get("address_family"),
+        protocol: row.get("protocol"),
+        port_min: row
+            .get::<Option<i32>, _>("port_min")
+            .map(|v| u16::try_from(v).map_err(|_| StoreError::Corrupt("invalid rule port".into())))
+            .transpose()?,
+        port_max: row
+            .get::<Option<i32>, _>("port_max")
+            .map(|v| u16::try_from(v).map_err(|_| StoreError::Corrupt("invalid rule port".into())))
+            .transpose()?,
+        remote_selector: row.get("remote_selector"),
+        action: row.get("action"),
+        state: row.get("state"),
+        generation: u64::try_from(row.get::<i64, _>("generation"))
+            .map_err(|_| StoreError::Corrupt("negative rule generation".into()))?,
+        enforcement_key: row.get("enforcement_key"),
+    })
+}
+fn pg_attachment(
+    row: &sqlx::postgres::PgRow,
+) -> Result<CanonicalPolicyAttachmentRecord, StoreError> {
+    Ok(CanonicalPolicyAttachmentRecord {
+        id: parse_uuid(row.get("id"))?,
+        policy_id: parse_uuid(row.get("policy_id"))?,
+        endpoint_id: parse_uuid(row.get("endpoint_id"))?,
+        project_id: row.get("project_id"),
+        state: row.get("state"),
+        generation: u64::try_from(row.get::<i64, _>("generation"))
+            .map_err(|_| StoreError::Corrupt("negative attachment generation".into()))?,
+    })
+}
+
+impl crate::PostgresStore {
+    pub async fn insert_reusable_policy(
+        &self,
+        p: &CanonicalReusableNetworkPolicyRecord,
+    ) -> Result<(), StoreError> {
+        let g = validate_policy(p)?;
+        sqlx::query("INSERT INTO canonical_reusable_network_policies (id,project_id,name,description,stateful_mode,unmatched_action,generation,state,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)").bind(p.id.to_string()).bind(&p.project_id).bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(g).bind(&p.state).bind(&p.created_at).bind(&p.updated_at).execute(&self.pool).await.map_err(map_canonical_insert_error).map(|_|())
+    }
+    pub async fn get_reusable_policy(
+        &self,
+        project: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalReusableNetworkPolicyRecord>, StoreError> {
+        sqlx::query(&format!("SELECT {POLICY_COLUMNS} FROM canonical_reusable_network_policies WHERE id=$1 AND project_id=$2")).bind(id.to_string()).bind(project).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.as_ref().map(pg_policy).transpose()
+    }
+    pub async fn list_reusable_policies(
+        &self,
+        project: &str,
+    ) -> Result<Vec<CanonicalReusableNetworkPolicyRecord>, StoreError> {
+        let r=sqlx::query(&format!("SELECT {POLICY_COLUMNS} FROM canonical_reusable_network_policies WHERE project_id=$1 ORDER BY id")).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        r.iter().map(pg_policy).collect()
+    }
+    pub async fn update_reusable_policy(
+        &self,
+        p: &CanonicalReusableNetworkPolicyRecord,
+        expected: u64,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+        let g = validate_policy(p)?;
+        if p.generation != expected.saturating_add(1) {
+            return Err(StoreError::Corrupt(
+                "policy update generation must increment by one".into(),
+            ));
+        }
+        let incompatible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM canonical_policy_attachments a JOIN canonical_policy_attachments other ON other.endpoint_id=a.endpoint_id AND other.policy_id<>a.policy_id AND other.state='active' JOIN canonical_reusable_network_policies other_policy ON other_policy.id=other.policy_id WHERE a.policy_id=$1 AND a.state='active' AND other_policy.unmatched_action<>$2")
+            .bind(p.id.to_string()).bind(&p.unmatched_action).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+        if incompatible != 0 {
+            return Err(StoreError::PolicyCompositionConflict);
+        }
+        let r=sqlx::query("UPDATE canonical_reusable_network_policies SET name=$1,description=$2,stateful_mode=$3,unmatched_action=$4,generation=$5,state=$6,updated_at=$7 WHERE id=$8 AND project_id=$9 AND generation=$10").bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(g).bind(&p.state).bind(&p.updated_at).bind(p.id.to_string()).bind(&p.project_id).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if r.rows_affected() == 0 {
+            return match self.get_reusable_policy(&p.project_id, &p.id).await? {
+                Some(_) => Err(StoreError::StaleGeneration),
+                None => Err(StoreError::ResourceNotFound),
+            };
+        }
+        self.get_reusable_policy(&p.project_id, &p.id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+    pub async fn transition_reusable_policy_state(
+        &self,
+        project: &str,
+        id: &Uuid,
+        expected: u64,
+        state: &str,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+        validate_canonical_state(state)?;
+        let result = sqlx::query("UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4")
+            .bind(state).bind(id.to_string()).bind(project).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_reusable_policy(project, id).await? {
+                Some(_) => Err(StoreError::StaleGeneration),
+                None => Err(StoreError::ResourceNotFound),
+            };
+        }
+        self.get_reusable_policy(project, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+    pub async fn delete_reusable_policy(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
+        let r=sqlx::query("DELETE FROM canonical_reusable_network_policies WHERE id=$1 AND project_id=$2 AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=$1 AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=$1 AND state IN ('requested','active','deleting'))").bind(id.to_string()).bind(project).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if r.rows_affected() == 0 {
+            if self.get_reusable_policy(project, id).await?.is_some() {
+                Err(StoreError::NetworkInUse)
+            } else {
+                Err(StoreError::ResourceNotFound)
+            }
+        } else {
+            Ok(())
+        }
+    }
+    pub async fn insert_policy_rule(
+        &self,
+        r: &CanonicalNetworkPolicyRuleRecord,
+    ) -> Result<(), StoreError> {
+        let generation = validate_rule(r)?;
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let p = sqlx::query(
+            "SELECT project_id,state,unmatched_action FROM canonical_reusable_network_policies WHERE id=$1",
+        )
+        .bind(r.policy_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::ResourceNotFound)?;
+        if p.get::<String, _>("project_id") != r.project_id
+            || p.get::<String, _>("state") != "active"
+        {
+            return Err(StoreError::OwnershipConflict);
+        }
+        sqlx::query("INSERT INTO canonical_network_policy_rules (id,policy_id,project_id,direction,address_family,protocol,port_min,port_max,remote_selector,action,state,generation,enforcement_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CAST($9 AS cidr),$10,$11,$12,$13)").bind(r.id.to_string()).bind(r.policy_id.to_string()).bind(&r.project_id).bind(&r.direction).bind(&r.address_family).bind(&r.protocol).bind(r.port_min.map(i32::from)).bind(r.port_max.map(i32::from)).bind(&r.remote_selector).bind(&r.action).bind(&r.state).bind(generation).bind(&r.enforcement_key).execute(&mut *tx).await.map_err(map_canonical_insert_error)?;
+        tx.commit().await.map_err(StoreError::Database)
+    }
+    pub async fn get_policy_rule(
+        &self,
+        project: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        sqlx::query("SELECT id,policy_id,project_id,direction,address_family,protocol,port_min,port_max,remote_selector::text AS remote_selector,action,state,generation,enforcement_key FROM canonical_network_policy_rules WHERE id=$1 AND project_id=$2").bind(id.to_string()).bind(project).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.as_ref().map(pg_rule).transpose()
+    }
+    pub async fn list_policy_rules(
+        &self,
+        project: &str,
+        policy: &Uuid,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        let r=sqlx::query(&format!("SELECT id,policy_id,project_id,direction,address_family,protocol,port_min,port_max,remote_selector::text AS remote_selector,action,state,generation,enforcement_key FROM canonical_network_policy_rules WHERE policy_id=$1 AND project_id=$2 ORDER BY id")).bind(policy.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        r.iter().map(pg_rule).collect()
+    }
+    pub async fn delete_policy_rule(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
+        let r =
+            sqlx::query("DELETE FROM canonical_network_policy_rules WHERE id=$1 AND project_id=$2")
+                .bind(id.to_string())
+                .bind(project)
+                .execute(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+        if r.rows_affected() == 0 {
+            Err(StoreError::ResourceNotFound)
+        } else {
+            Ok(())
+        }
+    }
+    pub async fn insert_policy_attachment(
+        &self,
+        a: &CanonicalPolicyAttachmentRecord,
+    ) -> Result<(), StoreError> {
+        let generation = validate_attachment(a)?;
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let p = sqlx::query(
+            "SELECT project_id,state FROM canonical_reusable_network_policies WHERE id=$1",
+        )
+        .bind(a.policy_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::ResourceNotFound)?;
+        if p.get::<String, _>("project_id") != a.project_id
+            || p.get::<String, _>("state") != "active"
+        {
+            return Err(StoreError::OwnershipConflict);
+        }
+        let incompatible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM canonical_policy_attachments a JOIN canonical_reusable_network_policies existing ON existing.id=a.policy_id WHERE a.endpoint_id=$1 AND a.state='active' AND existing.unmatched_action <> $2")
+            .bind(a.endpoint_id.to_string())
+            .bind(p.get::<String, _>("unmatched_action"))
+            .fetch_one(&mut *tx).await.map_err(StoreError::Database)?;
+        if incompatible != 0 {
+            return Err(StoreError::PolicyCompositionConflict);
+        }
+        let e = sqlx::query("SELECT project_id FROM canonical_endpoints WHERE id=$1")
+            .bind(a.endpoint_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::ResourceNotFound)?;
+        if e.get::<String, _>("project_id") != a.project_id {
+            return Err(StoreError::OwnershipConflict);
+        }
+        sqlx::query("INSERT INTO canonical_policy_attachments (id,policy_id,endpoint_id,project_id,state,generation) VALUES ($1,$2,$3,$4,$5,$6)").bind(a.id.to_string()).bind(a.policy_id.to_string()).bind(a.endpoint_id.to_string()).bind(&a.project_id).bind(&a.state).bind(generation).execute(&mut *tx).await.map_err(map_canonical_insert_error)?;
+        tx.commit().await.map_err(StoreError::Database)
+    }
+    pub async fn get_policy_attachment(
+        &self,
+        project: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalPolicyAttachmentRecord>, StoreError> {
+        sqlx::query(&format!("SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE id=$1 AND project_id=$2")).bind(id.to_string()).bind(project).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.as_ref().map(pg_attachment).transpose()
+    }
+    pub async fn list_policy_attachments(
+        &self,
+        project: &str,
+        policy: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        let r=sqlx::query(&format!("SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE policy_id=$1 AND project_id=$2 ORDER BY id")).bind(policy.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        r.iter().map(pg_attachment).collect()
+    }
+    pub async fn list_endpoint_policy_attachments(
+        &self,
+        project: &str,
+        endpoint: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        let r=sqlx::query(&format!("SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE endpoint_id=$1 AND project_id=$2 ORDER BY id")).bind(endpoint.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        r.iter().map(pg_attachment).collect()
+    }
+    pub async fn delete_policy_attachment(
+        &self,
+        project: &str,
+        id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let r =
+            sqlx::query("DELETE FROM canonical_policy_attachments WHERE id=$1 AND project_id=$2")
+                .bind(id.to_string())
+                .bind(project)
+                .execute(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+        if r.rows_affected() == 0 {
+            Err(StoreError::ResourceNotFound)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[async_trait]
+impl CanonicalPolicyRepository for crate::PostgresStore {
+    async fn insert_reusable_policy(
+        &self,
+        p: &CanonicalReusableNetworkPolicyRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_reusable_policy(p).await
+    }
+    async fn get_reusable_policy(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Option<CanonicalReusableNetworkPolicyRecord>, StoreError> {
+        self.get_reusable_policy(p, i).await
+    }
+    async fn list_reusable_policies(
+        &self,
+        p: &str,
+    ) -> Result<Vec<CanonicalReusableNetworkPolicyRecord>, StoreError> {
+        self.list_reusable_policies(p).await
+    }
+    async fn update_reusable_policy(
+        &self,
+        p: &CanonicalReusableNetworkPolicyRecord,
+        g: u64,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+        self.update_reusable_policy(p, g).await
+    }
+    async fn transition_reusable_policy_state(
+        &self,
+        p: &str,
+        i: &Uuid,
+        g: u64,
+        s: &str,
+    ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
+        self.transition_reusable_policy_state(p, i, g, s).await
+    }
+    async fn delete_reusable_policy(&self, p: &str, i: &Uuid) -> Result<(), StoreError> {
+        self.delete_reusable_policy(p, i).await
+    }
+    async fn insert_policy_rule(
+        &self,
+        r: &CanonicalNetworkPolicyRuleRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_policy_rule(r).await
+    }
+    async fn get_policy_rule(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Option<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        self.get_policy_rule(p, i).await
+    }
+    async fn list_policy_rules(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        self.list_policy_rules(p, i).await
+    }
+    async fn delete_policy_rule(&self, p: &str, i: &Uuid) -> Result<(), StoreError> {
+        self.delete_policy_rule(p, i).await
+    }
+    async fn insert_policy_attachment(
+        &self,
+        a: &CanonicalPolicyAttachmentRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_policy_attachment(a).await
+    }
+    async fn get_policy_attachment(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Option<CanonicalPolicyAttachmentRecord>, StoreError> {
+        self.get_policy_attachment(p, i).await
+    }
+    async fn list_policy_attachments(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        self.list_policy_attachments(p, i).await
+    }
+    async fn list_endpoint_policy_attachments(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        self.list_endpoint_policy_attachments(p, i).await
+    }
+    async fn delete_policy_attachment(&self, p: &str, i: &Uuid) -> Result<(), StoreError> {
+        self.delete_policy_attachment(p, i).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SqliteStore;
+
+    fn policy(id: Uuid, action: &str) -> CanonicalReusableNetworkPolicyRecord {
+        CanonicalReusableNetworkPolicyRecord {
+            id,
+            project_id: "project-a".into(),
+            name: "policy".into(),
+            description: "test".into(),
+            stateful_mode: "Stateful".into(),
+            unmatched_action: action.into(),
+            generation: 1,
+            state: "active".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn rule(id: Uuid, policy_id: Uuid) -> CanonicalNetworkPolicyRuleRecord {
+        let mut r = CanonicalNetworkPolicyRuleRecord {
+            id,
+            policy_id,
+            project_id: "project-a".into(),
+            direction: "Ingress".into(),
+            address_family: "Ipv4".into(),
+            protocol: "Tcp".into(),
+            port_min: Some(443),
+            port_max: Some(443),
+            remote_selector: Some("198.51.100.0/24".into()),
+            action: "Allow".into(),
+            state: "active".into(),
+            generation: 1,
+            enforcement_key: String::new(),
+        };
+        r.enforcement_key = format!(
+            "{}|{}|{}|443-443|198.51.100.0/24|{}",
+            r.direction, r.address_family, r.protocol, r.action
+        );
+        r
+    }
+
+    async fn endpoint_fixture(store: &SqliteStore, endpoint: Uuid) -> Result<(), StoreError> {
+        let network = Uuid::from_u128(10);
+        let realm = Uuid::from_u128(11);
+        sqlx::query("INSERT INTO canonical_networks (id,project_id,name,generation,state) VALUES (?,?,?,?,?)").bind(network.to_string()).bind("project-a").bind("network").bind(1_i64).bind("active").execute(&store.pool).await.map_err(StoreError::Database)?;
+        sqlx::query("INSERT INTO canonical_address_realms (id,network_id,project_id,prefix,overlapping_prefixes,generation,state) VALUES (?,?,?,?,?,?,?)").bind(realm.to_string()).bind(network.to_string()).bind("project-a").bind("10.0.0.0/24").bind(0_i64).bind(1_i64).bind("active").execute(&store.pool).await.map_err(StoreError::Database)?;
+        sqlx::query("INSERT INTO canonical_endpoints (id,realm_id,project_id,fixed_ip,mac,generation,state) VALUES (?,?,?,?,?,?,?)").bind(endpoint.to_string()).bind(realm.to_string()).bind("project-a").bind("10.0.0.10").bind("02:00:00:00:00:10").bind(1_i64).bind("active").execute(&store.pool).await.map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn detached_policy_rules_and_attachment_survive_reopen() -> Result<(), StoreError> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let policy_id = Uuid::from_u128(1);
+        let rule_id = Uuid::from_u128(2);
+        let endpoint_id = Uuid::from_u128(3);
+        let attachment_id = Uuid::from_u128(4);
+        store
+            .insert_reusable_policy(&policy(policy_id, "Deny"))
+            .await?;
+        assert!(
+            store
+                .list_policy_attachments("project-a", &policy_id)
+                .await?
+                .is_empty()
+        );
+        store.insert_policy_rule(&rule(rule_id, policy_id)).await?;
+        endpoint_fixture(&store, endpoint_id).await?;
+        let attachment = CanonicalPolicyAttachmentRecord {
+            id: attachment_id,
+            policy_id,
+            endpoint_id,
+            project_id: "project-a".into(),
+            state: "active".into(),
+            generation: 1,
+        };
+        store.insert_policy_attachment(&attachment).await?;
+        assert_eq!(
+            store
+                .get_reusable_policy("project-a", &policy_id)
+                .await?
+                .unwrap()
+                .unmatched_action,
+            "Deny"
+        );
+        assert_eq!(
+            store
+                .get_policy_rule("project-a", &rule_id)
+                .await?
+                .unwrap()
+                .id,
+            rule_id
+        );
+        assert_eq!(
+            store
+                .get_policy_attachment("project-a", &attachment_id)
+                .await?
+                .unwrap()
+                .id,
+            attachment_id
+        );
+        assert!(matches!(
+            store.delete_reusable_policy("project-a", &policy_id).await,
+            Err(StoreError::NetworkInUse)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_semantic_duplicates_and_mixed_defaults_are_rejected() -> Result<(), StoreError>
+    {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let policy_id = Uuid::from_u128(20);
+        store
+            .insert_reusable_policy(&policy(policy_id, "Allow"))
+            .await?;
+        store
+            .insert_policy_rule(&rule(Uuid::from_u128(21), policy_id))
+            .await?;
+        assert!(matches!(
+            store
+                .insert_policy_rule(&rule(Uuid::from_u128(22), policy_id))
+                .await,
+            Err(StoreError::ResourceAlreadyExists)
+        ));
+        endpoint_fixture(&store, Uuid::from_u128(23)).await?;
+        store
+            .insert_policy_attachment(&CanonicalPolicyAttachmentRecord {
+                id: Uuid::from_u128(24),
+                policy_id,
+                endpoint_id: Uuid::from_u128(23),
+                project_id: "project-a".into(),
+                state: "active".into(),
+                generation: 1,
+            })
+            .await?;
+        let other = Uuid::from_u128(25);
+        store.insert_reusable_policy(&policy(other, "Deny")).await?;
+        assert!(matches!(
+            store
+                .insert_policy_attachment(&CanonicalPolicyAttachmentRecord {
+                    id: Uuid::from_u128(26),
+                    policy_id: other,
+                    endpoint_id: Uuid::from_u128(23),
+                    project_id: "project-a".into(),
+                    state: "active".into(),
+                    generation: 1
+                })
+                .await,
+            Err(StoreError::PolicyCompositionConflict)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn durable_uniqueness_wins_for_concurrent_rule_and_attachment_creates()
+    -> Result<(), StoreError> {
+        let path = std::env::temp_dir().join(format!("o3k-policy-{}.sqlite", Uuid::now_v7()));
+        let store = SqliteStore::connect_file(&path).await?;
+        let policy_id = Uuid::from_u128(30);
+        store
+            .insert_reusable_policy(&policy(policy_id, "Allow"))
+            .await?;
+        endpoint_fixture(&store, Uuid::from_u128(31)).await?;
+        let first = rule(Uuid::from_u128(32), policy_id);
+        let mut second = first.clone();
+        second.id = Uuid::from_u128(33);
+        let (a, b) = tokio::join!(
+            store.insert_policy_rule(&first),
+            store.insert_policy_rule(&second)
+        );
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        let attachment_a = CanonicalPolicyAttachmentRecord {
+            id: Uuid::from_u128(34),
+            policy_id,
+            endpoint_id: Uuid::from_u128(31),
+            project_id: "project-a".into(),
+            state: "active".into(),
+            generation: 1,
+        };
+        let mut attachment_b = attachment_a.clone();
+        attachment_b.id = Uuid::from_u128(35);
+        let (a, b) = tokio::join!(
+            store.insert_policy_attachment(&attachment_a),
+            store.insert_policy_attachment(&attachment_b)
+        );
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        assert_eq!(
+            store
+                .list_endpoint_policy_attachments("project-a", &Uuid::from_u128(31))
+                .await?
+                .len(),
+            1
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+}

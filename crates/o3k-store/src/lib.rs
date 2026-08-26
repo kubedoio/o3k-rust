@@ -28,6 +28,7 @@ pub mod conformance;
 pub mod coordination;
 pub mod postgres;
 pub mod quota;
+mod reusable_policy;
 mod server_state;
 pub mod storage;
 pub mod unified;
@@ -37,6 +38,7 @@ pub use coordination::{
     FencingToken, LeaseAcquireOutcome, WorkLease,
 };
 pub use postgres::PostgresStore;
+pub use reusable_policy::CanonicalPolicyRepository;
 pub use unified::O3kStore;
 
 /// Maximum attempts for an observation update contended by a concurrent
@@ -273,6 +275,47 @@ pub struct CanonicalNetworkPolicyRecord {
     pub action: String,
     pub generation: u64,
     pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalReusableNetworkPolicyRecord {
+    pub id: Uuid,
+    pub project_id: String,
+    pub name: String,
+    pub description: String,
+    pub stateful_mode: String,
+    pub unmatched_action: String,
+    pub generation: u64,
+    pub state: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalNetworkPolicyRuleRecord {
+    pub id: Uuid,
+    pub policy_id: Uuid,
+    pub project_id: String,
+    pub direction: String,
+    pub address_family: String,
+    pub protocol: String,
+    pub port_min: Option<u16>,
+    pub port_max: Option<u16>,
+    pub remote_selector: Option<String>,
+    pub action: String,
+    pub state: String,
+    pub generation: u64,
+    pub enforcement_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalPolicyAttachmentRecord {
+    pub id: Uuid,
+    pub policy_id: Uuid,
+    pub endpoint_id: Uuid,
+    pub project_id: String,
+    pub state: String,
+    pub generation: u64,
 }
 
 fn legacy_policy_records(
@@ -1272,6 +1315,8 @@ pub enum StoreError {
     KeypairOwnershipConflict,
     #[error("canonical network ownership conflict")]
     OwnershipConflict,
+    #[error("attached policies have incompatible unmatched actions")]
+    PolicyCompositionConflict,
     #[error("image not found")]
     ImageNotFound,
     #[error("image is already active")]
