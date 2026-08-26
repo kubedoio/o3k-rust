@@ -61,6 +61,10 @@ def main() -> int:
     proposal = mapping["proposed_architecture"]
     assert proposal["status"] == "proposed_not_accepted"
     assert proposal["runtime_authorized"] is False
+    assert proposal["unmatched_action"]["canonical_values"] == ["Allow", "Deny"]
+    assert proposal["unmatched_action"]["no_policy_attached"] == "preserve existing O3K baseline"
+    assert proposal["unmatched_action"]["zero_rule_deny"] == "deny unmatched new traffic"
+    assert "identical enforcement key" in proposal["duplicate_rule_invariant"]
     assert proposal["adr"].endswith("ADR-0177-canonical-networkpolicy-and-reusable-policy-set.md")
     assert proposal["spec"].endswith("SPEC-0034-canonical-networkpolicy-lifecycle-v1.md")
     assert any(item["severity"] == "BLOCKER" for item in document["architecture_findings"])

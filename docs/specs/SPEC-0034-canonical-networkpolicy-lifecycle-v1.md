@@ -21,13 +21,18 @@ execution input and is not promoted or renamed here.
 
 `NetworkPolicy` has `id`, `project_id`, bounded `name` and `description`,
 `state` (`requested`, `active`, `deleting`, `deleted`, `error`), positive
-`generation`, canonical timestamps, and `stateful_mode`. It has independent
-CRUD, import, and detached existence.
+`generation`, canonical timestamps, `stateful_mode`, and
+`unmatched_action` (`allow` or `deny`). It has independent CRUD, import, and
+detached existence. `unmatched_action=allow` permits new traffic with no
+matching explicit rule; `unmatched_action=deny` rejects it.
 
 `NetworkPolicyRule` has independent UUID `id`, `policy_id`, `project_id`,
 direction, address family, protocol, optional port range, remote selector,
-Allow/Deny action, lifecycle state, and generation. Rule order is not identity;
-duplicate-rule behavior must be selected transactionally by implementation.
+Allow/Deny action, lifecycle state, and generation. Rule order is not identity.
+Within one policy, ACTIVE rules must have unique enforcement keys consisting of
+direction, address family, protocol, port range, remote selector, and action;
+description does not affect equality. A duplicate create conflicts with no
+mutation, enforced transactionally.
 
 `PolicyAttachment` has independent UUID `id`, `policy_id`, `endpoint_id`,
 `project_id`, lifecycle state, and generation. Active attachments require
@@ -77,14 +82,20 @@ has host policy `accept`; explicit current rules may Allow or Deny; and
 established/related conntrack traffic is accepted before targeted rules. This
 is legacy endpoint execution behavior, not a claim of Neutron equivalence.
 
-The proposed P13 boundary keeps detached and zero-rule policies inert, gives
-only explicit canonical rules policy effect, and requires positive/negative
-traffic evidence before compatibility acceptance. A canonical policy retains
-Allow and Deny, but the compiler must define deny precedence for overlapping
-matches and reject any profile that cannot be enforced without weakening O3K
-security. Any change to O3K's current unmatched-traffic posture requires a
-separate human security decision. Neutron default rules are not materialized
-implicitly.
+The proposed P13 boundary keeps detached policies inert and makes zero-rule
+semantics explicit: an attached Allow-default policy permits unmatched new
+traffic, while an attached Deny-default policy rejects it. An Endpoint with no
+attached policy retains the existing O3K baseline. A canonical policy retains
+Allow and Deny; any matching Deny wins, otherwise any matching Allow wins,
+otherwise `unmatched_action` applies. Established/related traffic may be
+accepted before new-flow evaluation only under selected stateful-provider
+semantics and must not bypass a Deny default for a new flow. Any change to the
+global O3K baseline requires a separate human security decision.
+
+Neutron Security Group projection uses `stateful=true` and
+`unmatched_action=deny`, mapping Neutron rules to explicit canonical Allow
+rules. It does not inject a compatibility-only terminal drop. Neutron default
+rules are not materialized implicitly.
 
 The bounded first projection may support stateful=true, IPv4, ingress/egress,
 any/TCP/UDP/ICMP, valid ports, remote CIDR, and explicit allow rules only

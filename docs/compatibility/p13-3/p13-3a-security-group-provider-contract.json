@@ -43,6 +43,15 @@
       "network_policy": "independent project-owned canonical resource, valid while unattached",
       "network_policy_rule": "independent durable UUID parented by NetworkPolicy",
       "policy_attachment": "durable same-project relation between NetworkPolicy and Endpoint",
+      "unmatched_action": {
+        "canonical_values": ["Allow", "Deny"],
+        "no_policy_attached": "preserve existing O3K baseline",
+        "zero_rule_allow": "allow unmatched new traffic",
+        "zero_rule_deny": "deny unmatched new traffic",
+        "multiple_policies": "active attachments must share the same value; Deny matches override Allow matches",
+        "neutron_security_group_projection": "stateful=true and unmatched_action=Deny; rules become explicit canonical Allow rules"
+      },
+      "duplicate_rule_invariant": "within one policy, ACTIVE rules with identical enforcement key are rejected transactionally; description is not part of the key",
       "compiler": "canonical policy/rules/attachments plus Endpoint/Realm snapshot to endpoint-scoped PolicyIntent",
       "runtime_authorized": false
     },

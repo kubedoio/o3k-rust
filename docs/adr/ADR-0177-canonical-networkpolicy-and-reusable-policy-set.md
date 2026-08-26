@@ -70,7 +70,7 @@ attachments remain separate relations.
 
 ```text
 NetworkPolicy { id, project_id, name, description, state, generation,
-                stateful_mode, created_at, updated_at }
+                stateful_mode, unmatched_action, created_at, updated_at }
 NetworkPolicyRule { id, policy_id, project_id, direction, address_family,
                     protocol, port_range, remote_selector, action, state,
                     generation }
@@ -87,10 +87,12 @@ uniqueness is `(policy_id, endpoint_id)`.
 Rules use typed direction (ingress/egress), address family (IPv4 first),
 protocol (any/TCP/UDP/ICMP), optional inclusive ports, typed remote selectors,
 and Allow/Deny action. Rule UUID, not order or provider handle, is identity.
-Duplicate semantic-rule policy must be selected transactionally by the future
-implementation; a content hash is never a UUID substitute. Remote-group and
-remote-address-group selectors are deferred until a canonical dynamic
-membership/reference model exists.
+Within one policy, two ACTIVE rules with the same enforcement key are
+forbidden. That key is direction, address family, protocol, port range, remote
+selector, and action; description is non-enforcement metadata. A duplicate
+attempt conflicts without mutation, and the uniqueness check must be durable
+and transactional. Remote-group and remote-address-group selectors are
+deferred until a canonical dynamic membership/reference model exists.
 
 ## PolicyIntent and compilation
 
@@ -131,10 +133,29 @@ compatibility acceptance. Any change from the current O3K unmatched-traffic
 posture is a separate human security decision, not an implication here.
 
 The canonical model retains Allow and Deny so future O3K profiles are not
-distorted to Neutron's allow-only vocabulary. Its compiler must define deny
-precedence for overlapping matches and preserve established/related behavior
-only where the selected provider supports it. `stateful=true` is the only
-proposed P13 mode; stateless mode is deferred.
+distorted to Neutron's allow-only vocabulary. `unmatched_action=Allow` permits
+traffic matching no explicit rule; `unmatched_action=Deny` rejects such new
+traffic. These values are canonical desired state and are persisted in every
+policy generation.
+
+For one Endpoint, all simultaneously active attached policies must use the
+same `unmatched_action`; an attachment or update that would disagree is
+rejected before provider mutation. Explicit rules from policies sharing that
+default are evaluated as one set: any matching Deny wins, otherwise any
+matching Allow wins, otherwise the shared unmatched action applies. Attachment
+order is never authority. Established/related traffic may be admitted before
+new-flow evaluation only when the selected stateful provider supports it; it
+must not bypass `unmatched_action=Deny` for a new flow.
+
+An Endpoint with no attached policy retains the existing O3K baseline and does
+not acquire a policy default. A policy with zero rules permits unmatched
+traffic when its action is Allow and denies new unmatched traffic when its
+action is Deny. `stateful=true` is the only proposed P13 mode; stateless mode
+is deferred.
+
+The future Neutron Security Group projection sets `stateful_mode=Stateful` and
+`unmatched_action=Deny`, and projects each Neutron rule to an explicit
+canonical Allow rule. It must not inject a compatibility-only terminal drop.
 
 ## Lifecycle, persistence, and concurrency
 
