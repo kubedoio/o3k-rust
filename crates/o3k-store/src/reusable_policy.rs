@@ -373,7 +373,7 @@ impl crate::SqliteStore {
                 "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=? AND state IN ('requested','active','deleting')"
             }
             "requested" => {
-                "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE 1=0"
+                "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=? AND state='__invalid_requested_transition__'"
             }
             _ => unreachable!(),
         };
@@ -934,7 +934,7 @@ impl crate::PostgresStore {
                 "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4 AND state IN ('requested','active','deleting')"
             }
             "requested" => {
-                "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE FALSE"
+                "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4 AND state='__invalid_requested_transition__'"
             }
             _ => unreachable!(),
         };
@@ -1662,6 +1662,12 @@ mod tests {
                 .transition_reusable_policy_state("project-a", &policy_id, 1, "deleted")
                 .await,
             Err(StoreError::NetworkInUse)
+        ));
+        assert!(matches!(
+            store
+                .transition_reusable_policy_state("project-a", &policy_id, 1, "requested")
+                .await,
+            Err(StoreError::StaleGeneration)
         ));
         assert!(matches!(
             store
