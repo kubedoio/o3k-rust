@@ -354,7 +354,7 @@ where
                     )
                     .await?;
             }
-            if record.state == "unknown" {
+            if matches!(record.state.as_str(), "unknown" | "applying") {
                 let observation = provider.observe_policy_snapshot(record.endpoint_id).await;
                 match observation {
                     PolicyObservation::Observed {
@@ -1271,6 +1271,55 @@ mod tests {
                 .await
                 .expect("stale realization")
                 .expect("stale row")
+                .state,
+            "realized"
+        );
+    }
+
+    #[tokio::test]
+    async fn applying_recovery_observes_before_retrying() {
+        let (store, endpoint_id) = sqlite_policy_fixture().await;
+        let service = CanonicalPolicyService::new(Arc::new(store.clone()));
+        let (_, fingerprint, generation) = service
+            .compile_endpoint_with_metadata("p", endpoint_id)
+            .await
+            .expect("compile");
+        let attempt_id = Uuid::from_u128(37);
+        store
+            .upsert_policy_realization(&CanonicalPolicyRealizationRecord {
+                endpoint_id,
+                project_id: "p".into(),
+                attempt_id,
+                desired_fingerprint: fingerprint.clone(),
+                desired_generation: generation,
+                observed_fingerprint: None,
+                observed_generation: None,
+                state: "applying".into(),
+                provider_resource_id: None,
+                last_outcome: Some("crash before completion".into()),
+            })
+            .await
+            .expect("applying realization");
+        let provider = ControlledRealizer {
+            applies: std::sync::Mutex::new(Vec::new()),
+            observations: std::sync::Mutex::new(vec![PolicyObservation::Observed {
+                fingerprint,
+                generation: Some(generation),
+                provider_resource_id: Some("controlled".into()),
+            }]),
+            apply_count: AtomicUsize::new(0),
+        };
+        service
+            .recover_policy_realizations("p", &provider)
+            .await
+            .expect("applying recovery");
+        assert_eq!(provider.apply_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store
+                .get_policy_realization("p", &endpoint_id)
+                .await
+                .expect("applying row")
+                .expect("applying realization")
                 .state,
             "realized"
         );
