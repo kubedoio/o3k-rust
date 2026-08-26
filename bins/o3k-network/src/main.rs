@@ -8,6 +8,7 @@ use o3k_network::{
     NodeNetworkPlan, PolicyEndpoint, PublicAddressRealizer, RoutedExternalConfig,
     StatefulPolicyProvider, TapAccess,
 };
+use std::collections::BTreeSet;
 use std::{env, fs, net::SocketAddr, path::PathBuf};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -211,10 +212,20 @@ impl NetworkPlanRealizer for CompositeRealizer {
                 .apply(&plan.intents)?;
         }
         if plan.intents.iter().any(is_policy_intent) {
-            self.policy
+            let endpoints = policy_endpoints(plan);
+            let provider = self
+                .policy
                 .as_mut()
-                .ok_or(CompositeRealizerError::PolicyNotConfigured)?
-                .apply(&plan.intents, &policy_endpoints(plan))?;
+                .ok_or(CompositeRealizerError::PolicyNotConfigured)?;
+            for endpoint_id in policy_targets(plan) {
+                let endpoint_intents = plan
+                    .intents
+                    .iter()
+                    .filter(|intent| policy_intent_endpoint(intent) == Some(endpoint_id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                provider.apply_endpoint_snapshot(endpoint_id, &endpoint_intents, &endpoints)?;
+            }
         }
         if plan.intents.iter().any(is_public_intent) {
             self.public
@@ -248,10 +259,18 @@ impl NetworkPlanRealizer for CompositeRealizer {
                 .remove_for_plan(&plan.intents)?;
         }
         if plan.intents.iter().any(is_policy_intent) {
-            self.policy
+            let endpoints = policy_endpoints(plan);
+            let provider = self
+                .policy
                 .as_mut()
-                .ok_or(CompositeRealizerError::PolicyNotConfigured)?
-                .remove_for_plan(&plan.intents, &policy_endpoints(plan))?;
+                .ok_or(CompositeRealizerError::PolicyNotConfigured)?;
+            for endpoint_id in policy_targets(plan)
+                .into_iter()
+                .chain(endpoints.iter().map(|endpoint| endpoint.endpoint_id))
+                .collect::<BTreeSet<_>>()
+            {
+                provider.apply_endpoint_snapshot(endpoint_id, &[], &endpoints)?;
+            }
         }
         if plan.intents.iter().any(is_routed_intent) {
             self.routed
@@ -322,7 +341,25 @@ fn is_routed_intent(intent: &NetworkPlanIntent) -> bool {
 }
 
 fn is_policy_intent(intent: &NetworkPlanIntent) -> bool {
-    matches!(intent, NetworkPlanIntent::Policy(_))
+    matches!(
+        intent,
+        NetworkPlanIntent::Policy(_) | NetworkPlanIntent::PolicyDefault(_)
+    )
+}
+
+fn policy_intent_endpoint(intent: &NetworkPlanIntent) -> Option<Uuid> {
+    match intent {
+        NetworkPlanIntent::Policy(policy) => Some(policy.endpoint_id),
+        NetworkPlanIntent::PolicyDefault(default) => Some(default.endpoint_id),
+        _ => None,
+    }
+}
+
+fn policy_targets(plan: &NodeNetworkPlan) -> BTreeSet<Uuid> {
+    plan.intents
+        .iter()
+        .filter_map(policy_intent_endpoint)
+        .collect()
 }
 
 fn fabric_policy_intents_match(plan: &NodeNetworkPlan) -> bool {
