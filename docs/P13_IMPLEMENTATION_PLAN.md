@@ -89,8 +89,9 @@ provider evidence is recorded in:
 - `docs/compatibility/p13-2/p13-2d-provider-server-lifecycle-evidence.json`
 
 This is an operation- and attribute-level claim, not general OpenStack or
-general Terraform compatibility. P13.3 remains not implemented; its next gate
-is `P13.3A — Security Group / NetworkPolicy provider-contract discovery`.
+general Terraform compatibility. P13.3 remains an evidence-gated, in-progress
+implementation; its accepted architecture and bounded native policy work do
+not by themselves establish provider lifecycle compatibility.
 
 ### P13.3 — Neutron adoption profile — ARCHITECTURE ACCEPTED; RUNTIME IN PROGRESS
 
