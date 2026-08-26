@@ -1121,6 +1121,151 @@ mod tests {
         let _ = server.kill();
         let _ = server.wait();
 
+        let allow_second = NetworkPlanIntent::Policy(PolicyIntent {
+            id: Uuid::from_u128(704),
+            ports: Some(o3k_domain::PortRange {
+                start: 18081,
+                end: 18081,
+            }),
+            ..match &allow {
+                NetworkPlanIntent::Policy(policy) => policy.clone(),
+                _ => unreachable!(),
+            }
+        });
+        let allow_third = NetworkPlanIntent::Policy(PolicyIntent {
+            id: Uuid::from_u128(705),
+            ports: Some(o3k_domain::PortRange {
+                start: 18082,
+                end: 18082,
+            }),
+            ..match &allow {
+                NetworkPlanIntent::Policy(policy) => policy.clone(),
+                _ => unreachable!(),
+            }
+        });
+        let multi_policy = runtime.block_on(async {
+            realizer
+                .apply_policy_snapshot(
+                    endpoint_id,
+                    &[
+                        deny_default.clone(),
+                        allow.clone(),
+                        allow_second,
+                        allow_third,
+                    ],
+                    "traffic-multi-policy",
+                )
+                .await
+        });
+        assert!(matches!(
+            multi_policy,
+            crate::canonical_policy::PolicyApplyOutcome::Success { .. }
+        ));
+        let probe = |port: u16, expected: bool| {
+            let server_code = format!(
+                "import socket;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('10.0.1.2',{port}));s.listen(1);c,_=s.accept();c.sendall(b'ok');c.close();s.close()"
+            );
+            let client_code =
+                format!("import socket;socket.create_connection(('10.0.1.2',{port}),1).recv(2)");
+            let mut server = std::process::Command::new("ip")
+                .args([
+                    "netns",
+                    "exec",
+                    &server_namespace,
+                    "python3",
+                    "-c",
+                    server_code.as_str(),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("start multi-policy server");
+            std::thread::sleep(Duration::from_millis(100));
+            let client = std::process::Command::new("ip")
+                .args([
+                    "netns",
+                    "exec",
+                    &client_namespace,
+                    "timeout",
+                    "2",
+                    "python3",
+                    "-c",
+                    client_code.as_str(),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("multi-policy client");
+            let _ = server.kill();
+            let _ = server.wait();
+            assert_eq!(client.success(), expected, "multi-policy port {port}");
+        };
+        probe(18080, true);
+        probe(18081, true);
+        probe(18082, true);
+        probe(18083, false);
+
+        let egress = NetworkPlanIntent::Policy(PolicyIntent {
+            id: Uuid::from_u128(706),
+            direction: PolicyDirection::Egress,
+            ports: Some(o3k_domain::PortRange {
+                start: 18084,
+                end: 18084,
+            }),
+            source: None,
+            destination: Some(
+                o3k_domain::Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 2), 32)
+                    .expect("client destination"),
+            ),
+            ..match &allow {
+                NetworkPlanIntent::Policy(policy) => policy.clone(),
+                _ => unreachable!(),
+            }
+        });
+        let egress_result = runtime.block_on(async {
+            realizer
+                .apply_policy_snapshot(
+                    endpoint_id,
+                    &[deny_default.clone(), egress],
+                    "traffic-egress-allow",
+                )
+                .await
+        });
+        assert!(matches!(
+            egress_result,
+            crate::canonical_policy::PolicyApplyOutcome::Success { .. }
+        ));
+        let egress_listener = "import socket;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('10.0.0.2',18084));s.listen(1);c,_=s.accept();c.sendall(b'ok');c.close();s.close()";
+        let egress_client = "import socket;socket.create_connection(('10.0.0.2',18084),1).recv(2)";
+        let mut listener = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &client_namespace,
+                "python3",
+                "-c",
+                egress_listener,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start egress listener");
+        std::thread::sleep(Duration::from_millis(100));
+        let egress_client_result = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &server_namespace,
+                "python3",
+                "-c",
+                egress_client,
+            ])
+            .status()
+            .expect("egress client");
+        assert!(egress_client_result.success(), "egress allow was denied");
+        let _ = listener.kill();
+        let _ = listener.wait();
+
         let allowed_by_default = runtime.block_on(async {
             realizer
                 .apply_policy_snapshot(endpoint_id, &[allow_default], "traffic-allow-default")
