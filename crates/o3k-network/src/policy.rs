@@ -14,6 +14,7 @@ use o3k_domain::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     fs::{self, File},
     io::{self, ErrorKind, Write},
     net::Ipv4Addr,
@@ -45,6 +46,10 @@ struct Ownership {
     defaults: Vec<PolicyDefaultIntent>,
     #[serde(default)]
     endpoints: Vec<PolicyEndpoint>,
+    /// Provider-owned endpoint realization evidence. This is never used to
+    /// reconstruct canonical policy state.
+    #[serde(default)]
+    endpoint_fingerprints: BTreeMap<Uuid, String>,
 }
 
 trait PolicyCommand: Send + Sync {
@@ -232,6 +237,11 @@ impl StatefulPolicyProvider {
             policies: all_policies,
             defaults: all_defaults,
             endpoints: all_endpoints,
+            endpoint_fingerprints: self
+                .ownership
+                .as_ref()
+                .map(|value| value.endpoint_fingerprints.clone())
+                .unwrap_or_default(),
         };
         if self
             .ownership
@@ -404,6 +414,58 @@ impl StatefulPolicyProvider {
         Ok(success && output.contains(MARKER) && output.contains(&ownership.fingerprint))
     }
 
+    /// Record exact endpoint-scoped realization evidence after a successful
+    /// provider application. The record is provider-owned derived state and
+    /// is intentionally not a source for canonical policy reconstruction.
+    pub fn record_endpoint_fingerprint(
+        &mut self,
+        endpoint_id: Uuid,
+        fingerprint: &str,
+    ) -> Result<(), PolicyNetworkError> {
+        let Some(mut ownership) = self.ownership.clone() else {
+            return Err(PolicyNetworkError::UnknownEndpoint);
+        };
+        if !ownership.endpoint_ids.contains(&endpoint_id) {
+            return Err(PolicyNetworkError::UnknownEndpoint);
+        }
+        ownership
+            .endpoint_fingerprints
+            .insert(endpoint_id, fingerprint.to_owned());
+        store_state(&self.root.join(STATE_FILE), &ownership)?;
+        self.ownership = Some(ownership);
+        Ok(())
+    }
+
+    /// Observe exact endpoint-scoped provider evidence after a fresh provider
+    /// instance is opened. The nftables table must still be O3K-owned.
+    pub fn observe_endpoint_fingerprint(
+        &self,
+        endpoint_id: Uuid,
+    ) -> Result<Option<String>, PolicyNetworkError> {
+        let Some(ownership) = &self.ownership else {
+            return Ok(None);
+        };
+        let (success, output) = self
+            .command
+            .output(&["list", "table", "ip", TABLE])
+            .map_err(PolicyNetworkError::Storage)?;
+        if !success {
+            return Ok(None);
+        }
+        if !output.contains(MARKER) {
+            return Err(PolicyNetworkError::ForeignState);
+        }
+        if !output.contains(&ownership.fingerprint) {
+            return Err(PolicyNetworkError::CorruptState);
+        }
+        ownership
+            .endpoint_fingerprints
+            .get(&endpoint_id)
+            .cloned()
+            .map(Some)
+            .ok_or(PolicyNetworkError::CorruptState)
+    }
+
     pub fn remove(&mut self) -> Result<(), PolicyNetworkError> {
         let Some(ownership) = self.ownership.take() else {
             return Ok(());
@@ -546,7 +608,7 @@ mod tests {
 
     struct FakeCommand {
         calls: Mutex<Vec<Vec<String>>>,
-        listing: String,
+        listing: Mutex<String>,
     }
 
     impl PolicyCommand for FakeCommand {
@@ -555,7 +617,8 @@ mod tests {
                 .lock()
                 .expect("calls")
                 .push(args.iter().map(|arg| (*arg).to_owned()).collect());
-            Ok((!self.listing.is_empty(), self.listing.clone()))
+            let listing = self.listing.lock().expect("listing").clone();
+            Ok((!listing.is_empty(), listing))
         }
 
         fn run(&self, args: &[&str]) -> io::Result<bool> {
@@ -613,7 +676,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
         let command = Arc::new(FakeCommand {
             calls: Mutex::new(Vec::new()),
-            listing: String::new(),
+            listing: Mutex::new(String::new()),
         });
         let mut provider = StatefulPolicyProvider::with_command(
             &root,
@@ -632,7 +695,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
         let command = Arc::new(FakeCommand {
             calls: Mutex::new(Vec::new()),
-            listing: "table ip o3k_policy { comment foreign; }".to_owned(),
+            listing: Mutex::new("table ip o3k_policy { comment foreign; }".to_owned()),
         });
         let mut provider = StatefulPolicyProvider::with_command(
             &root,
@@ -658,7 +721,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
         let command = Arc::new(FakeCommand {
             calls: Mutex::new(Vec::new()),
-            listing: String::new(),
+            listing: Mutex::new(String::new()),
         });
         let mut provider = StatefulPolicyProvider::with_command(
             &root,
@@ -703,7 +766,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
         let command = Arc::new(FakeCommand {
             calls: Mutex::new(Vec::new()),
-            listing: String::new(),
+            listing: Mutex::new(String::new()),
         });
         let mut provider = StatefulPolicyProvider::with_command(
             &root,
@@ -734,7 +797,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
         let command = Arc::new(FakeCommand {
             calls: Mutex::new(Vec::new()),
-            listing: String::new(),
+            listing: Mutex::new(String::new()),
         });
         let mut provider = StatefulPolicyProvider::with_command(
             &root,
@@ -772,7 +835,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
         let command = Arc::new(FakeCommand {
             calls: Mutex::new(Vec::new()),
-            listing: String::new(),
+            listing: Mutex::new(String::new()),
         });
         let mut provider = StatefulPolicyProvider::with_command(
             &root,
@@ -823,7 +886,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
         let command = Arc::new(FakeCommand {
             calls: Mutex::new(Vec::new()),
-            listing: String::new(),
+            listing: Mutex::new(String::new()),
         });
         let mut provider = StatefulPolicyProvider::with_command(
             &root,
@@ -844,5 +907,54 @@ mod tests {
 
         provider.remove().expect("policy cleanup");
         assert!(!root.join(STATE_FILE).exists());
+    }
+
+    #[test]
+    fn endpoint_fingerprint_observation_survives_provider_restart() {
+        let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: Mutex::new(String::new()),
+        });
+        let endpoint = Uuid::from_u128(1);
+        let mut provider = StatefulPolicyProvider::with_command(
+            &root,
+            Arc::clone(&command) as Arc<dyn PolicyCommand>,
+        )
+        .expect("provider");
+        provider
+            .apply(
+                &[policy(endpoint)],
+                &[PolicyEndpoint {
+                    endpoint_id: endpoint,
+                    address: Ipv4Addr::new(10, 0, 0, 2),
+                }],
+            )
+            .expect("policy apply");
+        let aggregate = provider
+            .ownership
+            .as_ref()
+            .expect("ownership")
+            .fingerprint
+            .clone();
+        let endpoint_fingerprint = "canonical-f1";
+        provider
+            .record_endpoint_fingerprint(endpoint, endpoint_fingerprint)
+            .expect("record endpoint evidence");
+        *command.listing.lock().expect("listing") =
+            format!("table ip {TABLE} {{ comment {MARKER}:{aggregate}; }}");
+        drop(provider);
+
+        let reopened = StatefulPolicyProvider::with_command(
+            &root,
+            Arc::clone(&command) as Arc<dyn PolicyCommand>,
+        )
+        .expect("reopened provider");
+        assert_eq!(
+            reopened
+                .observe_endpoint_fingerprint(endpoint)
+                .expect("observation"),
+            Some(endpoint_fingerprint.to_owned())
+        );
     }
 }

@@ -17,6 +17,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{NetworkPlanError, NodeNetworkPlan, canonical_plan_fingerprint};
+use crate::{PolicyEndpoint, PolicyNetworkError, StatefulPolicyProvider};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CanonicalPolicyCompileError {
@@ -74,6 +75,66 @@ pub trait PolicySnapshotRealizer: Send + Sync {
     async fn observe_policy_snapshot(&self, _endpoint_id: Uuid) -> PolicyObservation {
         PolicyObservation::Unknown {
             reason: "provider observation is unavailable".into(),
+        }
+    }
+}
+
+/// Production adapter from the canonical reconciler to the existing Linux
+/// stateful policy provider. The provider remains the execution boundary;
+/// endpoint fingerprints are durable derived observation evidence only.
+pub struct LinuxPolicySnapshotRealizer {
+    provider: tokio::sync::Mutex<StatefulPolicyProvider>,
+    endpoints: Vec<PolicyEndpoint>,
+}
+
+impl LinuxPolicySnapshotRealizer {
+    pub fn open(
+        root: impl Into<std::path::PathBuf>,
+        endpoints: Vec<PolicyEndpoint>,
+    ) -> Result<Self, PolicyNetworkError> {
+        Ok(Self {
+            provider: tokio::sync::Mutex::new(StatefulPolicyProvider::open(root)?),
+            endpoints,
+        })
+    }
+}
+
+#[async_trait]
+impl PolicySnapshotRealizer for LinuxPolicySnapshotRealizer {
+    async fn apply_policy_snapshot(
+        &self,
+        endpoint_id: Uuid,
+        snapshot: &[NetworkPlanIntent],
+        fingerprint: &str,
+    ) -> PolicyApplyOutcome {
+        let mut provider = self.provider.lock().await;
+        if let Err(error) = provider.apply(snapshot, &self.endpoints) {
+            return PolicyApplyOutcome::Unknown {
+                reason: error.to_string(),
+            };
+        }
+        if let Err(error) = provider.record_endpoint_fingerprint(endpoint_id, fingerprint) {
+            return PolicyApplyOutcome::Unknown {
+                reason: error.to_string(),
+            };
+        }
+        PolicyApplyOutcome::Success {
+            provider_resource_id: Some(format!("linux-policy:{endpoint_id}")),
+        }
+    }
+
+    async fn observe_policy_snapshot(&self, endpoint_id: Uuid) -> PolicyObservation {
+        let provider = self.provider.lock().await;
+        match provider.observe_endpoint_fingerprint(endpoint_id) {
+            Ok(Some(fingerprint)) => PolicyObservation::Observed {
+                fingerprint,
+                generation: None,
+                provider_resource_id: Some(format!("linux-policy:{endpoint_id}")),
+            },
+            Ok(None) => PolicyObservation::Absent,
+            Err(error) => PolicyObservation::Unknown {
+                reason: error.to_string(),
+            },
         }
     }
 }
