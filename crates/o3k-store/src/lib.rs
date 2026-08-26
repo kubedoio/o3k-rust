@@ -180,6 +180,23 @@ pub struct CanonicalEndpointRecord {
     pub state: String,
 }
 
+/// Derived execution truth for one Endpoint's canonical policy snapshot.
+/// This record is never a source for NetworkPolicy, Rule, or Attachment
+/// desired state; it exists so independent Endpoint realizations remain
+/// truthful across retries and process restarts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalPolicyRealizationRecord {
+    pub endpoint_id: Uuid,
+    pub project_id: String,
+    pub desired_fingerprint: String,
+    pub desired_generation: u64,
+    pub observed_fingerprint: Option<String>,
+    pub observed_generation: Option<u64>,
+    pub state: String,
+    pub provider_resource_id: Option<String>,
+    pub last_outcome: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalRealmBindingRecord {
     pub fabric_domain_id: String,
@@ -1869,7 +1886,9 @@ pub trait ImageRepository: Send + Sync + QuotaRepository {
 /// persistence surface. Application code depends on this trait instead of on
 /// the concrete `SqliteStore` adapter.
 #[async_trait]
-pub trait NetworkRepository: Send + Sync + DurableStore + QuotaRepository {
+pub trait NetworkRepository:
+    Send + Sync + DurableStore + QuotaRepository + crate::CanonicalPolicyRepository
+{
     /// Resolves canonical ownership for authorization without exposing an
     /// unscoped public read API. The network service uses this only to build
     /// an authorization target before applying project non-disclosure.

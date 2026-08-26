@@ -9,13 +9,15 @@ use uuid::Uuid;
 
 use crate::{
     CanonicalNetworkPolicyRuleRecord, CanonicalPolicyAttachmentRecord,
-    CanonicalReusableNetworkPolicyRecord, StoreError, checked_generation,
-    map_canonical_insert_error, parse_uuid, validate_canonical_state,
+    CanonicalPolicyRealizationRecord, CanonicalReusableNetworkPolicyRecord, StoreError,
+    checked_generation, map_canonical_insert_error, parse_uuid, validate_canonical_state,
 };
 
 const POLICY_COLUMNS: &str = "id, project_id, name, description, stateful_mode, unmatched_action, generation, state, created_at, updated_at";
 const RULE_COLUMNS: &str = "id, policy_id, project_id, direction, address_family, protocol, port_min, port_max, remote_selector, action, state, generation, enforcement_key";
 const ATTACHMENT_COLUMNS: &str = "id, policy_id, endpoint_id, project_id, state, generation";
+
+const REALIZATION_COLUMNS: &str = "endpoint_id, project_id, desired_fingerprint, desired_generation, observed_fingerprint, observed_generation, state, provider_resource_id, last_outcome";
 
 #[async_trait]
 pub trait CanonicalPolicyRepository {
@@ -105,6 +107,32 @@ pub trait CanonicalPolicyRepository {
     ) -> Result<(), StoreError>;
     async fn delete_policy_attachment(&self, project_id: &str, id: &Uuid)
     -> Result<(), StoreError>;
+    /// Replace the derived realization truth for one Endpoint. This does not
+    /// mutate canonical policy desired state.
+    async fn upsert_policy_realization(
+        &self,
+        realization: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError>;
+    async fn get_policy_realization(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<Option<CanonicalPolicyRealizationRecord>, StoreError>;
+    async fn list_policy_realizations(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<CanonicalPolicyRealizationRecord>, StoreError>;
+    async fn set_policy_realization_outcome(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        expected_fingerprint: &str,
+        state: &str,
+        observed_fingerprint: Option<&str>,
+        observed_generation: Option<u64>,
+        provider_resource_id: Option<&str>,
+        last_outcome: Option<&str>,
+    ) -> Result<(), StoreError>;
 }
 
 fn validate_policy(policy: &CanonicalReusableNetworkPolicyRecord) -> Result<i64, StoreError> {
@@ -290,6 +318,27 @@ fn sqlite_attachment(
         state: row.get("state"),
         generation: u64::try_from(row.get::<i64, _>("generation"))
             .map_err(|_| StoreError::Corrupt("negative attachment generation".into()))?,
+    })
+}
+
+fn sqlite_realization(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<CanonicalPolicyRealizationRecord, StoreError> {
+    Ok(CanonicalPolicyRealizationRecord {
+        endpoint_id: parse_uuid(row.get("endpoint_id"))?,
+        project_id: row.get("project_id"),
+        desired_fingerprint: row.get("desired_fingerprint"),
+        desired_generation: u64::try_from(row.get::<i64, _>("desired_generation"))
+            .map_err(|_| StoreError::Corrupt("negative desired policy generation".into()))?,
+        observed_fingerprint: row.get("observed_fingerprint"),
+        observed_generation: row
+            .get::<Option<i64>, _>("observed_generation")
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| StoreError::Corrupt("negative observed policy generation".into()))?,
+        state: row.get("state"),
+        provider_resource_id: row.get("provider_resource_id"),
+        last_outcome: row.get("last_outcome"),
     })
 }
 
@@ -688,6 +737,70 @@ impl crate::SqliteStore {
         self.finalize_policy_attachment_deletion(project, id, reserved.generation)
             .await
     }
+
+    pub async fn upsert_policy_realization(
+        &self,
+        r: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        if r.endpoint_id.is_nil()
+            || r.project_id.trim().is_empty()
+            || r.desired_fingerprint.is_empty()
+            || r.desired_generation == 0
+            || !matches!(
+                r.state.as_str(),
+                "pending" | "applying" | "realized" | "failed" | "unknown"
+            )
+        {
+            return Err(StoreError::Corrupt("invalid policy realization".into()));
+        }
+        sqlx::query("INSERT INTO canonical_policy_realizations (endpoint_id, project_id, desired_fingerprint, desired_generation, observed_fingerprint, observed_generation, state, provider_resource_id, last_outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(endpoint_id) DO UPDATE SET project_id=excluded.project_id, desired_fingerprint=excluded.desired_fingerprint, desired_generation=excluded.desired_generation, observed_fingerprint=excluded.observed_fingerprint, observed_generation=excluded.observed_generation, state=excluded.state, provider_resource_id=excluded.provider_resource_id, last_outcome=excluded.last_outcome")
+            .bind(r.endpoint_id.to_string()).bind(&r.project_id).bind(&r.desired_fingerprint).bind(checked_generation(r.desired_generation)?)
+            .bind(&r.observed_fingerprint).bind(r.observed_generation.map(checked_generation).transpose()?).bind(&r.state).bind(&r.provider_resource_id).bind(&r.last_outcome)
+            .execute(&self.pool).await.map_err(StoreError::Database).map(|_| ())
+    }
+    pub async fn get_policy_realization(
+        &self,
+        project: &str,
+        endpoint: &Uuid,
+    ) -> Result<Option<CanonicalPolicyRealizationRecord>, StoreError> {
+        sqlx::query(&format!("SELECT {REALIZATION_COLUMNS} FROM canonical_policy_realizations WHERE endpoint_id=? AND project_id=?"))
+            .bind(endpoint.to_string()).bind(project).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.as_ref().map(sqlite_realization).transpose()
+    }
+    pub async fn list_policy_realizations(
+        &self,
+        project: &str,
+    ) -> Result<Vec<CanonicalPolicyRealizationRecord>, StoreError> {
+        let rows = sqlx::query(&format!("SELECT {REALIZATION_COLUMNS} FROM canonical_policy_realizations WHERE project_id=? ORDER BY endpoint_id")).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(sqlite_realization).collect()
+    }
+    pub async fn set_policy_realization_outcome(
+        &self,
+        project: &str,
+        endpoint: &Uuid,
+        expected: &str,
+        state: &str,
+        observed: Option<&str>,
+        observed_generation: Option<u64>,
+        provider_resource_id: Option<&str>,
+        last_outcome: Option<&str>,
+    ) -> Result<(), StoreError> {
+        if !matches!(
+            state,
+            "pending" | "applying" | "realized" | "failed" | "unknown"
+        ) {
+            return Err(StoreError::Corrupt(
+                "invalid policy realization state".into(),
+            ));
+        }
+        let result = sqlx::query("UPDATE canonical_policy_realizations SET observed_fingerprint=?, observed_generation=?, state=?, provider_resource_id=?, last_outcome=? WHERE endpoint_id=? AND project_id=? AND desired_fingerprint=?")
+            .bind(observed).bind(observed_generation.map(checked_generation).transpose()?).bind(state).bind(provider_resource_id).bind(last_outcome)
+            .bind(endpoint.to_string()).bind(project).bind(expected).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(StoreError::StaleGeneration)
+        }
+    }
 }
 
 #[async_trait]
@@ -815,6 +928,39 @@ impl CanonicalPolicyRepository for crate::SqliteStore {
     async fn delete_policy_attachment(&self, p: &str, i: &Uuid) -> Result<(), StoreError> {
         self.delete_policy_attachment(p, i).await
     }
+    async fn upsert_policy_realization(
+        &self,
+        r: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        self.upsert_policy_realization(r).await
+    }
+    async fn get_policy_realization(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Option<CanonicalPolicyRealizationRecord>, StoreError> {
+        self.get_policy_realization(p, i).await
+    }
+    async fn list_policy_realizations(
+        &self,
+        p: &str,
+    ) -> Result<Vec<CanonicalPolicyRealizationRecord>, StoreError> {
+        self.list_policy_realizations(p).await
+    }
+    async fn set_policy_realization_outcome(
+        &self,
+        p: &str,
+        e: &Uuid,
+        f: &str,
+        s: &str,
+        o: Option<&str>,
+        g: Option<u64>,
+        r: Option<&str>,
+        l: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.set_policy_realization_outcome(p, e, f, s, o, g, r, l)
+            .await
+    }
 }
 
 fn pg_policy(
@@ -869,6 +1015,27 @@ fn pg_attachment(
         state: row.get("state"),
         generation: u64::try_from(row.get::<i64, _>("generation"))
             .map_err(|_| StoreError::Corrupt("negative attachment generation".into()))?,
+    })
+}
+
+fn pg_realization(
+    row: &sqlx::postgres::PgRow,
+) -> Result<CanonicalPolicyRealizationRecord, StoreError> {
+    Ok(CanonicalPolicyRealizationRecord {
+        endpoint_id: parse_uuid(row.get("endpoint_id"))?,
+        project_id: row.get("project_id"),
+        desired_fingerprint: row.get("desired_fingerprint"),
+        desired_generation: u64::try_from(row.get::<i64, _>("desired_generation"))
+            .map_err(|_| StoreError::Corrupt("negative desired policy generation".into()))?,
+        observed_fingerprint: row.get("observed_fingerprint"),
+        observed_generation: row
+            .get::<Option<i64>, _>("observed_generation")
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| StoreError::Corrupt("negative observed policy generation".into()))?,
+        state: row.get("state"),
+        provider_resource_id: row.get("provider_resource_id"),
+        last_outcome: row.get("last_outcome"),
     })
 }
 
@@ -1243,6 +1410,70 @@ impl crate::PostgresStore {
         self.finalize_policy_attachment_deletion(project, id, reserved.generation)
             .await
     }
+
+    pub async fn upsert_policy_realization(
+        &self,
+        r: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        if r.endpoint_id.is_nil()
+            || r.project_id.trim().is_empty()
+            || r.desired_fingerprint.is_empty()
+            || r.desired_generation == 0
+            || !matches!(
+                r.state.as_str(),
+                "pending" | "applying" | "realized" | "failed" | "unknown"
+            )
+        {
+            return Err(StoreError::Corrupt("invalid policy realization".into()));
+        }
+        sqlx::query("INSERT INTO canonical_policy_realizations (endpoint_id, project_id, desired_fingerprint, desired_generation, observed_fingerprint, observed_generation, state, provider_resource_id, last_outcome) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT(endpoint_id) DO UPDATE SET project_id=excluded.project_id, desired_fingerprint=excluded.desired_fingerprint, desired_generation=excluded.desired_generation, observed_fingerprint=excluded.observed_fingerprint, observed_generation=excluded.observed_generation, state=excluded.state, provider_resource_id=excluded.provider_resource_id, last_outcome=excluded.last_outcome")
+            .bind(r.endpoint_id.to_string()).bind(&r.project_id).bind(&r.desired_fingerprint).bind(checked_generation(r.desired_generation)?)
+            .bind(&r.observed_fingerprint).bind(r.observed_generation.map(checked_generation).transpose()?).bind(&r.state).bind(&r.provider_resource_id).bind(&r.last_outcome)
+            .execute(&self.pool).await.map_err(StoreError::Database).map(|_| ())
+    }
+    pub async fn get_policy_realization(
+        &self,
+        project: &str,
+        endpoint: &Uuid,
+    ) -> Result<Option<CanonicalPolicyRealizationRecord>, StoreError> {
+        sqlx::query(&format!("SELECT {REALIZATION_COLUMNS} FROM canonical_policy_realizations WHERE endpoint_id=$1 AND project_id=$2"))
+            .bind(endpoint.to_string()).bind(project).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.as_ref().map(pg_realization).transpose()
+    }
+    pub async fn list_policy_realizations(
+        &self,
+        project: &str,
+    ) -> Result<Vec<CanonicalPolicyRealizationRecord>, StoreError> {
+        let rows = sqlx::query(&format!("SELECT {REALIZATION_COLUMNS} FROM canonical_policy_realizations WHERE project_id=$1 ORDER BY endpoint_id")).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(pg_realization).collect()
+    }
+    pub async fn set_policy_realization_outcome(
+        &self,
+        project: &str,
+        endpoint: &Uuid,
+        expected: &str,
+        state: &str,
+        observed: Option<&str>,
+        observed_generation: Option<u64>,
+        provider_resource_id: Option<&str>,
+        last_outcome: Option<&str>,
+    ) -> Result<(), StoreError> {
+        if !matches!(
+            state,
+            "pending" | "applying" | "realized" | "failed" | "unknown"
+        ) {
+            return Err(StoreError::Corrupt(
+                "invalid policy realization state".into(),
+            ));
+        }
+        let result = sqlx::query("UPDATE canonical_policy_realizations SET observed_fingerprint=$1, observed_generation=$2, state=$3, provider_resource_id=$4, last_outcome=$5 WHERE endpoint_id=$6 AND project_id=$7 AND desired_fingerprint=$8")
+            .bind(observed).bind(observed_generation.map(checked_generation).transpose()?).bind(state).bind(provider_resource_id).bind(last_outcome)
+            .bind(endpoint.to_string()).bind(project).bind(expected).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(StoreError::StaleGeneration)
+        }
+    }
 }
 
 #[async_trait]
@@ -1370,6 +1601,39 @@ impl CanonicalPolicyRepository for crate::PostgresStore {
     async fn delete_policy_attachment(&self, p: &str, i: &Uuid) -> Result<(), StoreError> {
         self.delete_policy_attachment(p, i).await
     }
+    async fn upsert_policy_realization(
+        &self,
+        r: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        self.upsert_policy_realization(r).await
+    }
+    async fn get_policy_realization(
+        &self,
+        p: &str,
+        i: &Uuid,
+    ) -> Result<Option<CanonicalPolicyRealizationRecord>, StoreError> {
+        self.get_policy_realization(p, i).await
+    }
+    async fn list_policy_realizations(
+        &self,
+        p: &str,
+    ) -> Result<Vec<CanonicalPolicyRealizationRecord>, StoreError> {
+        self.list_policy_realizations(p).await
+    }
+    async fn set_policy_realization_outcome(
+        &self,
+        p: &str,
+        e: &Uuid,
+        f: &str,
+        s: &str,
+        o: Option<&str>,
+        g: Option<u64>,
+        r: Option<&str>,
+        l: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.set_policy_realization_outcome(p, e, f, s, o, g, r, l)
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -1478,6 +1742,43 @@ mod tests {
             store.delete_reusable_policy("project-a", &policy_id).await,
             Err(StoreError::NetworkInUse)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn endpoint_realization_truth_round_trips_and_is_overwritable() -> Result<(), StoreError>
+    {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let endpoint = Uuid::from_u128(31);
+        endpoint_fixture(&store, endpoint).await?;
+        let first = CanonicalPolicyRealizationRecord {
+            endpoint_id: endpoint,
+            project_id: "project-a".into(),
+            desired_fingerprint: "sha256:first".into(),
+            desired_generation: 2,
+            observed_fingerprint: None,
+            observed_generation: None,
+            state: "unknown".into(),
+            provider_resource_id: None,
+            last_outcome: Some("timeout".into()),
+        };
+        store.upsert_policy_realization(&first).await?;
+        assert_eq!(
+            store.get_policy_realization("project-a", &endpoint).await?,
+            Some(first.clone())
+        );
+        let realized = CanonicalPolicyRealizationRecord {
+            observed_fingerprint: Some(first.desired_fingerprint.clone()),
+            observed_generation: Some(first.desired_generation),
+            state: "realized".into(),
+            last_outcome: Some("observed".into()),
+            ..first
+        };
+        store.upsert_policy_realization(&realized).await?;
+        assert_eq!(
+            store.list_policy_realizations("project-a").await?.first(),
+            Some(&realized)
+        );
         Ok(())
     }
 

@@ -1,16 +1,19 @@
 //! Compilation of reusable canonical policy state into endpoint execution
 //! intents. This module deliberately has no OpenStack or provider types.
 
+use async_trait::async_trait;
 use o3k_domain::{
     NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDefaultIntent, PolicyDirection,
     PolicyIntent, PolicyStatefulMode, PortRange,
 };
 use o3k_store::{
     CanonicalAddressRealmRecord, CanonicalEndpointRecord, CanonicalNetworkPolicyRuleRecord,
-    CanonicalPolicyAttachmentRecord, CanonicalReusableNetworkPolicyRecord,
+    CanonicalPolicyAttachmentRecord, CanonicalPolicyRealizationRecord,
+    CanonicalReusableNetworkPolicyRecord, NetworkRepository,
 };
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use thiserror::Error;
-#[cfg(test)]
 use uuid::Uuid;
 
 use crate::{NetworkPlanError, NodeNetworkPlan, canonical_plan_fingerprint};
@@ -29,6 +32,372 @@ pub enum CanonicalPolicyCompileError {
     InvalidRule,
     #[error("canonical policy graph does not match the endpoint realm")]
     RealmMismatch,
+}
+
+/// The provider boundary used by the canonical policy reconciler. Providers
+/// report uncertainty explicitly; they never become policy authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyApplyOutcome {
+    Success {
+        provider_resource_id: Option<String>,
+    },
+    DefiniteFailure {
+        reason: String,
+    },
+    Unknown {
+        reason: String,
+    },
+}
+
+#[async_trait]
+pub trait PolicySnapshotRealizer: Send + Sync {
+    async fn apply_policy_snapshot(
+        &self,
+        endpoint_id: Uuid,
+        snapshot: &[NetworkPlanIntent],
+        fingerprint: &str,
+    ) -> PolicyApplyOutcome;
+
+    async fn observe_policy_snapshot(&self, _endpoint_id: Uuid) -> PolicyApplyOutcome {
+        PolicyApplyOutcome::Unknown {
+            reason: "provider observation is unavailable".into(),
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum CanonicalPolicyServiceError {
+    #[error("policy resource is not visible in this project")]
+    NotFound,
+    #[error("canonical policy snapshot is stale")]
+    StaleSnapshot,
+    #[error("canonical policy graph is invalid: {0}")]
+    Compile(#[from] CanonicalPolicyCompileError),
+    #[error("policy store error: {0}")]
+    Store(#[from] o3k_store::StoreError),
+}
+
+#[derive(Clone)]
+pub struct CanonicalPolicyService<R: ?Sized> {
+    repository: Arc<R>,
+}
+
+impl<R> CanonicalPolicyService<R>
+where
+    R: NetworkRepository + ?Sized,
+{
+    pub fn new(repository: Arc<R>) -> Self {
+        Self { repository }
+    }
+
+    /// Rebuild one Endpoint's policy graph from canonical storage. This is the
+    /// only service entry point that can create a realization record.
+    pub async fn compile_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: Uuid,
+    ) -> Result<(Vec<NetworkPlanIntent>, String), CanonicalPolicyServiceError> {
+        let endpoint = self
+            .repository
+            .get_canonical_endpoint(project_id, &endpoint_id)
+            .await?
+            .ok_or(CanonicalPolicyServiceError::NotFound)?;
+        let realm = self
+            .repository
+            .get_canonical_realm(project_id, &endpoint.realm_id)
+            .await?
+            .ok_or(CanonicalPolicyServiceError::NotFound)?;
+        let policies = self.repository.list_reusable_policies(project_id).await?;
+        let mut rules = Vec::new();
+        for policy in &policies {
+            rules.extend(
+                self.repository
+                    .list_policy_rules(project_id, &policy.id)
+                    .await?,
+            );
+        }
+        let attachments = self
+            .repository
+            .list_endpoint_policy_attachments(project_id, &endpoint_id)
+            .await?;
+        let snapshot = compile_endpoint_policy(&endpoint, &realm, &policies, &rules, &attachments)?;
+        let fingerprint = policy_snapshot_fingerprint(
+            &endpoint,
+            &realm,
+            &policies,
+            &rules,
+            &attachments,
+            &snapshot,
+        );
+        Ok((snapshot, fingerprint))
+    }
+
+    /// Return every active Endpoint affected by a policy mutation, sorted by
+    /// canonical Endpoint UUID. Callers must reconcile each result
+    /// independently; a reusable policy is not a single realization.
+    pub async fn affected_endpoints_for_policy(
+        &self,
+        project_id: &str,
+        policy_id: Uuid,
+    ) -> Result<Vec<Uuid>, CanonicalPolicyServiceError> {
+        let policy = self
+            .repository
+            .get_reusable_policy(project_id, &policy_id)
+            .await?
+            .ok_or(CanonicalPolicyServiceError::NotFound)?;
+        if policy.state != "active" {
+            return Ok(Vec::new());
+        }
+        let mut endpoints = self
+            .repository
+            .list_policy_attachments(project_id, &policy_id)
+            .await?
+            .into_iter()
+            .filter(|attachment| attachment.state == "active")
+            .map(|attachment| attachment.endpoint_id)
+            .collect::<Vec<_>>();
+        endpoints.sort_unstable();
+        endpoints.dedup();
+        Ok(endpoints)
+    }
+
+    /// Reconcile every active attachment independently. A returned failure on
+    /// one Endpoint does not erase or downgrade another Endpoint's durable
+    /// realization record.
+    pub async fn reconcile_policy_endpoints<P>(
+        &self,
+        project_id: &str,
+        policy_id: Uuid,
+        provider: &P,
+    ) -> Result<Vec<(Uuid, PolicyApplyOutcome)>, CanonicalPolicyServiceError>
+    where
+        P: PolicySnapshotRealizer,
+    {
+        let endpoints = self
+            .affected_endpoints_for_policy(project_id, policy_id)
+            .await?;
+        let mut outcomes = Vec::with_capacity(endpoints.len());
+        for endpoint_id in endpoints {
+            outcomes.push((
+                endpoint_id,
+                self.reconcile_endpoint_policy(project_id, endpoint_id, None, provider)
+                    .await?,
+            ));
+        }
+        Ok(outcomes)
+    }
+
+    /// Restart recovery enumerates durable Endpoint realization rows. Unknown
+    /// provider state is observed first; only a non-realized row is retried.
+    pub async fn recover_policy_realizations<P>(
+        &self,
+        project_id: &str,
+        provider: &P,
+    ) -> Result<Vec<(Uuid, PolicyApplyOutcome)>, CanonicalPolicyServiceError>
+    where
+        P: PolicySnapshotRealizer,
+    {
+        let records = self.repository.list_policy_realizations(project_id).await?;
+        let mut outcomes = Vec::new();
+        for record in records {
+            if record.state == "realized" {
+                continue;
+            }
+            if record.state == "unknown" {
+                let observation = provider.observe_policy_snapshot(record.endpoint_id).await;
+                if let PolicyApplyOutcome::Success {
+                    provider_resource_id,
+                } = observation.clone()
+                {
+                    let observed_outcome = PolicyApplyOutcome::Success {
+                        provider_resource_id: provider_resource_id.clone(),
+                    };
+                    self.repository
+                        .set_policy_realization_outcome(
+                            project_id,
+                            &record.endpoint_id,
+                            &record.desired_fingerprint,
+                            "realized",
+                            Some(&record.desired_fingerprint),
+                            Some(record.desired_generation),
+                            provider_resource_id.as_deref(),
+                            Some("observed after unknown outcome"),
+                        )
+                        .await?;
+                    outcomes.push((record.endpoint_id, observed_outcome));
+                    continue;
+                }
+                // Unknown remains unknown until observation resolves it. Do
+                // not blindly issue a second provider mutation after a
+                // transport timeout or process restart.
+                outcomes.push((record.endpoint_id, observation));
+                continue;
+            }
+            outcomes.push((
+                record.endpoint_id,
+                self.reconcile_endpoint_policy(
+                    project_id,
+                    record.endpoint_id,
+                    Some(&record.desired_fingerprint),
+                    provider,
+                )
+                .await?,
+            ));
+        }
+        Ok(outcomes)
+    }
+
+    /// Reconcile only the currently canonical snapshot. `expected_fingerprint`
+    /// fences queued work before any provider mutation.
+    pub async fn reconcile_endpoint_policy<P>(
+        &self,
+        project_id: &str,
+        endpoint_id: Uuid,
+        expected_fingerprint: Option<&str>,
+        provider: &P,
+    ) -> Result<PolicyApplyOutcome, CanonicalPolicyServiceError>
+    where
+        P: PolicySnapshotRealizer,
+    {
+        let (snapshot, fingerprint) = self.compile_endpoint(project_id, endpoint_id).await?;
+        if expected_fingerprint.is_some_and(|expected| expected != fingerprint) {
+            return Err(CanonicalPolicyServiceError::StaleSnapshot);
+        }
+        let generation = snapshot_generation(&snapshot);
+        self.repository
+            .upsert_policy_realization(&CanonicalPolicyRealizationRecord {
+                endpoint_id,
+                project_id: project_id.to_owned(),
+                desired_fingerprint: fingerprint.clone(),
+                desired_generation: generation,
+                observed_fingerprint: None,
+                observed_generation: None,
+                state: "applying".into(),
+                provider_resource_id: None,
+                last_outcome: None,
+            })
+            .await?;
+        let outcome = provider
+            .apply_policy_snapshot(endpoint_id, &snapshot, &fingerprint)
+            .await;
+        let realization = match &outcome {
+            PolicyApplyOutcome::Success {
+                provider_resource_id,
+            } => CanonicalPolicyRealizationRecord {
+                endpoint_id,
+                project_id: project_id.to_owned(),
+                desired_fingerprint: fingerprint.clone(),
+                desired_generation: generation,
+                observed_fingerprint: Some(fingerprint),
+                observed_generation: Some(generation),
+                state: "realized".into(),
+                provider_resource_id: provider_resource_id.clone(),
+                last_outcome: Some("success".into()),
+            },
+            PolicyApplyOutcome::DefiniteFailure { reason } => CanonicalPolicyRealizationRecord {
+                endpoint_id,
+                project_id: project_id.to_owned(),
+                desired_fingerprint: fingerprint,
+                desired_generation: generation,
+                observed_fingerprint: None,
+                observed_generation: None,
+                state: "failed".into(),
+                provider_resource_id: None,
+                last_outcome: Some(reason.clone()),
+            },
+            PolicyApplyOutcome::Unknown { reason } => CanonicalPolicyRealizationRecord {
+                endpoint_id,
+                project_id: project_id.to_owned(),
+                desired_fingerprint: fingerprint,
+                desired_generation: generation,
+                observed_fingerprint: None,
+                observed_generation: None,
+                state: "unknown".into(),
+                provider_resource_id: None,
+                last_outcome: Some(reason.clone()),
+            },
+        };
+        if matches!(outcome, PolicyApplyOutcome::Success { .. }) {
+            // The canonical graph may have changed while the provider call
+            // was in flight. Never record an old snapshot as current.
+            let (_, current_fingerprint) = self.compile_endpoint(project_id, endpoint_id).await?;
+            if current_fingerprint != realization.desired_fingerprint {
+                let mut pending = realization;
+                pending.desired_fingerprint = current_fingerprint;
+                pending.state = "pending".into();
+                pending.observed_fingerprint = None;
+                pending.observed_generation = None;
+                pending.last_outcome = Some("stale provider success; requeue".into());
+                self.repository.upsert_policy_realization(&pending).await?;
+                return Ok(outcome);
+            }
+        }
+        self.repository
+            .set_policy_realization_outcome(
+                project_id,
+                &endpoint_id,
+                &realization.desired_fingerprint,
+                &realization.state,
+                realization.observed_fingerprint.as_deref(),
+                realization.observed_generation,
+                realization.provider_resource_id.as_deref(),
+                realization.last_outcome.as_deref(),
+            )
+            .await?;
+        Ok(outcome)
+    }
+}
+
+fn snapshot_generation(snapshot: &[NetworkPlanIntent]) -> u64 {
+    snapshot
+        .iter()
+        .map(|intent| match intent {
+            NetworkPlanIntent::Policy(policy) => policy.id.as_u128() as u64,
+            NetworkPlanIntent::PolicyDefault(default) => default.generation,
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(1)
+}
+
+fn policy_snapshot_fingerprint(
+    endpoint: &CanonicalEndpointRecord,
+    realm: &CanonicalAddressRealmRecord,
+    policies: &[CanonicalReusableNetworkPolicyRecord],
+    rules: &[CanonicalNetworkPolicyRuleRecord],
+    attachments: &[CanonicalPolicyAttachmentRecord],
+    snapshot: &[NetworkPlanIntent],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(endpoint.id.as_bytes());
+    hasher.update(endpoint.generation.to_be_bytes());
+    hasher.update(realm.id.as_bytes());
+    hasher.update(realm.generation.to_be_bytes());
+    for policy in policies {
+        hasher.update(policy.id.as_bytes());
+        hasher.update(policy.project_id.as_bytes());
+        hasher.update(policy.stateful_mode.as_bytes());
+        hasher.update(policy.unmatched_action.as_bytes());
+        hasher.update(policy.generation.to_be_bytes());
+        hasher.update(policy.state.as_bytes());
+    }
+    for rule in rules {
+        hasher.update(rule.id.as_bytes());
+        hasher.update(rule.policy_id.as_bytes());
+        hasher.update(rule.project_id.as_bytes());
+        hasher.update(rule.enforcement_key.as_bytes());
+        hasher.update(rule.generation.to_be_bytes());
+        hasher.update(rule.state.as_bytes());
+    }
+    for attachment in attachments {
+        hasher.update(attachment.id.as_bytes());
+        hasher.update(attachment.policy_id.as_bytes());
+        hasher.update(attachment.endpoint_id.as_bytes());
+        hasher.update(attachment.generation.to_be_bytes());
+        hasher.update(attachment.state.as_bytes());
+    }
+    hasher.update(serde_json::to_vec(snapshot).unwrap_or_default());
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 /// Compile all active policies attached to one endpoint. Empty output is

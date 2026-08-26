@@ -29,7 +29,10 @@ pub mod policy;
 pub mod public;
 pub use policy::{PolicyEndpoint, PolicyNetworkError, StatefulPolicyProvider};
 pub mod routed;
-pub use canonical_policy::{CanonicalPolicyCompileError, compile_endpoint_policy};
+pub use canonical_policy::{
+    CanonicalPolicyCompileError, CanonicalPolicyService, CanonicalPolicyServiceError,
+    PolicyApplyOutcome, PolicySnapshotRealizer, compile_endpoint_policy,
+};
 pub use execution::{
     FlatNetworkError, FlatNetworkRealizer, NetworkAgentIdentity, NetworkControllerLease,
     NetworkDispatchError, NetworkExecutionError, NetworkPlanAction, NetworkPlanCommand,
@@ -4571,6 +4574,72 @@ impl NetworkService {
         };
         service.recover_realm_deletion_operations().await?;
         Ok(service)
+    }
+
+    /// Rebuilds one endpoint's effective policy from canonical reusable policy
+    /// state. This is the runtime integration seam; the returned snapshot is
+    /// still derived execution input and is never written back as policy
+    /// authority.
+    pub async fn compile_canonical_policy_for_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: Uuid,
+    ) -> Result<(Vec<NetworkPlanIntent>, String), CanonicalPolicyServiceError> {
+        CanonicalPolicyService::new(self.inner.repository.clone())
+            .compile_endpoint(project_id, endpoint_id)
+            .await
+    }
+
+    pub async fn affected_endpoints_for_canonical_policy(
+        &self,
+        project_id: &str,
+        policy_id: Uuid,
+    ) -> Result<Vec<Uuid>, CanonicalPolicyServiceError> {
+        CanonicalPolicyService::new(self.inner.repository.clone())
+            .affected_endpoints_for_policy(project_id, policy_id)
+            .await
+    }
+
+    pub async fn reconcile_canonical_policy_for_endpoint<P>(
+        &self,
+        project_id: &str,
+        endpoint_id: Uuid,
+        expected_fingerprint: Option<&str>,
+        provider: &P,
+    ) -> Result<PolicyApplyOutcome, CanonicalPolicyServiceError>
+    where
+        P: PolicySnapshotRealizer,
+    {
+        CanonicalPolicyService::new(self.inner.repository.clone())
+            .reconcile_endpoint_policy(project_id, endpoint_id, expected_fingerprint, provider)
+            .await
+    }
+
+    pub async fn reconcile_canonical_policy_endpoints<P>(
+        &self,
+        project_id: &str,
+        policy_id: Uuid,
+        provider: &P,
+    ) -> Result<Vec<(Uuid, PolicyApplyOutcome)>, CanonicalPolicyServiceError>
+    where
+        P: PolicySnapshotRealizer,
+    {
+        CanonicalPolicyService::new(self.inner.repository.clone())
+            .reconcile_policy_endpoints(project_id, policy_id, provider)
+            .await
+    }
+
+    pub async fn recover_canonical_policy_realizations<P>(
+        &self,
+        project_id: &str,
+        provider: &P,
+    ) -> Result<Vec<(Uuid, PolicyApplyOutcome)>, CanonicalPolicyServiceError>
+    where
+        P: PolicySnapshotRealizer,
+    {
+        CanonicalPolicyService::new(self.inner.repository.clone())
+            .recover_policy_realizations(project_id, provider)
+            .await
     }
 
     #[must_use]

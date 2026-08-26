@@ -12,16 +12,16 @@ use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
     CanonicalNetworkPolicyRecord, CanonicalNetworkPolicyRuleRecord, CanonicalNetworkRecord,
-    CanonicalOperationRecord, CanonicalPolicyAttachmentRecord, CanonicalPolicyRepository,
-    CanonicalRealmBindingRecord, CanonicalReusableNetworkPolicyRecord, ComputeRepository,
-    ControllerEpoch, ControllerId, ControllerSession, CoordinationRepository, DatabaseHealth,
-    DurableStore, FencingToken, IdempotencyReservation, IdempotencyReservationRequest,
-    IdentityRepository, ImageMetadataRecord, ImageOverlayIdentity, ImageOverlayOwnershipRecord,
-    ImageOverlayUpdate, ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
-    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
-    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    LeaseAcquireOutcome, NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord,
-    NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
+    CanonicalOperationRecord, CanonicalPolicyAttachmentRecord, CanonicalPolicyRealizationRecord,
+    CanonicalPolicyRepository, CanonicalRealmBindingRecord, CanonicalReusableNetworkPolicyRecord,
+    ComputeRepository, ControllerEpoch, ControllerId, ControllerSession, CoordinationRepository,
+    DatabaseHealth, DurableStore, FencingToken, IdempotencyReservation,
+    IdempotencyReservationRequest, IdentityRepository, ImageMetadataRecord, ImageOverlayIdentity,
+    ImageOverlayOwnershipRecord, ImageOverlayUpdate, ImageRepository, KeypairRecord,
+    KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord,
+    KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord,
+    KeystoneUserRecord, LeaseAcquireOutcome, NetworkAddressAllocationRecord, NetworkIntentRecord,
+    NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
     PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository, PortRecord,
     PostgresStore, ProviderReference, RelationshipRepository, ResourceRecord,
@@ -286,6 +286,74 @@ impl CanonicalPolicyRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.delete_policy_attachment(project, id).await,
             Self::Postgres(s) => s.delete_policy_attachment(project, id).await,
+        }
+    }
+    async fn upsert_policy_realization(
+        &self,
+        realization: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.upsert_policy_realization(realization).await,
+            Self::Postgres(s) => s.upsert_policy_realization(realization).await,
+        }
+    }
+    async fn get_policy_realization(
+        &self,
+        project: &str,
+        endpoint: &Uuid,
+    ) -> Result<Option<CanonicalPolicyRealizationRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_policy_realization(project, endpoint).await,
+            Self::Postgres(s) => s.get_policy_realization(project, endpoint).await,
+        }
+    }
+    async fn list_policy_realizations(
+        &self,
+        project: &str,
+    ) -> Result<Vec<CanonicalPolicyRealizationRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_policy_realizations(project).await,
+            Self::Postgres(s) => s.list_policy_realizations(project).await,
+        }
+    }
+    async fn set_policy_realization_outcome(
+        &self,
+        project: &str,
+        endpoint: &Uuid,
+        expected: &str,
+        state: &str,
+        observed: Option<&str>,
+        generation: Option<u64>,
+        provider_resource_id: Option<&str>,
+        last_outcome: Option<&str>,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.set_policy_realization_outcome(
+                    project,
+                    endpoint,
+                    expected,
+                    state,
+                    observed,
+                    generation,
+                    provider_resource_id,
+                    last_outcome,
+                )
+                .await
+            }
+            Self::Postgres(s) => {
+                s.set_policy_realization_outcome(
+                    project,
+                    endpoint,
+                    expected,
+                    state,
+                    observed,
+                    generation,
+                    provider_resource_id,
+                    last_outcome,
+                )
+                .await
+            }
         }
     }
 }

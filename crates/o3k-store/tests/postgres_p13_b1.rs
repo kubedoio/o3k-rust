@@ -1,7 +1,7 @@
 use o3k_store::{
     CanonicalAddressRealmRecord, CanonicalEndpointRecord, CanonicalNetworkPolicyRuleRecord,
-    CanonicalNetworkRecord, CanonicalPolicyAttachmentRecord, CanonicalReusableNetworkPolicyRecord,
-    PostgresStore, StoreError,
+    CanonicalNetworkRecord, CanonicalPolicyAttachmentRecord, CanonicalPolicyRealizationRecord,
+    CanonicalReusableNetworkPolicyRecord, PostgresStore, StoreError,
 };
 use std::net::Ipv4Addr;
 use uuid::Uuid;
@@ -218,6 +218,19 @@ async fn postgres_p13_b1_attachment_lifecycle_and_races() -> Result<(), StoreErr
             .len(),
         2
     );
+    store
+        .upsert_policy_realization(&CanonicalPolicyRealizationRecord {
+            endpoint_id,
+            project_id: project.into(),
+            desired_fingerprint: "sha256:p13-b2".into(),
+            desired_generation: 3,
+            observed_fingerprint: None,
+            observed_generation: None,
+            state: "unknown".into(),
+            provider_resource_id: None,
+            last_outcome: Some("transport loss".into()),
+        })
+        .await?;
     assert!(matches!(
         store
             .insert_policy_attachment(&CanonicalPolicyAttachmentRecord {
@@ -258,6 +271,16 @@ async fn postgres_p13_b1_attachment_lifecycle_and_races() -> Result<(), StoreErr
             .await?
             .len(),
         2
+    );
+    let realization = reopened
+        .get_policy_realization(project, &endpoint_id)
+        .await?
+        .ok_or(StoreError::Corrupt(
+            "realization missing after reopen".into(),
+        ))?;
+    assert_eq!(
+        (realization.desired_generation, realization.state.as_str()),
+        (3, "unknown")
     );
 
     let deleting_compatible = reopened
