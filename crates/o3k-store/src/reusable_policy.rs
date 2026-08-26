@@ -216,6 +216,16 @@ fn validate_attachment(attachment: &CanonicalPolicyAttachmentRecord) -> Result<i
     checked_generation(attachment.generation)
 }
 
+fn validate_child_insert_state(state: &str) -> Result<(), StoreError> {
+    if matches!(state, "requested" | "active") {
+        Ok(())
+    } else {
+        Err(StoreError::Corrupt(
+            "policy child must be requested or active when inserted".into(),
+        ))
+    }
+}
+
 fn sqlite_policy(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
@@ -307,12 +317,19 @@ impl crate::SqliteStore {
                 "policy update generation must increment by one".into(),
             ));
         }
+        let current = self
+            .get_reusable_policy(&p.project_id, &p.id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
+        if current.state != p.state {
+            return Err(StoreError::StaleGeneration);
+        }
         let incompatible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM canonical_policy_attachments a JOIN canonical_policy_attachments other ON other.endpoint_id=a.endpoint_id AND other.policy_id<>a.policy_id AND other.state='active' JOIN canonical_reusable_network_policies other_policy ON other_policy.id=other.policy_id WHERE a.policy_id=? AND a.state='active' AND other_policy.unmatched_action<>?")
             .bind(p.id.to_string()).bind(&p.unmatched_action).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
         if incompatible != 0 {
             return Err(StoreError::PolicyCompositionConflict);
         }
-        let result=sqlx::query("UPDATE canonical_reusable_network_policies SET name=?, description=?, stateful_mode=?, unmatched_action=?, generation=?, state=?, updated_at=? WHERE id=? AND project_id=? AND generation=?").bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(new_gen).bind(&p.state).bind(&p.updated_at).bind(p.id.to_string()).bind(&p.project_id).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        let result=sqlx::query("UPDATE canonical_reusable_network_policies SET name=?, description=?, stateful_mode=?, unmatched_action=?, generation=?, updated_at=? WHERE id=? AND project_id=? AND generation=? AND state=?").bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(new_gen).bind(&p.updated_at).bind(p.id.to_string()).bind(&p.project_id).bind(checked_generation(expected)?).bind(&p.state).execute(&self.pool).await.map_err(StoreError::Database)?;
         if result.rows_affected() == 0 {
             return match self.get_reusable_policy(&p.project_id, &p.id).await? {
                 Some(_) => Err(StoreError::StaleGeneration),
@@ -331,12 +348,25 @@ impl crate::SqliteStore {
         state: &str,
     ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
         validate_canonical_state(state)?;
-        let query = if state == "deleting" {
-            "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=? AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=? AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=? AND state IN ('requested','active','deleting'))"
-        } else {
-            "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=?"
+        let query = match state {
+            "active" => {
+                "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=? AND state='requested'"
+            }
+            "deleting" => {
+                "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=? AND state IN ('requested','active') AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=? AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=? AND state IN ('requested','active','deleting'))"
+            }
+            "deleted" => {
+                "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=? AND state='deleting' AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=? AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=? AND state IN ('requested','active','deleting'))"
+            }
+            "error" => {
+                "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=? AND state IN ('requested','active','deleting')"
+            }
+            "requested" => {
+                "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE 1=0"
+            }
+            _ => unreachable!(),
         };
-        let statement = if state == "deleting" {
+        let statement = if matches!(state, "deleting" | "deleted") {
             sqlx::query(query)
                 .bind(state)
                 .bind(id.to_string())
@@ -358,7 +388,7 @@ impl crate::SqliteStore {
                 .map_err(StoreError::Database)?
         };
         if statement.rows_affected() == 0 {
-            if state == "deleting" {
+            if matches!(state, "deleting" | "deleted") {
                 let current = self.get_reusable_policy(project, id).await?;
                 if let Some(current) = current {
                     if current.generation != expected {
@@ -404,6 +434,7 @@ impl crate::SqliteStore {
         r: &CanonicalNetworkPolicyRuleRecord,
     ) -> Result<(), StoreError> {
         let generation = validate_rule(r)?;
+        validate_child_insert_state(&r.state)?;
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         let parent = sqlx::query(
             "SELECT project_id, state FROM canonical_reusable_network_policies WHERE id=?",
@@ -500,6 +531,7 @@ impl crate::SqliteStore {
         a: &CanonicalPolicyAttachmentRecord,
     ) -> Result<(), StoreError> {
         let generation = validate_attachment(a)?;
+        validate_child_insert_state(&a.state)?;
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         let p = sqlx::query(
             "SELECT project_id,state,unmatched_action FROM canonical_reusable_network_policies WHERE id=?",
@@ -832,12 +864,19 @@ impl crate::PostgresStore {
                 "policy update generation must increment by one".into(),
             ));
         }
+        let current = self
+            .get_reusable_policy(&p.project_id, &p.id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
+        if current.state != p.state {
+            return Err(StoreError::StaleGeneration);
+        }
         let incompatible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM canonical_policy_attachments a JOIN canonical_policy_attachments other ON other.endpoint_id=a.endpoint_id AND other.policy_id<>a.policy_id AND other.state='active' JOIN canonical_reusable_network_policies other_policy ON other_policy.id=other.policy_id WHERE a.policy_id=$1 AND a.state='active' AND other_policy.unmatched_action<>$2")
             .bind(p.id.to_string()).bind(&p.unmatched_action).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
         if incompatible != 0 {
             return Err(StoreError::PolicyCompositionConflict);
         }
-        let r=sqlx::query("UPDATE canonical_reusable_network_policies SET name=$1,description=$2,stateful_mode=$3,unmatched_action=$4,generation=$5,state=$6,updated_at=$7 WHERE id=$8 AND project_id=$9 AND generation=$10").bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(g).bind(&p.state).bind(&p.updated_at).bind(p.id.to_string()).bind(&p.project_id).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        let r=sqlx::query("UPDATE canonical_reusable_network_policies SET name=$1,description=$2,stateful_mode=$3,unmatched_action=$4,generation=$5,updated_at=$6 WHERE id=$7 AND project_id=$8 AND generation=$9 AND state=$10").bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(g).bind(&p.updated_at).bind(p.id.to_string()).bind(&p.project_id).bind(checked_generation(expected)?).bind(&p.state).execute(&self.pool).await.map_err(StoreError::Database)?;
         if r.rows_affected() == 0 {
             return match self.get_reusable_policy(&p.project_id, &p.id).await? {
                 Some(_) => Err(StoreError::StaleGeneration),
@@ -856,10 +895,23 @@ impl crate::PostgresStore {
         state: &str,
     ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
         validate_canonical_state(state)?;
-        let query = if state == "deleting" {
-            "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4 AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=$2 AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=$2 AND state IN ('requested','active','deleting'))"
-        } else {
-            "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4"
+        let query = match state {
+            "active" => {
+                "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4 AND state='requested'"
+            }
+            "deleting" => {
+                "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4 AND state IN ('requested','active') AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=$2 AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=$2 AND state IN ('requested','active','deleting'))"
+            }
+            "deleted" => {
+                "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4 AND state='deleting' AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=$2 AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=$2 AND state IN ('requested','active','deleting'))"
+            }
+            "error" => {
+                "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4 AND state IN ('requested','active','deleting')"
+            }
+            "requested" => {
+                "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE FALSE"
+            }
+            _ => unreachable!(),
         };
         let result = sqlx::query(query)
             .bind(state)
@@ -870,7 +922,7 @@ impl crate::PostgresStore {
             .await
             .map_err(StoreError::Database)?;
         if result.rows_affected() == 0 {
-            if state == "deleting"
+            if matches!(state, "deleting" | "deleted")
                 && let Some(current) = self.get_reusable_policy(project, id).await?
             {
                 if current.generation != expected {
@@ -908,6 +960,7 @@ impl crate::PostgresStore {
         r: &CanonicalNetworkPolicyRuleRecord,
     ) -> Result<(), StoreError> {
         let generation = validate_rule(r)?;
+        validate_child_insert_state(&r.state)?;
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         let p = sqlx::query(
             "SELECT project_id,state,unmatched_action FROM canonical_reusable_network_policies WHERE id=$1 FOR UPDATE",
@@ -994,6 +1047,7 @@ impl crate::PostgresStore {
         a: &CanonicalPolicyAttachmentRecord,
     ) -> Result<(), StoreError> {
         let generation = validate_attachment(a)?;
+        validate_child_insert_state(&a.state)?;
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         let p = sqlx::query(
             "SELECT project_id,state,unmatched_action FROM canonical_reusable_network_policies WHERE id=$1 FOR UPDATE",
@@ -1538,6 +1592,44 @@ mod tests {
                 .insert_policy_rule(&rule(Uuid::from_u128(51), policy_id))
                 .await,
             Err(StoreError::OwnershipConflict)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn policy_state_changes_use_the_lifecycle_transition_path() -> Result<(), StoreError> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let policy_id = Uuid::from_u128(60);
+        store
+            .insert_reusable_policy(&policy(policy_id, "Allow"))
+            .await?;
+        store
+            .insert_policy_rule(&rule(Uuid::from_u128(61), policy_id))
+            .await?;
+
+        let mut attempted_update = policy(policy_id, "Allow");
+        attempted_update.generation = 2;
+        attempted_update.state = "deleting".into();
+        assert!(matches!(
+            store.update_reusable_policy(&attempted_update, 1).await,
+            Err(StoreError::StaleGeneration)
+        ));
+        assert!(matches!(
+            store
+                .transition_reusable_policy_state("project-a", &policy_id, 1, "deleted")
+                .await,
+            Err(StoreError::NetworkInUse)
+        ));
+        assert!(matches!(
+            store
+                .insert_policy_rule(&CanonicalNetworkPolicyRuleRecord {
+                    id: Uuid::from_u128(62),
+                    policy_id,
+                    state: "deleted".into(),
+                    ..rule(Uuid::from_u128(62), policy_id)
+                })
+                .await,
+            Err(StoreError::Corrupt(_))
         ));
         Ok(())
     }
