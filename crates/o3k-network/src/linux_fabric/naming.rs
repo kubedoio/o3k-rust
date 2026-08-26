@@ -57,7 +57,12 @@ pub(crate) fn public_realm_table_name(realm_id: Uuid) -> String {
     provider_name("n", realm_id, "public")
 }
 pub(crate) fn policy_fingerprint(plan: &NamespacedRoutedFabricPlan) -> String {
-    let bytes = serde_json::to_vec(&(plan.policy_generation, &plan.policies)).unwrap_or_default();
+    let bytes = serde_json::to_vec(&(
+        plan.policy_generation,
+        &plan.policy_defaults,
+        &plan.policies,
+    ))
+    .unwrap_or_default();
     format!("{:x}", Sha256::digest(bytes))
 }
 pub(crate) fn policy_protocol(protocol: NetworkProtocol) -> Option<&'static str> {

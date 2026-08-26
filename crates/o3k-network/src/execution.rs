@@ -519,6 +519,7 @@ impl FlatNetworkRealizer {
                 | NetworkPlanIntent::Gateway(_)
                 | NetworkPlanIntent::Egress(_)
                 | NetworkPlanIntent::PublicAddressBinding(_)
+                | NetworkPlanIntent::PolicyDefault(_)
                 | NetworkPlanIntent::Policy(_)
         )
     }

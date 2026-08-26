@@ -7,6 +7,7 @@
 use crate::fabric::{FabricBackend, FabricError};
 use o3k_domain::{
     FabricPeer, NamespacedRoutedFabricPlan, NetworkProtocol, PolicyAction, PolicyDirection,
+    PolicyStatefulMode,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

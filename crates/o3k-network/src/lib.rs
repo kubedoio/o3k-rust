@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod canonical_policy;
 pub mod execution;
 pub mod fabric;
 pub mod linux_fabric;
@@ -28,6 +29,7 @@ pub mod policy;
 pub mod public;
 pub use policy::{PolicyEndpoint, PolicyNetworkError, StatefulPolicyProvider};
 pub mod routed;
+pub use canonical_policy::{CanonicalPolicyCompileError, compile_endpoint_policy};
 pub use execution::{
     FlatNetworkError, FlatNetworkRealizer, NetworkAgentIdentity, NetworkControllerLease,
     NetworkDispatchError, NetworkExecutionError, NetworkPlanAction, NetworkPlanCommand,
@@ -288,6 +290,7 @@ mod p9_plan_tests {
             tenant_mtu: 1400,
             policy_generation: 1,
             policies: Vec::new(),
+            policy_defaults: Vec::new(),
             public_bindings: Vec::new(),
             routes: vec![FabricEndpointRoute {
                 realm_id: Uuid::from_u128(2),
@@ -3775,6 +3778,22 @@ impl NodeNetworkPlan {
                     .entries
                     .iter()
                     .all(|entry| entry.endpoint_id != policy.endpoint_id)
+            {
+                return Err(NetworkPlanError::InvalidFabricPlan);
+            }
+        }
+        let mut default_endpoints = BTreeSet::new();
+        for default in &fabric.policy_defaults {
+            if default.policy_id.is_nil()
+                || default.endpoint_id.is_nil()
+                || default.generation == 0
+                || default.stateful_mode != o3k_domain::PolicyStatefulMode::Stateful
+                || !default_endpoints.insert(default.endpoint_id)
+                || fabric
+                    .directory
+                    .entries
+                    .iter()
+                    .all(|entry| entry.endpoint_id != default.endpoint_id)
             {
                 return Err(NetworkPlanError::InvalidFabricPlan);
             }

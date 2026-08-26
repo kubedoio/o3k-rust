@@ -1,12 +1,16 @@
 //! Bounded stateful L3/L4 policy realization using Linux nftables/conntrack.
 //!
-//! The canonical policy remains [`PolicyIntent`]. This provider owns one
+//! The canonical execution input is [`PolicyIntent`]. This provider owns one
 //! marked table and scopes every rule to an O3K endpoint address, leaving
 //! unrelated firewall state untouched. Default behavior is explicitly
-//! stateful allow: rules add targeted denies/allows and established/related
-//! return traffic is accepted by conntrack.
+//! stateful realization: canonical rules and per-Endpoint unmatched actions
+//! are compiled into an owned nftables table; established/related return
+//! traffic is accepted by conntrack.
 
-use o3k_domain::{NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent};
+use o3k_domain::{
+    NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDefaultIntent, PolicyDirection,
+    PolicyIntent, PolicyStatefulMode,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -37,6 +41,8 @@ struct Ownership {
     endpoint_ids: Vec<Uuid>,
     #[serde(default)]
     policies: Vec<PolicyIntent>,
+    #[serde(default)]
+    defaults: Vec<PolicyDefaultIntent>,
     #[serde(default)]
     endpoints: Vec<PolicyEndpoint>,
 }
@@ -78,6 +84,10 @@ pub enum PolicyNetworkError {
     ForeignState,
     #[error("policy provider ownership conflicts with the accepted plan")]
     OwnershipConflict,
+    #[error("policy default action is invalid or unsupported")]
+    InvalidDefault,
+    #[error("policy defaults conflict for one endpoint")]
+    ConflictingDefault,
 }
 
 pub struct StatefulPolicyProvider {
@@ -125,6 +135,13 @@ impl StatefulPolicyProvider {
                 _ => None,
             })
             .collect();
+        let defaults: Vec<PolicyDefaultIntent> = intents
+            .iter()
+            .filter_map(|intent| match intent {
+                NetworkPlanIntent::PolicyDefault(default) => Some(default.clone()),
+                _ => None,
+            })
+            .collect();
         let current_addresses: std::collections::HashMap<Uuid, Ipv4Addr> = endpoints
             .iter()
             .map(|endpoint| (endpoint.endpoint_id, endpoint.address))
@@ -134,6 +151,15 @@ impl StatefulPolicyProvider {
                 return Err(PolicyNetworkError::UnknownEndpoint);
             }
             validate_policy(policy)?;
+        }
+        for default in &defaults {
+            if default.endpoint_id == Uuid::nil()
+                || default.policy_id == Uuid::nil()
+                || !current_addresses.contains_key(&default.endpoint_id)
+            {
+                return Err(PolicyNetworkError::InvalidDefault);
+            }
+            validate_default(default)?;
         }
         let current_endpoint_ids: std::collections::HashSet<Uuid> = endpoints
             .iter()
@@ -152,6 +178,26 @@ impl StatefulPolicyProvider {
             })
             .unwrap_or_default();
         all_policies.extend(policies);
+        let mut all_defaults: Vec<PolicyDefaultIntent> = self
+            .ownership
+            .as_ref()
+            .map(|ownership| {
+                ownership
+                    .defaults
+                    .iter()
+                    .filter(|default| !current_endpoint_ids.contains(&default.endpoint_id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        all_defaults.extend(defaults);
+        all_defaults.sort_by_key(|default| default.endpoint_id);
+        if all_defaults
+            .windows(2)
+            .any(|pair| pair[0].endpoint_id == pair[1].endpoint_id)
+        {
+            return Err(PolicyNetworkError::ConflictingDefault);
+        }
         let mut all_endpoints = self
             .ownership
             .as_ref()
@@ -176,7 +222,7 @@ impl StatefulPolicyProvider {
                 return Err(PolicyNetworkError::UnknownEndpoint);
             }
         }
-        let fingerprint = fingerprint(&all_policies);
+        let fingerprint = fingerprint(&all_policies, &all_defaults);
         let ownership = Ownership {
             fingerprint,
             endpoint_ids: all_endpoints
@@ -184,6 +230,7 @@ impl StatefulPolicyProvider {
                 .map(|endpoint| endpoint.endpoint_id)
                 .collect(),
             policies: all_policies,
+            defaults: all_defaults,
             endpoints: all_endpoints,
         };
         if self
@@ -258,7 +305,9 @@ impl StatefulPolicyProvider {
         {
             return Err(PolicyNetworkError::CommandFailed);
         }
-        for (index, policy) in ownership.policies.iter().enumerate() {
+        let mut sorted_policies = ownership.policies.clone();
+        sorted_policies.sort_by_key(|policy| (policy.action != PolicyAction::Deny, policy.id));
+        for (index, policy) in sorted_policies.iter().enumerate() {
             let endpoint_address = addresses[&policy.endpoint_id];
             let mut args = vec!["add", "rule", "ip", TABLE, CHAIN];
             let endpoint_value = endpoint_address.to_string();
@@ -305,6 +354,40 @@ impl StatefulPolicyProvider {
                 .map_err(PolicyNetworkError::Storage)?
             {
                 return Err(PolicyNetworkError::CommandFailed);
+            }
+        }
+        for default in &ownership.defaults {
+            let endpoint_value = addresses[&default.endpoint_id].to_string();
+            let mut args = vec!["add", "rule", "ip", TABLE, CHAIN];
+            if default.unmatched_action == PolicyAction::Deny {
+                args.extend(["ip", "daddr", &endpoint_value, "drop", "comment", MARKER]);
+                if !self
+                    .command
+                    .run(&args)
+                    .map_err(PolicyNetworkError::Storage)?
+                {
+                    return Err(PolicyNetworkError::CommandFailed);
+                }
+                let egress = vec![
+                    "add",
+                    "rule",
+                    "ip",
+                    TABLE,
+                    CHAIN,
+                    "ip",
+                    "saddr",
+                    &endpoint_value,
+                    "drop",
+                    "comment",
+                    MARKER,
+                ];
+                if !self
+                    .command
+                    .run(&egress)
+                    .map_err(PolicyNetworkError::Storage)?
+                {
+                    return Err(PolicyNetworkError::CommandFailed);
+                }
             }
         }
         Ok(())
@@ -355,6 +438,7 @@ impl StatefulPolicyProvider {
             .iter()
             .filter_map(|intent| match intent {
                 NetworkPlanIntent::Policy(policy) => Some(policy.endpoint_id),
+                NetworkPlanIntent::PolicyDefault(default) => Some(default.endpoint_id),
                 _ => None,
             })
             .chain(endpoints.iter().map(|endpoint| endpoint.endpoint_id))
@@ -409,6 +493,12 @@ fn validate_policy(policy: &PolicyIntent) -> Result<(), PolicyNetworkError> {
     Ok(())
 }
 
+fn validate_default(default: &PolicyDefaultIntent) -> Result<(), PolicyNetworkError> {
+    (default.stateful_mode == PolicyStatefulMode::Stateful && default.generation > 0)
+        .then_some(())
+        .ok_or(PolicyNetworkError::InvalidDefault)
+}
+
 fn protocol_name(protocol: NetworkProtocol) -> Option<&'static str> {
     match protocol {
         NetworkProtocol::Any => None,
@@ -418,10 +508,10 @@ fn protocol_name(protocol: NetworkProtocol) -> Option<&'static str> {
     }
 }
 
-fn fingerprint(policies: &[PolicyIntent]) -> String {
+fn fingerprint(policies: &[PolicyIntent], defaults: &[PolicyDefaultIntent]) -> String {
     format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(policies).unwrap_or_default())
+        Sha256::digest(serde_json::to_vec(&(policies, defaults)).unwrap_or_default())
     )
 }
 
@@ -503,6 +593,16 @@ mod tests {
             source: None,
             destination: None,
             action: PolicyAction::Allow,
+        })
+    }
+
+    fn default(endpoint_id: Uuid, action: PolicyAction) -> NetworkPlanIntent {
+        NetworkPlanIntent::PolicyDefault(PolicyDefaultIntent {
+            policy_id: Uuid::from_u128(12),
+            endpoint_id,
+            unmatched_action: action,
+            stateful_mode: PolicyStatefulMode::Stateful,
+            generation: 1,
         })
     }
 
@@ -625,6 +725,44 @@ mod tests {
             Err(PolicyNetworkError::InvalidRule)
         ));
         assert!(command.calls.lock().expect("calls").is_empty());
+    }
+
+    #[test]
+    fn deny_default_realizes_endpoint_scoped_terminal_drops() {
+        let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: String::new(),
+        });
+        let mut provider = StatefulPolicyProvider::with_command(
+            &root,
+            Arc::clone(&command) as Arc<dyn PolicyCommand>,
+        )
+        .expect("provider");
+        let endpoint = Uuid::from_u128(1);
+        provider
+            .apply(
+                &[default(endpoint, PolicyAction::Deny)],
+                &[PolicyEndpoint {
+                    endpoint_id: endpoint,
+                    address: Ipv4Addr::new(10, 0, 0, 2),
+                }],
+            )
+            .expect("deny default");
+        let calls = command.calls.lock().expect("calls");
+        let drops = calls
+            .iter()
+            .filter(|call| call.iter().any(|value| value == "drop"))
+            .count();
+        assert_eq!(drops, 2);
+        assert!(calls.iter().any(|call| {
+            call.windows(3)
+                .any(|window| window == ["ip", "daddr", "10.0.0.2"])
+        }));
+        assert!(calls.iter().any(|call| {
+            call.windows(3)
+                .any(|window| window == ["ip", "saddr", "10.0.0.2"])
+        }));
     }
 
     #[test]

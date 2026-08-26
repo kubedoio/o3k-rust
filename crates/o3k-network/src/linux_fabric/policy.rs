@@ -8,7 +8,7 @@ impl super::LinuxFabricBackend {
         let Some(current) = self.state.realms.get(&plan.realm_id).cloned() else {
             return Err(LinuxFabricError::CorruptState);
         };
-        if plan.policies.is_empty() {
+        if plan.policies.is_empty() && plan.policy_defaults.is_empty() {
             return self.remove_policy(plan);
         }
         Self::validate_policy_plan(plan)?;
@@ -116,7 +116,9 @@ impl super::LinuxFabricBackend {
                 return Err(LinuxFabricError::CommandFailed);
             }
         }
-        for (index, policy) in plan.policies.iter().enumerate() {
+        let mut sorted_policies = plan.policies.clone();
+        sorted_policies.sort_by_key(|policy| (policy.action != PolicyAction::Deny, policy.id));
+        for (index, policy) in sorted_policies.iter().enumerate() {
             let endpoint = plan
                 .directory
                 .location(policy.endpoint_id)
@@ -177,6 +179,65 @@ impl super::LinuxFabricBackend {
                 .map_err(LinuxFabricError::Storage)?
             {
                 return Err(LinuxFabricError::CommandFailed);
+            }
+        }
+        for default in &plan.policy_defaults {
+            let endpoint = plan
+                .directory
+                .location(default.endpoint_id)
+                .ok_or(LinuxFabricError::OwnershipConflict)?;
+            if default.unmatched_action == PolicyAction::Deny {
+                let endpoint_address = endpoint.fixed_ip.to_string();
+                let mut args = vec![
+                    "netns",
+                    "exec",
+                    namespace,
+                    "nft",
+                    "add",
+                    "rule",
+                    "ip",
+                    &table,
+                    "forward",
+                    "ip",
+                    "daddr",
+                    &endpoint_address,
+                    "drop",
+                    "comment",
+                    "o3k-p11-policy-default",
+                ];
+                let refs = args;
+                if !self
+                    .command
+                    .run("ip", &refs)
+                    .map_err(LinuxFabricError::Storage)?
+                {
+                    return Err(LinuxFabricError::CommandFailed);
+                }
+                args = vec![
+                    "netns",
+                    "exec",
+                    namespace,
+                    "nft",
+                    "add",
+                    "rule",
+                    "ip",
+                    &table,
+                    "forward",
+                    "ip",
+                    "saddr",
+                    &endpoint_address,
+                    "drop",
+                    "comment",
+                    "o3k-p11-policy-default",
+                ];
+                let refs = args;
+                if !self
+                    .command
+                    .run("ip", &refs)
+                    .map_err(LinuxFabricError::Storage)?
+                {
+                    return Err(LinuxFabricError::CommandFailed);
+                }
             }
         }
         Ok(())
@@ -240,7 +301,16 @@ impl super::LinuxFabricBackend {
     pub(crate) fn validate_policy_plan(
         plan: &NamespacedRoutedFabricPlan,
     ) -> Result<(), LinuxFabricError> {
+        let mut default_endpoints = BTreeSet::new();
         if plan.policy_generation == 0
+            || plan.policy_defaults.iter().any(|default| {
+                default.policy_id.is_nil()
+                    || default.endpoint_id.is_nil()
+                    || default.generation == 0
+                    || default.stateful_mode != PolicyStatefulMode::Stateful
+                    || plan.directory.location(default.endpoint_id).is_none()
+                    || !default_endpoints.insert(default.endpoint_id)
+            })
             || plan.policies.iter().any(|policy| {
                 policy.id.is_nil()
                     || policy.endpoint_id.is_nil()
