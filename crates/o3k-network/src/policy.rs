@@ -28,6 +28,7 @@ use uuid::Uuid;
 const TABLE: &str = "o3k_policy";
 const CHAIN: &str = "forward";
 const MARKER: &str = "o3k-p9-policy";
+const ENDPOINT_MARKER: &str = "o3k-p9-policy-endpoint";
 const STATE_FILE: &str = "policy.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -526,6 +527,11 @@ impl StatefulPolicyProvider {
         for bound_aggregate in ownership.endpoint_aggregate_fingerprints.values_mut() {
             *bound_aggregate = ownership.fingerprint.clone();
         }
+        // Re-emit preserved endpoint evidence into the newly rebuilt
+        // aggregate.  The sidecar alone is not observation authority: these
+        // markers bind each endpoint fingerprint to the exact nftables
+        // aggregate that was just realized.
+        self.write_endpoint_markers(&ownership)?;
         store_state(&self.root.join(STATE_FILE), &ownership)?;
         self.ownership = Some(ownership);
         Ok(())
@@ -562,6 +568,7 @@ impl StatefulPolicyProvider {
         ownership
             .endpoint_aggregate_fingerprints
             .insert(endpoint_id, ownership.fingerprint.clone());
+        self.write_endpoint_marker(&ownership, endpoint_id, fingerprint)?;
         store_state(&self.root.join(STATE_FILE), &ownership)?;
         self.ownership = Some(ownership);
         Ok(())
@@ -607,7 +614,44 @@ impl StatefulPolicyProvider {
         if endpoint_aggregate != &ownership.fingerprint {
             return Err(PolicyNetworkError::CorruptState);
         }
+        let marker = endpoint_marker(endpoint_id, &endpoint_fingerprint, &ownership.fingerprint);
+        if !output.contains(&marker) {
+            return Err(PolicyNetworkError::CorruptState);
+        }
         Ok(Some(endpoint_fingerprint))
+    }
+
+    fn write_endpoint_markers(&self, ownership: &Ownership) -> Result<(), PolicyNetworkError> {
+        for (endpoint_id, endpoint_fingerprint) in &ownership.endpoint_fingerprints {
+            self.write_endpoint_marker(ownership, *endpoint_id, endpoint_fingerprint)?;
+        }
+        Ok(())
+    }
+
+    fn write_endpoint_marker(
+        &self,
+        ownership: &Ownership,
+        endpoint_id: Uuid,
+        endpoint_fingerprint: &str,
+    ) -> Result<(), PolicyNetworkError> {
+        let marker = endpoint_marker(endpoint_id, endpoint_fingerprint, &ownership.fingerprint);
+        if !self
+            .command
+            .run(&[
+                "add",
+                "rule",
+                "ip",
+                TABLE,
+                CHAIN,
+                "counter",
+                "comment",
+                &format!("\"{marker}\""),
+            ])
+            .map_err(PolicyNetworkError::Storage)?
+        {
+            return Err(PolicyNetworkError::CommandFailed);
+        }
+        Ok(())
     }
 
     pub fn remove(&mut self) -> Result<(), PolicyNetworkError> {
@@ -709,6 +753,17 @@ fn validate_policy(policy: &PolicyIntent) -> Result<(), PolicyNetworkError> {
     Ok(())
 }
 
+fn endpoint_marker(endpoint_id: Uuid, endpoint_fingerprint: &str, aggregate: &str) -> String {
+    // Keep the nftables comment below its 128-byte limit.  The aggregate is
+    // already independently bound by the table ownership marker and the
+    // durable endpoint binding, so it need not be repeated in this marker.
+    let _ = aggregate;
+    format!(
+        "{ENDPOINT_MARKER}:{}:{endpoint_fingerprint}",
+        endpoint_id.simple()
+    )
+}
+
 fn validate_default(default: &PolicyDefaultIntent) -> Result<(), PolicyNetworkError> {
     (default.stateful_mode == PolicyStatefulMode::Stateful && default.generation > 0)
         .then_some(())
@@ -772,7 +827,18 @@ mod tests {
                 .lock()
                 .expect("calls")
                 .push(args.iter().map(|arg| (*arg).to_owned()).collect());
-            let listing = self.listing.lock().expect("listing").clone();
+            let mut listing = self.listing.lock().expect("listing").clone();
+            // The fake models provider-visible endpoint comments emitted by
+            // `run`; tests may replace the aggregate table listing between
+            // observations to exercise binding and stale-state cases.
+            for call in self.calls.lock().expect("calls").iter() {
+                for arg in call {
+                    if arg.contains(ENDPOINT_MARKER) && !listing.contains(arg.trim_matches('"')) {
+                        listing.push(' ');
+                        listing.push_str(arg.trim_matches('"'));
+                    }
+                }
+            }
             Ok((!listing.is_empty(), listing))
         }
 
