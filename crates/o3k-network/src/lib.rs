@@ -6151,6 +6151,7 @@ impl NetworkService {
                     name,
                     description,
                     updated_at: "2026-08-26T00:00:00Z".to_owned(),
+                    generation: current.generation.saturating_add(1),
                     ..current
                 },
                 current.generation,
@@ -10090,10 +10091,20 @@ mod tests {
         service
             .replace_security_group_bindings_for_project("project-a", port.id, vec![group.id])
             .await?;
+        let updated_group = service
+            .update_security_group_for_project(
+                "project-a",
+                group.id,
+                "web-renamed".to_owned(),
+                "updated".to_owned(),
+            )
+            .await?;
+        assert_eq!(updated_group.name, "web-renamed");
         let canonical_group = store
             .get_reusable_policy("project-a", &group.id)
             .await?
             .ok_or("canonical security group missing")?;
+        assert_eq!(canonical_group.generation, 2);
         assert_eq!(canonical_group.stateful_mode, "Stateful");
         assert_eq!(canonical_group.unmatched_action, "Deny");
         let canonical_rules = store.list_policy_rules("project-a", &group.id).await?;
