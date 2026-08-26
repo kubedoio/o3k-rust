@@ -485,18 +485,15 @@ impl crate::SqliteStore {
         }
     }
     pub async fn delete_policy_rule(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
-        let r =
-            sqlx::query("DELETE FROM canonical_network_policy_rules WHERE id=? AND project_id=?")
-                .bind(id.to_string())
-                .bind(project)
-                .execute(&self.pool)
-                .await
-                .map_err(StoreError::Database)?;
-        if r.rows_affected() == 0 {
-            Err(StoreError::ResourceNotFound)
-        } else {
-            Ok(())
-        }
+        let current = self
+            .get_policy_rule(project, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
+        let reserved = self
+            .begin_policy_rule_deletion(project, id, current.generation)
+            .await?;
+        self.finalize_policy_rule_deletion(project, id, reserved.generation)
+            .await
     }
     pub async fn insert_policy_attachment(
         &self,
@@ -608,17 +605,15 @@ impl crate::SqliteStore {
         project: &str,
         id: &Uuid,
     ) -> Result<(), StoreError> {
-        let r = sqlx::query("DELETE FROM canonical_policy_attachments WHERE id=? AND project_id=?")
-            .bind(id.to_string())
-            .bind(project)
-            .execute(&self.pool)
+        let current = self
+            .get_policy_attachment(project, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
+        let reserved = self
+            .begin_policy_attachment_deletion(project, id, current.generation)
+            .await?;
+        self.finalize_policy_attachment_deletion(project, id, reserved.generation)
             .await
-            .map_err(StoreError::Database)?;
-        if r.rows_affected() == 0 {
-            Err(StoreError::ResourceNotFound)
-        } else {
-            Ok(())
-        }
     }
 }
 
@@ -984,18 +979,15 @@ impl crate::PostgresStore {
         }
     }
     pub async fn delete_policy_rule(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
-        let r =
-            sqlx::query("DELETE FROM canonical_network_policy_rules WHERE id=$1 AND project_id=$2")
-                .bind(id.to_string())
-                .bind(project)
-                .execute(&self.pool)
-                .await
-                .map_err(StoreError::Database)?;
-        if r.rows_affected() == 0 {
-            Err(StoreError::ResourceNotFound)
-        } else {
-            Ok(())
-        }
+        let current = self
+            .get_policy_rule(project, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
+        let reserved = self
+            .begin_policy_rule_deletion(project, id, current.generation)
+            .await?;
+        self.finalize_policy_rule_deletion(project, id, reserved.generation)
+            .await
     }
     pub async fn insert_policy_attachment(
         &self,
@@ -1107,18 +1099,15 @@ impl crate::PostgresStore {
         project: &str,
         id: &Uuid,
     ) -> Result<(), StoreError> {
-        let r =
-            sqlx::query("DELETE FROM canonical_policy_attachments WHERE id=$1 AND project_id=$2")
-                .bind(id.to_string())
-                .bind(project)
-                .execute(&self.pool)
-                .await
-                .map_err(StoreError::Database)?;
-        if r.rows_affected() == 0 {
-            Err(StoreError::ResourceNotFound)
-        } else {
-            Ok(())
-        }
+        let current = self
+            .get_policy_attachment(project, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
+        let reserved = self
+            .begin_policy_attachment_deletion(project, id, current.generation)
+            .await?;
+        self.finalize_policy_attachment_deletion(project, id, reserved.generation)
+            .await
     }
 }
 
