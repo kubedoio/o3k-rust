@@ -504,6 +504,16 @@ impl StatefulPolicyProvider {
             })
             .unwrap_or_default();
         aggregate.extend(intents.iter().cloned());
+        // An empty canonical Endpoint snapshot is absence, not an empty
+        // aggregate policy. Avoid creating provider state for a no-policy
+        // Endpoint, while still rebuilding the aggregate when another
+        // Endpoint remains realized.
+        if aggregate.is_empty() && self.ownership.is_none() {
+            return Ok(());
+        }
+        if aggregate.is_empty() {
+            return self.remove();
+        }
         self.apply(&aggregate, &inventory)?;
 
         let Some(mut ownership) = self.ownership.clone() else {
@@ -831,6 +841,32 @@ mod tests {
             provider.apply(&[policy(Uuid::from_u128(1))], &[]),
             Err(PolicyNetworkError::UnknownEndpoint)
         ));
+        assert!(command.calls.lock().expect("calls").is_empty());
+    }
+
+    #[test]
+    fn empty_endpoint_snapshot_preserves_no_policy_baseline() {
+        let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: Mutex::new(String::new()),
+        });
+        let mut provider = StatefulPolicyProvider::with_command(
+            &root,
+            Arc::clone(&command) as Arc<dyn PolicyCommand>,
+        )
+        .expect("provider");
+        provider
+            .apply_endpoint_snapshot(
+                Uuid::from_u128(1),
+                &[],
+                &[PolicyEndpoint {
+                    endpoint_id: Uuid::from_u128(1),
+                    address: Ipv4Addr::new(10, 0, 0, 2),
+                }],
+            )
+            .expect("empty snapshot");
+        assert!(provider.ownership.is_none());
         assert!(command.calls.lock().expect("calls").is_empty());
     }
 
