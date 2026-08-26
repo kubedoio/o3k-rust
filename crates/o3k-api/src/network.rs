@@ -1295,15 +1295,20 @@ pub(crate) struct FloatingIpList {
 pub(crate) struct FloatingIpResponse {
     id: String,
     project_id: String,
+    floating_network_id: Option<String>,
     floating_ip_address: Ipv4Addr,
     port_id: Option<String>,
     status: &'static str,
 }
 
-fn floating_ip_response(binding: PublicAddressBinding) -> FloatingIpResponse {
+fn floating_ip_response(
+    binding: PublicAddressBinding,
+    floating_network_id: Option<Uuid>,
+) -> FloatingIpResponse {
     FloatingIpResponse {
         id: binding.allocation_id.to_string(),
         project_id: binding.project_id,
+        floating_network_id: floating_network_id.map(|id| id.to_string()),
         floating_ip_address: binding.public_address,
         port_id: binding.endpoint_id.map(|id| id.to_string()),
         // Allocation/association is control-plane state only. Host realization
@@ -1487,7 +1492,10 @@ pub(crate) async fn list_floating_ips(
     };
     match allocator.list(auth.effective_scope().id().as_str()) {
         Ok(values) => Json(FloatingIpList {
-            floatingips: values.into_iter().map(floating_ip_response).collect(),
+            floatingips: values
+                .into_iter()
+                .map(|value| floating_ip_response(value, state.network_external_realm_id))
+                .collect(),
         })
         .into_response(),
         Err(error) => public_error(error),
@@ -1562,7 +1570,7 @@ pub(crate) async fn create_floating_ip(
     (
         StatusCode::CREATED,
         Json(FloatingIpEnvelope {
-            floatingip: floating_ip_response(binding),
+            floatingip: floating_ip_response(binding, state.network_external_realm_id),
         }),
     )
         .into_response()
@@ -1583,7 +1591,7 @@ pub(crate) async fn show_floating_ip(
     };
     match allocator.get(auth.effective_scope().id().as_str(), id) {
         Ok(value) => Json(FloatingIpEnvelope {
-            floatingip: floating_ip_response(value),
+            floatingip: floating_ip_response(value, state.network_external_realm_id),
         })
         .into_response(),
         Err(error) => public_error(error),
@@ -1653,7 +1661,7 @@ pub(crate) async fn update_floating_ip(
     };
     match result {
         Ok(value) => Json(FloatingIpEnvelope {
-            floatingip: floating_ip_response(value),
+            floatingip: floating_ip_response(value, state.network_external_realm_id),
         })
         .into_response(),
         Err(error) => public_error(error),
