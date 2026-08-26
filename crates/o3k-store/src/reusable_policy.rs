@@ -422,23 +422,36 @@ impl crate::SqliteStore {
             .ok_or(StoreError::ResourceNotFound)
     }
     pub async fn delete_reusable_policy(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
-        let child:i64=sqlx::query_scalar("SELECT COUNT(*) FROM canonical_network_policy_rules WHERE policy_id=? AND state IN ('requested','active','deleting')").bind(id.to_string()).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
-        let attached:i64=sqlx::query_scalar("SELECT COUNT(*) FROM canonical_policy_attachments WHERE policy_id=? AND state IN ('requested','active','deleting')").bind(id.to_string()).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
-        if child + attached > 0 {
-            return Err(StoreError::NetworkInUse);
+        let current = self
+            .get_reusable_policy(project, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
+        let reserved = if current.state == "deleting" {
+            current
+        } else {
+            self.transition_reusable_policy_state(project, id, current.generation, "deleting")
+                .await?
+        };
+        let result = sqlx::query("DELETE FROM canonical_reusable_network_policies WHERE id=? AND project_id=? AND state='deleting' AND generation=? AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=? AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=? AND state IN ('requested','active','deleting'))")
+            .bind(id.to_string())
+            .bind(project)
+            .bind(checked_generation(reserved.generation)?)
+            .bind(id.to_string())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            match self.get_reusable_policy(project, id).await? {
+                Some(policy) if policy.generation != reserved.generation => {
+                    Err(StoreError::StaleGeneration)
+                }
+                Some(_) => Err(StoreError::NetworkInUse),
+                None => Err(StoreError::ResourceNotFound),
+            }
         }
-        let result = sqlx::query(
-            "DELETE FROM canonical_reusable_network_policies WHERE id=? AND project_id=?",
-        )
-        .bind(id.to_string())
-        .bind(project)
-        .execute(&self.pool)
-        .await
-        .map_err(StoreError::Database)?;
-        if result.rows_affected() == 0 {
-            return Err(StoreError::ResourceNotFound);
-        }
-        Ok(())
     }
     pub async fn insert_policy_rule(
         &self,
@@ -956,15 +969,33 @@ impl crate::PostgresStore {
             .ok_or(StoreError::ResourceNotFound)
     }
     pub async fn delete_reusable_policy(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
-        let r=sqlx::query("DELETE FROM canonical_reusable_network_policies WHERE id=$1 AND project_id=$2 AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=$1 AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=$1 AND state IN ('requested','active','deleting'))").bind(id.to_string()).bind(project).execute(&self.pool).await.map_err(StoreError::Database)?;
-        if r.rows_affected() == 0 {
-            if self.get_reusable_policy(project, id).await?.is_some() {
-                Err(StoreError::NetworkInUse)
-            } else {
-                Err(StoreError::ResourceNotFound)
-            }
+        let current = self
+            .get_reusable_policy(project, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)?;
+        let reserved = if current.state == "deleting" {
+            current
         } else {
+            self.transition_reusable_policy_state(project, id, current.generation, "deleting")
+                .await?
+        };
+        let result = sqlx::query("DELETE FROM canonical_reusable_network_policies WHERE id=$1 AND project_id=$2 AND state='deleting' AND generation=$3 AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=$1 AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=$1 AND state IN ('requested','active','deleting'))")
+            .bind(id.to_string())
+            .bind(project)
+            .bind(checked_generation(reserved.generation)?)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        if result.rows_affected() == 1 {
             Ok(())
+        } else {
+            match self.get_reusable_policy(project, id).await? {
+                Some(policy) if policy.generation != reserved.generation => {
+                    Err(StoreError::StaleGeneration)
+                }
+                Some(_) => Err(StoreError::NetworkInUse),
+                None => Err(StoreError::ResourceNotFound),
+            }
         }
     }
     pub async fn insert_policy_rule(
