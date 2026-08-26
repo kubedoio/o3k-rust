@@ -10,7 +10,8 @@ use std::{
 
 use o3k_domain::{
     AddressRealm, Ipv4Prefix, NamespacedRoutedFabricPlan, NetworkCapability, NetworkIntent,
-    NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange,
+    NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDefaultIntent, PolicyDirection,
+    PolicyIntent, PolicyStatefulMode, PortRange,
 };
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
@@ -3903,6 +3904,13 @@ pub struct AttachmentPlanInput<'a> {
 pub fn compile_attachment_plan(
     input: AttachmentPlanInput<'_>,
 ) -> Result<NodeNetworkPlan, NetworkPlanError> {
+    compile_attachment_plan_with_defaults(input, Vec::new())
+}
+
+pub fn compile_attachment_plan_with_defaults(
+    input: AttachmentPlanInput<'_>,
+    policy_defaults: Vec<PolicyDefaultIntent>,
+) -> Result<NodeNetworkPlan, NetworkPlanError> {
     let AttachmentPlanInput {
         endpoint_id,
         realm_id,
@@ -3917,7 +3925,7 @@ pub fn compile_attachment_plan(
         external_realm_id,
         policies,
     } = input;
-    let has_policies = !policies.is_empty();
+    let has_policies = !policies.is_empty() || !policy_defaults.is_empty();
     let (network, prefix_len) = subnet_cidr
         .split_once('/')
         .ok_or(NetworkPlanError::InvalidPrefix)?;
@@ -3990,14 +3998,30 @@ pub fn compile_attachment_plan(
     if has_policies {
         capabilities.insert(NetworkCapability::StatefulPolicy);
     }
-    compile_node_network_plan(
+    let mut plan = compile_node_network_plan(
         &intent,
         node_id,
         operation_id,
         deadline_unix_ms,
         &capabilities,
         &[],
-    )
+    )?;
+    for default in policy_defaults {
+        if default.endpoint_id != endpoint_id
+            || default.policy_id.is_nil()
+            || default.generation == 0
+            || default.stateful_mode != PolicyStatefulMode::Stateful
+        {
+            return Err(NetworkPlanError::InvalidPolicy);
+        }
+        plan.resource_generations
+            .insert(default.policy_id, default.generation);
+        plan.intents.push(NetworkPlanIntent::PolicyDefault(default));
+    }
+    plan.intents
+        .sort_by_key(|intent| serde_json::to_string(intent).unwrap_or_default());
+    plan.fingerprint_sha256 = canonical_plan_fingerprint(&plan)?;
+    Ok(plan)
 }
 
 /// Compiles one canonical intent into a stable semantic node plan. The
@@ -6503,6 +6527,49 @@ impl NetworkService {
         }
         policies.sort_by_key(|policy| policy.id);
         Ok(policies)
+    }
+
+    /// Resolves canonical unmatched-action defaults for the active policies
+    /// attached to one endpoint. Defaults are derived execution input; the
+    /// reusable policy repository remains the sole desired-state authority.
+    pub async fn policy_defaults_for_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: Uuid,
+    ) -> Result<Vec<PolicyDefaultIntent>, NetworkError> {
+        let attachments = self
+            .inner
+            .repository
+            .list_endpoint_policy_attachments(project_id, &endpoint_id)
+            .await
+            .map_err(map_store_error)?;
+        let mut defaults = Vec::new();
+        for attachment in attachments.into_iter().filter(|a| a.state == "active") {
+            let policy = self
+                .inner
+                .repository
+                .get_reusable_policy(project_id, &attachment.policy_id)
+                .await
+                .map_err(map_store_error)?
+                .ok_or(NetworkError::InvalidRequest)?;
+            if policy.state != "active" || policy.stateful_mode != "Stateful" {
+                return Err(NetworkError::InvalidRequest);
+            }
+            let unmatched_action = match policy.unmatched_action.as_str() {
+                "Allow" => PolicyAction::Allow,
+                "Deny" => PolicyAction::Deny,
+                _ => return Err(NetworkError::InvalidRequest),
+            };
+            defaults.push(PolicyDefaultIntent {
+                policy_id: policy.id,
+                endpoint_id,
+                unmatched_action,
+                stateful_mode: PolicyStatefulMode::Stateful,
+                generation: policy.generation.max(attachment.generation),
+            });
+        }
+        defaults.sort_by_key(|default| default.policy_id);
+        Ok(defaults)
     }
 
     /// Adds or replaces one canonical policy rule. NetworkIntent is not
@@ -10125,6 +10192,36 @@ mod tests {
         assert_eq!(canonical_group.generation, 2);
         assert_eq!(canonical_group.stateful_mode, "Stateful");
         assert_eq!(canonical_group.unmatched_action, "Deny");
+        let defaults = service
+            .policy_defaults_for_endpoint("project-a", port.id)
+            .await?;
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].policy_id, group.id);
+        assert_eq!(defaults[0].endpoint_id, port.id);
+        assert_eq!(defaults[0].unmatched_action, PolicyAction::Deny);
+        let default_plan = compile_attachment_plan_with_defaults(
+            AttachmentPlanInput {
+                endpoint_id: port.id,
+                realm_id: network.id,
+                project_id: "project-a",
+                mac: &port.mac_address,
+                fixed_ip: port.fixed_ip,
+                subnet_cidr: "192.0.2.0/29",
+                node_id: "network-agent-1",
+                operation_id: Uuid::now_v7(),
+                deadline_unix_ms: 1,
+                public_address: None,
+                external_realm_id: None,
+                policies: Vec::new(),
+            },
+            defaults,
+        )?;
+        assert!(default_plan.intents.iter().any(|intent| matches!(
+            intent,
+            NetworkPlanIntent::PolicyDefault(default)
+                if default.policy_id == group.id
+                    && default.unmatched_action == PolicyAction::Deny
+        )));
         let canonical_rules = store.list_policy_rules("project-a", &group.id).await?;
         assert_eq!(canonical_rules.len(), 1);
         assert_eq!(canonical_rules[0].id, rule.id);
