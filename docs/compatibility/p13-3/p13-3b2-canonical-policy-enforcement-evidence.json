@@ -1,6 +1,6 @@
 {
   "artifact_type": "o3k-p13-3b2-canonical-policy-enforcement-evidence",
-  "implementation_sha": "7b8bd4dbfd84f7c1d76afd14efe7b86a75fd1cb8",
+  "implementation_sha": "f4fded1c687ceca97d55c55f2471e8797edf7c40",
   "branch": "p13-3b2-policy-enforcement",
   "scope": "native O3K canonical policy enforcement only; Neutron compatibility is not claimed",
   "provider_mode": "isolated Linux network namespaces with nftables",
@@ -99,6 +99,15 @@
         "remote_cidr": "10.0.0.2/32",
         "expected": "deny",
         "actual": "deny"
+      },
+      {
+        "case": "stateful_established_after_policy_update",
+        "direction": "ingress",
+        "protocol": "tcp",
+        "port": 18080,
+        "remote_cidr": "10.0.0.2/32",
+        "expected": "existing connection remains allowed; new connection denied",
+        "actual": "existing connection allowed; new connection denied"
       }
     ]
   },
