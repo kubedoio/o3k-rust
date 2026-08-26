@@ -364,7 +364,7 @@ impl crate::SqliteStore {
                 "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=? AND state='requested'"
             }
             "deleting" => {
-                "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=? AND state IN ('requested','active') AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=? AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=? AND state IN ('requested','active','deleting'))"
+                "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=? AND state IN ('requested','active','error') AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=? AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=? AND state IN ('requested','active','deleting'))"
             }
             "deleted" => {
                 "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=? AND state='deleting' AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=? AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=? AND state IN ('requested','active','deleting'))"
@@ -925,7 +925,7 @@ impl crate::PostgresStore {
                 "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4 AND state='requested'"
             }
             "deleting" => {
-                "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4 AND state IN ('requested','active') AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=$2 AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=$2 AND state IN ('requested','active','deleting'))"
+                "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4 AND state IN ('requested','active','error') AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=$2 AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=$2 AND state IN ('requested','active','deleting'))"
             }
             "deleted" => {
                 "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4 AND state='deleting' AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=$2 AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=$2 AND state IN ('requested','active','deleting'))"
@@ -1686,6 +1686,19 @@ mod tests {
             store.insert_reusable_policy(&invalid_policy).await,
             Err(StoreError::Corrupt(_))
         ));
+
+        let error_policy_id = Uuid::from_u128(64);
+        let error_policy = policy(error_policy_id, "Allow");
+        store.insert_reusable_policy(&error_policy).await?;
+        store
+            .transition_reusable_policy_state("project-a", &error_policy_id, 1, "error")
+            .await?;
+        store
+            .transition_reusable_policy_state("project-a", &error_policy_id, 2, "deleting")
+            .await?;
+        store
+            .delete_reusable_policy("project-a", &error_policy_id)
+            .await?;
         Ok(())
     }
 }
