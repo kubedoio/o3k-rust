@@ -92,7 +92,15 @@ This is an operation- and attribute-level claim, not general OpenStack or
 general Terraform compatibility. P13.3 remains not implemented; its next gate
 is `P13.3A — Security Group / NetworkPolicy provider-contract discovery`.
 
-### P13.3 — Neutron adoption profile — NOT IMPLEMENTED
+### P13.3 — Neutron adoption profile — ARCHITECTURE ACCEPTED; RUNTIME NOT IMPLEMENTED
+
+The P13.3A provider discovery checkpoint found that the existing endpoint-
+scoped `PolicyIntent` and policy persistence cannot represent an unattached,
+reusable Security Group. The reusable canonical policy architecture is
+accepted in ADR-0177/SPEC-0034. No P13.3 runtime work is implemented or
+claimed. The next prerequisite is P13.3B1: implement and test the canonical
+NetworkPolicy / PolicyRule / PolicyAttachment domain and persistence before
+reopening the provider compatibility gate.
 
 The P13.3 discovery gate must complete before any P13.3 runtime work begins.
 
@@ -103,6 +111,11 @@ The P13.3 discovery gate must complete before any P13.3 runtime work begins.
 - `openstack_networking_floatingip_v2` — floating IP CRUD
 - Neutron API adapter layer over canonical O3K Network/AddressRealm/Policy
 - Compatibility projection identity mapping
+
+P13.3A discovery is complete and architecture-accepted, but provider lifecycle
+evidence remains unverified until the canonical implementation and a later
+provider gate pass. The current discovery artifact is
+`docs/compatibility/p13-3/p13-3a-security-group-provider-contract.json`.
 
 ### P13.4 — Native Volume Cinder projection and Terraform volume lifecycle
 

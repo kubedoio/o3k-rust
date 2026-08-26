@@ -1518,6 +1518,91 @@ pub enum NetworkProtocol {
     Icmp,
 }
 
+/// Canonical lifecycle for reusable network policy resources and children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyLifecycleState {
+    Requested,
+    Active,
+    Deleting,
+    Deleted,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolicyStatefulMode {
+    Stateful,
+    Stateless,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolicyAddressFamily {
+    Ipv4,
+    Ipv6,
+}
+
+/// Reusable project-owned policy authority. It is valid without an Endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkPolicy {
+    pub id: Uuid,
+    pub project_id: String,
+    pub name: String,
+    pub description: String,
+    pub state: PolicyLifecycleState,
+    pub generation: u64,
+    pub stateful_mode: PolicyStatefulMode,
+    pub unmatched_action: PolicyAction,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkPolicyRule {
+    pub id: Uuid,
+    pub policy_id: Uuid,
+    pub project_id: String,
+    pub direction: PolicyDirection,
+    pub address_family: PolicyAddressFamily,
+    pub protocol: NetworkProtocol,
+    pub ports: Option<PortRange>,
+    pub remote_selector: Option<Ipv4Prefix>,
+    pub action: PolicyAction,
+    pub state: PolicyLifecycleState,
+    pub generation: u64,
+}
+
+impl NetworkPolicyRule {
+    /// A uniqueness key only; the UUID remains the canonical rule identity.
+    #[must_use]
+    pub fn enforcement_key(&self) -> String {
+        format!(
+            "{:?}|{:?}|{:?}|{}|{}|{:?}",
+            self.direction,
+            self.address_family,
+            self.protocol,
+            self.ports.map_or_else(
+                || "-".to_owned(),
+                |ports| format!("{}-{}", ports.start, ports.end)
+            ),
+            self.remote_selector.map_or_else(
+                || "-".to_owned(),
+                |prefix| format!("{}/{}", prefix.network, prefix.prefix_len)
+            ),
+            self.action
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyAttachment {
+    pub id: Uuid,
+    pub policy_id: Uuid,
+    pub endpoint_id: Uuid,
+    pub project_id: String,
+    pub state: PolicyLifecycleState,
+    pub generation: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortRange {
     pub start: u16,
