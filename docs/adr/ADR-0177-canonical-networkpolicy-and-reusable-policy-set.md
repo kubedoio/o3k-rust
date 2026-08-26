@@ -1,7 +1,10 @@
 # ADR-0177 — Canonical NetworkPolicy and reusable policy-set lifecycle
 
-Status: Proposed
+Status: Accepted
 Date: 2026-08-26
+Decision-accepted: 2026-08-26
+Human-approval: project-requester (2026-08-26, explicit acceptance recorded in task instruction)
+Reviewed-proposal-baseline: 8429a56a32aa1963edd98291000418f02bb87d03
 Supersedes: none
 Superseded-by: none
 Affected-services: kernel, network, store, api, compute, compatibility, governance
@@ -15,9 +18,10 @@ Related decisions and specifications:
 - [SPEC-0034 — Canonical NetworkPolicy lifecycle v1](../specs/SPEC-0034-canonical-networkpolicy-lifecycle-v1.md)
 - [P13.3A provider discovery](../compatibility/p13-3/p13-3a-security-group-provider-contract.json)
 
-This is an architecture proposal. It is not an acceptance of a new canonical
-resource, does not authorize runtime implementation, and does not advertise
-Neutron Security Group compatibility.
+This decision accepts the canonical architecture against reviewed proposal
+baseline `8429a56a32aa1963edd98291000418f02bb87d03`. Acceptance authorizes the
+subsequent canonical-domain implementation gate only; it does not claim runtime
+implementation, provider verification, or Neutron Security Group compatibility.
 
 ## Context
 

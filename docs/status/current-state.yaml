@@ -308,13 +308,14 @@ profiles:
       Non-blocking for the first native alpha (v0.2.0-alpha.1). This profile
       extends native-rust-testlab but does not alter its release gate.
     blockers:
-      - proposed ADR-0177/SPEC-0034 human acceptance before P13.3 policy runtime work
+      - P13.3B1 canonical NetworkPolicy / PolicyRule / PolicyAttachment implementation and persistence
       - equivalent provider contract discovery gates before P13.3/P13.4 runtime work
       - P13.3-P13.7 implementation evidence as defined in SPEC-0032
     next_evidence_action: >-
-      Review and accept or reject proposed ADR-0177/SPEC-0034. P13.3A
-      provider discovery is checkpointed but architecture-gated; do not begin
-      P13.3 runtime work or claim P13.3 implementation.
+      Implement and validate the accepted canonical NetworkPolicy /
+      PolicyRule / PolicyAttachment model in P13.3B1. P13.3A provider
+      discovery is architecture-accepted but provider lifecycle evidence and
+      Security Group runtime remain unverified.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)

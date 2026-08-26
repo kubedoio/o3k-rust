@@ -1,13 +1,18 @@
 # SPEC-0034 — Canonical NetworkPolicy / PolicyRule / PolicyAttachment lifecycle v1
 
-Status: Proposed
+Status: Accepted
 Date: 2026-08-26
+Decision-accepted: 2026-08-26
+Human-approval: project-requester (2026-08-26, explicit acceptance recorded in task instruction)
+Reviewed-proposal-baseline: 8429a56a32aa1963edd98291000418f02bb87d03
 Decision: [ADR-0177](../adr/ADR-0177-canonical-networkpolicy-and-reusable-policy-set.md)
 Applies-to: canonical policy domain, persistence, compiler, execution, future native and compatibility adapters
 
-This proposal is a design target, not an implementation or support claim.
-Human acceptance of ADR-0177 and this specification is required before runtime,
-schema, migration, or compatibility work begins.
+This specification is accepted architecture and contract authority against
+reviewed proposal baseline `8429a56a32aa1963edd98291000418f02bb87d03`. It is
+not runtime implementation or provider support evidence. Runtime, schema,
+migration, and compatibility work remain gated by the implementation and
+evidence requirements below.
 
 ## 1. Purpose and authority
 

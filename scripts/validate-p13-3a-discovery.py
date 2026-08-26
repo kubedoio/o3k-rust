@@ -29,7 +29,7 @@ def main() -> int:
     document = json.loads(ARTIFACT.read_text(encoding="utf-8"))
     assert document["artifact_type"] == "o3k-p13-3a-security-group-provider-contract"
     assert document["phase"] == "p13.3a"
-    assert document["status"] == "discovery_complete_architecture_gate_blocked"
+    assert document["status"] == "discovery_complete_architecture_accepted_runtime_pending"
     assert document["toolchain"] == {
         "opentofu": "1.12.6",
         "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
@@ -57,9 +57,10 @@ def main() -> int:
         if key in SECRET_KEYS or any(part in key for part in SECRET_NAME_PARTS):
             assert value == "<redacted>" or value is True or value == "ignored temporary output", f"secret at {path}"
     mapping = document["canonical_mapping_review"]
-    assert mapping["current_fit"] == "blocked_pending_proposed_architecture_acceptance"
+    assert mapping["current_fit"] == "architecture_accepted_runtime_not_implemented"
     proposal = mapping["proposed_architecture"]
-    assert proposal["status"] == "proposed_not_accepted"
+    assert proposal["status"] == "accepted_architecture_runtime_not_implemented"
+    assert proposal["reviewed_proposal_baseline"] == "8429a56a32aa1963edd98291000418f02bb87d03"
     assert proposal["runtime_authorized"] is False
     assert proposal["unmatched_action"]["canonical_values"] == ["Allow", "Deny"]
     assert proposal["unmatched_action"]["no_policy_attached"] == "preserve existing O3K baseline"

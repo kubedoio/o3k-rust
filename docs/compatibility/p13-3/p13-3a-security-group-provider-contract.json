@@ -34,12 +34,14 @@
     ]
   },
   "canonical_mapping_review": {
-    "current_fit": "blocked_pending_proposed_architecture_acceptance",
+    "current_fit": "architecture_accepted_runtime_not_implemented",
     "reason": "PolicyIntent is endpoint-scoped and has no independent NetworkPolicy identity; current SecurityGroupRecord/SecurityGroupRuleRecord rows are compatibility projection state, not an independent canonical policy lifecycle",
     "proposed_architecture": {
       "adr": "docs/adr/ADR-0177-canonical-networkpolicy-and-reusable-policy-set.md",
       "spec": "docs/specs/SPEC-0034-canonical-networkpolicy-lifecycle-v1.md",
-      "status": "proposed_not_accepted",
+      "status": "accepted_architecture_runtime_not_implemented",
+      "reviewed_proposal_baseline": "8429a56a32aa1963edd98291000418f02bb87d03",
+      "accepted_date": "2026-08-26",
       "network_policy": "independent project-owned canonical resource, valid while unattached",
       "network_policy_rule": "independent durable UUID parented by NetworkPolicy",
       "policy_attachment": "durable same-project relation between NetworkPolicy and Endpoint",
@@ -1289,7 +1291,7 @@
     "run_id": "1b25687a-807c-4c28-a3db-6be3394eb502"
   },
   "schema_version": 1,
-  "status": "discovery_complete_architecture_gate_blocked",
+  "status": "discovery_complete_architecture_accepted_runtime_pending",
   "toolchain": {
     "opentofu": "1.12.6",
     "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
