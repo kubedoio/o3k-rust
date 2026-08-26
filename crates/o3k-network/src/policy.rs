@@ -1205,6 +1205,105 @@ mod tests {
         probe(18082, true);
         probe(18083, false);
 
+        let stateful_allow = runtime.block_on(async {
+            realizer
+                .apply_policy_snapshot(
+                    endpoint_id,
+                    &[deny_default.clone(), allow.clone()],
+                    "traffic-stateful-allow",
+                )
+                .await
+        });
+        assert!(matches!(
+            stateful_allow,
+            crate::canonical_policy::PolicyApplyOutcome::Success { .. }
+        ));
+        let established_server = "import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('10.0.1.2',18080));s.listen(1);c,_=s.accept();c.recv(2);time.sleep(1.5);c.sendall(b'ok');c.close();s.close()";
+        let established_client = "import socket,time;s=socket.create_connection(('10.0.1.2',18080),1);s.sendall(b'ok');time.sleep(0.7);s.recv(2);s.close()";
+        let mut established_server_process = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &server_namespace,
+                "python3",
+                "-c",
+                established_server,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start established server");
+        std::thread::sleep(Duration::from_millis(100));
+        let mut established_client_process = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &client_namespace,
+                "python3",
+                "-c",
+                established_client,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start established client");
+        std::thread::sleep(Duration::from_millis(300));
+        let deny_new_flows = runtime.block_on(async {
+            realizer
+                .apply_policy_snapshot(
+                    endpoint_id,
+                    &[deny_default.clone()],
+                    "traffic-stateful-deny-new",
+                )
+                .await
+        });
+        assert!(matches!(
+            deny_new_flows,
+            crate::canonical_policy::PolicyApplyOutcome::Success { .. }
+        ));
+        let established_status = established_client_process
+            .wait()
+            .expect("wait established client");
+        assert!(
+            established_status.success(),
+            "established flow was not preserved after policy update"
+        );
+        let _ = established_server_process.kill();
+        let _ = established_server_process.wait();
+
+        let mut new_flow_server = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &server_namespace,
+                "python3",
+                "-c",
+                server_code,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start new-flow server");
+        std::thread::sleep(Duration::from_millis(100));
+        let new_flow_client = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &client_namespace,
+                "timeout",
+                "2",
+                "python3",
+                "-c",
+                client_code,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("new-flow client");
+        assert!(!new_flow_client.success(), "new flow bypassed Deny default");
+        let _ = new_flow_server.kill();
+        let _ = new_flow_server.wait();
+
         let egress = NetworkPlanIntent::Policy(PolicyIntent {
             id: Uuid::from_u128(706),
             direction: PolicyDirection::Egress,
