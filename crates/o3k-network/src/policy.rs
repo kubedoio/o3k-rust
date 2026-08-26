@@ -50,6 +50,11 @@ struct Ownership {
     /// reconstruct canonical policy state.
     #[serde(default)]
     endpoint_fingerprints: BTreeMap<Uuid, String>,
+    /// Aggregate provider fingerprint associated with each endpoint evidence
+    /// record. Endpoint evidence is valid only while the aggregate nftables
+    /// ownership marker still has this value.
+    #[serde(default)]
+    endpoint_aggregate_fingerprints: BTreeMap<Uuid, String>,
 }
 
 trait PolicyCommand: Send + Sync {
@@ -57,11 +62,20 @@ trait PolicyCommand: Send + Sync {
     fn run(&self, args: &[&str]) -> io::Result<bool>;
 }
 
-struct SystemPolicyCommand;
+struct SystemPolicyCommand {
+    namespace: Option<String>,
+}
 
 impl PolicyCommand for SystemPolicyCommand {
     fn output(&self, args: &[&str]) -> io::Result<(bool, String)> {
-        let output = Command::new("nft").args(args).output()?;
+        let mut command = if let Some(namespace) = &self.namespace {
+            let mut command = Command::new("ip");
+            command.args(["netns", "exec", namespace, "nft"]);
+            command
+        } else {
+            Command::new("nft")
+        };
+        let output = command.args(args).output()?;
         Ok((
             output.status.success(),
             String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -69,7 +83,14 @@ impl PolicyCommand for SystemPolicyCommand {
     }
 
     fn run(&self, args: &[&str]) -> io::Result<bool> {
-        Ok(Command::new("nft").args(args).status()?.success())
+        let mut command = if let Some(namespace) = &self.namespace {
+            let mut command = Command::new("ip");
+            command.args(["netns", "exec", namespace, "nft"]);
+            command
+        } else {
+            Command::new("nft")
+        };
+        Ok(command.args(args).status()?.success())
     }
 }
 
@@ -108,7 +129,26 @@ impl StatefulPolicyProvider {
         let ownership = load_state(&root.join(STATE_FILE))?;
         Ok(Self {
             root,
-            command: Arc::new(SystemPolicyCommand),
+            command: Arc::new(SystemPolicyCommand { namespace: None }),
+            ownership,
+        })
+    }
+
+    /// Open the production provider against an explicitly isolated network
+    /// namespace. The namespace is part of the execution boundary and is
+    /// never inferred from canonical policy state.
+    pub fn open_in_namespace(
+        root: impl Into<PathBuf>,
+        namespace: impl Into<String>,
+    ) -> Result<Self, PolicyNetworkError> {
+        let root = root.into();
+        fs::create_dir_all(&root)?;
+        let ownership = load_state(&root.join(STATE_FILE))?;
+        Ok(Self {
+            root,
+            command: Arc::new(SystemPolicyCommand {
+                namespace: Some(namespace.into()),
+            }),
             ownership,
         })
     }
@@ -241,6 +281,11 @@ impl StatefulPolicyProvider {
                 .ownership
                 .as_ref()
                 .map(|value| value.endpoint_fingerprints.clone())
+                .unwrap_or_default(),
+            endpoint_aggregate_fingerprints: self
+                .ownership
+                .as_ref()
+                .map(|value| value.endpoint_aggregate_fingerprints.clone())
                 .unwrap_or_default(),
         };
         if self
@@ -431,6 +476,9 @@ impl StatefulPolicyProvider {
         ownership
             .endpoint_fingerprints
             .insert(endpoint_id, fingerprint.to_owned());
+        ownership
+            .endpoint_aggregate_fingerprints
+            .insert(endpoint_id, ownership.fingerprint.clone());
         store_state(&self.root.join(STATE_FILE), &ownership)?;
         self.ownership = Some(ownership);
         Ok(())
@@ -458,12 +506,19 @@ impl StatefulPolicyProvider {
         if !output.contains(&ownership.fingerprint) {
             return Err(PolicyNetworkError::CorruptState);
         }
-        ownership
+        let endpoint_fingerprint = ownership
             .endpoint_fingerprints
             .get(&endpoint_id)
             .cloned()
-            .map(Some)
-            .ok_or(PolicyNetworkError::CorruptState)
+            .ok_or(PolicyNetworkError::CorruptState)?;
+        let endpoint_aggregate = ownership
+            .endpoint_aggregate_fingerprints
+            .get(&endpoint_id)
+            .ok_or(PolicyNetworkError::CorruptState)?;
+        if endpoint_aggregate != &ownership.fingerprint {
+            return Err(PolicyNetworkError::CorruptState);
+        }
+        Ok(Some(endpoint_fingerprint))
     }
 
     pub fn remove(&mut self) -> Result<(), PolicyNetworkError> {
@@ -956,5 +1011,64 @@ mod tests {
                 .expect("observation"),
             Some(endpoint_fingerprint.to_owned())
         );
+    }
+
+    #[test]
+    fn endpoint_evidence_is_rejected_when_aggregate_realization_changes() {
+        let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: Mutex::new(String::new()),
+        });
+        let endpoint_a = Uuid::from_u128(1);
+        let endpoint_b = Uuid::from_u128(2);
+        let endpoints = vec![
+            PolicyEndpoint {
+                endpoint_id: endpoint_a,
+                address: Ipv4Addr::new(10, 0, 0, 2),
+            },
+            PolicyEndpoint {
+                endpoint_id: endpoint_b,
+                address: Ipv4Addr::new(10, 0, 0, 3),
+            },
+        ];
+        let mut provider = StatefulPolicyProvider::with_command(
+            &root,
+            Arc::clone(&command) as Arc<dyn PolicyCommand>,
+        )
+        .expect("provider");
+        provider
+            .apply(&[policy(endpoint_a)], &endpoints)
+            .expect("apply A");
+        let aggregate_a = provider
+            .ownership
+            .as_ref()
+            .expect("ownership")
+            .fingerprint
+            .clone();
+        provider
+            .record_endpoint_fingerprint(endpoint_a, "endpoint-a-f1")
+            .expect("record endpoint evidence");
+        *command.listing.lock().expect("listing") =
+            format!("table ip {TABLE} {{ comment {MARKER}:{aggregate_a}; }}");
+
+        provider
+            .apply(&[policy(endpoint_b)], &endpoints)
+            .expect("apply B");
+        let aggregate_b = provider
+            .ownership
+            .as_ref()
+            .expect("ownership")
+            .fingerprint
+            .clone();
+        assert_ne!(aggregate_a, aggregate_b);
+        *command.listing.lock().expect("listing") =
+            format!("table ip {TABLE} {{ comment {MARKER}:{aggregate_b}; }}");
+
+        assert!(matches!(
+            provider.observe_endpoint_fingerprint(endpoint_a),
+            Err(PolicyNetworkError::CorruptState)
+        ));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

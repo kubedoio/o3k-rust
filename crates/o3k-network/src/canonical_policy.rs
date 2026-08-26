@@ -97,6 +97,19 @@ impl LinuxPolicySnapshotRealizer {
             endpoints,
         })
     }
+
+    pub fn open_in_namespace(
+        root: impl Into<std::path::PathBuf>,
+        namespace: impl Into<String>,
+        endpoints: Vec<PolicyEndpoint>,
+    ) -> Result<Self, PolicyNetworkError> {
+        Ok(Self {
+            provider: tokio::sync::Mutex::new(StatefulPolicyProvider::open_in_namespace(
+                root, namespace,
+            )?),
+            endpoints,
+        })
+    }
 }
 
 #[async_trait]
@@ -1031,6 +1044,112 @@ mod tests {
             result[2],
             NetworkPlanIntent::Policy(PolicyIntent { id, .. }) if id == Uuid::from_u128(9)
         ));
+    }
+
+    #[tokio::test]
+    async fn linux_realizer_observes_exact_fingerprint_after_fresh_instances() {
+        let namespace = format!("o3k-r2a-{}", Uuid::now_v7().simple());
+        let root = std::env::temp_dir().join(format!("o3k-r2a-{}", Uuid::now_v7()));
+        let add = std::process::Command::new("ip")
+            .args(["netns", "add", &namespace])
+            .status()
+            .expect("create isolated namespace");
+        assert!(add.success(), "ip netns add failed");
+        let endpoint_id = Uuid::from_u128(1);
+        let endpoint = PolicyEndpoint {
+            endpoint_id,
+            address: Ipv4Addr::new(10, 0, 0, 2),
+        };
+        let snapshot = vec![NetworkPlanIntent::PolicyDefault(PolicyDefaultIntent {
+            policy_id: Uuid::from_u128(2),
+            endpoint_id,
+            unmatched_action: PolicyAction::Deny,
+            stateful_mode: PolicyStatefulMode::Stateful,
+            generation: 1,
+        })];
+        let first = LinuxPolicySnapshotRealizer::open_in_namespace(
+            &root,
+            &namespace,
+            vec![endpoint.clone()],
+        )
+        .expect("first realizer");
+        assert!(matches!(
+            first
+                .apply_policy_snapshot(endpoint_id, &snapshot, "canonical-f1")
+                .await,
+            PolicyApplyOutcome::Success { .. }
+        ));
+        drop(first);
+
+        let second = LinuxPolicySnapshotRealizer::open_in_namespace(
+            &root,
+            &namespace,
+            vec![endpoint.clone()],
+        )
+        .expect("second realizer");
+        assert_eq!(
+            second.observe_policy_snapshot(endpoint_id).await,
+            PolicyObservation::Observed {
+                fingerprint: "canonical-f1".into(),
+                generation: None,
+                provider_resource_id: Some(format!("linux-policy:{endpoint_id}")),
+            }
+        );
+        assert_eq!(
+            second.observe_policy_snapshot(Uuid::from_u128(99)).await,
+            PolicyObservation::Unknown {
+                reason: "policy provider state is corrupt".into()
+            }
+        );
+
+        drop(second);
+        let third =
+            LinuxPolicySnapshotRealizer::open_in_namespace(&root, &namespace, vec![endpoint])
+                .expect("third realizer");
+        let snapshot_f2 = vec![NetworkPlanIntent::PolicyDefault(PolicyDefaultIntent {
+            policy_id: Uuid::from_u128(2),
+            endpoint_id,
+            unmatched_action: PolicyAction::Allow,
+            stateful_mode: PolicyStatefulMode::Stateful,
+            generation: 2,
+        })];
+        assert_eq!(
+            third.observe_policy_snapshot(endpoint_id).await,
+            PolicyObservation::Observed {
+                fingerprint: "canonical-f1".into(),
+                generation: None,
+                provider_resource_id: Some(format!("linux-policy:{endpoint_id}")),
+            }
+        );
+        assert!(matches!(
+            third
+                .apply_policy_snapshot(endpoint_id, &snapshot_f2, "canonical-f2")
+                .await,
+            PolicyApplyOutcome::Success { .. }
+        ));
+        drop(third);
+        let fourth = LinuxPolicySnapshotRealizer::open_in_namespace(
+            &root,
+            &namespace,
+            vec![PolicyEndpoint {
+                endpoint_id,
+                address: Ipv4Addr::new(10, 0, 0, 2),
+            }],
+        )
+        .expect("fourth realizer");
+        assert_eq!(
+            fourth.observe_policy_snapshot(endpoint_id).await,
+            PolicyObservation::Observed {
+                fingerprint: "canonical-f2".into(),
+                generation: None,
+                provider_resource_id: Some(format!("linux-policy:{endpoint_id}")),
+            }
+        );
+        drop(fourth);
+        let _ = std::process::Command::new("ip")
+            .args(["netns", "del", &namespace])
+            .status();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
