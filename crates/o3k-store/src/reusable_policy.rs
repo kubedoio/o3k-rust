@@ -335,12 +335,29 @@ impl crate::SqliteStore {
         if current.state != p.state {
             return Err(StoreError::StaleGeneration);
         }
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let current_state: Option<String> = sqlx::query_scalar(
+            "SELECT state FROM canonical_reusable_network_policies WHERE id=? AND project_id=?",
+        )
+        .bind(p.id.to_string())
+        .bind(&p.project_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        if current_state.as_deref() != Some(p.state.as_str()) {
+            return Err(if current_state.is_some() {
+                StoreError::StaleGeneration
+            } else {
+                StoreError::ResourceNotFound
+            });
+        }
         let incompatible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM canonical_policy_attachments a JOIN canonical_policy_attachments other ON other.endpoint_id=a.endpoint_id AND other.policy_id<>a.policy_id AND other.state='active' JOIN canonical_reusable_network_policies other_policy ON other_policy.id=other.policy_id WHERE a.policy_id=? AND a.state='active' AND other_policy.unmatched_action<>?")
-            .bind(p.id.to_string()).bind(&p.unmatched_action).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+            .bind(p.id.to_string()).bind(&p.unmatched_action).fetch_one(&mut *tx).await.map_err(StoreError::Database)?;
         if incompatible != 0 {
             return Err(StoreError::PolicyCompositionConflict);
         }
-        let result=sqlx::query("UPDATE canonical_reusable_network_policies SET name=?, description=?, stateful_mode=?, unmatched_action=?, generation=?, updated_at=? WHERE id=? AND project_id=? AND generation=? AND state=?").bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(new_gen).bind(&p.updated_at).bind(p.id.to_string()).bind(&p.project_id).bind(checked_generation(expected)?).bind(&p.state).execute(&self.pool).await.map_err(StoreError::Database)?;
+        let result=sqlx::query("UPDATE canonical_reusable_network_policies SET name=?, description=?, stateful_mode=?, unmatched_action=?, generation=?, updated_at=? WHERE id=? AND project_id=? AND generation=? AND state=?").bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(new_gen).bind(&p.updated_at).bind(p.id.to_string()).bind(&p.project_id).bind(checked_generation(expected)?).bind(&p.state).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)?;
         if result.rows_affected() == 0 {
             return match self.get_reusable_policy(&p.project_id, &p.id).await? {
                 Some(_) => Err(StoreError::StaleGeneration),
@@ -896,12 +913,32 @@ impl crate::PostgresStore {
         if current.state != p.state {
             return Err(StoreError::StaleGeneration);
         }
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let current_state: Option<String> = sqlx::query_scalar("SELECT state FROM canonical_reusable_network_policies WHERE id=$1 AND project_id=$2 FOR UPDATE")
+            .bind(p.id.to_string())
+            .bind(&p.project_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        if current_state.as_deref() != Some(p.state.as_str()) {
+            return Err(if current_state.is_some() {
+                StoreError::StaleGeneration
+            } else {
+                StoreError::ResourceNotFound
+            });
+        }
+        sqlx::query("SELECT e.id FROM canonical_endpoints e JOIN canonical_policy_attachments a ON a.endpoint_id=e.id WHERE a.policy_id=$1 AND a.state='active' ORDER BY e.id FOR UPDATE OF e")
+            .bind(p.id.to_string())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
         let incompatible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM canonical_policy_attachments a JOIN canonical_policy_attachments other ON other.endpoint_id=a.endpoint_id AND other.policy_id<>a.policy_id AND other.state='active' JOIN canonical_reusable_network_policies other_policy ON other_policy.id=other.policy_id WHERE a.policy_id=$1 AND a.state='active' AND other_policy.unmatched_action<>$2")
-            .bind(p.id.to_string()).bind(&p.unmatched_action).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+            .bind(p.id.to_string()).bind(&p.unmatched_action).fetch_one(&mut *tx).await.map_err(StoreError::Database)?;
         if incompatible != 0 {
             return Err(StoreError::PolicyCompositionConflict);
         }
-        let r=sqlx::query("UPDATE canonical_reusable_network_policies SET name=$1,description=$2,stateful_mode=$3,unmatched_action=$4,generation=$5,updated_at=$6 WHERE id=$7 AND project_id=$8 AND generation=$9 AND state=$10").bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(g).bind(&p.updated_at).bind(p.id.to_string()).bind(&p.project_id).bind(checked_generation(expected)?).bind(&p.state).execute(&self.pool).await.map_err(StoreError::Database)?;
+        let r=sqlx::query("UPDATE canonical_reusable_network_policies SET name=$1,description=$2,stateful_mode=$3,unmatched_action=$4,generation=$5,updated_at=$6 WHERE id=$7 AND project_id=$8 AND generation=$9 AND state=$10").bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(g).bind(&p.updated_at).bind(p.id.to_string()).bind(&p.project_id).bind(checked_generation(expected)?).bind(&p.state).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)?;
         if r.rows_affected() == 0 {
             return match self.get_reusable_policy(&p.project_id, &p.id).await? {
                 Some(_) => Err(StoreError::StaleGeneration),
