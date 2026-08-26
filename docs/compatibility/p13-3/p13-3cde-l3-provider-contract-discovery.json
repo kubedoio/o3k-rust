@@ -6,10 +6,11 @@
     "source_tag": "v3.4.0",
     "source_commit": "4fd8eba1f85edfdc7aed2d17bae3f3c814abad41",
     "modified": false,
-    "gophercloud_major": "v2"
+    "gophercloud": "v2.8.0",
+    "provider_source_revision": "4fd8eba1f85edfdc7aed2d17bae3f3c814abad41"
   },
   "router": {
-    "provider_source": "openstack/networking_router_v2.go",
+    "provider_source": "openstack/resource_openstack_networking_router_v2.go; openstack/networking_router_v2.go",
     "operations": [
       "POST /v2.0/routers",
       "GET /v2.0/routers/{id}",
