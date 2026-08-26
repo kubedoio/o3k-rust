@@ -7767,6 +7767,24 @@ impl NetworkService {
         project_id: &str,
         id: Uuid,
     ) -> Result<(), NetworkError> {
+        // Endpoint deletion owns only the endpoint and its canonical
+        // attachment relations.  Remove those relations explicitly before
+        // the endpoint row so the reusable policy and its rules remain
+        // independent and the endpoint delete cannot leave dangling
+        // attachments.
+        let attachments = self
+            .inner
+            .repository
+            .list_endpoint_policy_attachments(project_id, &id)
+            .await
+            .map_err(map_store_error)?;
+        for attachment in attachments {
+            self.inner
+                .repository
+                .delete_policy_attachment(project_id, &attachment.id)
+                .await
+                .map_err(map_store_error)?;
+        }
         self.inner
             .repository
             .delete_canonical_endpoint_and_port(project_id, &id)
