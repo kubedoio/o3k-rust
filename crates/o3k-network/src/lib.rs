@@ -4319,6 +4319,32 @@ fn canonical_policy_record(
     }
 }
 
+fn security_group_from_policy(
+    policy: o3k_store::CanonicalReusableNetworkPolicyRecord,
+) -> o3k_store::SecurityGroupRecord {
+    o3k_store::SecurityGroupRecord {
+        id: policy.id,
+        project_id: policy.project_id,
+        name: policy.name,
+        description: policy.description,
+    }
+}
+
+fn security_group_rule_from_policy(
+    rule: o3k_store::CanonicalNetworkPolicyRuleRecord,
+) -> o3k_store::SecurityGroupRuleRecord {
+    o3k_store::SecurityGroupRuleRecord {
+        id: rule.id,
+        security_group_id: rule.policy_id,
+        project_id: rule.project_id,
+        direction: rule.direction.to_lowercase(),
+        protocol: rule.protocol.to_lowercase(),
+        port_min: rule.port_min,
+        port_max: rule.port_max,
+        remote_ip_prefix: rule.remote_selector,
+    }
+}
+
 fn policy_from_canonical_record(
     record: o3k_store::CanonicalNetworkPolicyRecord,
 ) -> Result<PolicyIntent, NetworkError> {
@@ -6039,8 +6065,14 @@ impl NetworkService {
     ) -> Result<Vec<o3k_store::SecurityGroupRecord>, NetworkError> {
         self.inner
             .repository
-            .list_security_groups(project_id)
+            .list_reusable_policies(project_id)
             .await
+            .map(|policies| {
+                policies
+                    .into_iter()
+                    .map(security_group_from_policy)
+                    .collect()
+            })
             .map_err(map_store_error)
     }
 
@@ -6051,9 +6083,10 @@ impl NetworkService {
     ) -> Result<o3k_store::SecurityGroupRecord, NetworkError> {
         self.inner
             .repository
-            .get_security_group(project_id, &id)
+            .get_reusable_policy(project_id, &id)
             .await
             .map_err(map_store_error)?
+            .map(security_group_from_policy)
             .ok_or(NetworkError::NotFound)
     }
 
@@ -6075,7 +6108,18 @@ impl NetworkService {
         };
         self.inner
             .repository
-            .insert_security_group(&group)
+            .insert_reusable_policy(&o3k_store::CanonicalReusableNetworkPolicyRecord {
+                id: group.id,
+                project_id: group.project_id.clone(),
+                name: group.name.clone(),
+                description: group.description.clone(),
+                stateful_mode: "Stateful".to_owned(),
+                unmatched_action: "Deny".to_owned(),
+                generation: 1,
+                state: "active".to_owned(),
+                created_at: "2026-08-26T00:00:00Z".to_owned(),
+                updated_at: "2026-08-26T00:00:00Z".to_owned(),
+            })
             .await
             .map_err(map_store_error)?;
         Ok(group)
@@ -6092,11 +6136,28 @@ impl NetworkService {
             return Err(NetworkError::InvalidRequest);
         }
         let _guard = self.lock().await;
-        self.inner
+        let current = self
+            .inner
             .repository
-            .update_security_group(project_id, &id, &name, &description)
+            .get_reusable_policy(project_id, &id)
             .await
-            .map_err(map_store_error)
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        let updated = self
+            .inner
+            .repository
+            .update_reusable_policy(
+                &o3k_store::CanonicalReusableNetworkPolicyRecord {
+                    name,
+                    description,
+                    updated_at: "2026-08-26T00:00:00Z".to_owned(),
+                    ..current
+                },
+                current.generation,
+            )
+            .await
+            .map_err(map_store_error)?;
+        Ok(security_group_from_policy(updated))
     }
 
     pub async fn delete_security_group_for_project(
@@ -6107,7 +6168,7 @@ impl NetworkService {
         let _guard = self.lock().await;
         self.inner
             .repository
-            .delete_security_group(project_id, &id)
+            .delete_reusable_policy(project_id, &id)
             .await
             .map_err(map_store_error)
     }
@@ -6120,7 +6181,7 @@ impl NetworkService {
         if self
             .inner
             .repository
-            .get_security_group(project_id, &group_id)
+            .get_reusable_policy(project_id, &group_id)
             .await
             .map_err(map_store_error)?
             .is_none()
@@ -6129,8 +6190,14 @@ impl NetworkService {
         }
         self.inner
             .repository
-            .list_security_group_rules(project_id, &group_id)
+            .list_policy_rules(project_id, &group_id)
             .await
+            .map(|rules| {
+                rules
+                    .into_iter()
+                    .map(security_group_rule_from_policy)
+                    .collect()
+            })
             .map_err(map_store_error)
     }
 
@@ -6141,9 +6208,10 @@ impl NetworkService {
     ) -> Result<o3k_store::SecurityGroupRuleRecord, NetworkError> {
         self.inner
             .repository
-            .get_security_group_rule(project_id, &id)
+            .get_policy_rule(project_id, &id)
             .await
             .map_err(map_store_error)?
+            .map(security_group_rule_from_policy)
             .ok_or(NetworkError::NotFound)
     }
 
@@ -6177,33 +6245,57 @@ impl NetworkService {
         if self
             .inner
             .repository
-            .get_security_group(project_id, &group_id)
+            .get_reusable_policy(project_id, &group_id)
             .await
             .map_err(map_store_error)?
             .is_none()
         {
             return Err(NetworkError::NotFound);
         }
-        let rule = o3k_store::SecurityGroupRuleRecord {
+        let rule = o3k_store::CanonicalNetworkPolicyRuleRecord {
             id: Uuid::now_v7(),
-            security_group_id: group_id,
+            policy_id: group_id,
             project_id: project_id.to_owned(),
             direction: match direction {
-                PolicyDirection::Ingress => "ingress",
-                PolicyDirection::Egress => "egress",
+                PolicyDirection::Ingress => "Ingress",
+                PolicyDirection::Egress => "Egress",
             }
             .to_owned(),
-            protocol,
+            protocol: match protocol_value {
+                NetworkProtocol::Any => "Any",
+                NetworkProtocol::Tcp => "Tcp",
+                NetworkProtocol::Udp => "Udp",
+                NetworkProtocol::Icmp => "Icmp",
+            }
+            .to_owned(),
+            address_family: "Ipv4".to_owned(),
             port_min,
             port_max,
-            remote_ip_prefix,
+            remote_selector: remote_ip_prefix,
+            action: "Allow".to_owned(),
+            state: "active".to_owned(),
+            generation: 1,
+            enforcement_key: String::new(),
         };
+        let remote = rule
+            .remote_selector
+            .clone()
+            .unwrap_or_else(|| "-".to_owned());
+        let ports = rule
+            .port_min
+            .zip(rule.port_max)
+            .map_or_else(|| "-".to_owned(), |(min, max)| format!("{min}-{max}"));
+        let mut rule = rule;
+        rule.enforcement_key = format!(
+            "{}|{}|{}|{}|{}|{}",
+            rule.direction, rule.address_family, rule.protocol, ports, remote, rule.action
+        );
         self.inner
             .repository
-            .insert_security_group_rule(&rule)
+            .insert_policy_rule(&rule)
             .await
             .map_err(map_store_error)?;
-        Ok(rule)
+        Ok(security_group_rule_from_policy(rule))
     }
 
     pub async fn delete_security_group_rule_for_project(
@@ -6214,7 +6306,7 @@ impl NetworkService {
         let _guard = self.lock().await;
         self.inner
             .repository
-            .delete_security_group_rule(project_id, &id)
+            .delete_policy_rule(project_id, &id)
             .await
             .map_err(map_store_error)
     }
@@ -6224,11 +6316,40 @@ impl NetworkService {
         project_id: &str,
         endpoint_id: Option<Uuid>,
     ) -> Result<Vec<o3k_store::SecurityGroupBindingRecord>, NetworkError> {
-        self.inner
-            .repository
-            .list_security_group_bindings(project_id, endpoint_id.as_ref())
-            .await
-            .map_err(map_store_error)
+        let attachments = if let Some(endpoint_id) = endpoint_id {
+            self.inner
+                .repository
+                .list_endpoint_policy_attachments(project_id, &endpoint_id)
+                .await
+                .map_err(map_store_error)?
+        } else {
+            let policies = self
+                .inner
+                .repository
+                .list_reusable_policies(project_id)
+                .await
+                .map_err(map_store_error)?;
+            let mut all = Vec::new();
+            for policy in policies {
+                all.extend(
+                    self.inner
+                        .repository
+                        .list_policy_attachments(project_id, &policy.id)
+                        .await
+                        .map_err(map_store_error)?,
+                );
+            }
+            all
+        };
+        Ok(attachments
+            .into_iter()
+            .filter(|attachment| attachment.state == "active")
+            .map(|attachment| o3k_store::SecurityGroupBindingRecord {
+                project_id: attachment.project_id,
+                endpoint_id: attachment.endpoint_id,
+                security_group_id: attachment.policy_id,
+            })
+            .collect())
     }
 
     pub async fn replace_security_group_bindings_for_project(
@@ -6252,7 +6373,7 @@ impl NetworkService {
             if self
                 .inner
                 .repository
-                .get_security_group(project_id, group_id)
+                .get_reusable_policy(project_id, group_id)
                 .await
                 .map_err(map_store_error)?
                 .is_none()
@@ -6260,11 +6381,34 @@ impl NetworkService {
                 return Err(NetworkError::NotFound);
             }
         }
-        self.inner
+        let existing = self
+            .inner
             .repository
-            .replace_security_group_bindings(project_id, &endpoint_id, &group_ids)
+            .list_endpoint_policy_attachments(project_id, &endpoint_id)
             .await
-            .map_err(map_store_error)
+            .map_err(map_store_error)?;
+        for attachment in existing.into_iter().filter(|a| a.state == "active") {
+            self.inner
+                .repository
+                .delete_policy_attachment(project_id, &attachment.id)
+                .await
+                .map_err(map_store_error)?;
+        }
+        for group_id in group_ids {
+            self.inner
+                .repository
+                .insert_policy_attachment(&o3k_store::CanonicalPolicyAttachmentRecord {
+                    id: Uuid::now_v7(),
+                    policy_id: group_id,
+                    endpoint_id,
+                    project_id: project_id.to_owned(),
+                    state: "active".to_owned(),
+                    generation: 1,
+                })
+                .await
+                .map_err(map_store_error)?;
+        }
+        Ok(())
     }
 
     /// Returns the durable canonical policy rules for a network. A network
@@ -6303,14 +6447,17 @@ impl NetworkService {
             let bindings = self
                 .inner
                 .repository
-                .list_security_group_bindings(project_id, Some(&port.id))
+                .list_endpoint_policy_attachments(project_id, &port.id)
                 .await
                 .map_err(map_store_error)?;
-            for binding in bindings {
+            for binding in bindings
+                .into_iter()
+                .filter(|binding| binding.state == "active")
+            {
                 let Some(group) = self
                     .inner
                     .repository
-                    .get_security_group(project_id, &binding.security_group_id)
+                    .get_reusable_policy(project_id, &binding.policy_id)
                     .await
                     .map_err(map_store_error)?
                 else {
@@ -6319,13 +6466,15 @@ impl NetworkService {
                 for rule in self
                     .inner
                     .repository
-                    .list_security_group_rules(project_id, &group.id)
+                    .list_policy_rules(project_id, &group.id)
                     .await
                     .map_err(map_store_error)?
+                    .into_iter()
+                    .filter(|rule| rule.state == "active")
                 {
                     let direction = parse_security_group_direction(&rule.direction)?;
                     let remote = rule
-                        .remote_ip_prefix
+                        .remote_selector
                         .as_deref()
                         .map(parse_security_group_prefix)
                         .transpose()?;
