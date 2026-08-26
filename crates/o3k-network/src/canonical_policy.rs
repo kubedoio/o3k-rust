@@ -891,7 +891,9 @@ fn parse_prefix(
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use std::net::Ipv4Addr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn endpoint() -> CanonicalEndpointRecord {
         CanonicalEndpointRecord {
@@ -914,6 +916,364 @@ mod tests {
             generation: 1,
             state: "active".into(),
         }
+    }
+
+    async fn sqlite_policy_fixture() -> (o3k_store::SqliteStore, Uuid) {
+        let store = o3k_store::SqliteStore::connect("sqlite::memory:")
+            .await
+            .expect("sqlite store");
+        let network_id = Uuid::from_u128(30);
+        let realm_id = Uuid::from_u128(31);
+        let endpoint_id = Uuid::from_u128(32);
+        let policy_id = Uuid::from_u128(33);
+        store
+            .insert_canonical_network(&o3k_store::CanonicalNetworkRecord {
+                id: network_id,
+                project_id: "p".into(),
+                name: "network".into(),
+                admin_state_up: true,
+                generation: 1,
+                state: "active".into(),
+            })
+            .await
+            .expect("network");
+        store
+            .insert_canonical_realm(&CanonicalAddressRealmRecord {
+                id: realm_id,
+                network_id,
+                project_id: "p".into(),
+                prefix: "10.0.0.0/24".into(),
+                overlapping_prefixes: false,
+                generation: 1,
+                state: "active".into(),
+            })
+            .await
+            .expect("realm");
+        store
+            .insert_canonical_endpoint(&CanonicalEndpointRecord {
+                id: endpoint_id,
+                realm_id,
+                project_id: "p".into(),
+                fixed_ip: Ipv4Addr::new(10, 0, 0, 2),
+                mac: "02:00:00:00:00:02".into(),
+                generation: 1,
+                state: "active".into(),
+            })
+            .await
+            .expect("endpoint");
+        store
+            .insert_reusable_policy(&CanonicalReusableNetworkPolicyRecord {
+                id: policy_id,
+                project_id: "p".into(),
+                name: "policy".into(),
+                description: String::new(),
+                stateful_mode: "Stateful".into(),
+                unmatched_action: "Deny".into(),
+                generation: 1,
+                state: "active".into(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .await
+            .expect("policy");
+        store
+            .insert_policy_attachment(&CanonicalPolicyAttachmentRecord {
+                id: Uuid::from_u128(34),
+                policy_id,
+                endpoint_id,
+                project_id: "p".into(),
+                state: "active".into(),
+                generation: 1,
+            })
+            .await
+            .expect("attachment");
+        (store, endpoint_id)
+    }
+
+    struct ControlledRealizer {
+        applies: std::sync::Mutex<Vec<PolicyApplyOutcome>>,
+        observations: std::sync::Mutex<Vec<PolicyObservation>>,
+        apply_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl PolicySnapshotRealizer for ControlledRealizer {
+        async fn apply_policy_snapshot(
+            &self,
+            _endpoint_id: Uuid,
+            _snapshot: &[NetworkPlanIntent],
+            _fingerprint: &str,
+        ) -> PolicyApplyOutcome {
+            self.apply_count.fetch_add(1, Ordering::SeqCst);
+            self.applies
+                .lock()
+                .expect("apply queue")
+                .pop()
+                .unwrap_or(PolicyApplyOutcome::Success {
+                    provider_resource_id: Some("controlled".into()),
+                })
+        }
+
+        async fn observe_policy_snapshot(&self, _endpoint_id: Uuid) -> PolicyObservation {
+            self.observations
+                .lock()
+                .expect("observation queue")
+                .pop()
+                .unwrap_or(PolicyObservation::Unknown {
+                    reason: "controlled observation unavailable".into(),
+                })
+        }
+    }
+
+    #[tokio::test]
+    async fn reconciliation_failure_retry_and_unknown_recovery_are_durable() {
+        let (store, endpoint_id) = sqlite_policy_fixture().await;
+        let repository = Arc::new(store.clone());
+        let service = CanonicalPolicyService::new(repository.clone());
+        let (_, fingerprint) = service
+            .compile_endpoint("p", endpoint_id)
+            .await
+            .expect("compile");
+        let provider = ControlledRealizer {
+            // pop() makes the first result the final queue item.
+            applies: std::sync::Mutex::new(vec![
+                PolicyApplyOutcome::Success {
+                    provider_resource_id: Some("retry".into()),
+                },
+                PolicyApplyOutcome::DefiniteFailure {
+                    reason: "definitive test failure".into(),
+                },
+            ]),
+            observations: std::sync::Mutex::new(Vec::new()),
+            apply_count: AtomicUsize::new(0),
+        };
+        let failed = service
+            .reconcile_endpoint_policy("p", endpoint_id, Some(&fingerprint), &provider)
+            .await
+            .expect("failed reconcile");
+        assert!(matches!(failed, PolicyApplyOutcome::DefiniteFailure { .. }));
+        let recovered = service
+            .recover_policy_realizations("p", &provider)
+            .await
+            .expect("retry recovery");
+        assert!(matches!(recovered[0].1, PolicyApplyOutcome::Success { .. }));
+        assert_eq!(provider.apply_count.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store
+                .get_policy_realization("p", &endpoint_id)
+                .await
+                .expect("realization")
+                .expect("realization row")
+                .state,
+            "realized"
+        );
+
+        let (store, endpoint_id) = sqlite_policy_fixture().await;
+        let service = CanonicalPolicyService::new(Arc::new(store.clone()));
+        let (_, fingerprint) = service
+            .compile_endpoint("p", endpoint_id)
+            .await
+            .expect("compile unknown");
+        let provider = ControlledRealizer {
+            applies: std::sync::Mutex::new(vec![PolicyApplyOutcome::Unknown {
+                reason: "response lost after possible apply".into(),
+            }]),
+            observations: std::sync::Mutex::new(vec![PolicyObservation::Observed {
+                fingerprint: fingerprint.clone(),
+                generation: None,
+                provider_resource_id: Some("controlled".into()),
+            }]),
+            apply_count: AtomicUsize::new(0),
+        };
+        let unknown = service
+            .reconcile_endpoint_policy("p", endpoint_id, Some(&fingerprint), &provider)
+            .await
+            .expect("unknown reconcile");
+        assert!(matches!(unknown, PolicyApplyOutcome::Unknown { .. }));
+        service
+            .recover_policy_realizations("p", &provider)
+            .await
+            .expect("unknown recovery");
+        assert_eq!(provider.apply_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .get_policy_realization("p", &endpoint_id)
+                .await
+                .expect("unknown realization")
+                .expect("unknown row")
+                .state,
+            "realized"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_policy_reconciles_each_attached_endpoint_independently() {
+        let (store, endpoint_a) = sqlite_policy_fixture().await;
+        let realm_id = Uuid::from_u128(31);
+        let policy_id = Uuid::from_u128(33);
+        let endpoint_b = Uuid::from_u128(35);
+        store
+            .insert_canonical_endpoint(&CanonicalEndpointRecord {
+                id: endpoint_b,
+                realm_id,
+                project_id: "p".into(),
+                fixed_ip: Ipv4Addr::new(10, 0, 0, 3),
+                mac: "02:00:00:00:00:03".into(),
+                generation: 1,
+                state: "active".into(),
+            })
+            .await
+            .expect("second endpoint");
+        store
+            .insert_policy_attachment(&CanonicalPolicyAttachmentRecord {
+                id: Uuid::from_u128(36),
+                policy_id,
+                endpoint_id: endpoint_b,
+                project_id: "p".into(),
+                state: "active".into(),
+                generation: 1,
+            })
+            .await
+            .expect("second attachment");
+        let provider = ControlledRealizer {
+            applies: std::sync::Mutex::new(vec![
+                PolicyApplyOutcome::DefiniteFailure {
+                    reason: "endpoint B failed".into(),
+                },
+                PolicyApplyOutcome::Success {
+                    provider_resource_id: Some("endpoint A".into()),
+                },
+            ]),
+            observations: std::sync::Mutex::new(Vec::new()),
+            apply_count: AtomicUsize::new(0),
+        };
+        let service = CanonicalPolicyService::new(Arc::new(store.clone()));
+        let outcomes = service
+            .reconcile_policy_endpoints("p", policy_id, &provider)
+            .await
+            .expect("independent reconciliation");
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].0, endpoint_a);
+        assert!(matches!(outcomes[0].1, PolicyApplyOutcome::Success { .. }));
+        assert_eq!(outcomes[1].0, endpoint_b);
+        assert!(matches!(
+            outcomes[1].1,
+            PolicyApplyOutcome::DefiniteFailure { .. }
+        ));
+        assert_eq!(provider.apply_count.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store
+                .get_policy_realization("p", &endpoint_a)
+                .await
+                .expect("endpoint A realization")
+                .expect("endpoint A row")
+                .state,
+            "realized"
+        );
+        assert_eq!(
+            store
+                .get_policy_realization("p", &endpoint_b)
+                .await
+                .expect("endpoint B realization")
+                .expect("endpoint B row")
+                .state,
+            "failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_observation_never_blindly_applies_and_stale_observation_retries() {
+        let (store, endpoint_id) = sqlite_policy_fixture().await;
+        let service = CanonicalPolicyService::new(Arc::new(store.clone()));
+        let (_, fingerprint) = service
+            .compile_endpoint("p", endpoint_id)
+            .await
+            .expect("compile");
+        let provider = ControlledRealizer {
+            applies: std::sync::Mutex::new(vec![
+                PolicyApplyOutcome::Success {
+                    provider_resource_id: Some("retry".into()),
+                },
+                PolicyApplyOutcome::Unknown {
+                    reason: "provider response lost".into(),
+                },
+            ]),
+            observations: std::sync::Mutex::new(vec![PolicyObservation::Unknown {
+                reason: "provider unreadable".into(),
+            }]),
+            apply_count: AtomicUsize::new(0),
+        };
+        service
+            .reconcile_endpoint_policy("p", endpoint_id, Some(&fingerprint), &provider)
+            .await
+            .expect("initial unknown");
+        let recovered = service
+            .recover_policy_realizations("p", &provider)
+            .await
+            .expect("unknown recovery");
+        assert!(matches!(recovered[0].1, PolicyApplyOutcome::Unknown { .. }));
+        assert_eq!(provider.apply_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .get_policy_realization("p", &endpoint_id)
+                .await
+                .expect("realization")
+                .expect("row")
+                .state,
+            "unknown"
+        );
+
+        let (store, endpoint_id) = sqlite_policy_fixture().await;
+        let service = CanonicalPolicyService::new(Arc::new(store.clone()));
+        let (_, fingerprint) = service
+            .compile_endpoint("p", endpoint_id)
+            .await
+            .expect("compile stale");
+        let provider = ControlledRealizer {
+            applies: std::sync::Mutex::new(vec![
+                PolicyApplyOutcome::Success {
+                    provider_resource_id: Some("retry".into()),
+                },
+                PolicyApplyOutcome::Unknown {
+                    reason: "provider response lost".into(),
+                },
+            ]),
+            observations: std::sync::Mutex::new(vec![PolicyObservation::Observed {
+                fingerprint: "sha256:old".into(),
+                generation: Some(1),
+                provider_resource_id: Some("controlled".into()),
+            }]),
+            apply_count: AtomicUsize::new(0),
+        };
+        service
+            .reconcile_endpoint_policy("p", endpoint_id, Some(&fingerprint), &provider)
+            .await
+            .expect("stale unknown");
+        assert_eq!(
+            store
+                .get_policy_realization("p", &endpoint_id)
+                .await
+                .expect("pre-recovery realization")
+                .expect("pre-recovery row")
+                .state,
+            "unknown"
+        );
+        let recovered = service
+            .recover_policy_realizations("p", &provider)
+            .await
+            .expect("stale recovery");
+        assert!(!recovered.is_empty(), "stale recovery produced no outcome");
+        assert!(matches!(recovered[0].1, PolicyApplyOutcome::Success { .. }));
+        assert_eq!(provider.apply_count.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store
+                .get_policy_realization("p", &endpoint_id)
+                .await
+                .expect("stale realization")
+                .expect("stale row")
+                .state,
+            "realized"
+        );
     }
     fn policy(action: &str) -> CanonicalReusableNetworkPolicyRecord {
         CanonicalReusableNetworkPolicyRecord {
