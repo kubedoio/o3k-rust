@@ -226,6 +226,16 @@ fn validate_child_insert_state(state: &str) -> Result<(), StoreError> {
     }
 }
 
+fn validate_policy_insert_state(state: &str) -> Result<(), StoreError> {
+    if matches!(state, "requested" | "active") {
+        Ok(())
+    } else {
+        Err(StoreError::Corrupt(
+            "policy must be requested or active when inserted".into(),
+        ))
+    }
+}
+
 fn sqlite_policy(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
@@ -289,6 +299,7 @@ impl crate::SqliteStore {
         p: &CanonicalReusableNetworkPolicyRecord,
     ) -> Result<(), StoreError> {
         let generation = validate_policy(p)?;
+        validate_policy_insert_state(&p.state)?;
         sqlx::query("INSERT INTO canonical_reusable_network_policies (id, project_id, name, description, stateful_mode, unmatched_action, generation, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(p.id.to_string()).bind(&p.project_id).bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(generation).bind(&p.state).bind(&p.created_at).bind(&p.updated_at).execute(&self.pool).await.map_err(map_canonical_insert_error).map(|_| ())
     }
@@ -837,6 +848,7 @@ impl crate::PostgresStore {
         p: &CanonicalReusableNetworkPolicyRecord,
     ) -> Result<(), StoreError> {
         let g = validate_policy(p)?;
+        validate_policy_insert_state(&p.state)?;
         sqlx::query("INSERT INTO canonical_reusable_network_policies (id,project_id,name,description,stateful_mode,unmatched_action,generation,state,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)").bind(p.id.to_string()).bind(&p.project_id).bind(&p.name).bind(&p.description).bind(&p.stateful_mode).bind(&p.unmatched_action).bind(g).bind(&p.state).bind(&p.created_at).bind(&p.updated_at).execute(&self.pool).await.map_err(map_canonical_insert_error).map(|_|())
     }
     pub async fn get_reusable_policy(
@@ -1629,6 +1641,12 @@ mod tests {
                     ..rule(Uuid::from_u128(62), policy_id)
                 })
                 .await,
+            Err(StoreError::Corrupt(_))
+        ));
+        let mut invalid_policy = policy(Uuid::from_u128(63), "Allow");
+        invalid_policy.state = "deleted".into();
+        assert!(matches!(
+            store.insert_reusable_policy(&invalid_policy).await,
             Err(StoreError::Corrupt(_))
         ));
         Ok(())
