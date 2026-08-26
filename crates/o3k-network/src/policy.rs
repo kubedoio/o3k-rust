@@ -223,6 +223,7 @@ impl StatefulPolicyProvider {
             })
             .unwrap_or_default();
         all_policies.extend(policies);
+        all_policies.sort_by_key(|policy| (policy.endpoint_id, policy.id));
         let mut all_defaults: Vec<PolicyDefaultIntent> = self
             .ownership
             .as_ref()
@@ -448,6 +449,78 @@ impl StatefulPolicyProvider {
         Ok(())
     }
 
+    /// Replace exactly one Endpoint's effective snapshot while rebuilding the
+    /// provider-owned aggregate table from the complete known inventory. The
+    /// inventory is not the replacement scope: policies for every other
+    /// Endpoint are retained, and their provider evidence is rebound only
+    /// after the aggregate realization succeeds.
+    pub fn apply_endpoint_snapshot(
+        &mut self,
+        endpoint_id: Uuid,
+        intents: &[NetworkPlanIntent],
+        known_endpoints: &[PolicyEndpoint],
+    ) -> Result<(), PolicyNetworkError> {
+        if !known_endpoints
+            .iter()
+            .any(|endpoint| endpoint.endpoint_id == endpoint_id)
+        {
+            return Err(PolicyNetworkError::UnknownEndpoint);
+        }
+        let mut inventory = self
+            .ownership
+            .as_ref()
+            .map(|ownership| ownership.endpoints.clone())
+            .unwrap_or_default();
+        for endpoint in known_endpoints {
+            if let Some(existing) = inventory
+                .iter_mut()
+                .find(|existing| existing.endpoint_id == endpoint.endpoint_id)
+            {
+                *existing = endpoint.clone();
+            } else {
+                inventory.push(endpoint.clone());
+            }
+        }
+
+        let mut aggregate = self
+            .ownership
+            .as_ref()
+            .map(|ownership| {
+                ownership
+                    .policies
+                    .iter()
+                    .filter(|policy| policy.endpoint_id != endpoint_id)
+                    .cloned()
+                    .map(NetworkPlanIntent::Policy)
+                    .chain(
+                        ownership
+                            .defaults
+                            .iter()
+                            .filter(|default| default.endpoint_id != endpoint_id)
+                            .cloned()
+                            .map(NetworkPlanIntent::PolicyDefault),
+                    )
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        aggregate.extend(intents.iter().cloned());
+        self.apply(&aggregate, &inventory)?;
+
+        let Some(mut ownership) = self.ownership.clone() else {
+            return Err(PolicyNetworkError::CorruptState);
+        };
+        ownership.endpoint_fingerprints.remove(&endpoint_id);
+        ownership
+            .endpoint_aggregate_fingerprints
+            .remove(&endpoint_id);
+        for bound_aggregate in ownership.endpoint_aggregate_fingerprints.values_mut() {
+            *bound_aggregate = ownership.fingerprint.clone();
+        }
+        store_state(&self.root.join(STATE_FILE), &ownership)?;
+        self.ownership = Some(ownership);
+        Ok(())
+    }
+
     pub fn observe(&self) -> Result<bool, PolicyNetworkError> {
         let Some(ownership) = &self.ownership else {
             return Ok(true);
@@ -506,11 +579,17 @@ impl StatefulPolicyProvider {
         if !output.contains(&ownership.fingerprint) {
             return Err(PolicyNetworkError::CorruptState);
         }
-        let endpoint_fingerprint = ownership
-            .endpoint_fingerprints
-            .get(&endpoint_id)
-            .cloned()
-            .ok_or(PolicyNetworkError::CorruptState)?;
+        let endpoint_fingerprint = match ownership.endpoint_fingerprints.get(&endpoint_id) {
+            Some(fingerprint) => fingerprint.clone(),
+            None if ownership
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.endpoint_id == endpoint_id) =>
+            {
+                return Ok(None);
+            }
+            None => return Err(PolicyNetworkError::CorruptState),
+        };
         let endpoint_aggregate = ownership
             .endpoint_aggregate_fingerprints
             .get(&endpoint_id)
@@ -1069,6 +1148,121 @@ mod tests {
             provider.observe_endpoint_fingerprint(endpoint_a),
             Err(PolicyNetworkError::CorruptState)
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn endpoint_replacement_preserves_unaffected_endpoint_evidence() {
+        let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: Mutex::new(String::new()),
+        });
+        let endpoint_a = Uuid::from_u128(1);
+        let endpoint_b = Uuid::from_u128(2);
+        let endpoints = vec![
+            PolicyEndpoint {
+                endpoint_id: endpoint_a,
+                address: Ipv4Addr::new(10, 0, 0, 2),
+            },
+            PolicyEndpoint {
+                endpoint_id: endpoint_b,
+                address: Ipv4Addr::new(10, 0, 0, 3),
+            },
+        ];
+        let mut provider = StatefulPolicyProvider::with_command(
+            &root,
+            Arc::clone(&command) as Arc<dyn PolicyCommand>,
+        )
+        .expect("provider");
+        provider
+            .apply(
+                &[
+                    NetworkPlanIntent::PolicyDefault(PolicyDefaultIntent {
+                        policy_id: Uuid::from_u128(11),
+                        endpoint_id: endpoint_a,
+                        unmatched_action: PolicyAction::Deny,
+                        stateful_mode: PolicyStatefulMode::Stateful,
+                        generation: 1,
+                    }),
+                    NetworkPlanIntent::PolicyDefault(PolicyDefaultIntent {
+                        policy_id: Uuid::from_u128(12),
+                        endpoint_id: endpoint_b,
+                        unmatched_action: PolicyAction::Deny,
+                        stateful_mode: PolicyStatefulMode::Stateful,
+                        generation: 1,
+                    }),
+                ],
+                &endpoints,
+            )
+            .expect("initial aggregate");
+        provider
+            .record_endpoint_fingerprint(endpoint_a, "FA1")
+            .expect("record A");
+        provider
+            .record_endpoint_fingerprint(endpoint_b, "FB1")
+            .expect("record B");
+        let aggregate = provider
+            .ownership
+            .as_ref()
+            .expect("ownership")
+            .fingerprint
+            .clone();
+        *command.listing.lock().expect("listing") =
+            format!("table ip {TABLE} {{ comment {MARKER}:{aggregate}; }}");
+
+        provider
+            .apply_endpoint_snapshot(
+                endpoint_a,
+                &[NetworkPlanIntent::PolicyDefault(PolicyDefaultIntent {
+                    policy_id: Uuid::from_u128(11),
+                    endpoint_id: endpoint_a,
+                    unmatched_action: PolicyAction::Allow,
+                    stateful_mode: PolicyStatefulMode::Stateful,
+                    generation: 2,
+                })],
+                &endpoints,
+            )
+            .expect("replace A");
+        provider
+            .record_endpoint_fingerprint(endpoint_a, "FA2")
+            .expect("record A2");
+        let aggregate = provider
+            .ownership
+            .as_ref()
+            .expect("ownership")
+            .fingerprint
+            .clone();
+        *command.listing.lock().expect("listing") =
+            format!("table ip {TABLE} {{ comment {MARKER}:{aggregate}; }}");
+        assert_eq!(
+            provider.observe_endpoint_fingerprint(endpoint_a).ok(),
+            Some(Some("FA2".into()))
+        );
+        assert_eq!(
+            provider.observe_endpoint_fingerprint(endpoint_b).ok(),
+            Some(Some("FB1".into()))
+        );
+
+        provider
+            .apply_endpoint_snapshot(endpoint_a, &[], &endpoints)
+            .expect("remove A");
+        let aggregate = provider
+            .ownership
+            .as_ref()
+            .expect("ownership")
+            .fingerprint
+            .clone();
+        *command.listing.lock().expect("listing") =
+            format!("table ip {TABLE} {{ comment {MARKER}:{aggregate}; }}");
+        assert_eq!(
+            provider.observe_endpoint_fingerprint(endpoint_a).ok(),
+            Some(None)
+        );
+        assert_eq!(
+            provider.observe_endpoint_fingerprint(endpoint_b).ok(),
+            Some(Some("FB1".into()))
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

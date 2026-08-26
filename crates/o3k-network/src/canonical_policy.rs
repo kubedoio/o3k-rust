@@ -121,12 +121,21 @@ impl PolicySnapshotRealizer for LinuxPolicySnapshotRealizer {
         fingerprint: &str,
     ) -> PolicyApplyOutcome {
         let mut provider = self.provider.lock().await;
-        if let Err(error) = provider.apply(snapshot, &self.endpoints) {
+        if let Err(error) = provider.apply_endpoint_snapshot(endpoint_id, snapshot, &self.endpoints)
+        {
             return PolicyApplyOutcome::Unknown {
                 reason: error.to_string(),
             };
         }
-        if let Err(error) = provider.record_endpoint_fingerprint(endpoint_id, fingerprint) {
+        let has_policy = snapshot.iter().any(|intent| {
+            matches!(
+                intent,
+                NetworkPlanIntent::Policy(_) | NetworkPlanIntent::PolicyDefault(_)
+            )
+        });
+        if has_policy
+            && let Err(error) = provider.record_endpoint_fingerprint(endpoint_id, fingerprint)
+        {
             return PolicyApplyOutcome::Unknown {
                 reason: error.to_string(),
             };
@@ -1146,6 +1155,181 @@ mod tests {
             }
         );
         drop(fourth);
+        let _ = std::process::Command::new("ip")
+            .args(["netns", "del", &namespace])
+            .status();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn linux_realizer_rebuilds_one_endpoint_without_removing_another() {
+        let namespace = format!("o3k-r2a-ab-{}", Uuid::now_v7().simple());
+        let root = std::env::temp_dir().join(format!("o3k-r2a-ab-{}", Uuid::now_v7()));
+        let add = std::process::Command::new("ip")
+            .args(["netns", "add", &namespace])
+            .status()
+            .expect("create isolated namespace");
+        assert!(add.success(), "ip netns add failed");
+        let endpoint_a = Uuid::from_u128(101);
+        let endpoint_b = Uuid::from_u128(102);
+        let endpoints = vec![
+            PolicyEndpoint {
+                endpoint_id: endpoint_a,
+                address: Ipv4Addr::new(10, 0, 0, 10),
+            },
+            PolicyEndpoint {
+                endpoint_id: endpoint_b,
+                address: Ipv4Addr::new(10, 0, 0, 11),
+            },
+        ];
+        let default = |endpoint_id, policy_id, action, generation| {
+            NetworkPlanIntent::PolicyDefault(PolicyDefaultIntent {
+                policy_id,
+                endpoint_id,
+                unmatched_action: action,
+                stateful_mode: PolicyStatefulMode::Stateful,
+                generation,
+            })
+        };
+        let first =
+            LinuxPolicySnapshotRealizer::open_in_namespace(&root, &namespace, endpoints.clone())
+                .expect("first realizer");
+        assert!(matches!(
+            first
+                .apply_policy_snapshot(
+                    endpoint_a,
+                    &[default(
+                        endpoint_a,
+                        Uuid::from_u128(201),
+                        PolicyAction::Deny,
+                        1,
+                    )],
+                    "FA1",
+                )
+                .await,
+            PolicyApplyOutcome::Success { .. }
+        ));
+        assert!(matches!(
+            first
+                .apply_policy_snapshot(
+                    endpoint_b,
+                    &[default(
+                        endpoint_b,
+                        Uuid::from_u128(202),
+                        PolicyAction::Deny,
+                        1,
+                    )],
+                    "FB1",
+                )
+                .await,
+            PolicyApplyOutcome::Success { .. }
+        ));
+        drop(first);
+
+        let second =
+            LinuxPolicySnapshotRealizer::open_in_namespace(&root, &namespace, endpoints.clone())
+                .expect("second realizer");
+        assert_eq!(
+            second.observe_policy_snapshot(endpoint_a).await,
+            PolicyObservation::Observed {
+                fingerprint: "FA1".into(),
+                generation: None,
+                provider_resource_id: Some(format!("linux-policy:{endpoint_a}")),
+            }
+        );
+        assert_eq!(
+            second.observe_policy_snapshot(endpoint_b).await,
+            PolicyObservation::Observed {
+                fingerprint: "FB1".into(),
+                generation: None,
+                provider_resource_id: Some(format!("linux-policy:{endpoint_b}")),
+            }
+        );
+        drop(second);
+
+        let third =
+            LinuxPolicySnapshotRealizer::open_in_namespace(&root, &namespace, endpoints.clone())
+                .expect("third realizer");
+        assert!(matches!(
+            third
+                .apply_policy_snapshot(
+                    endpoint_a,
+                    &[default(
+                        endpoint_a,
+                        Uuid::from_u128(201),
+                        PolicyAction::Deny,
+                        2
+                    )],
+                    "FA2",
+                )
+                .await,
+            PolicyApplyOutcome::Success { .. }
+        ));
+        drop(third);
+
+        let fourth =
+            LinuxPolicySnapshotRealizer::open_in_namespace(&root, &namespace, endpoints.clone())
+                .expect("fourth realizer");
+        assert_eq!(
+            fourth.observe_policy_snapshot(endpoint_a).await,
+            PolicyObservation::Observed {
+                fingerprint: "FA2".into(),
+                generation: None,
+                provider_resource_id: Some(format!("linux-policy:{endpoint_a}")),
+            }
+        );
+        assert_eq!(
+            fourth.observe_policy_snapshot(endpoint_b).await,
+            PolicyObservation::Observed {
+                fingerprint: "FB1".into(),
+                generation: None,
+                provider_resource_id: Some(format!("linux-policy:{endpoint_b}")),
+            }
+        );
+        let listing = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &namespace,
+                "nft",
+                "list",
+                "table",
+                "ip",
+                "o3k_policy",
+            ])
+            .output()
+            .expect("inspect isolated nftables table");
+        let listing = String::from_utf8_lossy(&listing.stdout);
+        assert!(listing.contains("10.0.0.10"), "nft listing: {listing}");
+        assert!(listing.contains("10.0.0.11"), "nft listing: {listing}");
+        drop(fourth);
+
+        let fifth =
+            LinuxPolicySnapshotRealizer::open_in_namespace(&root, &namespace, endpoints.clone())
+                .expect("fifth realizer");
+        assert!(matches!(
+            fifth
+                .apply_policy_snapshot(endpoint_b, &[], "FB-absent")
+                .await,
+            PolicyApplyOutcome::Success { .. }
+        ));
+        drop(fifth);
+
+        let sixth = LinuxPolicySnapshotRealizer::open_in_namespace(&root, &namespace, endpoints)
+            .expect("sixth realizer");
+        assert_eq!(
+            sixth.observe_policy_snapshot(endpoint_a).await,
+            PolicyObservation::Observed {
+                fingerprint: "FA2".into(),
+                generation: None,
+                provider_resource_id: Some(format!("linux-policy:{endpoint_a}")),
+            }
+        );
+        assert_eq!(
+            sixth.observe_policy_snapshot(endpoint_b).await,
+            PolicyObservation::Absent
+        );
+        drop(sixth);
         let _ = std::process::Command::new("ip")
             .args(["netns", "del", &namespace])
             .status();
