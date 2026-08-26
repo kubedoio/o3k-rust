@@ -17,7 +17,7 @@ const POLICY_COLUMNS: &str = "id, project_id, name, description, stateful_mode, 
 const RULE_COLUMNS: &str = "id, policy_id, project_id, direction, address_family, protocol, port_min, port_max, remote_selector, action, state, generation, enforcement_key";
 const ATTACHMENT_COLUMNS: &str = "id, policy_id, endpoint_id, project_id, state, generation";
 
-const REALIZATION_COLUMNS: &str = "endpoint_id, project_id, desired_fingerprint, desired_generation, observed_fingerprint, observed_generation, state, provider_resource_id, last_outcome";
+const REALIZATION_COLUMNS: &str = "endpoint_id, project_id, attempt_id, desired_fingerprint, desired_generation, observed_fingerprint, observed_generation, state, provider_resource_id, last_outcome";
 
 #[async_trait]
 pub trait CanonicalPolicyRepository {
@@ -128,11 +128,20 @@ pub trait CanonicalPolicyRepository {
         project_id: &str,
         endpoint_id: &Uuid,
         expected_fingerprint: &str,
+        expected_attempt_id: &Uuid,
         state: &str,
         observed_fingerprint: Option<&str>,
         observed_generation: Option<u64>,
         provider_resource_id: Option<&str>,
         last_outcome: Option<&str>,
+    ) -> Result<(), StoreError>;
+    /// Replace desired realization metadata only if this worker still owns
+    /// the attempt it read. This prevents a late worker from overwriting a
+    /// newer desired/observed result.
+    async fn requeue_policy_realization(
+        &self,
+        expected_attempt_id: &Uuid,
+        realization: &CanonicalPolicyRealizationRecord,
     ) -> Result<(), StoreError>;
 }
 
@@ -328,6 +337,7 @@ fn sqlite_realization(
     Ok(CanonicalPolicyRealizationRecord {
         endpoint_id: parse_uuid(row.get("endpoint_id"))?,
         project_id: row.get("project_id"),
+        attempt_id: parse_uuid(row.get("attempt_id"))?,
         desired_fingerprint: row.get("desired_fingerprint"),
         desired_generation: u64::try_from(row.get::<i64, _>("desired_generation"))
             .map_err(|_| StoreError::Corrupt("negative desired policy generation".into()))?,
@@ -754,8 +764,8 @@ impl crate::SqliteStore {
         {
             return Err(StoreError::Corrupt("invalid policy realization".into()));
         }
-        sqlx::query("INSERT INTO canonical_policy_realizations (endpoint_id, project_id, desired_fingerprint, desired_generation, observed_fingerprint, observed_generation, state, provider_resource_id, last_outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(endpoint_id) DO UPDATE SET project_id=excluded.project_id, desired_fingerprint=excluded.desired_fingerprint, desired_generation=excluded.desired_generation, observed_fingerprint=excluded.observed_fingerprint, observed_generation=excluded.observed_generation, state=excluded.state, provider_resource_id=excluded.provider_resource_id, last_outcome=excluded.last_outcome")
-            .bind(r.endpoint_id.to_string()).bind(&r.project_id).bind(&r.desired_fingerprint).bind(checked_generation(r.desired_generation)?)
+        sqlx::query("INSERT INTO canonical_policy_realizations (endpoint_id, project_id, attempt_id, desired_fingerprint, desired_generation, observed_fingerprint, observed_generation, state, provider_resource_id, last_outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(endpoint_id) DO UPDATE SET project_id=excluded.project_id, attempt_id=excluded.attempt_id, desired_fingerprint=excluded.desired_fingerprint, desired_generation=excluded.desired_generation, observed_fingerprint=excluded.observed_fingerprint, observed_generation=excluded.observed_generation, state=excluded.state, provider_resource_id=excluded.provider_resource_id, last_outcome=excluded.last_outcome")
+            .bind(r.endpoint_id.to_string()).bind(&r.project_id).bind(r.attempt_id.to_string()).bind(&r.desired_fingerprint).bind(checked_generation(r.desired_generation)?)
             .bind(&r.observed_fingerprint).bind(r.observed_generation.map(checked_generation).transpose()?).bind(&r.state).bind(&r.provider_resource_id).bind(&r.last_outcome)
             .execute(&self.pool).await.map_err(StoreError::Database).map(|_| ())
     }
@@ -780,6 +790,7 @@ impl crate::SqliteStore {
         project: &str,
         endpoint: &Uuid,
         expected: &str,
+        expected_attempt_id: &Uuid,
         state: &str,
         observed: Option<&str>,
         observed_generation: Option<u64>,
@@ -794,9 +805,25 @@ impl crate::SqliteStore {
                 "invalid policy realization state".into(),
             ));
         }
-        let result = sqlx::query("UPDATE canonical_policy_realizations SET observed_fingerprint=?, observed_generation=?, state=?, provider_resource_id=?, last_outcome=? WHERE endpoint_id=? AND project_id=? AND desired_fingerprint=?")
+        let result = sqlx::query("UPDATE canonical_policy_realizations SET observed_fingerprint=?, observed_generation=?, state=?, provider_resource_id=?, last_outcome=? WHERE endpoint_id=? AND project_id=? AND desired_fingerprint=? AND attempt_id=?")
             .bind(observed).bind(observed_generation.map(checked_generation).transpose()?).bind(state).bind(provider_resource_id).bind(last_outcome)
-            .bind(endpoint.to_string()).bind(project).bind(expected).execute(&self.pool).await.map_err(StoreError::Database)?;
+            .bind(endpoint.to_string()).bind(project).bind(expected).bind(expected_attempt_id.to_string()).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(StoreError::StaleGeneration)
+        }
+    }
+
+    pub async fn requeue_policy_realization(
+        &self,
+        expected_attempt_id: &Uuid,
+        r: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query("UPDATE canonical_policy_realizations SET attempt_id=?, desired_fingerprint=?, desired_generation=?, observed_fingerprint=?, observed_generation=?, state=?, provider_resource_id=?, last_outcome=? WHERE endpoint_id=? AND project_id=? AND attempt_id=?")
+            .bind(r.attempt_id.to_string()).bind(&r.desired_fingerprint).bind(checked_generation(r.desired_generation)?)
+            .bind(&r.observed_fingerprint).bind(r.observed_generation.map(checked_generation).transpose()?).bind(&r.state).bind(&r.provider_resource_id).bind(&r.last_outcome)
+            .bind(r.endpoint_id.to_string()).bind(&r.project_id).bind(expected_attempt_id.to_string()).execute(&self.pool).await.map_err(StoreError::Database)?;
         if result.rows_affected() == 1 {
             Ok(())
         } else {
@@ -954,14 +981,22 @@ impl CanonicalPolicyRepository for crate::SqliteStore {
         p: &str,
         e: &Uuid,
         f: &str,
+        a: &Uuid,
         s: &str,
         o: Option<&str>,
         g: Option<u64>,
         r: Option<&str>,
         l: Option<&str>,
     ) -> Result<(), StoreError> {
-        self.set_policy_realization_outcome(p, e, f, s, o, g, r, l)
+        self.set_policy_realization_outcome(p, e, f, a, s, o, g, r, l)
             .await
+    }
+    async fn requeue_policy_realization(
+        &self,
+        a: &Uuid,
+        r: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        self.requeue_policy_realization(a, r).await
     }
 }
 
@@ -1026,6 +1061,7 @@ fn pg_realization(
     Ok(CanonicalPolicyRealizationRecord {
         endpoint_id: parse_uuid(row.get("endpoint_id"))?,
         project_id: row.get("project_id"),
+        attempt_id: parse_uuid(row.get("attempt_id"))?,
         desired_fingerprint: row.get("desired_fingerprint"),
         desired_generation: u64::try_from(row.get::<i64, _>("desired_generation"))
             .map_err(|_| StoreError::Corrupt("negative desired policy generation".into()))?,
@@ -1428,8 +1464,8 @@ impl crate::PostgresStore {
         {
             return Err(StoreError::Corrupt("invalid policy realization".into()));
         }
-        sqlx::query("INSERT INTO canonical_policy_realizations (endpoint_id, project_id, desired_fingerprint, desired_generation, observed_fingerprint, observed_generation, state, provider_resource_id, last_outcome) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT(endpoint_id) DO UPDATE SET project_id=excluded.project_id, desired_fingerprint=excluded.desired_fingerprint, desired_generation=excluded.desired_generation, observed_fingerprint=excluded.observed_fingerprint, observed_generation=excluded.observed_generation, state=excluded.state, provider_resource_id=excluded.provider_resource_id, last_outcome=excluded.last_outcome")
-            .bind(r.endpoint_id.to_string()).bind(&r.project_id).bind(&r.desired_fingerprint).bind(checked_generation(r.desired_generation)?)
+        sqlx::query("INSERT INTO canonical_policy_realizations (endpoint_id, project_id, attempt_id, desired_fingerprint, desired_generation, observed_fingerprint, observed_generation, state, provider_resource_id, last_outcome) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT(endpoint_id) DO UPDATE SET project_id=excluded.project_id, attempt_id=excluded.attempt_id, desired_fingerprint=excluded.desired_fingerprint, desired_generation=excluded.desired_generation, observed_fingerprint=excluded.observed_fingerprint, observed_generation=excluded.observed_generation, state=excluded.state, provider_resource_id=excluded.provider_resource_id, last_outcome=excluded.last_outcome")
+            .bind(r.endpoint_id.to_string()).bind(&r.project_id).bind(r.attempt_id.to_string()).bind(&r.desired_fingerprint).bind(checked_generation(r.desired_generation)?)
             .bind(&r.observed_fingerprint).bind(r.observed_generation.map(checked_generation).transpose()?).bind(&r.state).bind(&r.provider_resource_id).bind(&r.last_outcome)
             .execute(&self.pool).await.map_err(StoreError::Database).map(|_| ())
     }
@@ -1454,6 +1490,7 @@ impl crate::PostgresStore {
         project: &str,
         endpoint: &Uuid,
         expected: &str,
+        expected_attempt_id: &Uuid,
         state: &str,
         observed: Option<&str>,
         observed_generation: Option<u64>,
@@ -1468,9 +1505,25 @@ impl crate::PostgresStore {
                 "invalid policy realization state".into(),
             ));
         }
-        let result = sqlx::query("UPDATE canonical_policy_realizations SET observed_fingerprint=$1, observed_generation=$2, state=$3, provider_resource_id=$4, last_outcome=$5 WHERE endpoint_id=$6 AND project_id=$7 AND desired_fingerprint=$8")
+        let result = sqlx::query("UPDATE canonical_policy_realizations SET observed_fingerprint=$1, observed_generation=$2, state=$3, provider_resource_id=$4, last_outcome=$5 WHERE endpoint_id=$6 AND project_id=$7 AND desired_fingerprint=$8 AND attempt_id=$9")
             .bind(observed).bind(observed_generation.map(checked_generation).transpose()?).bind(state).bind(provider_resource_id).bind(last_outcome)
-            .bind(endpoint.to_string()).bind(project).bind(expected).execute(&self.pool).await.map_err(StoreError::Database)?;
+            .bind(endpoint.to_string()).bind(project).bind(expected).bind(expected_attempt_id.to_string()).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(StoreError::StaleGeneration)
+        }
+    }
+
+    pub async fn requeue_policy_realization(
+        &self,
+        expected_attempt_id: &Uuid,
+        r: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query("UPDATE canonical_policy_realizations SET attempt_id=$1, desired_fingerprint=$2, desired_generation=$3, observed_fingerprint=$4, observed_generation=$5, state=$6, provider_resource_id=$7, last_outcome=$8 WHERE endpoint_id=$9 AND project_id=$10 AND attempt_id=$11")
+            .bind(r.attempt_id.to_string()).bind(&r.desired_fingerprint).bind(checked_generation(r.desired_generation)?)
+            .bind(&r.observed_fingerprint).bind(r.observed_generation.map(checked_generation).transpose()?).bind(&r.state).bind(&r.provider_resource_id).bind(&r.last_outcome)
+            .bind(r.endpoint_id.to_string()).bind(&r.project_id).bind(expected_attempt_id.to_string()).execute(&self.pool).await.map_err(StoreError::Database)?;
         if result.rows_affected() == 1 {
             Ok(())
         } else {
@@ -1628,14 +1681,22 @@ impl CanonicalPolicyRepository for crate::PostgresStore {
         p: &str,
         e: &Uuid,
         f: &str,
+        a: &Uuid,
         s: &str,
         o: Option<&str>,
         g: Option<u64>,
         r: Option<&str>,
         l: Option<&str>,
     ) -> Result<(), StoreError> {
-        self.set_policy_realization_outcome(p, e, f, s, o, g, r, l)
+        self.set_policy_realization_outcome(p, e, f, a, s, o, g, r, l)
             .await
+    }
+    async fn requeue_policy_realization(
+        &self,
+        a: &Uuid,
+        r: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        self.requeue_policy_realization(a, r).await
     }
 }
 
@@ -1757,6 +1818,7 @@ mod tests {
         let first = CanonicalPolicyRealizationRecord {
             endpoint_id: endpoint,
             project_id: "project-a".into(),
+            attempt_id: Uuid::from_u128(301),
             desired_fingerprint: "sha256:first".into(),
             desired_generation: 2,
             observed_fingerprint: None,
@@ -1782,6 +1844,53 @@ mod tests {
             store.list_policy_realizations("project-a").await?.first(),
             Some(&realized)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn realization_outcome_is_fenced_by_attempt_id() -> Result<(), StoreError> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let endpoint = Uuid::from_u128(32);
+        endpoint_fixture(&store, endpoint).await?;
+        let first = CanonicalPolicyRealizationRecord {
+            endpoint_id: endpoint,
+            project_id: "project-a".into(),
+            attempt_id: Uuid::from_u128(303),
+            desired_fingerprint: "sha256:same-desired".into(),
+            desired_generation: 2,
+            observed_fingerprint: None,
+            observed_generation: None,
+            state: "applying".into(),
+            provider_resource_id: None,
+            last_outcome: None,
+        };
+        store.upsert_policy_realization(&first).await?;
+        let second = CanonicalPolicyRealizationRecord {
+            attempt_id: Uuid::from_u128(304),
+            ..first.clone()
+        };
+        store.upsert_policy_realization(&second).await?;
+        assert!(matches!(
+            store
+                .set_policy_realization_outcome(
+                    "project-a",
+                    &endpoint,
+                    &first.desired_fingerprint,
+                    &first.attempt_id,
+                    "realized",
+                    Some(&first.desired_fingerprint),
+                    Some(first.desired_generation),
+                    None,
+                    Some("late worker"),
+                )
+                .await,
+            Err(StoreError::StaleGeneration)
+        ));
+        let Some(current) = store.get_policy_realization("project-a", &endpoint).await? else {
+            return Err(StoreError::Corrupt("realization disappeared".into()));
+        };
+        assert_eq!(current.attempt_id, second.attempt_id);
+        assert_eq!(current.state, "applying");
         Ok(())
     }
 

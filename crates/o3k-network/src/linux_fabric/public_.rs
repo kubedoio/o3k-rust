@@ -29,7 +29,7 @@ impl super::LinuxFabricBackend {
             .get(&plan.realm_id)
             .cloned()
             .ok_or(LinuxFabricError::CorruptState)?;
-        let fingerprint = public_fingerprint(plan);
+        let fingerprint = public_fingerprint(plan).map_err(|_| LinuxFabricError::CorruptState)?;
         let mark = public_mark(plan.realm_id);
         let route_table = public_route_table(plan.realm_id);
         let root_table = public_root_table_name(plan.realm_id);

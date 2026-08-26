@@ -222,7 +222,7 @@ impl StatefulPolicyProvider {
                 return Err(PolicyNetworkError::UnknownEndpoint);
             }
         }
-        let fingerprint = fingerprint(&all_policies, &all_defaults);
+        let fingerprint = fingerprint(&all_policies, &all_defaults)?;
         let ownership = Ownership {
             fingerprint,
             endpoint_ids: all_endpoints
@@ -508,11 +508,13 @@ fn protocol_name(protocol: NetworkProtocol) -> Option<&'static str> {
     }
 }
 
-fn fingerprint(policies: &[PolicyIntent], defaults: &[PolicyDefaultIntent]) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&(policies, defaults)).unwrap_or_default())
-    )
+fn fingerprint(
+    policies: &[PolicyIntent],
+    defaults: &[PolicyDefaultIntent],
+) -> Result<String, PolicyNetworkError> {
+    let bytes =
+        serde_json::to_vec(&(policies, defaults)).map_err(|_| PolicyNetworkError::CorruptState)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn load_state(path: &Path) -> Result<Option<Ownership>, PolicyNetworkError> {

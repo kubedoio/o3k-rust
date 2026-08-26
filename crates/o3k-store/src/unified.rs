@@ -321,6 +321,7 @@ impl CanonicalPolicyRepository for O3kStore {
         project: &str,
         endpoint: &Uuid,
         expected: &str,
+        attempt_id: &Uuid,
         state: &str,
         observed: Option<&str>,
         generation: Option<u64>,
@@ -333,6 +334,7 @@ impl CanonicalPolicyRepository for O3kStore {
                     project,
                     endpoint,
                     expected,
+                    attempt_id,
                     state,
                     observed,
                     generation,
@@ -346,6 +348,7 @@ impl CanonicalPolicyRepository for O3kStore {
                     project,
                     endpoint,
                     expected,
+                    attempt_id,
                     state,
                     observed,
                     generation,
@@ -353,6 +356,23 @@ impl CanonicalPolicyRepository for O3kStore {
                     last_outcome,
                 )
                 .await
+            }
+        }
+    }
+
+    async fn requeue_policy_realization(
+        &self,
+        expected_attempt_id: &Uuid,
+        realization: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.requeue_policy_realization(expected_attempt_id, realization)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.requeue_policy_realization(expected_attempt_id, realization)
+                    .await
             }
         }
     }

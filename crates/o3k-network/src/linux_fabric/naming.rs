@@ -56,14 +56,15 @@ pub(crate) fn public_root_table_name(realm_id: Uuid) -> String {
 pub(crate) fn public_realm_table_name(realm_id: Uuid) -> String {
     provider_name("n", realm_id, "public")
 }
-pub(crate) fn policy_fingerprint(plan: &NamespacedRoutedFabricPlan) -> String {
+pub(crate) fn policy_fingerprint(
+    plan: &NamespacedRoutedFabricPlan,
+) -> Result<String, serde_json::Error> {
     let bytes = serde_json::to_vec(&(
         plan.policy_generation,
         &plan.policy_defaults,
         &plan.policies,
-    ))
-    .unwrap_or_default();
-    format!("{:x}", Sha256::digest(bytes))
+    ))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 pub(crate) fn policy_protocol(protocol: NetworkProtocol) -> Option<&'static str> {
     match protocol {
@@ -73,9 +74,11 @@ pub(crate) fn policy_protocol(protocol: NetworkProtocol) -> Option<&'static str>
         NetworkProtocol::Icmp => Some("icmp"),
     }
 }
-pub(crate) fn public_fingerprint(plan: &NamespacedRoutedFabricPlan) -> String {
-    let bytes = serde_json::to_vec(&plan.public_bindings).unwrap_or_default();
-    format!("{:x}", Sha256::digest(bytes))
+pub(crate) fn public_fingerprint(
+    plan: &NamespacedRoutedFabricPlan,
+) -> Result<String, serde_json::Error> {
+    let bytes = serde_json::to_vec(&plan.public_bindings)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 pub(crate) fn public_mark(realm_id: Uuid) -> u32 {
     let digest = Sha256::digest(realm_id.as_bytes());

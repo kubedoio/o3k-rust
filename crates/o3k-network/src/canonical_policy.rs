@@ -238,12 +238,16 @@ where
             }
             if record.desired_fingerprint != current_fingerprint {
                 self.repository
-                    .upsert_policy_realization(&CanonicalPolicyRealizationRecord {
-                        desired_fingerprint: current_fingerprint.clone(),
-                        desired_generation: current_generation,
-                        state: "pending".into(),
-                        ..record.clone()
-                    })
+                    .requeue_policy_realization(
+                        &record.attempt_id,
+                        &CanonicalPolicyRealizationRecord {
+                            attempt_id: record.attempt_id,
+                            desired_fingerprint: current_fingerprint.clone(),
+                            desired_generation: current_generation,
+                            state: "pending".into(),
+                            ..record.clone()
+                        },
+                    )
                     .await?;
             }
             if record.state == "unknown" {
@@ -262,6 +266,7 @@ where
                                 project_id,
                                 &record.endpoint_id,
                                 &current_fingerprint,
+                                &record.attempt_id,
                                 "realized",
                                 Some(&fingerprint),
                                 generation.or(Some(current_generation)),
@@ -321,14 +326,22 @@ where
         if expected_fingerprint.is_some_and(|expected| expected != fingerprint) {
             return Err(CanonicalPolicyServiceError::StaleSnapshot);
         }
+        let attempt_id = Uuid::now_v7();
+        let previous = self
+            .repository
+            .get_policy_realization(project_id, &endpoint_id)
+            .await?;
         self.repository
             .upsert_policy_realization(&CanonicalPolicyRealizationRecord {
                 endpoint_id,
                 project_id: project_id.to_owned(),
+                attempt_id,
                 desired_fingerprint: fingerprint.clone(),
                 desired_generation: generation,
-                observed_fingerprint: None,
-                observed_generation: None,
+                observed_fingerprint: previous
+                    .as_ref()
+                    .and_then(|r| r.observed_fingerprint.clone()),
+                observed_generation: previous.as_ref().and_then(|r| r.observed_generation),
                 state: "applying".into(),
                 provider_resource_id: None,
                 last_outcome: None,
@@ -343,6 +356,7 @@ where
             } => CanonicalPolicyRealizationRecord {
                 endpoint_id,
                 project_id: project_id.to_owned(),
+                attempt_id,
                 desired_fingerprint: fingerprint.clone(),
                 desired_generation: generation,
                 observed_fingerprint: Some(fingerprint),
@@ -354,6 +368,7 @@ where
             PolicyApplyOutcome::DefiniteFailure { reason } => CanonicalPolicyRealizationRecord {
                 endpoint_id,
                 project_id: project_id.to_owned(),
+                attempt_id,
                 desired_fingerprint: fingerprint,
                 desired_generation: generation,
                 observed_fingerprint: None,
@@ -365,6 +380,7 @@ where
             PolicyApplyOutcome::Unknown { reason } => CanonicalPolicyRealizationRecord {
                 endpoint_id,
                 project_id: project_id.to_owned(),
+                attempt_id,
                 desired_fingerprint: fingerprint,
                 desired_generation: generation,
                 observed_fingerprint: None,
@@ -383,6 +399,7 @@ where
             if current_fingerprint != realization.desired_fingerprint {
                 let observed_fingerprint = realization.observed_fingerprint.clone();
                 let observed_generation = realization.observed_generation;
+                let expected_attempt_id = realization.attempt_id;
                 let mut pending = realization;
                 pending.desired_fingerprint = current_fingerprint;
                 pending.desired_generation = current_generation;
@@ -390,7 +407,12 @@ where
                 pending.observed_fingerprint = observed_fingerprint;
                 pending.observed_generation = observed_generation;
                 pending.last_outcome = Some("stale provider success; requeue".into());
-                self.repository.upsert_policy_realization(&pending).await?;
+                // Keep the attempt fence attached to the provider result. A
+                // newer worker cannot be overwritten by this late success;
+                // its CAS outcome below will fail against the new attempt.
+                self.repository
+                    .requeue_policy_realization(&expected_attempt_id, &pending)
+                    .await?;
                 return Ok(outcome);
             }
         }
@@ -399,6 +421,7 @@ where
                 project_id,
                 &endpoint_id,
                 &realization.desired_fingerprint,
+                &realization.attempt_id,
                 &realization.state,
                 realization.observed_fingerprint.as_deref(),
                 realization.observed_generation,

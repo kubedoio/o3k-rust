@@ -12,7 +12,7 @@ impl super::LinuxFabricBackend {
             return self.remove_policy(plan);
         }
         Self::validate_policy_plan(plan)?;
-        let fingerprint = policy_fingerprint(plan);
+        let fingerprint = policy_fingerprint(plan).map_err(|_| LinuxFabricError::CorruptState)?;
         if current.policy_generation == plan.policy_generation
             && current.policy_fingerprint == fingerprint
         {

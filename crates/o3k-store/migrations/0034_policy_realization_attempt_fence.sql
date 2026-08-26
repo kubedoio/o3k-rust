@@ -1,0 +1,2 @@
+ALTER TABLE canonical_policy_realizations
+    ADD COLUMN attempt_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000';

@@ -222,6 +222,7 @@ async fn postgres_p13_b1_attachment_lifecycle_and_races() -> Result<(), StoreErr
         .upsert_policy_realization(&CanonicalPolicyRealizationRecord {
             endpoint_id,
             project_id: project.into(),
+            attempt_id: Uuid::from_u128(302),
             desired_fingerprint: "sha256:p13-b2".into(),
             desired_generation: 3,
             observed_fingerprint: None,

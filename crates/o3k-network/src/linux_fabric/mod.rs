@@ -303,6 +303,40 @@ impl LinuxFabricBackend {
 }
 
 impl LinuxFabricBackend {
+    /// Observe the exact policy fingerprint advertised by the provider-owned
+    /// nftables table. This reads provider state after restart; it does not
+    /// consult the control-plane realization record and cannot reconstruct
+    /// canonical policy state.
+    pub fn observe_policy_fingerprint(
+        &self,
+        realm_id: Uuid,
+    ) -> Result<Option<String>, LinuxFabricError> {
+        let Some(ownership) = self.state.realms.get(&realm_id) else {
+            return Ok(None);
+        };
+        let table = policy_table_name(realm_id);
+        let (exists, listing) = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    ownership.namespace.as_str(),
+                    "nft",
+                    "list",
+                    "table",
+                    "ip",
+                    table.as_str(),
+                ],
+            )
+            .map_err(LinuxFabricError::Storage)?;
+        if !exists {
+            return Ok(None);
+        }
+        Ok(Some(extract_policy_fingerprint(&listing)?))
+    }
+
     fn persist_plan(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxFabricError> {
         store_plan(
             &self.plans_path.join(format!("{}.json", plan.realm_id)),
@@ -319,6 +353,17 @@ impl LinuxFabricBackend {
         }
         Ok(())
     }
+}
+
+fn extract_policy_fingerprint(listing: &str) -> Result<String, LinuxFabricError> {
+    let marker = "o3k-p11-policy:";
+    let start = listing.find(marker).ok_or(LinuxFabricError::ForeignState)? + marker.len();
+    listing[start..]
+        .split(|character: char| character == '"' || character.is_whitespace())
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or(LinuxFabricError::CorruptState)
 }
 
 impl FabricBackend for LinuxFabricBackend {
@@ -775,6 +820,21 @@ mod tests {
         provider.remove(&current).expect("remove");
         assert!(provider.observe_removed(&current).expect("removed"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_observation_extracts_exact_owned_fingerprint() {
+        assert_eq!(
+            extract_policy_fingerprint(
+                "table ip o3k-policy { comment \"o3k-p11-policy:sha256:f1\"; }"
+            )
+            .expect("marker"),
+            "sha256:f1"
+        );
+        assert!(matches!(
+            extract_policy_fingerprint("table ip o3k-policy { }"),
+            Err(LinuxFabricError::ForeignState)
+        ));
     }
 
     #[test]

@@ -188,6 +188,9 @@ pub struct CanonicalEndpointRecord {
 pub struct CanonicalPolicyRealizationRecord {
     pub endpoint_id: Uuid,
     pub project_id: String,
+    /// Unique durable fence for one reconciliation attempt. This is derived
+    /// execution state, never canonical policy identity.
+    pub attempt_id: Uuid,
     pub desired_fingerprint: String,
     pub desired_generation: u64,
     pub observed_fingerprint: Option<String>,
