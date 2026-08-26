@@ -31,7 +31,7 @@ pub use policy::{PolicyEndpoint, PolicyNetworkError, StatefulPolicyProvider};
 pub mod routed;
 pub use canonical_policy::{
     CanonicalPolicyCompileError, CanonicalPolicyService, CanonicalPolicyServiceError,
-    PolicyApplyOutcome, PolicySnapshotRealizer, compile_endpoint_policy,
+    PolicyApplyOutcome, PolicyObservation, PolicySnapshotRealizer, compile_endpoint_policy,
 };
 pub use execution::{
     FlatNetworkError, FlatNetworkRealizer, NetworkAgentIdentity, NetworkControllerLease,

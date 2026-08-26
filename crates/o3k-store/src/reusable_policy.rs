@@ -122,6 +122,7 @@ pub trait CanonicalPolicyRepository {
         &self,
         project_id: &str,
     ) -> Result<Vec<CanonicalPolicyRealizationRecord>, StoreError>;
+    #[allow(clippy::too_many_arguments)]
     async fn set_policy_realization_outcome(
         &self,
         project_id: &str,
@@ -773,6 +774,7 @@ impl crate::SqliteStore {
         let rows = sqlx::query(&format!("SELECT {REALIZATION_COLUMNS} FROM canonical_policy_realizations WHERE project_id=? ORDER BY endpoint_id")).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         rows.iter().map(sqlite_realization).collect()
     }
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_policy_realization_outcome(
         &self,
         project: &str,
@@ -1446,6 +1448,7 @@ impl crate::PostgresStore {
         let rows = sqlx::query(&format!("SELECT {REALIZATION_COLUMNS} FROM canonical_policy_realizations WHERE project_id=$1 ORDER BY endpoint_id")).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         rows.iter().map(pg_realization).collect()
     }
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_policy_realization_outcome(
         &self,
         project: &str,

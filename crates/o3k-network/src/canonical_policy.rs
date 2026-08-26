@@ -49,6 +49,19 @@ pub enum PolicyApplyOutcome {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyObservation {
+    Observed {
+        fingerprint: String,
+        generation: Option<u64>,
+        provider_resource_id: Option<String>,
+    },
+    Absent,
+    Unknown {
+        reason: String,
+    },
+}
+
 #[async_trait]
 pub trait PolicySnapshotRealizer: Send + Sync {
     async fn apply_policy_snapshot(
@@ -58,8 +71,8 @@ pub trait PolicySnapshotRealizer: Send + Sync {
         fingerprint: &str,
     ) -> PolicyApplyOutcome;
 
-    async fn observe_policy_snapshot(&self, _endpoint_id: Uuid) -> PolicyApplyOutcome {
-        PolicyApplyOutcome::Unknown {
+    async fn observe_policy_snapshot(&self, _endpoint_id: Uuid) -> PolicyObservation {
+        PolicyObservation::Unknown {
             reason: "provider observation is unavailable".into(),
         }
     }
@@ -75,6 +88,8 @@ pub enum CanonicalPolicyServiceError {
     Compile(#[from] CanonicalPolicyCompileError),
     #[error("policy store error: {0}")]
     Store(#[from] o3k_store::StoreError),
+    #[error("policy snapshot fingerprint serialization failed: {0}")]
+    Fingerprint(#[from] serde_json::Error),
 }
 
 #[derive(Clone)]
@@ -97,6 +112,17 @@ where
         project_id: &str,
         endpoint_id: Uuid,
     ) -> Result<(Vec<NetworkPlanIntent>, String), CanonicalPolicyServiceError> {
+        let (snapshot, fingerprint, _) = self
+            .compile_endpoint_with_metadata(project_id, endpoint_id)
+            .await?;
+        Ok((snapshot, fingerprint))
+    }
+
+    async fn compile_endpoint_with_metadata(
+        &self,
+        project_id: &str,
+        endpoint_id: Uuid,
+    ) -> Result<(Vec<NetworkPlanIntent>, String, u64), CanonicalPolicyServiceError> {
         let endpoint = self
             .repository
             .get_canonical_endpoint(project_id, &endpoint_id)
@@ -128,8 +154,9 @@ where
             &rules,
             &attachments,
             &snapshot,
-        );
-        Ok((snapshot, fingerprint))
+        )?;
+        let generation = snapshot_generation(&endpoint, &realm, &policies, &rules, &attachments);
+        Ok((snapshot, fingerprint, generation))
     }
 
     /// Return every active Endpoint affected by a policy mutation, sorted by
@@ -200,37 +227,66 @@ where
         let records = self.repository.list_policy_realizations(project_id).await?;
         let mut outcomes = Vec::new();
         for record in records {
-            if record.state == "realized" {
+            let (_, current_fingerprint, current_generation) = self
+                .compile_endpoint_with_metadata(project_id, record.endpoint_id)
+                .await?;
+            if record.state == "realized"
+                && record.desired_fingerprint == current_fingerprint
+                && record.observed_fingerprint.as_deref() == Some(current_fingerprint.as_str())
+            {
                 continue;
+            }
+            if record.desired_fingerprint != current_fingerprint {
+                self.repository
+                    .upsert_policy_realization(&CanonicalPolicyRealizationRecord {
+                        desired_fingerprint: current_fingerprint.clone(),
+                        desired_generation: current_generation,
+                        state: "pending".into(),
+                        ..record.clone()
+                    })
+                    .await?;
             }
             if record.state == "unknown" {
                 let observation = provider.observe_policy_snapshot(record.endpoint_id).await;
-                if let PolicyApplyOutcome::Success {
-                    provider_resource_id,
-                } = observation.clone()
-                {
-                    let observed_outcome = PolicyApplyOutcome::Success {
-                        provider_resource_id: provider_resource_id.clone(),
-                    };
-                    self.repository
-                        .set_policy_realization_outcome(
-                            project_id,
-                            &record.endpoint_id,
-                            &record.desired_fingerprint,
-                            "realized",
-                            Some(&record.desired_fingerprint),
-                            Some(record.desired_generation),
-                            provider_resource_id.as_deref(),
-                            Some("observed after unknown outcome"),
-                        )
-                        .await?;
-                    outcomes.push((record.endpoint_id, observed_outcome));
-                    continue;
+                match observation {
+                    PolicyObservation::Observed {
+                        fingerprint,
+                        generation,
+                        provider_resource_id,
+                    } if fingerprint == current_fingerprint => {
+                        let observed_outcome = PolicyApplyOutcome::Success {
+                            provider_resource_id: provider_resource_id.clone(),
+                        };
+                        self.repository
+                            .set_policy_realization_outcome(
+                                project_id,
+                                &record.endpoint_id,
+                                &current_fingerprint,
+                                "realized",
+                                Some(&fingerprint),
+                                generation.or(Some(current_generation)),
+                                provider_resource_id.as_deref(),
+                                Some("observed after unknown outcome"),
+                            )
+                            .await?;
+                        outcomes.push((record.endpoint_id, observed_outcome));
+                    }
+                    PolicyObservation::Observed { .. } | PolicyObservation::Absent => {
+                        outcomes.push((
+                            record.endpoint_id,
+                            self.reconcile_endpoint_policy(
+                                project_id,
+                                record.endpoint_id,
+                                Some(&current_fingerprint),
+                                provider,
+                            )
+                            .await?,
+                        ));
+                    }
+                    PolicyObservation::Unknown { reason } => {
+                        outcomes.push((record.endpoint_id, PolicyApplyOutcome::Unknown { reason }));
+                    }
                 }
-                // Unknown remains unknown until observation resolves it. Do
-                // not blindly issue a second provider mutation after a
-                // transport timeout or process restart.
-                outcomes.push((record.endpoint_id, observation));
                 continue;
             }
             outcomes.push((
@@ -238,7 +294,7 @@ where
                 self.reconcile_endpoint_policy(
                     project_id,
                     record.endpoint_id,
-                    Some(&record.desired_fingerprint),
+                    Some(&current_fingerprint),
                     provider,
                 )
                 .await?,
@@ -259,11 +315,12 @@ where
     where
         P: PolicySnapshotRealizer,
     {
-        let (snapshot, fingerprint) = self.compile_endpoint(project_id, endpoint_id).await?;
+        let (snapshot, fingerprint, generation) = self
+            .compile_endpoint_with_metadata(project_id, endpoint_id)
+            .await?;
         if expected_fingerprint.is_some_and(|expected| expected != fingerprint) {
             return Err(CanonicalPolicyServiceError::StaleSnapshot);
         }
-        let generation = snapshot_generation(&snapshot);
         self.repository
             .upsert_policy_realization(&CanonicalPolicyRealizationRecord {
                 endpoint_id,
@@ -320,13 +377,18 @@ where
         if matches!(outcome, PolicyApplyOutcome::Success { .. }) {
             // The canonical graph may have changed while the provider call
             // was in flight. Never record an old snapshot as current.
-            let (_, current_fingerprint) = self.compile_endpoint(project_id, endpoint_id).await?;
+            let (_, current_fingerprint, current_generation) = self
+                .compile_endpoint_with_metadata(project_id, endpoint_id)
+                .await?;
             if current_fingerprint != realization.desired_fingerprint {
+                let observed_fingerprint = realization.observed_fingerprint.clone();
+                let observed_generation = realization.observed_generation;
                 let mut pending = realization;
                 pending.desired_fingerprint = current_fingerprint;
+                pending.desired_generation = current_generation;
                 pending.state = "pending".into();
-                pending.observed_fingerprint = None;
-                pending.observed_generation = None;
+                pending.observed_fingerprint = observed_fingerprint;
+                pending.observed_generation = observed_generation;
                 pending.last_outcome = Some("stale provider success; requeue".into());
                 self.repository.upsert_policy_realization(&pending).await?;
                 return Ok(outcome);
@@ -348,14 +410,40 @@ where
     }
 }
 
-fn snapshot_generation(snapshot: &[NetworkPlanIntent]) -> u64 {
-    snapshot
+fn snapshot_generation(
+    endpoint: &CanonicalEndpointRecord,
+    realm: &CanonicalAddressRealmRecord,
+    policies: &[CanonicalReusableNetworkPolicyRecord],
+    rules: &[CanonicalNetworkPolicyRuleRecord],
+    attachments: &[CanonicalPolicyAttachmentRecord],
+) -> u64 {
+    let policy_ids = attachments
         .iter()
-        .map(|intent| match intent {
-            NetworkPlanIntent::Policy(policy) => policy.id.as_u128() as u64,
-            NetworkPlanIntent::PolicyDefault(default) => default.generation,
-            _ => 0,
-        })
+        .filter(|attachment| attachment.endpoint_id == endpoint.id && attachment.state != "deleted")
+        .map(|attachment| attachment.policy_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    std::iter::once(endpoint.generation)
+        .chain(std::iter::once(realm.generation))
+        .chain(
+            policies
+                .iter()
+                .filter(|policy| policy_ids.contains(&policy.id))
+                .map(|policy| policy.generation),
+        )
+        .chain(
+            rules
+                .iter()
+                .filter(|rule| policy_ids.contains(&rule.policy_id) && rule.state != "deleted")
+                .map(|rule| rule.generation),
+        )
+        .chain(
+            attachments
+                .iter()
+                .filter(|attachment| {
+                    attachment.endpoint_id == endpoint.id && attachment.state != "deleted"
+                })
+                .map(|attachment| attachment.generation),
+        )
         .max()
         .unwrap_or(1)
 }
@@ -367,13 +455,35 @@ fn policy_snapshot_fingerprint(
     rules: &[CanonicalNetworkPolicyRuleRecord],
     attachments: &[CanonicalPolicyAttachmentRecord],
     snapshot: &[NetworkPlanIntent],
-) -> String {
+) -> Result<String, serde_json::Error> {
     let mut hasher = Sha256::new();
     hasher.update(endpoint.id.as_bytes());
     hasher.update(endpoint.generation.to_be_bytes());
     hasher.update(realm.id.as_bytes());
     hasher.update(realm.generation.to_be_bytes());
-    for policy in policies {
+    let mut relevant_attachments = attachments
+        .iter()
+        .filter(|attachment| attachment.endpoint_id == endpoint.id && attachment.state != "deleted")
+        .cloned()
+        .collect::<Vec<_>>();
+    relevant_attachments.sort_by_key(|attachment| attachment.id);
+    let policy_ids = relevant_attachments
+        .iter()
+        .map(|attachment| attachment.policy_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut relevant_policies = policies
+        .iter()
+        .filter(|policy| policy_ids.contains(&policy.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    relevant_policies.sort_by_key(|policy| policy.id);
+    let mut relevant_rules = rules
+        .iter()
+        .filter(|rule| policy_ids.contains(&rule.policy_id) && rule.state != "deleted")
+        .cloned()
+        .collect::<Vec<_>>();
+    relevant_rules.sort_by_key(|rule| rule.id);
+    for policy in &relevant_policies {
         hasher.update(policy.id.as_bytes());
         hasher.update(policy.project_id.as_bytes());
         hasher.update(policy.stateful_mode.as_bytes());
@@ -381,7 +491,7 @@ fn policy_snapshot_fingerprint(
         hasher.update(policy.generation.to_be_bytes());
         hasher.update(policy.state.as_bytes());
     }
-    for rule in rules {
+    for rule in &relevant_rules {
         hasher.update(rule.id.as_bytes());
         hasher.update(rule.policy_id.as_bytes());
         hasher.update(rule.project_id.as_bytes());
@@ -389,15 +499,15 @@ fn policy_snapshot_fingerprint(
         hasher.update(rule.generation.to_be_bytes());
         hasher.update(rule.state.as_bytes());
     }
-    for attachment in attachments {
+    for attachment in &relevant_attachments {
         hasher.update(attachment.id.as_bytes());
         hasher.update(attachment.policy_id.as_bytes());
         hasher.update(attachment.endpoint_id.as_bytes());
         hasher.update(attachment.generation.to_be_bytes());
         hasher.update(attachment.state.as_bytes());
     }
-    hasher.update(serde_json::to_vec(snapshot).unwrap_or_default());
-    format!("sha256:{:x}", hasher.finalize())
+    hasher.update(serde_json::to_vec(snapshot)?);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 /// Compile all active policies attached to one endpoint. Empty output is
@@ -837,5 +947,155 @@ mod tests {
             result[2],
             NetworkPlanIntent::Policy(PolicyIntent { id, .. }) if id == Uuid::from_u128(9)
         ));
+    }
+
+    #[test]
+    fn fingerprint_ignores_unrelated_policy_and_is_order_independent() {
+        let attached = policy("Deny");
+        let mut unrelated = policy("Allow");
+        unrelated.id = Uuid::from_u128(40);
+        let rule = CanonicalNetworkPolicyRuleRecord {
+            id: Uuid::from_u128(41),
+            policy_id: attached.id,
+            project_id: "p".into(),
+            direction: "Ingress".into(),
+            address_family: "Ipv4".into(),
+            protocol: "Tcp".into(),
+            port_min: Some(80),
+            port_max: Some(80),
+            remote_selector: Some("198.51.100.0/24".into()),
+            action: "Allow".into(),
+            state: "active".into(),
+            generation: 5,
+            enforcement_key: "attached".into(),
+        };
+        let unrelated_rule = CanonicalNetworkPolicyRuleRecord {
+            policy_id: unrelated.id,
+            id: Uuid::from_u128(42),
+            enforcement_key: "unrelated".into(),
+            ..rule.clone()
+        };
+        let snapshot = compile_endpoint_policy(
+            &endpoint(),
+            &realm(),
+            std::slice::from_ref(&attached),
+            std::slice::from_ref(&rule),
+            &[attachment()],
+        )
+        .expect("attached graph");
+        let first = policy_snapshot_fingerprint(
+            &endpoint(),
+            &realm(),
+            &[attached.clone(), unrelated.clone()],
+            &[rule.clone(), unrelated_rule.clone()],
+            &[attachment()],
+            &snapshot,
+        )
+        .expect("fingerprint");
+        unrelated.generation = 9;
+        let second = policy_snapshot_fingerprint(
+            &endpoint(),
+            &realm(),
+            &[unrelated, attached],
+            &[unrelated_rule, rule],
+            &[attachment()],
+            &snapshot,
+        )
+        .expect("fingerprint");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn same_summary_generation_does_not_collapse_distinct_graphs() {
+        let p = policy("Deny");
+        let first = first_rule_for_test(p.id, 5);
+        let second = second_rule_for_test(p.id, 2);
+        let snapshot_a = compile_endpoint_policy(
+            &endpoint(),
+            &realm(),
+            std::slice::from_ref(&p),
+            &[first.clone(), second.clone()],
+            &[attachment()],
+        )
+        .expect("graph A");
+        let generation_a = snapshot_generation(
+            &endpoint(),
+            &realm(),
+            std::slice::from_ref(&p),
+            &[first.clone(), second.clone()],
+            &[attachment()],
+        );
+        let first_b = first_rule_for_test(p.id, 2);
+        let second_b = second_rule_for_test(p.id, 5);
+        let snapshot_b = compile_endpoint_policy(
+            &endpoint(),
+            &realm(),
+            std::slice::from_ref(&p),
+            &[first_b.clone(), second_b.clone()],
+            &[attachment()],
+        )
+        .expect("graph B");
+        let generation_b = snapshot_generation(
+            &endpoint(),
+            &realm(),
+            std::slice::from_ref(&p),
+            &[first_b.clone(), second_b.clone()],
+            &[attachment()],
+        );
+        let fingerprint_a = policy_snapshot_fingerprint(
+            &endpoint(),
+            &realm(),
+            std::slice::from_ref(&p),
+            &[first.clone(), second.clone()],
+            &[attachment()],
+            &snapshot_a,
+        )
+        .expect("fingerprint A");
+        let fingerprint_b = policy_snapshot_fingerprint(
+            &endpoint(),
+            &realm(),
+            std::slice::from_ref(&p),
+            &[first_b, second_b],
+            &[attachment()],
+            &snapshot_b,
+        )
+        .expect("fingerprint B");
+        assert_eq!(generation_a, generation_b);
+        assert_ne!(fingerprint_a, fingerprint_b);
+    }
+
+    fn first_rule_for_test(policy_id: Uuid, generation: u64) -> CanonicalNetworkPolicyRuleRecord {
+        CanonicalNetworkPolicyRuleRecord {
+            id: Uuid::from_u128(50),
+            policy_id,
+            project_id: "p".into(),
+            direction: "Ingress".into(),
+            address_family: "Ipv4".into(),
+            protocol: "Tcp".into(),
+            port_min: Some(80),
+            port_max: Some(80),
+            remote_selector: None,
+            action: "Allow".into(),
+            state: "active".into(),
+            generation,
+            enforcement_key: "a".into(),
+        }
+    }
+    fn second_rule_for_test(policy_id: Uuid, generation: u64) -> CanonicalNetworkPolicyRuleRecord {
+        CanonicalNetworkPolicyRuleRecord {
+            id: Uuid::from_u128(51),
+            policy_id,
+            project_id: "p".into(),
+            direction: "Ingress".into(),
+            address_family: "Ipv4".into(),
+            protocol: "Tcp".into(),
+            port_min: Some(443),
+            port_max: Some(443),
+            remote_selector: None,
+            action: "Allow".into(),
+            state: "active".into(),
+            generation,
+            enforcement_key: "b".into(),
+        }
     }
 }
