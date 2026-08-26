@@ -2036,19 +2036,14 @@ pub(crate) async fn create_port(
             "this profile requires one canonical fixed IP",
         );
     }
-    if !body.port.security_groups.is_empty() {
-        return keystone_error(
-            StatusCode::BAD_REQUEST,
-            "Bad Request",
-            "security groups are deferred by this profile",
-        );
-    }
     let fixed_ip = body
         .port
         .fixed_ips
         .into_iter()
         .next()
         .map(|value| (value.subnet_id, value.ip_address));
+    let project = auth.effective_scope().id().as_str();
+    let security_groups = body.port.security_groups;
     match service
         .create_port_with_fixed_ip(
             &auth,
@@ -2058,13 +2053,31 @@ pub(crate) async fn create_port(
         )
         .await
     {
-        Ok(value) => (
-            StatusCode::CREATED,
-            Json(PortEnvelope {
-                port: port_response(value, Vec::new()),
-            }),
-        )
-            .into_response(),
+        Ok(value) => {
+            if let Err(error) = service
+                .replace_security_group_bindings_for_project(
+                    auth.effective_scope().id().as_str(),
+                    value.id,
+                    security_groups.clone(),
+                )
+                .await
+            {
+                return network_error(error);
+            }
+            if !security_groups.is_empty()
+                && let Err(response) =
+                    dispatch_security_group_endpoints(&state, project, security_groups[0]).await
+            {
+                return response;
+            }
+            (
+                StatusCode::CREATED,
+                Json(PortEnvelope {
+                    port: port_response(value, security_groups),
+                }),
+            )
+                .into_response()
+        }
         Err(error) => network_error(error),
     }
 }
@@ -2169,13 +2182,18 @@ pub(crate) async fn update_port(
     if let Err(error) = service.get_port_for_project(project, id).await {
         return network_error(error);
     }
-    if !body.port.security_groups.is_empty() {
-        return keystone_error(
-            StatusCode::BAD_REQUEST,
-            "Bad Request",
-            "security groups are deferred by this profile",
-        );
-    }
+    let previous_groups = service
+        .list_security_group_bindings_for_project(project, Some(id))
+        .await
+        .map_err(network_error);
+    let previous_groups = match previous_groups {
+        Ok(bindings) => bindings
+            .into_iter()
+            .map(|binding| binding.security_group_id)
+            .collect::<Vec<_>>(),
+        Err(response) => return response,
+    };
+    let security_groups = body.port.security_groups;
     if let Some(name) = body.port.name
         && let Err(error) = service
             .update_port_name_for_project(project, id, name)
@@ -2183,9 +2201,24 @@ pub(crate) async fn update_port(
     {
         return network_error(error);
     }
+    if let Err(error) = service
+        .replace_security_group_bindings_for_project(project, id, security_groups.clone())
+        .await
+    {
+        return network_error(error);
+    }
+    let groups_to_reconcile = previous_groups
+        .into_iter()
+        .chain(security_groups.iter().copied())
+        .collect::<std::collections::BTreeSet<_>>();
+    for group_id in groups_to_reconcile {
+        if let Err(response) = dispatch_security_group_endpoints(&state, project, group_id).await {
+            return response;
+        }
+    }
     match service.get_port_for_project(project, id).await {
         Ok(value) => Json(PortEnvelope {
-            port: port_response(value, Vec::new()),
+            port: port_response(value, security_groups),
         })
         .into_response(),
         Err(error) => network_error(error),
