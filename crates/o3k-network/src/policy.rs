@@ -758,7 +758,8 @@ fn store_state(path: &Path, ownership: &Ownership) -> Result<(), PolicyNetworkEr
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::canonical_policy::PolicySnapshotRealizer;
+    use std::{process::Stdio, sync::Mutex, time::Duration};
 
     struct FakeCommand {
         calls: Mutex<Vec<Vec<String>>>,
@@ -868,6 +869,378 @@ mod tests {
             .expect("empty snapshot");
         assert!(provider.ownership.is_none());
         assert!(command.calls.lock().expect("calls").is_empty());
+    }
+
+    #[test]
+    fn isolated_namespace_proves_native_policy_traffic_allow_and_deny() {
+        let namespace = format!("o3k-policy-router-{}", Uuid::now_v7().simple());
+        let client_namespace = format!("{namespace}-client");
+        let server_namespace = format!("{namespace}-server");
+        let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
+        let run_ip = |target: &str, args: &[&str]| {
+            let status = std::process::Command::new("ip")
+                .args(["netns", "exec", target, "ip"])
+                .args(args)
+                .status()
+                .expect("ip command");
+            assert!(status.success(), "ip {:?} failed", args);
+        };
+        for target in [&namespace, &client_namespace, &server_namespace] {
+            let add = std::process::Command::new("ip")
+                .args(["netns", "add", target])
+                .status()
+                .expect("create namespace");
+            assert!(add.success(), "ip netns add {target} failed");
+        }
+        let cleanup = || {
+            for target in [&namespace, &client_namespace, &server_namespace] {
+                let _ = std::process::Command::new("ip")
+                    .args(["netns", "del", target])
+                    .status();
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        };
+        run_ip(
+            &namespace,
+            &[
+                "link",
+                "add",
+                "router-client",
+                "type",
+                "veth",
+                "peer",
+                "name",
+                "client-router",
+            ],
+        );
+        run_ip(
+            &namespace,
+            &["link", "set", "client-router", "netns", &client_namespace],
+        );
+        run_ip(
+            &namespace,
+            &[
+                "link",
+                "add",
+                "router-server",
+                "type",
+                "veth",
+                "peer",
+                "name",
+                "server-router",
+            ],
+        );
+        run_ip(
+            &namespace,
+            &["link", "set", "server-router", "netns", &server_namespace],
+        );
+        run_ip(
+            &namespace,
+            &["addr", "add", "10.0.0.1/24", "dev", "router-client"],
+        );
+        run_ip(
+            &namespace,
+            &["addr", "add", "10.0.1.1/24", "dev", "router-server"],
+        );
+        run_ip(&namespace, &["link", "set", "router-client", "up"]);
+        run_ip(&namespace, &["link", "set", "router-server", "up"]);
+        run_ip(
+            &client_namespace,
+            &["addr", "add", "10.0.0.2/24", "dev", "client-router"],
+        );
+        run_ip(&client_namespace, &["link", "set", "client-router", "up"]);
+        run_ip(
+            &client_namespace,
+            &["route", "add", "10.0.1.0/24", "via", "10.0.0.1"],
+        );
+        run_ip(
+            &server_namespace,
+            &["addr", "add", "10.0.1.2/24", "dev", "server-router"],
+        );
+        run_ip(&server_namespace, &["link", "set", "server-router", "up"]);
+        run_ip(
+            &server_namespace,
+            &["route", "add", "10.0.0.0/24", "via", "10.0.1.1"],
+        );
+        run_ip(&namespace, &["link", "set", "lo", "up"]);
+        let forwarding = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &namespace,
+                "sysctl",
+                "-q",
+                "-w",
+                "net.ipv4.ip_forward=1",
+            ])
+            .status()
+            .expect("enable forwarding");
+        assert!(forwarding.success(), "router forwarding enable failed");
+
+        let endpoint_id = Uuid::from_u128(700);
+        let endpoint = PolicyEndpoint {
+            endpoint_id,
+            address: Ipv4Addr::new(10, 0, 1, 2),
+        };
+        let allow = NetworkPlanIntent::Policy(PolicyIntent {
+            id: Uuid::from_u128(701),
+            endpoint_id,
+            direction: PolicyDirection::Ingress,
+            protocol: NetworkProtocol::Tcp,
+            ports: Some(o3k_domain::PortRange {
+                start: 18080,
+                end: 18080,
+            }),
+            source: Some(
+                o3k_domain::Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 2), 32).expect("client prefix"),
+            ),
+            destination: None,
+            action: PolicyAction::Allow,
+        });
+        let deny = NetworkPlanIntent::Policy(PolicyIntent {
+            id: Uuid::from_u128(703),
+            action: PolicyAction::Deny,
+            ..match &allow {
+                NetworkPlanIntent::Policy(policy) => policy.clone(),
+                _ => unreachable!(),
+            }
+        });
+        let deny_default = NetworkPlanIntent::PolicyDefault(PolicyDefaultIntent {
+            policy_id: Uuid::from_u128(702),
+            endpoint_id,
+            unmatched_action: PolicyAction::Deny,
+            stateful_mode: PolicyStatefulMode::Stateful,
+            generation: 1,
+        });
+        let allow_default = match &deny_default {
+            NetworkPlanIntent::PolicyDefault(default) => {
+                NetworkPlanIntent::PolicyDefault(PolicyDefaultIntent {
+                    unmatched_action: PolicyAction::Allow,
+                    generation: 2,
+                    ..default.clone()
+                })
+            }
+            _ => unreachable!(),
+        };
+        let realizer = crate::canonical_policy::LinuxPolicySnapshotRealizer::open_in_namespace(
+            &root,
+            &namespace,
+            vec![endpoint],
+        )
+        .expect("policy realizer");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let allowed = runtime.block_on(async {
+            realizer
+                .apply_policy_snapshot(
+                    endpoint_id,
+                    &[deny_default.clone(), allow.clone()],
+                    "traffic-allow",
+                )
+                .await
+        });
+        assert!(matches!(
+            allowed,
+            crate::canonical_policy::PolicyApplyOutcome::Success { .. }
+        ));
+
+        let server_code = "import socket;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('10.0.1.2',18080));s.listen(1);c,_=s.accept();c.sendall(b'ok');c.close();s.close()";
+        let client_code = "import socket;socket.create_connection(('10.0.1.2',18080),1).recv(2)";
+        let mut server = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &server_namespace,
+                "python3",
+                "-c",
+                server_code,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start server");
+        std::thread::sleep(Duration::from_millis(100));
+        let client = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &client_namespace,
+                "python3",
+                "-c",
+                client_code,
+            ])
+            .status()
+            .expect("allowed client");
+        assert!(
+            client.success(),
+            "matching native policy traffic was denied"
+        );
+        let _ = server.kill();
+        let _ = server.wait();
+
+        let denied_by_rule = runtime.block_on(async {
+            realizer
+                .apply_policy_snapshot(
+                    endpoint_id,
+                    &[deny_default.clone(), allow.clone(), deny.clone()],
+                    "traffic-deny-rule",
+                )
+                .await
+        });
+        assert!(matches!(
+            denied_by_rule,
+            crate::canonical_policy::PolicyApplyOutcome::Success { .. }
+        ));
+        let mut server = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &server_namespace,
+                "python3",
+                "-c",
+                server_code,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start deny-rule server");
+        std::thread::sleep(Duration::from_millis(100));
+        let client = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &client_namespace,
+                "timeout",
+                "2",
+                "python3",
+                "-c",
+                client_code,
+            ])
+            .status()
+            .expect("deny-rule client");
+        assert!(!client.success(), "explicit Deny did not override Allow");
+        let _ = server.kill();
+        let _ = server.wait();
+
+        let allowed_by_default = runtime.block_on(async {
+            realizer
+                .apply_policy_snapshot(endpoint_id, &[allow_default], "traffic-allow-default")
+                .await
+        });
+        assert!(matches!(
+            allowed_by_default,
+            crate::canonical_policy::PolicyApplyOutcome::Success { .. }
+        ));
+        let mut server = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &server_namespace,
+                "python3",
+                "-c",
+                server_code,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start allow-default server");
+        std::thread::sleep(Duration::from_millis(100));
+        let client = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &client_namespace,
+                "python3",
+                "-c",
+                client_code,
+            ])
+            .status()
+            .expect("allow-default client");
+        assert!(client.success(), "Allow default denied unmatched traffic");
+        let _ = server.kill();
+        let _ = server.wait();
+
+        let baseline = runtime.block_on(async {
+            realizer
+                .apply_policy_snapshot(endpoint_id, &[], "traffic-no-policy")
+                .await
+        });
+        assert!(matches!(
+            baseline,
+            crate::canonical_policy::PolicyApplyOutcome::Success { .. }
+        ));
+        let mut server = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &server_namespace,
+                "python3",
+                "-c",
+                server_code,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start baseline server");
+        std::thread::sleep(Duration::from_millis(100));
+        let client = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &client_namespace,
+                "python3",
+                "-c",
+                client_code,
+            ])
+            .status()
+            .expect("baseline client");
+        assert!(client.success(), "no-policy baseline blocked traffic");
+        let _ = server.kill();
+        let _ = server.wait();
+
+        let denied = runtime.block_on(async {
+            realizer
+                .apply_policy_snapshot(endpoint_id, &[deny_default], "traffic-deny")
+                .await
+        });
+        assert!(matches!(
+            denied,
+            crate::canonical_policy::PolicyApplyOutcome::Success { .. }
+        ));
+        let mut server = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &server_namespace,
+                "python3",
+                "-c",
+                server_code,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start deny server");
+        std::thread::sleep(Duration::from_millis(100));
+        let client = std::process::Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &client_namespace,
+                "timeout",
+                "2",
+                "python3",
+                "-c",
+                client_code,
+            ])
+            .status()
+            .expect("denied client");
+        assert!(
+            !client.success(),
+            "unmatched native policy traffic was allowed"
+        );
+        let _ = server.kill();
+        let _ = server.wait();
+
+        cleanup();
     }
 
     #[test]
