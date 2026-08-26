@@ -34,8 +34,18 @@
     ]
   },
   "canonical_mapping_review": {
-    "current_fit": "blocked",
+    "current_fit": "blocked_pending_proposed_architecture_acceptance",
     "reason": "PolicyIntent is endpoint-scoped and has no independent NetworkPolicy identity; current SecurityGroupRecord/SecurityGroupRuleRecord rows are compatibility projection state, not an independent canonical policy lifecycle",
+    "proposed_architecture": {
+      "adr": "docs/adr/ADR-0177-canonical-networkpolicy-and-reusable-policy-set.md",
+      "spec": "docs/specs/SPEC-0034-canonical-networkpolicy-lifecycle-v1.md",
+      "status": "proposed_not_accepted",
+      "network_policy": "independent project-owned canonical resource, valid while unattached",
+      "network_policy_rule": "independent durable UUID parented by NetworkPolicy",
+      "policy_attachment": "durable same-project relation between NetworkPolicy and Endpoint",
+      "compiler": "canonical policy/rules/attachments plus Endpoint/Realm snapshot to endpoint-scoped PolicyIntent",
+      "runtime_authorized": false
+    },
     "rule": "proposed projection to canonical NetworkPolicy rule",
     "security_group": "proposed projection to canonical NetworkPolicy"
   },

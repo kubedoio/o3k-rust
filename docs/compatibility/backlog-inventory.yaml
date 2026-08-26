@@ -1055,7 +1055,7 @@
       "name": "Terraform OpenStack provider workflows",
       "profiles": ["p13-iac-compatibility-v1"],
       "client": "terraform-provider-openstack v3.4.0 with Terraform CLI",
-      "recommendation": "P13.2 bounded core slice is provider-lifecycle-verified for keypair, Network, Subnet, Port, and instance resources; the candidates below remain broader/deferred field and feature gaps. Next gate: P13.3A — Security Group / NetworkPolicy provider-contract discovery. No router/FIP/security-group implementation is claimed.",
+          "recommendation": "P13.2 bounded core slice is provider-lifecycle-verified for keypair, Network, Subnet, Port, and instance resources; the candidates below remain broader/deferred field and feature gaps. P13.3A discovery is checkpointed but architecture-gated pending proposed ADR-0177/SPEC-0034 acceptance. No router/FIP/security-group implementation is claimed.",
       "candidates": [
         {
           "id": "terraform-001",

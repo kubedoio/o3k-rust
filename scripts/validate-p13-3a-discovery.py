@@ -56,7 +56,13 @@ def main() -> int:
     for path, key, value in walk(document):
         if key in SECRET_KEYS or any(part in key for part in SECRET_NAME_PARTS):
             assert value == "<redacted>" or value is True or value == "ignored temporary output", f"secret at {path}"
-    assert document["canonical_mapping_review"]["current_fit"] == "blocked"
+    mapping = document["canonical_mapping_review"]
+    assert mapping["current_fit"] == "blocked_pending_proposed_architecture_acceptance"
+    proposal = mapping["proposed_architecture"]
+    assert proposal["status"] == "proposed_not_accepted"
+    assert proposal["runtime_authorized"] is False
+    assert proposal["adr"].endswith("ADR-0177-canonical-networkpolicy-and-reusable-policy-set.md")
+    assert proposal["spec"].endswith("SPEC-0034-canonical-networkpolicy-lifecycle-v1.md")
     assert any(item["severity"] == "BLOCKER" for item in document["architecture_findings"])
     print(f"P13.3A discovery artifact valid: {ARTIFACT}")
     print(f"trace records: {len(trace)}")
