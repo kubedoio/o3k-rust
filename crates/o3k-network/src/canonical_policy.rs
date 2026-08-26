@@ -222,7 +222,7 @@ where
         Ok((snapshot, fingerprint))
     }
 
-    async fn compile_endpoint_with_metadata(
+    pub async fn compile_endpoint_with_metadata(
         &self,
         project_id: &str,
         endpoint_id: Uuid,
