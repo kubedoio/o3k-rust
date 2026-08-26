@@ -358,8 +358,7 @@ async fn run_native_openstack_http_conformance(
                         "network_id": network_id,
                         "name": format!("p12-7-subnet-{run_tag}"),
                         "cidr": "192.0.2.0/24",
-                        "gateway_ip": "192.0.2.1",
-                        "allocation_pools": [{"start": "192.0.2.10", "end": "192.0.2.200"}]
+                        "gateway_ip": "192.0.2.1"
                     }
                 }))?))?,
         )

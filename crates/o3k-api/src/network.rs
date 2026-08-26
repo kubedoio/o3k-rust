@@ -66,12 +66,28 @@ pub(crate) fn network_response(
         id: value.id.to_string(),
         name: value.name,
         tenant_id: value.project_id.clone(),
-        project_id: value.project_id,
+        project_id: value.project_id.clone(),
         status: value.status,
         admin_state_up,
         mtu: 1500,
         subnets: subnet_ids.into_iter().map(|id| id.to_string()).collect(),
     }
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct UpdateSubnetRequestBody {
+    subnet: UpdateSubnetRequest,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateSubnetRequest {
+    name: Option<String>,
+    gateway_ip: Option<Ipv4Addr>,
+    enable_dhcp: Option<bool>,
+    network_id: Option<Uuid>,
+    cidr: Option<String>,
+    ip_version: Option<u8>,
 }
 
 async fn canonical_network_response(
@@ -94,13 +110,19 @@ pub(crate) struct SubnetRequestBody {
 }
 #[derive(serde::Deserialize)]
 pub(crate) struct CreateSubnetRequest {
-    name: String,
+    #[serde(default)]
+    name: Option<String>,
     network_id: uuid::Uuid,
     cidr: String,
+    #[serde(default)]
+    ip_version: Option<u8>,
     gateway_ip: Option<Ipv4Addr>,
+    #[serde(default)]
+    enable_dhcp: Option<bool>,
     allocation_pools: Option<Vec<AllocationPool>>,
 }
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 pub(crate) struct AllocationPool {
     start: Ipv4Addr,
     end: Ipv4Addr,
@@ -122,6 +144,11 @@ pub(crate) struct SubnetResponse {
     cidr: String,
     gateway_ip: Ipv4Addr,
     allocation_pools: Vec<AllocationPoolResponse>,
+    tenant_id: String,
+    ip_version: u8,
+    enable_dhcp: bool,
+    dns_nameservers: Vec<String>,
+    host_routes: Vec<serde_json::Value>,
 }
 #[derive(serde::Serialize)]
 pub(crate) struct AllocationPoolResponse {
@@ -134,13 +161,18 @@ pub(crate) fn subnet_response(value: SubnetRecord) -> SubnetResponse {
         id: value.id.to_string(),
         network_id: value.network_id.to_string(),
         name: value.name,
-        project_id: value.project_id,
+        project_id: value.project_id.clone(),
         cidr: value.cidr,
         gateway_ip: value.gateway_ip,
         allocation_pools: vec![AllocationPoolResponse {
             start: value.allocation_start,
             end: value.allocation_end,
         }],
+        tenant_id: value.project_id,
+        ip_version: value.ip_version,
+        enable_dhcp: value.enable_dhcp,
+        dns_nameservers: Vec::new(),
+        host_routes: Vec::new(),
     }
 }
 
@@ -155,14 +187,27 @@ pub(crate) struct UpdatePortRequestBody {
 #[derive(serde::Deserialize)]
 pub(crate) struct UpdatePortRequest {
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     security_groups: Vec<uuid::Uuid>,
 }
 #[derive(serde::Deserialize)]
 pub(crate) struct CreatePortRequest {
-    name: String,
+    #[serde(default)]
+    name: Option<String>,
     network_id: uuid::Uuid,
     #[serde(default)]
+    fixed_ips: Vec<FixedIpRequest>,
+    #[serde(default)]
+    no_fixed_ip: bool,
+    #[serde(default)]
     security_groups: Vec<uuid::Uuid>,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct FixedIpRequest {
+    subnet_id: uuid::Uuid,
+    #[serde(default)]
+    ip_address: Option<Ipv4Addr>,
 }
 #[derive(serde::Serialize)]
 pub(crate) struct PortEnvelope {
@@ -182,6 +227,11 @@ pub(crate) struct PortResponse {
     fixed_ips: Vec<FixedIpResponse>,
     status: String,
     security_groups: Vec<String>,
+    tenant_id: String,
+    admin_state_up: bool,
+    device_id: String,
+    device_owner: String,
+    port_security_enabled: bool,
 }
 #[derive(serde::Serialize)]
 pub(crate) struct FixedIpResponse {
@@ -1124,10 +1174,11 @@ async fn dispatch_policy_network(
 }
 
 pub(crate) fn port_response(value: PortRecord, security_groups: Vec<Uuid>) -> PortResponse {
+    let project_id = value.project_id.clone();
     PortResponse {
         id: value.id.to_string(),
         network_id: value.network_id.to_string(),
-        project_id: value.project_id,
+        project_id: project_id.clone(),
         name: value.name,
         mac_address: value.mac_address,
         fixed_ips: value
@@ -1143,6 +1194,11 @@ pub(crate) fn port_response(value: PortRecord, security_groups: Vec<Uuid>) -> Po
             .into_iter()
             .map(|id| id.to_string())
             .collect(),
+        tenant_id: project_id,
+        admin_state_up: true,
+        device_id: String::new(),
+        device_owner: String::new(),
+        port_security_enabled: false,
     }
 }
 
@@ -1788,38 +1844,105 @@ pub(crate) async fn create_subnet(
         .subnet
         .allocation_pools
         .as_ref()
-        .is_some_and(|values| values.len() > 1)
+        .is_some_and(|values| !values.is_empty())
     {
         return keystone_error(
             StatusCode::BAD_REQUEST,
             "Bad Request",
-            "multiple allocation pools are not supported by this profile",
+            "custom allocation pools are deferred by this profile",
         );
     }
-    let pool = body
-        .subnet
-        .allocation_pools
-        .as_ref()
-        .and_then(|values| values.first());
+    if body.subnet.ip_version.is_some_and(|value| value != 4) {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "only IPv4 subnets are supported by this profile",
+        );
+    }
+    let requested_dhcp = body.subnet.enable_dhcp;
     match service
         .create_subnet(
             &auth,
             body.subnet.network_id,
-            body.subnet.name,
+            body.subnet.name.unwrap_or_default(),
             body.subnet.cidr,
             body.subnet.gateway_ip,
-            pool.map(|v| v.start),
-            pool.map(|v| v.end),
+            None,
+            None,
         )
         .await
     {
-        Ok(value) => (
-            StatusCode::CREATED,
-            Json(SubnetEnvelope {
-                subnet: subnet_response(value),
-            }),
+        Ok(value) => {
+            let value = if requested_dhcp.is_some() {
+                match service
+                    .update_subnet(
+                        &auth,
+                        value.id,
+                        None,
+                        None,
+                        requested_dhcp,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(updated) => updated,
+                    Err(error) => return network_error(error),
+                }
+            } else {
+                value
+            };
+            (
+                StatusCode::CREATED,
+                Json(SubnetEnvelope {
+                    subnet: subnet_response(value),
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn update_subnet(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+    request: Result<Json<UpdateSubnetRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid subnet request",
+        );
+    };
+    match service
+        .update_subnet(
+            &auth,
+            id,
+            body.subnet.name,
+            body.subnet.gateway_ip,
+            body.subnet.enable_dhcp,
+            body.subnet.network_id,
+            body.subnet.cidr,
+            body.subnet.ip_version,
         )
-            .into_response(),
+        .await
+    {
+        Ok(value) => Json(SubnetEnvelope {
+            subnet: subnet_response(value),
+        })
+        .into_response(),
         Err(error) => network_error(error),
     }
 }
@@ -1906,43 +2029,42 @@ pub(crate) async fn create_port(
             "invalid port request",
         );
     };
-    let security_groups = body.port.security_groups.clone();
+    if body.port.no_fixed_ip || body.port.fixed_ips.len() > 1 {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "this profile requires one canonical fixed IP",
+        );
+    }
+    if !body.port.security_groups.is_empty() {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "security groups are deferred by this profile",
+        );
+    }
+    let fixed_ip = body
+        .port
+        .fixed_ips
+        .into_iter()
+        .next()
+        .map(|value| (value.subnet_id, value.ip_address));
     match service
-        .create_port(&auth, body.port.network_id, body.port.name)
+        .create_port_with_fixed_ip(
+            &auth,
+            body.port.network_id,
+            body.port.name.unwrap_or_default(),
+            fixed_ip,
+        )
         .await
     {
-        Ok(value) => {
-            if let Err(error) = service
-                .replace_security_group_bindings_for_project(
-                    auth.effective_scope().id().as_str(),
-                    value.id,
-                    security_groups,
-                )
-                .await
-            {
-                return network_error(error);
-            }
-            let groups = service
-                .list_security_group_bindings_for_project(
-                    auth.effective_scope().id().as_str(),
-                    Some(value.id),
-                )
-                .await
-                .map(|bindings| {
-                    bindings
-                        .into_iter()
-                        .map(|binding| binding.security_group_id)
-                        .collect()
-                })
-                .unwrap_or_default();
-            (
-                StatusCode::CREATED,
-                Json(PortEnvelope {
-                    port: port_response(value, groups),
-                }),
-            )
-                .into_response()
-        }
+        Ok(value) => (
+            StatusCode::CREATED,
+            Json(PortEnvelope {
+                port: port_response(value, Vec::new()),
+            }),
+        )
+            .into_response(),
         Err(error) => network_error(error),
     }
 }
@@ -2044,33 +2166,26 @@ pub(crate) async fn update_port(
         Err(response) => return response,
     };
     let project = auth.effective_scope().id().as_str();
-    let port = match service.get_port_for_project(project, id).await {
-        Ok(value) => value,
-        Err(error) => return network_error(error),
-    };
-    if let Err(error) = service
-        .replace_security_group_bindings_for_project(project, id, body.port.security_groups)
-        .await
+    if let Err(error) = service.get_port_for_project(project, id).await {
+        return network_error(error);
+    }
+    if !body.port.security_groups.is_empty() {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "security groups are deferred by this profile",
+        );
+    }
+    if let Some(name) = body.port.name
+        && let Err(error) = service
+            .update_port_name_for_project(project, id, name)
+            .await
     {
         return network_error(error);
     }
-    if let Err(response) = dispatch_policy_network(&state, project, port.network_id, port.id).await
-    {
-        return response;
-    }
-    let groups = match service
-        .list_security_group_bindings_for_project(project, Some(id))
-        .await
-    {
-        Ok(values) => values
-            .into_iter()
-            .map(|value| value.security_group_id)
-            .collect(),
-        Err(error) => return network_error(error),
-    };
     match service.get_port_for_project(project, id).await {
         Ok(value) => Json(PortEnvelope {
-            port: port_response(value, groups),
+            port: port_response(value, Vec::new()),
         })
         .into_response(),
         Err(error) => network_error(error),

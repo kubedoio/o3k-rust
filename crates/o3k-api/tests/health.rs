@@ -1293,8 +1293,7 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
         )
         .await?;
     assert_eq!(invalid_name.status(), StatusCode::BAD_REQUEST);
-    let body =
-        serde_json::json!({"subnet":{"name":"lab","network_id":network_id,"cidr":"192.0.2.0/29"}});
+    let body = serde_json::json!({"subnet":{"network_id":network_id,"cidr":"192.0.2.0/29","ip_version":4,"enable_dhcp":false}});
     let response = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -1309,6 +1308,8 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
     let subnet: Value =
         serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4096).await?)?;
     assert_eq!(subnet["subnet"]["gateway_ip"], "192.0.2.1");
+    assert_eq!(subnet["subnet"]["name"], "");
+    assert_eq!(subnet["subnet"]["enable_dhcp"], false);
     let network_after_subnet = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -1324,6 +1325,36 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
         network_after_subnet_json["network"]["subnets"],
         serde_json::json!([subnet["subnet"]["id"]])
     );
+    let second = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/subnets")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(
+                    r#"{{"subnet":{{"network_id":"{network_id}","cidr":"198.51.100.0/29","ip_version":4}}}}"#
+                )))?,
+        )
+        .await?;
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+    let subnet_update = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!(
+                    "/v2.0/subnets/{}",
+                    subnet["subnet"]["id"].as_str().unwrap_or_default()
+                ))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"subnet":{"name":"renamed"}}"#))?,
+        )
+        .await?;
+    assert_eq!(subnet_update.status(), StatusCode::OK);
+    let subnet_update_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(subnet_update.into_body(), 4096).await?)?;
+    assert_eq!(subnet_update_json["subnet"]["name"], "renamed");
     let unsupported_pools = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()

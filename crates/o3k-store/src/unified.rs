@@ -1498,6 +1498,18 @@ impl NetworkRepository for O3kStore {
             Self::Postgres(s) => s.list_canonical_pools(project_id, realm_id).await,
         }
     }
+
+    async fn insert_subnet_bundle(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+        pool: &CanonicalAddressPoolRecord,
+        subnet: &SubnetRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_subnet_bundle(realm, pool, subnet).await,
+            Self::Postgres(s) => s.insert_subnet_bundle(realm, pool, subnet).await,
+        }
+    }
     async fn delete_canonical_pool(
         &self,
         project_id: &str,
@@ -1508,6 +1520,25 @@ impl NetworkRepository for O3kStore {
             Self::Postgres(s) => s.delete_canonical_pool(project_id, pool_id).await,
         }
     }
+
+    async fn update_canonical_pool(
+        &self,
+        project_id: &str,
+        pool_id: &Uuid,
+        expected_generation: u64,
+        gateway: Option<std::net::Ipv4Addr>,
+    ) -> Result<CanonicalAddressPoolRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.update_canonical_pool(project_id, pool_id, expected_generation, gateway)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.update_canonical_pool(project_id, pool_id, expected_generation, gateway)
+                    .await
+            }
+        }
+    }
     async fn insert_canonical_endpoint(
         &self,
         endpoint: &CanonicalEndpointRecord,
@@ -1515,6 +1546,16 @@ impl NetworkRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.insert_canonical_endpoint(endpoint).await,
             Self::Postgres(s) => s.insert_canonical_endpoint(endpoint).await,
+        }
+    }
+    async fn insert_canonical_endpoint_and_port(
+        &self,
+        endpoint: &CanonicalEndpointRecord,
+        port: &PortRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_canonical_endpoint_and_port(endpoint, port).await,
+            Self::Postgres(s) => s.insert_canonical_endpoint_and_port(endpoint, port).await,
         }
     }
     async fn list_canonical_endpoints(
@@ -1545,6 +1586,22 @@ impl NetworkRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.delete_canonical_endpoint(project_id, endpoint_id).await,
             Self::Postgres(s) => s.delete_canonical_endpoint(project_id, endpoint_id).await,
+        }
+    }
+    async fn delete_canonical_endpoint_and_port(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.delete_canonical_endpoint_and_port(project_id, endpoint_id)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.delete_canonical_endpoint_and_port(project_id, endpoint_id)
+                    .await
+            }
         }
     }
     async fn upsert_canonical_policy(
@@ -1830,6 +1887,38 @@ impl NetworkRepository for O3kStore {
         }
     }
 
+    async fn update_subnet(&self, subnet: &SubnetRecord) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.update_subnet(subnet).await,
+            Self::Postgres(s) => s.update_subnet(subnet).await,
+        }
+    }
+
+    async fn delete_subnet_bundle(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.delete_subnet_bundle(project_id, id).await,
+            Self::Postgres(s) => s.delete_subnet_bundle(project_id, id).await,
+        }
+    }
+
+    async fn update_subnet_bundle(
+        &self,
+        subnet: &SubnetRecord,
+        pool_id: &Uuid,
+        expected_pool_generation: u64,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.update_subnet_bundle(subnet, pool_id, expected_pool_generation)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.update_subnet_bundle(subnet, pool_id, expected_pool_generation)
+                    .await
+            }
+        }
+    }
+
     async fn insert_port(&self, port: &PortRecord) -> Result<(), StoreError> {
         match self {
             Self::Sqlite(s) => s.insert_port(port).await,
@@ -1896,6 +1985,17 @@ impl NetworkRepository for O3kStore {
                 s.update_port_binding(project_id, id, binding_host, binding_state)
                     .await
             }
+        }
+    }
+    async fn update_port_name(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        name: &str,
+    ) -> Result<PortRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.update_port_name(project_id, id, name).await,
+            Self::Postgres(s) => s.update_port_name(project_id, id, name).await,
         }
     }
 

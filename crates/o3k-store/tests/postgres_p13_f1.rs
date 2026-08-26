@@ -1,8 +1,12 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::borrow::Cow;
+use std::net::Ipv4Addr;
 
-use o3k_store::{CanonicalNetworkRecord, NetworkRepository, PostgresStore, StoreError};
+use o3k_store::{
+    CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
+    CanonicalNetworkRecord, NetworkRepository, PortRecord, PostgresStore, StoreError, SubnetRecord,
+};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -455,4 +459,281 @@ async fn postgres_p13_2a_network_rename_updates_projection_and_reopens() {
         .clean_tables_for_testing()
         .await
         .expect("clean test database");
+}
+
+#[tokio::test]
+#[ignore = "requires the configured PostgreSQL conformance database"]
+async fn postgres_p13_2b_subnet_bundle_cardinality_and_delete_reopen() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let url = database_url();
+    let pool = fresh_pool(&url).await;
+    let network_id = Uuid::from_u128(0x13b1);
+    let realm_id = Uuid::from_u128(0x13b2);
+    let pool_id = Uuid::from_u128(0x13b3);
+    let project_id = "project-p13-2b";
+    let store = PostgresStore::connect_pool(pool.clone())
+        .await
+        .expect("migrate store");
+
+    store
+        .insert_network(&o3k_store::NetworkRecord {
+            id: network_id,
+            name: "p13-2b-network".into(),
+            project_id: project_id.into(),
+            status: "ACTIVE".into(),
+        })
+        .await
+        .expect("legacy network projection");
+    store
+        .insert_canonical_network(&CanonicalNetworkRecord {
+            id: network_id,
+            project_id: project_id.into(),
+            name: "p13-2b-network".into(),
+            admin_state_up: true,
+            generation: 1,
+            state: "active".into(),
+        })
+        .await
+        .expect("canonical network");
+
+    let realm = CanonicalAddressRealmRecord {
+        id: realm_id,
+        network_id,
+        project_id: project_id.into(),
+        prefix: "198.51.100.0/24".into(),
+        overlapping_prefixes: false,
+        generation: 1,
+        state: "active".into(),
+    };
+    let pool_record = CanonicalAddressPoolRecord {
+        id: pool_id,
+        realm_id,
+        project_id: project_id.into(),
+        prefix: "198.51.100.0/24".into(),
+        gateway: Some(Ipv4Addr::new(198, 51, 100, 1)),
+        first_usable: Ipv4Addr::new(198, 51, 100, 2),
+        last_usable: Ipv4Addr::new(198, 51, 100, 254),
+        generation: 1,
+        state: "active".into(),
+    };
+    let subnet = SubnetRecord {
+        id: realm_id,
+        network_id,
+        name: String::new(),
+        project_id: project_id.into(),
+        cidr: "198.51.100.0/24".into(),
+        gateway_ip: Ipv4Addr::new(198, 51, 100, 1),
+        allocation_start: Ipv4Addr::new(198, 51, 100, 2),
+        allocation_end: Ipv4Addr::new(198, 51, 100, 254),
+        ip_version: 4,
+        enable_dhcp: true,
+    };
+
+    store
+        .insert_subnet_bundle(&realm, &pool_record, &subnet)
+        .await
+        .expect("create subnet bundle");
+    assert_eq!(
+        store
+            .list_canonical_realms(project_id, &network_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_canonical_pools(project_id, &realm_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let second = CanonicalAddressRealmRecord {
+        id: Uuid::from_u128(0x13b4),
+        prefix: "198.51.101.0/24".into(),
+        ..realm.clone()
+    };
+    let second_pool = CanonicalAddressPoolRecord {
+        id: Uuid::from_u128(0x13b5),
+        realm_id: second.id,
+        prefix: second.prefix.clone(),
+        ..pool_record.clone()
+    };
+    let second_subnet = SubnetRecord {
+        id: second.id,
+        cidr: second.prefix.clone(),
+        ..subnet.clone()
+    };
+    assert!(matches!(
+        store
+            .insert_subnet_bundle(&second, &second_pool, &second_subnet)
+            .await,
+        Err(StoreError::NetworkInUse)
+    ));
+
+    store
+        .delete_subnet_bundle(project_id, &realm_id)
+        .await
+        .expect("delete subnet bundle");
+    drop(store);
+    let reopened = PostgresStore::connect(&url).await.expect("reopen store");
+    assert!(
+        reopened
+            .get_canonical_realm(project_id, &realm_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        reopened
+            .list_canonical_pools(project_id, &realm_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        reopened
+            .get_canonical_network(project_id, &network_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the configured PostgreSQL conformance database"]
+async fn postgres_p13_2c_endpoint_port_atomic_lifecycle_and_reopen() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let url = database_url();
+    let pool = fresh_pool(&url).await;
+    let network_id = Uuid::from_u128(0x13c1);
+    let realm_id = Uuid::from_u128(0x13c2);
+    let pool_id = Uuid::from_u128(0x13c3);
+    let endpoint_id = Uuid::from_u128(0x13c4);
+    let project_id = "project-p13-2c";
+    let store = PostgresStore::connect_pool(pool.clone())
+        .await
+        .expect("migrate store");
+
+    store
+        .insert_network(&o3k_store::NetworkRecord {
+            id: network_id,
+            name: "p13-2c-network".into(),
+            project_id: project_id.into(),
+            status: "ACTIVE".into(),
+        })
+        .await
+        .expect("legacy network projection");
+    store
+        .insert_canonical_network(&CanonicalNetworkRecord {
+            id: network_id,
+            project_id: project_id.into(),
+            name: "p13-2c-network".into(),
+            admin_state_up: true,
+            generation: 1,
+            state: "active".into(),
+        })
+        .await
+        .expect("canonical network");
+    let realm = CanonicalAddressRealmRecord {
+        id: realm_id,
+        network_id,
+        project_id: project_id.into(),
+        prefix: "198.51.102.0/24".into(),
+        overlapping_prefixes: false,
+        generation: 1,
+        state: "active".into(),
+    };
+    let pool_record = CanonicalAddressPoolRecord {
+        id: pool_id,
+        realm_id,
+        project_id: project_id.into(),
+        prefix: realm.prefix.clone(),
+        gateway: Some(Ipv4Addr::new(198, 51, 102, 1)),
+        first_usable: Ipv4Addr::new(198, 51, 102, 2),
+        last_usable: Ipv4Addr::new(198, 51, 102, 254),
+        generation: 1,
+        state: "active".into(),
+    };
+    let subnet = SubnetRecord {
+        id: realm_id,
+        network_id,
+        name: String::new(),
+        project_id: project_id.into(),
+        cidr: realm.prefix.clone(),
+        gateway_ip: Ipv4Addr::new(198, 51, 102, 1),
+        allocation_start: Ipv4Addr::new(198, 51, 102, 2),
+        allocation_end: Ipv4Addr::new(198, 51, 102, 254),
+        ip_version: 4,
+        enable_dhcp: false,
+    };
+    store
+        .insert_subnet_bundle(&realm, &pool_record, &subnet)
+        .await
+        .expect("subnet bundle");
+
+    let endpoint = CanonicalEndpointRecord {
+        id: endpoint_id,
+        realm_id,
+        project_id: project_id.into(),
+        fixed_ip: Ipv4Addr::new(198, 51, 102, 10),
+        mac: "02:00:00:00:13:c4".into(),
+        generation: 1,
+        state: "active".into(),
+    };
+    let port = PortRecord {
+        id: endpoint_id,
+        network_id,
+        subnet_id: Some(realm_id),
+        project_id: project_id.into(),
+        name: "p13-2c-port".into(),
+        mac_address: endpoint.mac.clone(),
+        fixed_ip: endpoint.fixed_ip,
+        status: "ACTIVE".into(),
+        binding_host: None,
+        binding_state: None,
+    };
+    store
+        .insert_canonical_endpoint_and_port(&endpoint, &port)
+        .await
+        .expect("atomic endpoint and port create");
+    assert_eq!(
+        store
+            .get_canonical_endpoint(project_id, &endpoint_id)
+            .await
+            .expect("endpoint read")
+            .expect("endpoint exists")
+            .fixed_ip,
+        endpoint.fixed_ip
+    );
+    store
+        .delete_canonical_endpoint_and_port(project_id, &endpoint_id)
+        .await
+        .expect("atomic endpoint and port delete");
+    drop(store);
+
+    let reopened = PostgresStore::connect(&url).await.expect("reopen store");
+    assert!(
+        reopened
+            .get_canonical_endpoint(project_id, &endpoint_id)
+            .await
+            .expect("endpoint after reopen")
+            .is_none()
+    );
+    assert!(
+        reopened
+            .get_port(project_id, &endpoint_id)
+            .await
+            .expect("projection after reopen")
+            .is_none()
+    );
+    assert!(
+        reopened
+            .get_canonical_network(project_id, &network_id)
+            .await
+            .expect("network after reopen")
+            .is_some()
+    );
 }

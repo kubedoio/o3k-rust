@@ -67,7 +67,7 @@ terraform-provider-openstack  (unmodified upstream v3.4.0)
   their implementation; they must freeze their advanced-network and storage
   targets before runtime work in those phases begins.
 
-### P13.2 — Core Image/Compute/Network IaC lifecycle
+### P13.2 — Core Image/Compute/Network IaC lifecycle — COMPLETE (bounded profile)
 
 - `openstack_compute_keypair_v2` create/read/delete
 - `openstack_networking_network_v2` create/read/update/delete
@@ -80,7 +80,21 @@ terraform-provider-openstack  (unmodified upstream v3.4.0)
 - Provider compatibility at `provider-lifecycle-verified` minimum for the
   declared attribute subset
 
-### P13.3 — Neutron adoption profile
+P13.2 is complete for the declared bounded subsets above. Committed real
+provider evidence is recorded in:
+
+- `docs/compatibility/p13-1/p13-2a-provider-lifecycle-evidence.json`
+- `docs/compatibility/p13-2/p13-2b-subnet-lifecycle-evidence.json`
+- `docs/compatibility/p13-2/p13-2c-provider-port-lifecycle-evidence.json`
+- `docs/compatibility/p13-2/p13-2d-provider-server-lifecycle-evidence.json`
+
+This is an operation- and attribute-level claim, not general OpenStack or
+general Terraform compatibility. P13.3 remains not implemented; its next gate
+is `P13.3A — Security Group / NetworkPolicy provider-contract discovery`.
+
+### P13.3 — Neutron adoption profile — NOT IMPLEMENTED
+
+The P13.3 discovery gate must complete before any P13.3 runtime work begins.
 
 - `openstack_networking_secgroup_v2` — security group CRUD
 - `openstack_networking_secgroup_rule_v2` — security group rule CRUD

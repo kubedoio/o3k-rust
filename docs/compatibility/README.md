@@ -24,6 +24,8 @@ operation entry contains:
 - `supported_fields`: fields O3K intends to implement in the initial profile;
 - `known_deviations`: explicit behavior that differs from the target;
 - `executable_tests`: repository test identifiers or paths, once available;
+- `evidence_artifacts`: committed evidence files supporting a verified bounded
+  operation;
 - `status`: the evidence state of the operation.
 
 The file is deliberately data-only YAML so a later CI check can parse it without

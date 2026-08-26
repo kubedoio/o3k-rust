@@ -281,6 +281,38 @@ impl PostgresStore {
         .map(|_| ())
     }
 
+    pub async fn insert_subnet_bundle(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+        pool: &CanonicalAddressPoolRecord,
+        subnet: &SubnetRecord,
+    ) -> Result<(), StoreError> {
+        crate::validate_canonical_state(&realm.state)?;
+        crate::validate_canonical_state(&pool.state)?;
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let owner: Option<String> = sqlx::query_scalar("SELECT project_id FROM canonical_networks WHERE id = $1 AND state = 'active' FOR UPDATE")
+            .bind(realm.network_id.to_string()).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?;
+        if owner.as_deref() != Some(realm.project_id.as_str())
+            || realm.project_id != pool.project_id
+            || realm.project_id != subnet.project_id
+            || realm.id != subnet.id
+        {
+            return Err(StoreError::OwnershipConflict);
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM canonical_address_realms WHERE network_id = $1 AND project_id = $2 AND state = 'active'")
+            .bind(realm.network_id.to_string()).bind(&realm.project_id).fetch_one(&mut *tx).await.map_err(StoreError::Database)?;
+        if count != 0 {
+            return Err(StoreError::NetworkInUse);
+        }
+        sqlx::query("INSERT INTO canonical_address_realms (id, network_id, project_id, prefix, overlapping_prefixes, generation, state) VALUES ($1, $2, $3, $4::cidr, $5, $6, $7)")
+            .bind(realm.id.to_string()).bind(realm.network_id.to_string()).bind(&realm.project_id).bind(&realm.prefix).bind(realm.overlapping_prefixes).bind(crate::checked_generation(realm.generation)?).bind(&realm.state).execute(&mut *tx).await.map_err(crate::map_canonical_insert_error)?;
+        sqlx::query("INSERT INTO canonical_address_pools (id, realm_id, project_id, prefix, gateway, first_usable, last_usable, generation, state) VALUES ($1, $2, $3, $4::cidr, $5::inet, $6::inet, $7::inet, $8, $9)")
+            .bind(pool.id.to_string()).bind(pool.realm_id.to_string()).bind(&pool.project_id).bind(&pool.prefix).bind(pool.gateway.map(|v| v.to_string())).bind(pool.first_usable.to_string()).bind(pool.last_usable.to_string()).bind(crate::checked_generation(pool.generation)?).bind(&pool.state).execute(&mut *tx).await.map_err(crate::map_canonical_insert_error)?;
+        sqlx::query("INSERT INTO network_subnets (id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end, ip_version, enable_dhcp) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)")
+            .bind(subnet.id.to_string()).bind(subnet.network_id.to_string()).bind(&subnet.name).bind(&subnet.project_id).bind(&subnet.cidr).bind(subnet.gateway_ip.to_string()).bind(subnet.allocation_start.to_string()).bind(subnet.allocation_end.to_string()).bind(i16::from(subnet.ip_version)).bind(subnet.enable_dhcp).execute(&mut *tx).await.map_err(crate::map_canonical_insert_error)?;
+        tx.commit().await.map_err(StoreError::Database)
+    }
+
     pub async fn list_canonical_pools(
         &self,
         project_id: &str,
@@ -315,6 +347,36 @@ impl PostgresStore {
         Ok(())
     }
 
+    pub async fn update_canonical_pool(
+        &self,
+        project_id: &str,
+        pool_id: &Uuid,
+        expected_generation: u64,
+        gateway: Option<Ipv4Addr>,
+    ) -> Result<CanonicalAddressPoolRecord, StoreError> {
+        let result = sqlx::query(
+            "UPDATE canonical_address_pools SET gateway = $1::inet, generation = generation + 1 WHERE id = $2 AND project_id = $3 AND generation = $4 AND state = 'active'",
+        )
+        .bind(gateway.map(|value| value.to_string()))
+        .bind(pool_id.to_string())
+        .bind(project_id)
+        .bind(crate::checked_generation(expected_generation)?)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration);
+        }
+        let row = sqlx::query("SELECT id, realm_id, project_id, prefix::text AS prefix, gateway::text AS gateway, first_usable::text AS first_usable, last_usable::text AS last_usable, generation, state FROM canonical_address_pools WHERE id = $1 AND project_id = $2")
+            .bind(pool_id.to_string())
+            .bind(project_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::ResourceNotFound)?;
+        canonical_pool_from_pg_row(&row)
+    }
+
     pub async fn insert_canonical_endpoint(
         &self,
         endpoint: &CanonicalEndpointRecord,
@@ -343,6 +405,65 @@ impl PostgresStore {
         .await
         .map_err(crate::map_canonical_insert_error)
         .map(|_| ())
+    }
+
+    pub async fn insert_canonical_endpoint_and_port(
+        &self,
+        endpoint: &CanonicalEndpointRecord,
+        port: &PortRecord,
+    ) -> Result<(), StoreError> {
+        crate::validate_canonical_state(&endpoint.state)?;
+        let subnet_id = port.subnet_id.ok_or(StoreError::ResourceNotFound)?;
+        if endpoint.id != port.id
+            || endpoint.realm_id != subnet_id
+            || endpoint.project_id != port.project_id
+        {
+            return Err(StoreError::OwnershipConflict);
+        }
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let realm = sqlx::query(
+            "SELECT network_id, project_id FROM canonical_address_realms WHERE id = $1 AND state = 'active'",
+        )
+        .bind(endpoint.realm_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::ResourceNotFound)?;
+        if realm.get::<String, _>("project_id") != endpoint.project_id
+            || realm.get::<String, _>("network_id") != port.network_id.to_string()
+        {
+            return Err(StoreError::OwnershipConflict);
+        }
+        sqlx::query(
+            "INSERT INTO canonical_endpoints (id, realm_id, project_id, fixed_ip, mac, generation, state) VALUES ($1, $2, $3, $4::inet, $5, $6, $7)",
+        )
+        .bind(endpoint.id.to_string())
+        .bind(endpoint.realm_id.to_string())
+        .bind(&endpoint.project_id)
+        .bind(endpoint.fixed_ip.to_string())
+        .bind(&endpoint.mac)
+        .bind(crate::checked_generation(endpoint.generation)?)
+        .bind(&endpoint.state)
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::map_canonical_insert_error)?;
+        sqlx::query(
+            "INSERT INTO network_ports (id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(port.id.to_string())
+        .bind(port.network_id.to_string())
+        .bind(subnet_id.to_string())
+        .bind(&port.project_id)
+        .bind(&port.name)
+        .bind(&port.mac_address)
+        .bind(port.fixed_ip.to_string())
+        .bind(&port.status)
+        .bind(&port.binding_host)
+        .bind(&port.binding_state)
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::map_canonical_insert_error)?;
+        tx.commit().await.map_err(StoreError::Database)
     }
 
     pub async fn list_canonical_endpoints(
@@ -395,6 +516,39 @@ impl PostgresStore {
             return Err(StoreError::ResourceNotFound);
         }
         Ok(())
+    }
+
+    pub async fn delete_canonical_endpoint_and_port(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        sqlx::query(
+            "DELETE FROM canonical_network_policies WHERE endpoint_id = $1 AND project_id = $2",
+        )
+        .bind(endpoint_id.to_string())
+        .bind(project_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        let result =
+            sqlx::query("DELETE FROM canonical_endpoints WHERE id = $1 AND project_id = $2")
+                .bind(endpoint_id.to_string())
+                .bind(project_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::ResourceNotFound);
+        }
+        sqlx::query("DELETE FROM network_ports WHERE id = $1 AND project_id = $2")
+            .bind(endpoint_id.to_string())
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)
     }
 
     pub async fn upsert_canonical_policy(
@@ -3986,6 +4140,14 @@ impl NetworkRepository for PostgresStore {
     ) -> Result<(), StoreError> {
         self.insert_canonical_pool(pool).await
     }
+    async fn insert_subnet_bundle(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+        pool: &CanonicalAddressPoolRecord,
+        subnet: &SubnetRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_subnet_bundle(realm, pool, subnet).await
+    }
     async fn list_canonical_pools(
         &self,
         project_id: &str,
@@ -4000,11 +4162,29 @@ impl NetworkRepository for PostgresStore {
     ) -> Result<(), StoreError> {
         self.delete_canonical_pool(project_id, pool_id).await
     }
+    async fn update_canonical_pool(
+        &self,
+        project_id: &str,
+        pool_id: &Uuid,
+        expected_generation: u64,
+        gateway: Option<Ipv4Addr>,
+    ) -> Result<CanonicalAddressPoolRecord, StoreError> {
+        self.update_canonical_pool(project_id, pool_id, expected_generation, gateway)
+            .await
+    }
     async fn insert_canonical_endpoint(
         &self,
         endpoint: &CanonicalEndpointRecord,
     ) -> Result<(), StoreError> {
         self.insert_canonical_endpoint(endpoint).await
+    }
+    async fn insert_canonical_endpoint_and_port(
+        &self,
+        endpoint: &CanonicalEndpointRecord,
+        port: &PortRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_canonical_endpoint_and_port(endpoint, port)
+            .await
     }
     async fn list_canonical_endpoints(
         &self,
@@ -4026,6 +4206,14 @@ impl NetworkRepository for PostgresStore {
         endpoint_id: &Uuid,
     ) -> Result<(), StoreError> {
         self.delete_canonical_endpoint(project_id, endpoint_id)
+            .await
+    }
+    async fn delete_canonical_endpoint_and_port(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.delete_canonical_endpoint_and_port(project_id, endpoint_id)
             .await
     }
     async fn upsert_canonical_policy(
@@ -4407,8 +4595,8 @@ impl NetworkRepository for PostgresStore {
         let net_id_str = subnet.network_id.to_string();
 
         sqlx::query(
-            "INSERT INTO network_subnets (id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            "INSERT INTO network_subnets (id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end, ip_version, enable_dhcp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(&id_str)
         .bind(&net_id_str)
@@ -4418,6 +4606,8 @@ impl NetworkRepository for PostgresStore {
         .bind(subnet.gateway_ip.to_string())
         .bind(subnet.allocation_start.to_string())
         .bind(subnet.allocation_end.to_string())
+        .bind(i16::from(subnet.ip_version))
+        .bind(subnet.enable_dhcp)
         .execute(&self.pool)
         .await
         .map_err(map_pg_error)?;
@@ -4497,6 +4687,92 @@ impl NetworkRepository for PostgresStore {
 
         tx.commit().await.map_err(StoreError::Database)?;
         Ok(())
+    }
+
+    async fn update_subnet(&self, subnet: &SubnetRecord) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "UPDATE network_subnets SET name = $1, gateway_ip = $2, allocation_start = $3, allocation_end = $4, ip_version = $5, enable_dhcp = $6 WHERE id = $7 AND project_id = $8",
+        )
+        .bind(&subnet.name)
+        .bind(subnet.gateway_ip.to_string())
+        .bind(subnet.allocation_start.to_string())
+        .bind(subnet.allocation_end.to_string())
+        .bind(i16::from(subnet.ip_version))
+        .bind(subnet.enable_dhcp)
+        .bind(subnet.id.to_string())
+        .bind(&subnet.project_id)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NetworkNotFound);
+        }
+        Ok(())
+    }
+
+    async fn delete_subnet_bundle(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let endpoints: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM canonical_endpoints WHERE realm_id = $1 AND project_id = $2",
+        )
+        .bind(id.to_string())
+        .bind(project_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        if endpoints != 0 {
+            return Err(StoreError::NetworkInUse);
+        }
+        let realm: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM canonical_address_realms WHERE id = $1 AND project_id = $2 FOR UPDATE",
+        )
+        .bind(id.to_string())
+        .bind(project_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        if realm.is_some() {
+            sqlx::query(
+                "DELETE FROM canonical_address_pools WHERE realm_id = $1 AND project_id = $2",
+            )
+            .bind(id.to_string())
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+            let result = sqlx::query("DELETE FROM canonical_address_realms WHERE id = $1 AND project_id = $2 AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id)")
+                .bind(id.to_string()).bind(project_id).execute(&mut *tx).await.map_err(StoreError::Database)?;
+            if result.rows_affected() == 0 {
+                return Err(StoreError::NetworkInUse);
+            }
+        }
+        sqlx::query("DELETE FROM network_subnets WHERE id = $1 AND project_id = $2")
+            .bind(id.to_string())
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)
+    }
+
+    async fn update_subnet_bundle(
+        &self,
+        subnet: &SubnetRecord,
+        pool_id: &Uuid,
+        expected_pool_generation: u64,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let pool = sqlx::query("UPDATE canonical_address_pools SET gateway = $1::inet, generation = generation + 1 WHERE id = $2 AND project_id = $3 AND generation = $4 AND state = 'active'")
+            .bind(subnet.gateway_ip.to_string()).bind(pool_id.to_string()).bind(&subnet.project_id).bind(crate::checked_generation(expected_pool_generation)?).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if pool.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration);
+        }
+        let metadata = sqlx::query("UPDATE network_subnets SET name = $1, gateway_ip = $2, allocation_start = $3, allocation_end = $4, ip_version = $5, enable_dhcp = $6 WHERE id = $7 AND project_id = $8")
+            .bind(&subnet.name).bind(subnet.gateway_ip.to_string()).bind(subnet.allocation_start.to_string()).bind(subnet.allocation_end.to_string()).bind(i16::from(subnet.ip_version)).bind(subnet.enable_dhcp).bind(subnet.id.to_string()).bind(&subnet.project_id).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if metadata.rows_affected() == 0 {
+            return Err(StoreError::ResourceNotFound);
+        }
+        tx.commit().await.map_err(StoreError::Database)
     }
 
     async fn insert_port(&self, port: &PortRecord) -> Result<(), StoreError> {
@@ -4625,6 +4901,29 @@ impl NetworkRepository for PostgresStore {
             return Err(StoreError::NetworkNotFound);
         }
 
+        self.get_port(project_id, id)
+            .await?
+            .ok_or(StoreError::NetworkNotFound)
+    }
+
+    async fn update_port_name(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        name: &str,
+    ) -> Result<PortRecord, StoreError> {
+        let id_str = id.to_string();
+        let res =
+            sqlx::query("UPDATE network_ports SET name = $1 WHERE id = $2 AND project_id = $3")
+                .bind(name)
+                .bind(&id_str)
+                .bind(project_id)
+                .execute(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+        if res.rows_affected() == 0 {
+            return Err(StoreError::NetworkNotFound);
+        }
         self.get_port(project_id, id)
             .await?
             .ok_or(StoreError::NetworkNotFound)
@@ -4912,6 +5211,8 @@ fn parse_pg_subnet(row: &PgRow) -> Result<SubnetRecord, StoreError> {
         allocation_end: alloc_end
             .parse()
             .map_err(|_| StoreError::Corrupt("invalid IPv4 address in durable state".to_owned()))?,
+        ip_version: row.get::<i16, _>("ip_version") as u8,
+        enable_dhcp: row.get("enable_dhcp"),
     })
 }
 

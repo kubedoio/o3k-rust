@@ -84,15 +84,15 @@ resources:
       update: {method: PUT, path: "/v2.0/subnets/{id}", status: 200}
       delete: {method: DELETE, path: "/v2.0/subnets/{id}", status: 204}
       import: {id: subnet_uuid, first_request: GET}
-    current_o3k: provider-partial
-    evidence_status: provider-blocked-at-create; canonical realm lifecycle independently proven
+    current_o3k: implemented-bounded-profile
+    evidence_status: P13.2B implementation; real-provider evidence pending
     observed:
       request: {method: POST, path: /v2.0/subnets, fields: [network_id, cidr, ip_version, enable_dhcp]}
       response: {status: 400, message: "invalid subnet request"}
-      reason: provider omits name; current O3K compatibility handler forwards an empty name and rejects it
+      reason: historical P13.1 observation before P13.2B remediation
     remaining_gap:
-      classification: wrong-request-semantics
-      required_implementation: define provider-compatible subnet name/default semantics only after canonical architecture amendment; no P13.1D runtime fix permitted
+      classification: historical-observation
+      required_implementation: provider-compatible omitted-name semantics are implemented in P13.2B
       evidence_reference: target/p13-1/provider-contract.json
   openstack_networking_port_v2:
     attribute_subset:
@@ -108,16 +108,16 @@ resources:
       import: {id: port_uuid, first_request: GET}
     fixed_ip: provider_accepts_subnet_id_and_optional_ip_address
     security_groups: deferred_to_p13.3
-    current_o3k: provider-partial
-    evidence_status: provider-blocked-by-subnet-create; canonical endpoint lifecycle independently proven
+    current_o3k: implemented-bounded-profile
+    evidence_status: provider-lifecycle-verified for the bounded P13.2C subset; security groups and rich port fields remain deferred
     observed:
       request: {method: POST, path: /v2.0/ports, fields: [network_id, name]}
       response: {status: 404, message: "network resource was not found"}
       reason: discovery-only network reference had no successfully created subnet; O3K port allocation requires a subnet
     remaining_gap:
-      classification: dependency-blocked
-      required_implementation: rerun after canonical subnet architecture and provider-compatible subnet creation are implemented; security groups remain P13.3
-      evidence_reference: target/p13-1/provider-contract.json
+      classification: bounded-profile
+      required_implementation: canonical Endpoint lifecycle with Realm-scoped fixed-IP allocation, restart, import, and project isolation
+      evidence_reference: docs/compatibility/p13-2/p13-2c-provider-port-lifecycle-evidence.json
   openstack_compute_instance_v2:
     attribute_subset:
       required: [name, image_id, flavor_id, network.uuid]
@@ -133,15 +133,15 @@ resources:
       delete: {method: DELETE, path: "/v2.1/{project_id}/servers/{id}", status: 204}
       import: {id: server_uuid, first_request: GET}
     operation_authority: Nova wire state; never an O3K native Operation response
-    current_o3k: provider-partial
-    evidence_status: provider-blocked-at-Nova-create; canonical network/realm resolution independently proven
+    current_o3k: implemented-bounded-profile
+    evidence_status: provider-lifecycle-verified for the bounded P13.2D subset; security groups, volumes, floating IPs, and rich Nova fields remain deferred
     observed:
       prerequisite: {method: GET, path: /v2.0/networks, query: "id={network_id}&status=ACTIVE", status: 200}
-      create: {method: POST, path: "/v2.1/{project_id}/servers", status: 404, message: "network resource was not found"}
+      create: {method: POST, path: "/v2.1/{project_id}/servers", status: 202}
     remaining_gap:
-      classification: wrong-cross-service-resolution
-      required_implementation: resolve network identity/resource visibility for Nova create and continue source-defined polling discovery; no P13.1D runtime fix permitted
-      evidence_reference: target/p13-1/provider-contract.json
+      classification: deferred-profile-scope
+      required_implementation: security groups, floating IPs, volumes, and advanced Nova fields remain outside the bounded profile
+      evidence_reference: docs/compatibility/p13-2/p13-2d-provider-server-lifecycle-evidence.json
 dependency_graph:
   - [image_data_source, instance]
   - [flavor_data_source, instance]

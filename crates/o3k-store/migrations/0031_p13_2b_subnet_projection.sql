@@ -1,0 +1,2 @@
+ALTER TABLE network_subnets ADD COLUMN ip_version INTEGER NOT NULL DEFAULT 4;
+ALTER TABLE network_subnets ADD COLUMN enable_dhcp INTEGER NOT NULL DEFAULT 1;

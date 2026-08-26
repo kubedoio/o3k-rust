@@ -1,7 +1,7 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: 7b4a352dd719607e72bfb0cad0749c38fe54686e
-updated_at: 2026-08-24T00:00:00Z
+source_commit: cee2a8e892588a7b27ea8585d6843b71360908f8
+updated_at: 2026-08-25T00:00:00Z
 release_context: >-
   The first native alpha candidate v0.2.0-alpha.1 at
   952dcf9c4a1ae958996e4ae9444763e5524eddc5 is rejected and permanently
@@ -259,9 +259,12 @@ profiles:
   p13-iac-compatibility-v1:
     implementation_state: >-
       Specified. This profile extends native-rust-testlab for Terraform/OpenTofu
-      IaC compatibility. ADR-0175, SPEC-0032, and the machine-readable profile
-      contract were accepted on 2026-08-24 against reviewed baseline
-      7b4a352dd719607e72bfb0cad0749c38fe54686e.
+      IaC compatibility. ADR-0175 and SPEC-0032 are accepted. The bounded P13.2
+      core managed-resource slice is complete and provider-lifecycle-verified
+      from committed real-provider evidence at
+      cee2a8e892588a7b27ea8585d6843b71360908f8 for keypair, Network, Subnet,
+      Port, and Server. This is not a claim of general OpenStack or Terraform
+      compatibility.
       ADR-0176 and SPEC-0033 were accepted on 2026-08-24 against reviewed
       proposal baseline 9b5a74d9e470278c77907a5c3ca22a56af4fe64a. P13.1
       provider discovery and canonical Network/AddressRealm runtime closure
@@ -288,7 +291,16 @@ profiles:
     protected_component_evidence:
       - name: iac-provider-harness
         state: passed
-        note: Real OpenTofu 1.12.6 and unmodified OpenStack provider 3.4.0 completed P13.1B data-source proof and P13.1C/F3 managed-resource rediscovery.
+        note: Real OpenTofu 1.12.6 and unmodified OpenStack provider 3.4.0 completed P13.1 discovery and the bounded P13.2 lifecycle gates.
+      - name: p13-2-core-managed-resource-lifecycle
+        state: passed
+        note: >-
+          Committed real-provider evidence verifies the bounded P13.2
+          lifecycle subsets for keypair, Network, Subnet, Port, and Server.
+          Evidence: docs/compatibility/p13-1/p13-2a-provider-lifecycle-evidence.json;
+          docs/compatibility/p13-2/p13-2b-subnet-lifecycle-evidence.json;
+          docs/compatibility/p13-2/p13-2c-provider-port-lifecycle-evidence.json;
+          docs/compatibility/p13-2/p13-2d-provider-server-lifecycle-evidence.json.
     full_profile_evidence:
       - name: iac-full-lifecycle-gate
         state: not-proven
@@ -296,13 +308,12 @@ profiles:
       Non-blocking for the first native alpha (v0.2.0-alpha.1). This profile
       extends native-rust-testlab but does not alter its release gate.
     blockers:
-      - P13.2 managed-resource implementation and lifecycle evidence
       - equivalent provider contract discovery gates before P13.3/P13.4 runtime work
-      - P13.2-P13.7 implementation evidence as defined in SPEC-0032
+      - P13.3-P13.7 implementation evidence as defined in SPEC-0032
     next_evidence_action: >-
-      Begin P13.2 only after its explicit implementation authorization; use the
-      frozen P13.2 managed-resource requirements without changing canonical
-      Network/AddressRealm authority.
+      Begin P13.3A — Security Group / NetworkPolicy provider-contract discovery.
+      Do not claim P13.3 implementation until that discovery gate freezes its
+      bounded contract and evidence requirements.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)

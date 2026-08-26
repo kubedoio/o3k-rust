@@ -12,7 +12,7 @@ use axum::{
 use o3k_compute::{ComputeError, ComputeService, Flavor, Server};
 use o3k_console::ConsoleError;
 use o3k_domain::{ServerId, ServerState};
-use o3k_network::NetworkService;
+use o3k_network::{NetworkError, NetworkService};
 use o3k_provider::{ConfigDriveRequest, InstanceAction};
 use serde::Serialize;
 
@@ -121,11 +121,22 @@ pub(crate) struct ServerResponse {
     // unconditionally. O3K does not model server metadata yet, so the
     // representation is always the empty object.
     metadata: serde_json::Value,
+    tags: Vec<String>,
     // Nova's extended server attribute reporting the selected compute host.
     // O3K projects the durable scheduler placement provider identity, never a
     // display name; null only when no placement decision was recorded.
     #[serde(rename = "OS-EXT-SRV-ATTR:host")]
     host: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct UpdateServerEnvelope {
+    server: UpdateServerRequest,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct UpdateServerRequest {
+    name: Option<String>,
 }
 #[derive(Serialize)]
 pub(crate) struct IdResponse {
@@ -167,13 +178,24 @@ pub(crate) async fn server_response(
             else {
                 continue;
             };
+            let network_name = network_service
+                .get_network_for_project(&server.project_id, port.network_id)
+                .await
+                .map(|network| network.name)
+                .unwrap_or_else(|_| port.network_id.to_string());
+            let address_key = if port.name.starts_with("o3k-server:") {
+                network_name
+            } else {
+                port.network_id.to_string()
+            };
             let address_list = addresses
-                .entry(port.network_id.to_string())
+                .entry(address_key)
                 .or_insert_with(|| serde_json::Value::Array(Vec::new()));
             if let Some(address_list) = address_list.as_array_mut() {
                 address_list.push(serde_json::json!({
                     "version": 4,
                     "addr": port.fixed_ip.to_string(),
+                    "OS-EXT-IPS-MAC:mac_addr": port.mac_address,
                     "OS-EXT-IPS:type": "fixed"
                 }));
             }
@@ -195,6 +217,7 @@ pub(crate) async fn server_response(
         key_name: server.key_name,
         config_drive: server.config_drive,
         metadata: serde_json::Value::Object(serde_json::Map::new()),
+        tags: Vec::new(),
         host: server.host,
     }
 }
@@ -760,34 +783,85 @@ pub(crate) async fn create_server(
             Err(error) => return image_error(error),
         }
     }
-    let network_ids = networks
-        .iter()
-        .filter_map(|network| network.port.as_deref().or(network.uuid.as_deref()))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if let Some(network_service) = state.network.as_ref() {
-        for network_id in &network_ids {
-            let port_id = match network_id.parse::<uuid::Uuid>() {
-                Ok(value) => value,
-                Err(_) => {
-                    return keystone_error(
-                        StatusCode::BAD_REQUEST,
-                        "Bad Request",
-                        "network references must be durable port UUIDs when network validation is enabled",
-                    );
-                }
-            };
-            if let Err(error) = network_service.get_port(&auth, port_id).await {
-                return network_error(error);
-            }
-        }
-    }
     let idempotency = headers
         .get("x-openstack-request-id")
         .and_then(|value| value.to_str().ok())
         .unwrap_or(&body.server.name)
         .to_owned();
-    match service
+    let server_id = ComputeService::server_id_for_create(&project_id, &idempotency);
+    let mut owned_network_ids = Vec::new();
+    let mut network_ids = Vec::with_capacity(networks.len());
+    if let Some(network_service) = state.network.as_ref() {
+        for network in networks {
+            if let Some(port) = network.port {
+                let port_id = match port.parse::<uuid::Uuid>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return keystone_error(
+                            StatusCode::BAD_REQUEST,
+                            "Bad Request",
+                            "port references must be UUIDs",
+                        );
+                    }
+                };
+                if let Err(error) = network_service.get_port(&auth, port_id).await {
+                    return network_error(error);
+                }
+                network_ids.push(port);
+            } else if let Some(network_id) = network.uuid {
+                let network_id = match network_id.parse::<uuid::Uuid>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return keystone_error(
+                            StatusCode::BAD_REQUEST,
+                            "Bad Request",
+                            "network references must be UUIDs",
+                        );
+                    }
+                };
+                if network_service.get_network(&auth, network_id).await.is_ok() {
+                    // Nova's bounded P13 profile supplies a Network UUID, not
+                    // a pre-created Port UUID. Resolve the single admitted
+                    // Realm through the canonical Network service and create
+                    // exactly one canonical Endpoint before accepting the
+                    // Server.
+                    let port_name = format!("o3k-server:{project_id}:{idempotency}");
+                    let port = match network_service
+                        .create_port_for_project(&project_id, network_id, port_name)
+                        .await
+                    {
+                        Ok(port) => port,
+                        Err(error) => return network_error(error),
+                    };
+                    network_ids.push(port.id.to_string());
+                    owned_network_ids.push(port.id.to_string());
+                } else if network_service.get_port(&auth, network_id).await.is_ok() {
+                    // Preserve the existing bounded compatibility path for
+                    // callers that explicitly supply an already-created Port.
+                    network_ids.push(network_id.to_string());
+                } else {
+                    return keystone_error(
+                        StatusCode::NOT_FOUND,
+                        "Not Found",
+                        "network resource was not found",
+                    );
+                }
+            }
+        }
+    } else {
+        network_ids = networks
+            .into_iter()
+            .filter_map(|network| network.port.or(network.uuid))
+            .collect();
+    }
+    if network_ids.is_empty() {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "network is required",
+        );
+    }
+    let result = service
         .create_server_for_auth(
             &auth,
             o3k_compute::ServerCreateInput {
@@ -802,16 +876,95 @@ pub(crate) async fn create_server(
                 idempotency_key: idempotency,
             },
         )
-        .await
-    {
-        Ok(server) => (
-            StatusCode::ACCEPTED,
-            Json(ServerEnvelope {
-                server: server_response(server, state.network.as_deref()).await,
-            }),
-        )
-            .into_response(),
-        Err(error) => compute_error(error),
+        .await;
+    match result {
+        Ok(server) => {
+            if let Some(network_service) = state.network.as_ref() {
+                let mut cleanup_failed = false;
+                for port_id in &owned_network_ids {
+                    if !server.network_ids.iter().any(|id| id == port_id)
+                        && let Ok(port_id) = port_id.parse()
+                        && let Err(error) = network_service
+                            .delete_port_for_project(&project_id, port_id)
+                            .await
+                    {
+                        cleanup_failed = true;
+                        tracing::error!(
+                            %error,
+                            %port_id,
+                            "server create cleanup could not remove unused endpoint"
+                        );
+                    }
+                }
+                if cleanup_failed {
+                    return keystone_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal Server Error",
+                        "server network cleanup failed",
+                    );
+                }
+            }
+            (
+                StatusCode::ACCEPTED,
+                Json(ServerEnvelope {
+                    server: server_response(server, state.network.as_deref()).await,
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            if let Some(network_service) = state.network.as_ref() {
+                let durable_network_ids = match service
+                    .server_network_ids_for_auth(&auth, ServerId::from_uuid(server_id))
+                    .await
+                {
+                    Ok(network_ids) => Some(network_ids),
+                    Err(ComputeError::NotFound) => None,
+                    Err(lookup_error) => {
+                        tracing::error!(
+                            %lookup_error,
+                            %server_id,
+                            "server create outcome could not be checked before endpoint compensation"
+                        );
+                        return keystone_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Internal Server Error",
+                            "server create outcome could not be recovered",
+                        );
+                    }
+                };
+                for port_id in owned_network_ids {
+                    let preserve_for_durable_server = durable_network_ids
+                        .as_ref()
+                        .is_some_and(|network_ids| network_ids.iter().any(|id| id == &port_id));
+                    if preserve_for_durable_server {
+                        tracing::warn!(
+                            server_id = %server_id,
+                            port_id,
+                            "retaining server endpoint for durable create reconciliation"
+                        );
+                        continue;
+                    }
+                    if let Ok(port_id) = port_id.parse()
+                        && let Err(cleanup_error) = network_service
+                            .delete_port_for_project(&project_id, port_id)
+                            .await
+                    {
+                        tracing::error!(
+                            %cleanup_error,
+                            %port_id,
+                            "server create compensation could not remove owned endpoint"
+                        );
+                        return keystone_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Internal Server Error",
+                            "server network compensation failed",
+                        );
+                    }
+                }
+            }
+            compute_error(error)
+        }
     }
 }
 
@@ -868,6 +1021,64 @@ pub(crate) async fn show_server(
     }
 }
 
+pub(crate) async fn update_server(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((project_id, id)): Path<(String, uuid::Uuid)>,
+    request: Result<Json<UpdateServerEnvelope>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match project_auth_context(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid server update",
+        );
+    };
+    let Some(name) = body.server.name else {
+        return keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "name is required");
+    };
+    match service
+        .update_server_name_for_auth(&auth, ServerId::from_uuid(id), name)
+        .await
+    {
+        Ok(server) => Json(ServerEnvelope {
+            server: server_response(server, state.network.as_deref()).await,
+        })
+        .into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
+pub(crate) async fn show_server_metadata(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((project_id, id)): Path<(String, uuid::Uuid)>,
+) -> axum::response::Response {
+    let auth = match project_auth_context(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service
+        .show_server_for_auth(&auth, ServerId::from_uuid(id))
+        .await
+    {
+        Ok(_) => Json(serde_json::json!({"metadata": {}})).into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
 pub(crate) async fn delete_server(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -880,6 +1091,17 @@ pub(crate) async fn delete_server(
     let service = match compute_service(&state) {
         Ok(value) => value,
         Err(response) => return response,
+    };
+    let owned_ports = match service
+        .server_network_ids_for_auth(&auth, ServerId::from_uuid(id))
+        .await
+    {
+        Ok(network_ids) => network_ids
+            .iter()
+            .filter_map(|port_id| port_id.parse::<uuid::Uuid>().ok())
+            .collect::<Vec<_>>(),
+        Err(ComputeError::NotFound) => Vec::new(),
+        Err(error) => return compute_error(error),
     };
     match service
         .delete_server_for_auth(&auth, ServerId::from_uuid(id))
@@ -895,6 +1117,45 @@ pub(crate) async fn delete_server(
                     "Internal Server Error",
                     "server console cleanup failed",
                 );
+            }
+            if let Some(network_service) = state.network.as_ref() {
+                let mut cleanup_failed = false;
+                for port_id in owned_ports {
+                    match network_service
+                        .get_port_for_project(&project_id, port_id)
+                        .await
+                    {
+                        Ok(port) if port.name.starts_with(&format!("o3k-server:{project_id}:")) => {
+                            if let Err(error) = network_service
+                                .delete_port_for_project(&project_id, port_id)
+                                .await
+                            {
+                                cleanup_failed = true;
+                                tracing::error!(
+                                    %error,
+                                    %port_id,
+                                    "server-owned endpoint cleanup failed"
+                                );
+                            }
+                        }
+                        Ok(_) | Err(NetworkError::NotFound) => {}
+                        Err(error) => {
+                            cleanup_failed = true;
+                            tracing::error!(
+                                %error,
+                                %port_id,
+                                "server-owned endpoint lookup failed during cleanup"
+                            );
+                        }
+                    }
+                }
+                if cleanup_failed {
+                    return keystone_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal Server Error",
+                        "server network cleanup failed",
+                    );
+                }
             }
             StatusCode::NO_CONTENT.into_response()
         }

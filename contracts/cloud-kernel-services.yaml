@@ -54,6 +54,7 @@ services:
       - "network:ListSubnets"
       - "network:CreateSubnet"
       - "network:ReadSubnet"
+      - "network:UpdateSubnet"
       - "network:DeleteSubnet"
       - "network:ListPorts"
       - "network:CreatePort"

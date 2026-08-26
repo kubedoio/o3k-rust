@@ -135,6 +135,14 @@ actions:
     require_ownership: true
     public_discovery: false
 
+  - action_id: "network:UpdateSubnet"
+    service_namespace: "network"
+    resource_type: "subnet"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
   - action_id: "network:DeleteSubnet"
     service_namespace: "network"
     resource_type: "subnet"

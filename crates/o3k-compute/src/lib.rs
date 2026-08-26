@@ -1489,6 +1489,15 @@ impl ComputeService {
             .server)
     }
 
+    /// Returns the deterministic canonical identity used by the Nova create
+    /// adapter before the durable server intent exists.
+    pub fn server_id_for_create(project_id: &str, idempotency_key: &str) -> Uuid {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:server:{project_id}:{idempotency_key}").as_bytes(),
+        )
+    }
+
     async fn create_server_for_user_with_context(
         &self,
         input: ServerCreateInput,
@@ -1526,10 +1535,7 @@ impl ComputeService {
             None => None,
         };
         let flavor = self.flavor_for_project(&project_id, flavor_id).await?;
-        let server_id = Uuid::new_v5(
-            &Uuid::NAMESPACE_URL,
-            format!("o3k:server:{project_id}:{idempotency_key}").as_bytes(),
-        );
+        let server_id = Self::server_id_for_create(&project_id, &idempotency_key);
         let existing_res = self.store.get_resource(server_id).await;
         let operation_id = match &existing_res {
             Ok(existing) => {
@@ -2306,6 +2312,55 @@ impl ComputeService {
             .await
     }
 
+    /// Returns the durable network attachment intent even after the server
+    /// has reached Deleted.  The Nova adapter uses this to retry cleanup after
+    /// a process restart or a transient endpoint-store failure; the normal
+    /// read projection intentionally hides deleted servers.
+    pub async fn server_network_ids_for_auth(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+    ) -> Result<Vec<String>, ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "ReadServer").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "ReadServer".to_owned())
+        });
+        let target = ResourceTarget::instance(
+            ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+            ResourceId::new(id.as_uuid().to_string()).map_err(|_| ComputeError::InvalidRequest)?,
+            Some(auth.effective_scope().id().clone()),
+        );
+        let decision = self.authorizer.authorize(&AuthorizationRequest {
+            auth_context: auth,
+            action: act.clone(),
+            resource_target: target,
+        });
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
+            return Err(ComputeError::NotFound);
+        }
+        let resource =
+            self.store
+                .get_resource(id.as_uuid())
+                .await
+                .map_err(|error| match error {
+                    StoreError::ResourceNotFound => ComputeError::NotFound,
+                    other => ComputeError::Store(other),
+                })?;
+        if resource.kind != "compute_instance"
+            || resource.project_id != auth.effective_scope().id().as_str()
+        {
+            return Err(ComputeError::NotFound);
+        }
+        let request: CreateInstanceRequest =
+            serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
+        Ok(request.network_ids)
+    }
+
     pub async fn show_server(
         &self,
         project_id: &str,
@@ -2356,6 +2411,69 @@ impl ComputeService {
             .get_server_keypair_name(server.id.as_uuid())
             .await?;
         Ok(server)
+    }
+
+    /// Applies the bounded Nova in-place update supported by P13.2D.  The
+    /// canonical resource ledger is the merge base; compatibility callers
+    /// cannot update a stale projection or change server identity.
+    pub async fn update_server_name_for_auth(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+        name: String,
+    ) -> Result<Server, ComputeError> {
+        let action = ActionId::new("compute", "UpdateServer").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "UpdateServer".to_owned())
+        });
+        let target = ResourceTarget::instance(
+            ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+            ResourceId::new(id.as_uuid().to_string()).map_err(|_| ComputeError::InvalidRequest)?,
+            Some(auth.effective_scope().id().clone()),
+        );
+        if !self
+            .authorizer
+            .authorize(&AuthorizationRequest {
+                auth_context: auth,
+                action,
+                resource_target: target,
+            })
+            .is_allowed()
+        {
+            return Err(ComputeError::NotFound);
+        }
+        if name.trim().is_empty() {
+            return Err(ComputeError::InvalidRequest);
+        }
+        let resource =
+            self.store
+                .get_resource(id.as_uuid())
+                .await
+                .map_err(|error| match error {
+                    StoreError::ResourceNotFound => ComputeError::NotFound,
+                    other => ComputeError::Store(other),
+                })?;
+        if resource.kind != "compute_instance"
+            || resource.project_id != auth.effective_scope().id().as_str()
+        {
+            return Err(ComputeError::NotFound);
+        }
+        let mut request: CreateInstanceRequest =
+            serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
+        request.name = name;
+        let desired = serde_json::to_string(&request).map_err(|_| ComputeError::Conflict)?;
+        self.store
+            .update_resource(
+                resource.id,
+                resource.generation,
+                &desired,
+                &resource.observed_state,
+                resource.observed_generation,
+                resource.provider_id.as_deref(),
+            )
+            .await
+            .map_err(ComputeError::Store)?;
+        self.show_server(auth.effective_scope().id().as_str(), id)
+            .await
     }
 
     /// Drives durable create convergence for a server whose create operation
@@ -7856,6 +7974,23 @@ mod tests {
         );
         assert_eq!(second.state, ServerState::Active);
         Ok(())
+    }
+
+    #[test]
+    fn server_create_identity_is_stable_and_scope_bound() {
+        let first = ComputeService::server_id_for_create("project-a", "request-1");
+        assert_eq!(
+            first,
+            ComputeService::server_id_for_create("project-a", "request-1")
+        );
+        assert_ne!(
+            first,
+            ComputeService::server_id_for_create("project-b", "request-1")
+        );
+        assert_ne!(
+            first,
+            ComputeService::server_id_for_create("project-a", "request-2")
+        );
     }
 
     /// A retry of the recreation (a crash between the revive persist and the

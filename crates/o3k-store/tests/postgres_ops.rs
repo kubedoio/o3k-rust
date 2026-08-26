@@ -103,6 +103,8 @@ async fn test_postgres_backup_and_restore() {
         gateway_ip: Ipv4Addr::from_str("10.0.0.1").unwrap(),
         allocation_start: Ipv4Addr::from_str("10.0.0.10").unwrap(),
         allocation_end: Ipv4Addr::from_str("10.0.0.200").unwrap(),
+        ip_version: 4,
+        enable_dhcp: true,
     };
     store.insert_subnet(&sub).await.expect("insert_subnet");
 
