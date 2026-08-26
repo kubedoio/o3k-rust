@@ -892,6 +892,7 @@ fn parse_prefix(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use o3k_store::CanonicalPolicyRepository;
     use std::net::Ipv4Addr;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -918,8 +919,8 @@ mod tests {
         }
     }
 
-    async fn sqlite_policy_fixture() -> (o3k_store::SqliteStore, Uuid) {
-        let store = o3k_store::SqliteStore::connect("sqlite::memory:")
+    async fn sqlite_policy_fixture() -> (impl o3k_store::NetworkRepository + Clone, Uuid) {
+        let store = o3k_store::testkit::open_memory()
             .await
             .expect("sqlite store");
         let network_id = Uuid::from_u128(30);
