@@ -59,6 +59,18 @@ pub trait CanonicalPolicyRepository {
         project_id: &str,
         policy_id: &Uuid,
     ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError>;
+    async fn begin_policy_rule_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalNetworkPolicyRuleRecord, StoreError>;
+    async fn finalize_policy_rule_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), StoreError>;
     async fn delete_policy_rule(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError>;
     async fn insert_policy_attachment(
         &self,
@@ -79,6 +91,18 @@ pub trait CanonicalPolicyRepository {
         project_id: &str,
         endpoint_id: &Uuid,
     ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError>;
+    async fn begin_policy_attachment_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalPolicyAttachmentRecord, StoreError>;
+    async fn finalize_policy_attachment_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), StoreError>;
     async fn delete_policy_attachment(&self, project_id: &str, id: &Uuid)
     -> Result<(), StoreError>;
 }
@@ -307,9 +331,46 @@ impl crate::SqliteStore {
         state: &str,
     ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
         validate_canonical_state(state)?;
-        let result = sqlx::query("UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=?")
-            .bind(state).bind(id.to_string()).bind(project).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
-        if result.rows_affected() == 0 {
+        let query = if state == "deleting" {
+            "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=? AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=? AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=? AND state IN ('requested','active','deleting'))"
+        } else {
+            "UPDATE canonical_reusable_network_policies SET state=?, generation=generation+1, updated_at=updated_at WHERE id=? AND project_id=? AND generation=?"
+        };
+        let statement = if state == "deleting" {
+            sqlx::query(query)
+                .bind(state)
+                .bind(id.to_string())
+                .bind(project)
+                .bind(checked_generation(expected)?)
+                .bind(id.to_string())
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await
+                .map_err(StoreError::Database)?
+        } else {
+            sqlx::query(query)
+                .bind(state)
+                .bind(id.to_string())
+                .bind(project)
+                .bind(checked_generation(expected)?)
+                .execute(&self.pool)
+                .await
+                .map_err(StoreError::Database)?
+        };
+        if statement.rows_affected() == 0 {
+            if state == "deleting" {
+                let current = self.get_reusable_policy(project, id).await?;
+                if let Some(current) = current {
+                    if current.generation != expected {
+                        return Err(StoreError::StaleGeneration);
+                    }
+                    let children: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM canonical_network_policy_rules WHERE policy_id=? AND state IN ('requested','active','deleting')) + (SELECT COUNT(*) FROM canonical_policy_attachments WHERE policy_id=? AND state IN ('requested','active','deleting'))")
+                        .bind(id.to_string()).bind(id.to_string()).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+                    if children > 0 {
+                        return Err(StoreError::NetworkInUse);
+                    }
+                }
+            }
             return match self.get_reusable_policy(project, id).await? {
                 Some(_) => Err(StoreError::StaleGeneration),
                 None => Err(StoreError::ResourceNotFound),
@@ -385,6 +446,44 @@ impl crate::SqliteStore {
         let rows=sqlx::query(&format!("SELECT {RULE_COLUMNS} FROM canonical_network_policy_rules WHERE policy_id=? AND project_id=? ORDER BY id")).bind(policy.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         rows.iter().map(sqlite_rule).collect()
     }
+    pub async fn begin_policy_rule_deletion(
+        &self,
+        project: &str,
+        id: &Uuid,
+        expected: u64,
+    ) -> Result<CanonicalNetworkPolicyRuleRecord, StoreError> {
+        let result = sqlx::query("UPDATE canonical_network_policy_rules SET state='deleting', generation=generation+1 WHERE id=? AND project_id=? AND state='active' AND generation=?")
+            .bind(id.to_string()).bind(project).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_policy_rule(project, id).await? {
+                Some(rule) if rule.generation != expected => Err(StoreError::StaleGeneration),
+                Some(_) => Err(StoreError::Corrupt("policy rule is not active".into())),
+                None => Err(StoreError::ResourceNotFound),
+            };
+        }
+        self.get_policy_rule(project, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+    pub async fn finalize_policy_rule_deletion(
+        &self,
+        project: &str,
+        id: &Uuid,
+        expected: u64,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query("DELETE FROM canonical_network_policy_rules WHERE id=? AND project_id=? AND state='deleting' AND generation=?")
+            .bind(id.to_string()).bind(project).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 1 {
+            return Ok(());
+        }
+        match self.get_policy_rule(project, id).await? {
+            Some(rule) if rule.generation != expected => Err(StoreError::StaleGeneration),
+            Some(_) => Err(StoreError::Corrupt(
+                "policy rule is not deletion-reserved".into(),
+            )),
+            None => Err(StoreError::ResourceNotFound),
+        }
+    }
     pub async fn delete_policy_rule(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
         let r =
             sqlx::query("DELETE FROM canonical_network_policy_rules WHERE id=? AND project_id=?")
@@ -459,6 +558,50 @@ impl crate::SqliteStore {
     ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
         let rows=sqlx::query(&format!("SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE endpoint_id=? AND project_id=? ORDER BY id")).bind(endpoint.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         rows.iter().map(sqlite_attachment).collect()
+    }
+    pub async fn begin_policy_attachment_deletion(
+        &self,
+        project: &str,
+        id: &Uuid,
+        expected: u64,
+    ) -> Result<CanonicalPolicyAttachmentRecord, StoreError> {
+        let result = sqlx::query("UPDATE canonical_policy_attachments SET state='deleting', generation=generation+1 WHERE id=? AND project_id=? AND state='active' AND generation=?")
+            .bind(id.to_string()).bind(project).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_policy_attachment(project, id).await? {
+                Some(attachment) if attachment.generation != expected => {
+                    Err(StoreError::StaleGeneration)
+                }
+                Some(_) => Err(StoreError::Corrupt(
+                    "policy attachment is not active".into(),
+                )),
+                None => Err(StoreError::ResourceNotFound),
+            };
+        }
+        self.get_policy_attachment(project, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+    pub async fn finalize_policy_attachment_deletion(
+        &self,
+        project: &str,
+        id: &Uuid,
+        expected: u64,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query("DELETE FROM canonical_policy_attachments WHERE id=? AND project_id=? AND state='deleting' AND generation=?")
+            .bind(id.to_string()).bind(project).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 1 {
+            return Ok(());
+        }
+        match self.get_policy_attachment(project, id).await? {
+            Some(attachment) if attachment.generation != expected => {
+                Err(StoreError::StaleGeneration)
+            }
+            Some(_) => Err(StoreError::Corrupt(
+                "policy attachment is not deletion-reserved".into(),
+            )),
+            None => Err(StoreError::ResourceNotFound),
+        }
     }
     pub async fn delete_policy_attachment(
         &self,
@@ -539,6 +682,22 @@ impl CanonicalPolicyRepository for crate::SqliteStore {
     ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
         self.list_policy_rules(p, i).await
     }
+    async fn begin_policy_rule_deletion(
+        &self,
+        p: &str,
+        i: &Uuid,
+        g: u64,
+    ) -> Result<CanonicalNetworkPolicyRuleRecord, StoreError> {
+        self.begin_policy_rule_deletion(p, i, g).await
+    }
+    async fn finalize_policy_rule_deletion(
+        &self,
+        p: &str,
+        i: &Uuid,
+        g: u64,
+    ) -> Result<(), StoreError> {
+        self.finalize_policy_rule_deletion(p, i, g).await
+    }
     async fn delete_policy_rule(&self, p: &str, i: &Uuid) -> Result<(), StoreError> {
         self.delete_policy_rule(p, i).await
     }
@@ -568,6 +727,22 @@ impl CanonicalPolicyRepository for crate::SqliteStore {
         i: &Uuid,
     ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
         self.list_endpoint_policy_attachments(p, i).await
+    }
+    async fn begin_policy_attachment_deletion(
+        &self,
+        p: &str,
+        i: &Uuid,
+        g: u64,
+    ) -> Result<CanonicalPolicyAttachmentRecord, StoreError> {
+        self.begin_policy_attachment_deletion(p, i, g).await
+    }
+    async fn finalize_policy_attachment_deletion(
+        &self,
+        p: &str,
+        i: &Uuid,
+        g: u64,
+    ) -> Result<(), StoreError> {
+        self.finalize_policy_attachment_deletion(p, i, g).await
     }
     async fn delete_policy_attachment(&self, p: &str, i: &Uuid) -> Result<(), StoreError> {
         self.delete_policy_attachment(p, i).await
@@ -686,9 +861,32 @@ impl crate::PostgresStore {
         state: &str,
     ) -> Result<CanonicalReusableNetworkPolicyRecord, StoreError> {
         validate_canonical_state(state)?;
-        let result = sqlx::query("UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4")
-            .bind(state).bind(id.to_string()).bind(project).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        let query = if state == "deleting" {
+            "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4 AND NOT EXISTS (SELECT 1 FROM canonical_network_policy_rules WHERE policy_id=$2 AND state IN ('requested','active','deleting')) AND NOT EXISTS (SELECT 1 FROM canonical_policy_attachments WHERE policy_id=$2 AND state IN ('requested','active','deleting'))"
+        } else {
+            "UPDATE canonical_reusable_network_policies SET state=$1, generation=generation+1, updated_at=updated_at WHERE id=$2 AND project_id=$3 AND generation=$4"
+        };
+        let result = sqlx::query(query)
+            .bind(state)
+            .bind(id.to_string())
+            .bind(project)
+            .bind(checked_generation(expected)?)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
         if result.rows_affected() == 0 {
+            if state == "deleting"
+                && let Some(current) = self.get_reusable_policy(project, id).await?
+            {
+                if current.generation != expected {
+                    return Err(StoreError::StaleGeneration);
+                }
+                let children: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM canonical_network_policy_rules WHERE policy_id=$1 AND state IN ('requested','active','deleting')) + (SELECT COUNT(*) FROM canonical_policy_attachments WHERE policy_id=$1 AND state IN ('requested','active','deleting'))")
+                    .bind(id.to_string()).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+                if children > 0 {
+                    return Err(StoreError::NetworkInUse);
+                }
+            }
             return match self.get_reusable_policy(project, id).await? {
                 Some(_) => Err(StoreError::StaleGeneration),
                 None => Err(StoreError::ResourceNotFound),
@@ -717,7 +915,7 @@ impl crate::PostgresStore {
         let generation = validate_rule(r)?;
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         let p = sqlx::query(
-            "SELECT project_id,state,unmatched_action FROM canonical_reusable_network_policies WHERE id=$1",
+            "SELECT project_id,state,unmatched_action FROM canonical_reusable_network_policies WHERE id=$1 FOR UPDATE",
         )
         .bind(r.policy_id.to_string())
         .fetch_optional(&mut *tx)
@@ -744,8 +942,46 @@ impl crate::PostgresStore {
         project: &str,
         policy: &Uuid,
     ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
-        let r=sqlx::query(&format!("SELECT id,policy_id,project_id,direction,address_family,protocol,port_min,port_max,remote_selector::text AS remote_selector,action,state,generation,enforcement_key FROM canonical_network_policy_rules WHERE policy_id=$1 AND project_id=$2 ORDER BY id")).bind(policy.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        let r=sqlx::query("SELECT id,policy_id,project_id,direction,address_family,protocol,port_min,port_max,remote_selector::text AS remote_selector,action,state,generation,enforcement_key FROM canonical_network_policy_rules WHERE policy_id=$1 AND project_id=$2 ORDER BY id").bind(policy.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         r.iter().map(pg_rule).collect()
+    }
+    pub async fn begin_policy_rule_deletion(
+        &self,
+        project: &str,
+        id: &Uuid,
+        expected: u64,
+    ) -> Result<CanonicalNetworkPolicyRuleRecord, StoreError> {
+        let result = sqlx::query("UPDATE canonical_network_policy_rules SET state='deleting', generation=generation+1 WHERE id=$1 AND project_id=$2 AND state='active' AND generation=$3")
+            .bind(id.to_string()).bind(project).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_policy_rule(project, id).await? {
+                Some(rule) if rule.generation != expected => Err(StoreError::StaleGeneration),
+                Some(_) => Err(StoreError::Corrupt("policy rule is not active".into())),
+                None => Err(StoreError::ResourceNotFound),
+            };
+        }
+        self.get_policy_rule(project, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+    pub async fn finalize_policy_rule_deletion(
+        &self,
+        project: &str,
+        id: &Uuid,
+        expected: u64,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query("DELETE FROM canonical_network_policy_rules WHERE id=$1 AND project_id=$2 AND state='deleting' AND generation=$3")
+            .bind(id.to_string()).bind(project).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 1 {
+            return Ok(());
+        }
+        match self.get_policy_rule(project, id).await? {
+            Some(rule) if rule.generation != expected => Err(StoreError::StaleGeneration),
+            Some(_) => Err(StoreError::Corrupt(
+                "policy rule is not deletion-reserved".into(),
+            )),
+            None => Err(StoreError::ResourceNotFound),
+        }
     }
     pub async fn delete_policy_rule(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
         let r =
@@ -768,7 +1004,7 @@ impl crate::PostgresStore {
         let generation = validate_attachment(a)?;
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         let p = sqlx::query(
-            "SELECT project_id,state FROM canonical_reusable_network_policies WHERE id=$1",
+            "SELECT project_id,state,unmatched_action FROM canonical_reusable_network_policies WHERE id=$1 FOR UPDATE",
         )
         .bind(a.policy_id.to_string())
         .fetch_optional(&mut *tx)
@@ -780,14 +1016,7 @@ impl crate::PostgresStore {
         {
             return Err(StoreError::OwnershipConflict);
         }
-        let incompatible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM canonical_policy_attachments a JOIN canonical_reusable_network_policies existing ON existing.id=a.policy_id WHERE a.endpoint_id=$1 AND a.state='active' AND existing.unmatched_action <> $2")
-            .bind(a.endpoint_id.to_string())
-            .bind(p.get::<String, _>("unmatched_action"))
-            .fetch_one(&mut *tx).await.map_err(StoreError::Database)?;
-        if incompatible != 0 {
-            return Err(StoreError::PolicyCompositionConflict);
-        }
-        let e = sqlx::query("SELECT project_id FROM canonical_endpoints WHERE id=$1")
+        let e = sqlx::query("SELECT project_id FROM canonical_endpoints WHERE id=$1 FOR UPDATE")
             .bind(a.endpoint_id.to_string())
             .fetch_optional(&mut *tx)
             .await
@@ -795,6 +1024,13 @@ impl crate::PostgresStore {
             .ok_or(StoreError::ResourceNotFound)?;
         if e.get::<String, _>("project_id") != a.project_id {
             return Err(StoreError::OwnershipConflict);
+        }
+        let incompatible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM canonical_policy_attachments a JOIN canonical_reusable_network_policies existing ON existing.id=a.policy_id WHERE a.endpoint_id=$1 AND a.state='active' AND existing.unmatched_action <> $2")
+            .bind(a.endpoint_id.to_string())
+            .bind(p.get::<String, _>("unmatched_action"))
+            .fetch_one(&mut *tx).await.map_err(StoreError::Database)?;
+        if incompatible != 0 {
+            return Err(StoreError::PolicyCompositionConflict);
         }
         sqlx::query("INSERT INTO canonical_policy_attachments (id,policy_id,endpoint_id,project_id,state,generation) VALUES ($1,$2,$3,$4,$5,$6)").bind(a.id.to_string()).bind(a.policy_id.to_string()).bind(a.endpoint_id.to_string()).bind(&a.project_id).bind(&a.state).bind(generation).execute(&mut *tx).await.map_err(map_canonical_insert_error)?;
         tx.commit().await.map_err(StoreError::Database)
@@ -821,6 +1057,50 @@ impl crate::PostgresStore {
     ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
         let r=sqlx::query(&format!("SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE endpoint_id=$1 AND project_id=$2 ORDER BY id")).bind(endpoint.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         r.iter().map(pg_attachment).collect()
+    }
+    pub async fn begin_policy_attachment_deletion(
+        &self,
+        project: &str,
+        id: &Uuid,
+        expected: u64,
+    ) -> Result<CanonicalPolicyAttachmentRecord, StoreError> {
+        let result = sqlx::query("UPDATE canonical_policy_attachments SET state='deleting', generation=generation+1 WHERE id=$1 AND project_id=$2 AND state='active' AND generation=$3")
+            .bind(id.to_string()).bind(project).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_policy_attachment(project, id).await? {
+                Some(attachment) if attachment.generation != expected => {
+                    Err(StoreError::StaleGeneration)
+                }
+                Some(_) => Err(StoreError::Corrupt(
+                    "policy attachment is not active".into(),
+                )),
+                None => Err(StoreError::ResourceNotFound),
+            };
+        }
+        self.get_policy_attachment(project, id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+    pub async fn finalize_policy_attachment_deletion(
+        &self,
+        project: &str,
+        id: &Uuid,
+        expected: u64,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query("DELETE FROM canonical_policy_attachments WHERE id=$1 AND project_id=$2 AND state='deleting' AND generation=$3")
+            .bind(id.to_string()).bind(project).bind(checked_generation(expected)?).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 1 {
+            return Ok(());
+        }
+        match self.get_policy_attachment(project, id).await? {
+            Some(attachment) if attachment.generation != expected => {
+                Err(StoreError::StaleGeneration)
+            }
+            Some(_) => Err(StoreError::Corrupt(
+                "policy attachment is not deletion-reserved".into(),
+            )),
+            None => Err(StoreError::ResourceNotFound),
+        }
     }
     pub async fn delete_policy_attachment(
         &self,
@@ -902,6 +1182,22 @@ impl CanonicalPolicyRepository for crate::PostgresStore {
     ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
         self.list_policy_rules(p, i).await
     }
+    async fn begin_policy_rule_deletion(
+        &self,
+        p: &str,
+        i: &Uuid,
+        g: u64,
+    ) -> Result<CanonicalNetworkPolicyRuleRecord, StoreError> {
+        self.begin_policy_rule_deletion(p, i, g).await
+    }
+    async fn finalize_policy_rule_deletion(
+        &self,
+        p: &str,
+        i: &Uuid,
+        g: u64,
+    ) -> Result<(), StoreError> {
+        self.finalize_policy_rule_deletion(p, i, g).await
+    }
     async fn delete_policy_rule(&self, p: &str, i: &Uuid) -> Result<(), StoreError> {
         self.delete_policy_rule(p, i).await
     }
@@ -931,6 +1227,22 @@ impl CanonicalPolicyRepository for crate::PostgresStore {
         i: &Uuid,
     ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
         self.list_endpoint_policy_attachments(p, i).await
+    }
+    async fn begin_policy_attachment_deletion(
+        &self,
+        p: &str,
+        i: &Uuid,
+        g: u64,
+    ) -> Result<CanonicalPolicyAttachmentRecord, StoreError> {
+        self.begin_policy_attachment_deletion(p, i, g).await
+    }
+    async fn finalize_policy_attachment_deletion(
+        &self,
+        p: &str,
+        i: &Uuid,
+        g: u64,
+    ) -> Result<(), StoreError> {
+        self.finalize_policy_attachment_deletion(p, i, g).await
     }
     async fn delete_policy_attachment(&self, p: &str, i: &Uuid) -> Result<(), StoreError> {
         self.delete_policy_attachment(p, i).await
@@ -1016,19 +1328,16 @@ mod tests {
             generation: 1,
         };
         store.insert_policy_attachment(&attachment).await?;
-        assert_eq!(
-            store
-                .get_reusable_policy("project-a", &policy_id)
-                .await?
-                .unwrap()
-                .unmatched_action,
-            "Deny"
-        );
+        let loaded_policy = store
+            .get_reusable_policy("project-a", &policy_id)
+            .await?
+            .ok_or(StoreError::Corrupt("policy missing after insert".into()))?;
+        assert_eq!(loaded_policy.unmatched_action, "Deny");
         assert_eq!(
             store
                 .get_policy_rule("project-a", &rule_id)
                 .await?
-                .unwrap()
+                .ok_or(StoreError::Corrupt("rule missing after insert".into()))?
                 .id,
             rule_id
         );
@@ -1036,7 +1345,9 @@ mod tests {
             store
                 .get_policy_attachment("project-a", &attachment_id)
                 .await?
-                .unwrap()
+                .ok_or(StoreError::Corrupt(
+                    "attachment missing after insert".into()
+                ))?
                 .id,
             attachment_id
         );
@@ -1135,6 +1446,110 @@ mod tests {
         );
         drop(store);
         let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn child_deletion_is_generation_fenced_and_survives_reopen() -> Result<(), StoreError> {
+        let path =
+            std::env::temp_dir().join(format!("o3k-policy-delete-{}.sqlite", Uuid::now_v7()));
+        let store = SqliteStore::connect_file(&path).await?;
+        let policy_id = Uuid::from_u128(40);
+        let rule_id = Uuid::from_u128(41);
+        let endpoint_id = Uuid::from_u128(42);
+        let attachment_id = Uuid::from_u128(43);
+        store
+            .insert_reusable_policy(&policy(policy_id, "Allow"))
+            .await?;
+        store.insert_policy_rule(&rule(rule_id, policy_id)).await?;
+        endpoint_fixture(&store, endpoint_id).await?;
+        store
+            .insert_policy_attachment(&CanonicalPolicyAttachmentRecord {
+                id: attachment_id,
+                policy_id,
+                endpoint_id,
+                project_id: "project-a".into(),
+                state: "active".into(),
+                generation: 1,
+            })
+            .await?;
+
+        let deleting_rule = store
+            .begin_policy_rule_deletion("project-a", &rule_id, 1)
+            .await?;
+        assert_eq!(deleting_rule.state, "deleting");
+        assert_eq!(deleting_rule.generation, 2);
+        assert!(matches!(
+            store
+                .begin_policy_rule_deletion("project-a", &rule_id, 1)
+                .await,
+            Err(StoreError::StaleGeneration)
+        ));
+        drop(store);
+
+        let reopened = SqliteStore::connect_file(&path).await?;
+        let reopened_rule = reopened
+            .get_policy_rule("project-a", &rule_id)
+            .await?
+            .ok_or(StoreError::Corrupt("rule missing after reopen".into()))?;
+        assert_eq!(reopened_rule.state, "deleting");
+        assert!(matches!(
+            reopened
+                .finalize_policy_rule_deletion("project-a", &rule_id, 1)
+                .await,
+            Err(StoreError::StaleGeneration)
+        ));
+        reopened
+            .finalize_policy_rule_deletion("project-a", &rule_id, 2)
+            .await?;
+
+        let deleting_attachment = reopened
+            .begin_policy_attachment_deletion("project-a", &attachment_id, 1)
+            .await?;
+        assert_eq!(deleting_attachment.state, "deleting");
+        assert_eq!(deleting_attachment.generation, 2);
+        assert!(matches!(
+            reopened
+                .finalize_policy_attachment_deletion("project-a", &attachment_id, 1)
+                .await,
+            Err(StoreError::StaleGeneration)
+        ));
+        reopened
+            .finalize_policy_attachment_deletion("project-a", &attachment_id, 2)
+            .await?;
+        assert!(
+            reopened
+                .get_policy_rule("project-a", &rule_id)
+                .await?
+                .is_none()
+        );
+        assert!(
+            reopened
+                .get_policy_attachment("project-a", &attachment_id)
+                .await?
+                .is_none()
+        );
+        std::fs::remove_file(path).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deleting_policy_fences_new_children() -> Result<(), StoreError> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let policy_id = Uuid::from_u128(50);
+        store
+            .insert_reusable_policy(&policy(policy_id, "Allow"))
+            .await?;
+        let updated = store
+            .transition_reusable_policy_state("project-a", &policy_id, 1, "deleting")
+            .await?;
+        assert_eq!(updated.generation, 2);
+        assert!(matches!(
+            store
+                .insert_policy_rule(&rule(Uuid::from_u128(51), policy_id))
+                .await,
+            Err(StoreError::OwnershipConflict)
+        ));
         Ok(())
     }
 }

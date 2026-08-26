@@ -175,6 +175,34 @@ impl CanonicalPolicyRepository for O3kStore {
             Self::Postgres(s) => s.list_policy_rules(project, policy).await,
         }
     }
+    async fn begin_policy_rule_deletion(
+        &self,
+        project: &str,
+        id: &Uuid,
+        generation: u64,
+    ) -> Result<CanonicalNetworkPolicyRuleRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.begin_policy_rule_deletion(project, id, generation).await,
+            Self::Postgres(s) => s.begin_policy_rule_deletion(project, id, generation).await,
+        }
+    }
+    async fn finalize_policy_rule_deletion(
+        &self,
+        project: &str,
+        id: &Uuid,
+        generation: u64,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.finalize_policy_rule_deletion(project, id, generation)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.finalize_policy_rule_deletion(project, id, generation)
+                    .await
+            }
+        }
+    }
     async fn delete_policy_rule(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
         match self {
             Self::Sqlite(s) => s.delete_policy_rule(project, id).await,
@@ -218,6 +246,40 @@ impl CanonicalPolicyRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.list_endpoint_policy_attachments(project, endpoint).await,
             Self::Postgres(s) => s.list_endpoint_policy_attachments(project, endpoint).await,
+        }
+    }
+    async fn begin_policy_attachment_deletion(
+        &self,
+        project: &str,
+        id: &Uuid,
+        generation: u64,
+    ) -> Result<CanonicalPolicyAttachmentRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.begin_policy_attachment_deletion(project, id, generation)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.begin_policy_attachment_deletion(project, id, generation)
+                    .await
+            }
+        }
+    }
+    async fn finalize_policy_attachment_deletion(
+        &self,
+        project: &str,
+        id: &Uuid,
+        generation: u64,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.finalize_policy_attachment_deletion(project, id, generation)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.finalize_policy_attachment_deletion(project, id, generation)
+                    .await
+            }
         }
     }
     async fn delete_policy_attachment(&self, project: &str, id: &Uuid) -> Result<(), StoreError> {
