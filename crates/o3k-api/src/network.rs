@@ -273,9 +273,12 @@ pub(crate) struct SecurityGroupRequestBody {
 }
 #[derive(serde::Deserialize)]
 pub(crate) struct SecurityGroupRequest {
-    name: String,
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    stateful: Option<bool>,
 }
 #[derive(serde::Serialize)]
 pub(crate) struct SecurityGroupEnvelope {
@@ -291,6 +294,7 @@ pub(crate) struct SecurityGroupResponse {
     project_id: String,
     name: String,
     description: String,
+    stateful: bool,
     security_group_rules: Vec<SecurityGroupRuleResponse>,
 }
 #[derive(serde::Deserialize)]
@@ -469,6 +473,7 @@ async fn security_group_response(
         project_id: group.project_id,
         name: group.name,
         description: group.description,
+        stateful: true,
         security_group_rules: rules,
     })
 }
@@ -541,12 +546,18 @@ pub(crate) async fn create_security_group(
         Err(response) => return response,
     };
     let project = auth.effective_scope().id().as_str();
+    if body.security_group.stateful == Some(false) {
+        return network_error(NetworkError::InvalidRequest);
+    }
+    let Some(name) = body.security_group.name else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "security group name is required",
+        );
+    };
     match service
-        .create_security_group_for_project(
-            project,
-            body.security_group.name,
-            body.security_group.description,
-        )
+        .create_security_group_for_project(project, name, body.security_group.description)
         .await
     {
         Ok(group) => match security_group_response(service, project, group).await {
@@ -612,11 +623,18 @@ pub(crate) async fn update_security_group(
         Err(response) => return response,
     };
     let project = auth.effective_scope().id().as_str();
+    if body.security_group.stateful == Some(false) {
+        return network_error(NetworkError::InvalidRequest);
+    }
+    let current = match service.get_security_group_for_project(project, id).await {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
     let group = match service
         .update_security_group_for_project(
             project,
             id,
-            body.security_group.name,
+            body.security_group.name.unwrap_or(current.name),
             body.security_group.description,
         )
         .await
