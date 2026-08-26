@@ -1252,7 +1252,7 @@ mod tests {
             realizer
                 .apply_policy_snapshot(
                     endpoint_id,
-                    &[deny_default.clone()],
+                    std::slice::from_ref(&deny_default),
                     "traffic-stateful-deny-new",
                 )
                 .await

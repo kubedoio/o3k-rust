@@ -8338,7 +8338,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store).await?;
+        let service = NetworkService::open(&path, store.clone()).await?;
         let network = service
             .create_canonical_network_for_project("project-a", "canonical".to_owned())
             .await?;
@@ -10055,7 +10055,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store).await?;
+        let service = NetworkService::open(&path, store.clone()).await?;
         let network = service
             .create_network(&auth("project-a"), "net".to_owned())
             .await?;
@@ -10090,6 +10090,21 @@ mod tests {
         service
             .replace_security_group_bindings_for_project("project-a", port.id, vec![group.id])
             .await?;
+        let canonical_group = store
+            .get_reusable_policy("project-a", &group.id)
+            .await?
+            .ok_or("canonical security group missing")?;
+        assert_eq!(canonical_group.stateful_mode, "Stateful");
+        assert_eq!(canonical_group.unmatched_action, "Deny");
+        let canonical_rules = store.list_policy_rules("project-a", &group.id).await?;
+        assert_eq!(canonical_rules.len(), 1);
+        assert_eq!(canonical_rules[0].id, rule.id);
+        let canonical_attachments = store
+            .list_endpoint_policy_attachments("project-a", &port.id)
+            .await?;
+        assert_eq!(canonical_attachments.len(), 1);
+        assert_eq!(canonical_attachments[0].policy_id, group.id);
+        assert_ne!(canonical_attachments[0].id, group.id);
         let policies = service
             .list_policies_for_project("project-a", network.id)
             .await?;
