@@ -140,6 +140,27 @@ impl PolicySnapshotRealizer for LinuxPolicySnapshotRealizer {
                 reason: error.to_string(),
             };
         }
+        match provider.observe_endpoint_fingerprint(endpoint_id) {
+            Ok(Some(observed)) if has_policy && observed == fingerprint => {}
+            Ok(None) if !has_policy => {}
+            Ok(Some(observed)) => {
+                return PolicyApplyOutcome::Unknown {
+                    reason: format!(
+                        "provider observed endpoint fingerprint {observed}, expected {fingerprint}"
+                    ),
+                };
+            }
+            Ok(None) => {
+                return PolicyApplyOutcome::Unknown {
+                    reason: "provider did not observe the applied endpoint policy".into(),
+                };
+            }
+            Err(error) => {
+                return PolicyApplyOutcome::Unknown {
+                    reason: error.to_string(),
+                };
+            }
+        }
         PolicyApplyOutcome::Success {
             provider_resource_id: Some(format!("linux-policy:{endpoint_id}")),
         }

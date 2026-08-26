@@ -289,6 +289,7 @@ impl StatefulPolicyProvider {
                 .map(|value| value.endpoint_aggregate_fingerprints.clone())
                 .unwrap_or_default(),
         };
+        let table_exists = self.ensure_foreign_safe()?;
         if self
             .ownership
             .as_ref()
@@ -296,7 +297,6 @@ impl StatefulPolicyProvider {
         {
             return Ok(());
         }
-        let table_exists = self.ensure_foreign_safe()?;
         if table_exists && self.ownership.is_none() {
             return Err(PolicyNetworkError::ForeignState);
         }
@@ -663,6 +663,16 @@ impl StatefulPolicyProvider {
         if success && !output.contains(MARKER) {
             return Err(PolicyNetworkError::ForeignState);
         }
+        // A provider instance may outlive the process that opened it while a
+        // different instance advances the aggregate table.  Refuse to
+        // replace that newer realization from stale in-memory ownership.
+        if success
+            && self.ownership.as_ref().is_some_and(|ownership| {
+                !output.contains(&format!("{MARKER}:{}", ownership.fingerprint))
+            })
+        {
+            return Err(PolicyNetworkError::OwnershipConflict);
+        }
         Ok(success)
     }
 }
@@ -893,6 +903,89 @@ mod tests {
         let ownership = provider.ownership.as_ref().expect("remaining ownership");
         assert_eq!(ownership.policies.len(), 1);
         assert_eq!(ownership.policies[0].endpoint_id, second);
+    }
+
+    #[test]
+    fn stale_provider_instance_cannot_replace_newer_aggregate() {
+        let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
+        let endpoint = PolicyEndpoint {
+            endpoint_id: Uuid::from_u128(1),
+            address: Ipv4Addr::new(10, 0, 0, 2),
+        };
+        let first_command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: Mutex::new(String::new()),
+        });
+        let mut first = StatefulPolicyProvider::with_command(
+            &root,
+            Arc::clone(&first_command) as Arc<dyn PolicyCommand>,
+        )
+        .expect("first provider");
+        first
+            .apply_endpoint_snapshot(
+                endpoint.endpoint_id,
+                &[default(endpoint.endpoint_id, PolicyAction::Allow)],
+                std::slice::from_ref(&endpoint),
+            )
+            .expect("initial aggregate");
+        let first_fingerprint = first
+            .ownership
+            .as_ref()
+            .expect("ownership")
+            .fingerprint
+            .clone();
+
+        let stale_command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: Mutex::new(format!(
+                "table ip {TABLE} {{ comment {MARKER}:{first_fingerprint}; }}"
+            )),
+        });
+        let mut stale = StatefulPolicyProvider::with_command(
+            &root,
+            Arc::clone(&stale_command) as Arc<dyn PolicyCommand>,
+        )
+        .expect("stale provider");
+        let newer_command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: Mutex::new(format!(
+                "table ip {TABLE} {{ comment {MARKER}:{first_fingerprint}; }}"
+            )),
+        });
+        let mut newer = StatefulPolicyProvider::with_command(
+            &root,
+            Arc::clone(&newer_command) as Arc<dyn PolicyCommand>,
+        )
+        .expect("newer provider");
+        newer
+            .apply_endpoint_snapshot(
+                endpoint.endpoint_id,
+                &[default(endpoint.endpoint_id, PolicyAction::Deny)],
+                std::slice::from_ref(&endpoint),
+            )
+            .expect("newer aggregate");
+
+        let newer_fingerprint = newer
+            .ownership
+            .as_ref()
+            .expect("new ownership")
+            .fingerprint
+            .clone();
+        assert_ne!(first_fingerprint, newer_fingerprint);
+        *stale_command.listing.lock().expect("listing") =
+            format!("table ip {TABLE} {{ comment {MARKER}:{newer_fingerprint}; }}");
+        // The stale instance observes the newer provider marker and must
+        // refuse replacement before issuing a destructive nftables command.
+        let result = stale.apply_endpoint_snapshot(
+            endpoint.endpoint_id,
+            &[default(endpoint.endpoint_id, PolicyAction::Allow)],
+            std::slice::from_ref(&endpoint),
+        );
+        assert!(
+            matches!(result, Err(PolicyNetworkError::OwnershipConflict)),
+            "unexpected stale writer result: {result:?}"
+        );
+        assert_eq!(stale_command.calls.lock().expect("calls").len(), 1);
     }
 
     #[test]
