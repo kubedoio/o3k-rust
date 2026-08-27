@@ -483,6 +483,69 @@ mod p9_plan_tests {
     }
 
     #[test]
+    fn canonical_l3_gateway_compiles_connected_realm_intents() {
+        let gateway = o3k_store::CanonicalL3GatewayRecord {
+            id: Uuid::from_u128(100),
+            project_id: "project-a".into(),
+            name: "gw".into(),
+            external_realm_id: Some(Uuid::from_u128(200)),
+            enable_snat: true,
+            generation: 1,
+            state: "active".into(),
+        };
+        let realms = vec![
+            o3k_store::CanonicalAddressRealmRecord {
+                id: Uuid::from_u128(1),
+                network_id: Uuid::from_u128(10),
+                project_id: "project-a".into(),
+                prefix: "10.0.0.0/24".into(),
+                overlapping_prefixes: false,
+                generation: 1,
+                state: "active".into(),
+            },
+            o3k_store::CanonicalAddressRealmRecord {
+                id: Uuid::from_u128(2),
+                network_id: Uuid::from_u128(11),
+                project_id: "project-a".into(),
+                prefix: "10.1.0.0/24".into(),
+                overlapping_prefixes: false,
+                generation: 1,
+                state: "active".into(),
+            },
+        ];
+        let attachments = vec![
+            o3k_store::CanonicalL3GatewayAttachmentRecord {
+                id: Uuid::from_u128(3),
+                gateway_id: gateway.id,
+                realm_id: realms[0].id,
+                project_id: "project-a".into(),
+                generation: 1,
+                state: "active".into(),
+            },
+            o3k_store::CanonicalL3GatewayAttachmentRecord {
+                id: Uuid::from_u128(4),
+                gateway_id: gateway.id,
+                realm_id: realms[1].id,
+                project_id: "project-a".into(),
+                generation: 1,
+                state: "active".into(),
+            },
+        ];
+        let compiled =
+            compile_l3_gateway_intents(&gateway, &attachments, &realms, &BTreeMap::new())
+                .expect("gateway plan");
+        assert_eq!(compiled.len(), 2);
+        assert_eq!(
+            compiled[&realms[0].id].0[0].destination.network,
+            Ipv4Addr::new(10, 1, 0, 0)
+        );
+        assert_eq!(
+            compiled[&realms[0].id].1[0].external_realm_id,
+            Uuid::from_u128(200)
+        );
+    }
+
+    #[test]
     fn plan_rejects_nat_without_provider_capability() {
         let mut value = intent();
         value.egress.push(o3k_domain::EgressIntent {
@@ -4582,6 +4645,81 @@ pub struct CanonicalNetworkSnapshot {
         o3k_store::CanonicalL3GatewayRecord,
         Vec<o3k_store::CanonicalL3GatewayAttachmentRecord>,
     )>,
+}
+
+/// Compiles the canonical gateway graph into the existing provider-neutral
+/// routing intents. AddressRealm remains the unit of address interpretation;
+/// this function only derives connectivity from the gateway attachments.
+pub fn compile_l3_gateway_intents(
+    gateway: &o3k_store::CanonicalL3GatewayRecord,
+    attachments: &[o3k_store::CanonicalL3GatewayAttachmentRecord],
+    realms: &[o3k_store::CanonicalAddressRealmRecord],
+    pools: &BTreeMap<Uuid, Vec<o3k_store::CanonicalAddressPoolRecord>>,
+) -> Result<
+    BTreeMap<
+        Uuid,
+        (
+            Vec<o3k_domain::GatewayIntent>,
+            Vec<o3k_domain::EgressIntent>,
+        ),
+    >,
+    NetworkError,
+> {
+    if gateway.state != "active" || gateway.generation == 0 {
+        return Err(NetworkError::InvalidRequest);
+    }
+    let mut realm_map = BTreeMap::new();
+    for realm in realms {
+        if realm.project_id != gateway.project_id || realm.state != "active" {
+            continue;
+        }
+        let (network, prefix) = realm
+            .prefix
+            .split_once('/')
+            .ok_or(NetworkError::InvalidRequest)?;
+        let address = network.parse().map_err(|_| NetworkError::InvalidRequest)?;
+        let prefix_len = prefix.parse().map_err(|_| NetworkError::InvalidRequest)?;
+        let prefix = Ipv4Prefix::new(address, prefix_len).ok_or(NetworkError::InvalidRequest)?;
+        realm_map.insert(realm.id, prefix);
+    }
+    let attached: BTreeSet<Uuid> = attachments
+        .iter()
+        .filter(|attachment| {
+            attachment.project_id == gateway.project_id && attachment.state == "active"
+        })
+        .map(|attachment| attachment.realm_id)
+        .collect();
+    let mut result = BTreeMap::new();
+    for realm_id in &attached {
+        let local = realm_map.get(realm_id).ok_or(NetworkError::NotFound)?;
+        let local_gateway = pools
+            .get(realm_id)
+            .and_then(|items| items.iter().find_map(|pool| pool.gateway))
+            .or_else(|| u32::from(local.network).checked_add(1).map(Ipv4Addr::from))
+            .ok_or(NetworkError::InvalidRequest)?;
+        let mut routes = Vec::new();
+        for remote_id in &attached {
+            if remote_id != realm_id {
+                routes.push(o3k_domain::GatewayIntent {
+                    destination: *realm_map.get(remote_id).ok_or(NetworkError::NotFound)?,
+                    gateway: local_gateway,
+                    external: false,
+                });
+            }
+        }
+        let egress = gateway
+            .external_realm_id
+            .map(|external_realm_id| {
+                vec![o3k_domain::EgressIntent {
+                    external_realm_id,
+                    enabled: true,
+                    nat: gateway.enable_snat,
+                }]
+            })
+            .unwrap_or_default();
+        result.insert(*realm_id, (routes, egress));
+    }
+    Ok(result)
 }
 
 /// Result of observing one provider-owned Realm cleanup identity.  A Realm
