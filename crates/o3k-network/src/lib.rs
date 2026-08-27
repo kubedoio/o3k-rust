@@ -25,6 +25,7 @@ use uuid::Uuid;
 pub mod canonical_policy;
 pub mod execution;
 pub mod fabric;
+pub mod gateway;
 pub mod linux_fabric;
 pub mod policy;
 pub mod public;
@@ -42,6 +43,11 @@ pub use execution::{
     PlanAdmission, journal_path,
 };
 pub use fabric::{FabricBackend, FabricError, FabricRealizer, InMemoryFabricBackend};
+pub use gateway::{
+    InMemoryL3GatewayBackend, L3GatewayBackend, L3GatewayError, L3GatewayRealizer,
+    LinuxL3GatewayProvider, RealmExecutionContext, compile_l3_gateway_execution_plan,
+    gateway_plan_fingerprint,
+};
 pub use linux_fabric::{LinuxFabricBackend, LinuxFabricConfig, LinuxFabricError};
 pub use public::{
     PublicAddressAllocator, PublicAddressBinding, PublicAddressError, PublicAddressPool,
@@ -3756,6 +3762,10 @@ pub struct NodeNetworkPlan {
     /// wire shape and legacy fingerprint for non-P11 plans.
     #[serde(default)]
     pub fabric: Option<NamespacedRoutedFabricPlan>,
+    /// Independent multi-Realm gateway execution unit. This is not part of
+    /// the Realm-scoped `fabric` plan.
+    #[serde(default)]
+    pub gateway: Option<o3k_domain::L3GatewayExecutionPlan>,
     pub fingerprint_sha256: String,
 }
 
@@ -3783,6 +3793,8 @@ pub enum NetworkPlanError {
     InvalidPrefix,
     #[error("P11 fabric plan is invalid")]
     InvalidFabricPlan,
+    #[error("L3 gateway execution plan is invalid")]
+    InvalidGatewayPlan,
 }
 
 pub const NODE_NETWORK_PLAN_SCHEMA_VERSION: u16 = 1;
@@ -3796,6 +3808,17 @@ impl NodeNetworkPlan {
     ) -> Result<Self, NetworkPlanError> {
         self.fabric = Some(fabric);
         self.validate_fabric()?;
+        self.fingerprint_sha256 = canonical_plan_fingerprint(&self)?;
+        Ok(self)
+    }
+
+    /// Attaches the separate provider-independent L3 gateway execution unit.
+    pub fn with_gateway(
+        mut self,
+        gateway: o3k_domain::L3GatewayExecutionPlan,
+    ) -> Result<Self, NetworkPlanError> {
+        gateway::validate_plan(&gateway).map_err(|_| NetworkPlanError::InvalidGatewayPlan)?;
+        self.gateway = Some(gateway);
         self.fingerprint_sha256 = canonical_plan_fingerprint(&self)?;
         Ok(self)
     }
@@ -4310,6 +4333,7 @@ pub fn compile_node_network_plan(
         resource_generations: generations,
         intents,
         fabric: None,
+        gateway: None,
         fingerprint_sha256,
     })
 }
@@ -4337,8 +4361,37 @@ pub fn validate_plan_replay(
 /// arbitrary mutated payload with a syntactically valid but unrelated hash.
 pub fn canonical_plan_fingerprint(plan: &NodeNetworkPlan) -> Result<String, NetworkPlanError> {
     let mut intents = plan.intents.clone();
-    intents.sort_by_key(|value| serde_json::to_string(value).unwrap_or_default());
+    let mut keyed = Vec::with_capacity(intents.len());
+    for intent in intents.drain(..) {
+        let key = serde_json::to_vec(&intent).map_err(|_| NetworkPlanError::Serialization)?;
+        keyed.push((key, intent));
+    }
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    intents = keyed.into_iter().map(|(_, intent)| intent).collect();
     let bytes = if let Some(fabric) = &plan.fabric {
+        if let Some(gateway) = &plan.gateway {
+            serde_json::to_vec(&(
+                &plan.plan_id,
+                &plan.node_id,
+                &plan.operation_id,
+                &plan.schema_version,
+                &plan.resource_generations,
+                &intents,
+                gateway,
+                fabric,
+            ))
+        } else {
+            serde_json::to_vec(&(
+                &plan.plan_id,
+                &plan.node_id,
+                &plan.operation_id,
+                &plan.schema_version,
+                &plan.resource_generations,
+                &intents,
+                fabric,
+            ))
+        }
+    } else if let Some(gateway) = &plan.gateway {
         serde_json::to_vec(&(
             &plan.plan_id,
             &plan.node_id,
@@ -4346,7 +4399,7 @@ pub fn canonical_plan_fingerprint(plan: &NodeNetworkPlan) -> Result<String, Netw
             &plan.schema_version,
             &plan.resource_generations,
             &intents,
-            fabric,
+            gateway,
         ))
     } else {
         serde_json::to_vec(&(
@@ -4959,6 +5012,50 @@ impl NetworkService {
             .list_canonical_l3_gateway_attachments(project_id, gateway_id)
             .await
             .map_err(map_store_error)
+    }
+
+    /// Reconstructs the provider-independent multi-Realm gateway execution
+    /// unit from canonical persistence. Linux namespace/interface details are
+    /// intentionally supplied by the provider's derived Realm directory,
+    /// never persisted in this plan.
+    pub async fn compile_l3_gateway_execution_plan_for_project(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+    ) -> Result<o3k_domain::L3GatewayExecutionPlan, NetworkError> {
+        let gateway = self
+            .get_l3_gateway_for_project(project_id, gateway_id)
+            .await?;
+        let attachments = self
+            .list_l3_gateway_attachments(project_id, gateway_id)
+            .await?;
+        let mut realms = BTreeMap::new();
+        for attachment in &attachments {
+            if let Some(realm) = self
+                .inner
+                .repository
+                .get_canonical_realm(project_id, &attachment.realm_id)
+                .await
+                .map_err(map_store_error)?
+            {
+                realms.insert(realm.id, realm);
+            }
+        }
+        if let Some(external_realm_id) = gateway.external_realm_id {
+            let external = self
+                .inner
+                .repository
+                .get_canonical_realm(project_id, &external_realm_id)
+                .await
+                .map_err(map_store_error)?
+                .ok_or(NetworkError::NotFound)?;
+            if external.state != "active" {
+                return Err(NetworkError::Conflict);
+            }
+            realms.insert(external.id, external);
+        }
+        compile_l3_gateway_execution_plan(&gateway, &attachments, &realms)
+            .map_err(|_| NetworkError::InvalidRequest)
     }
 
     pub async fn open(

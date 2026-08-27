@@ -35,10 +35,11 @@ attach/detach, restart recovery, import identity, and project isolation.
 
 ## Current implementation state
 
-No Router or Router Interface API, persistence, or provider lifecycle has been
-implemented. This is intentional. The existing routed provider and canonical
-AddressRealm/gateway/route execution types remain unchanged until the authority
-decision is recorded.
+The canonical L3Gateway/L3GatewayAttachment resources and bounded Router/
+Router Interface projection are implemented. Gateway execution now has its own
+provider-independent plan and Linux provider boundary; the existing
+NamespacedRoutedFabricPlan remains Realm-scoped. Realm-to-Realm connectivity
+and external SNAT traffic remain separately bounded evidence gates.
 
 ## Evidence already captured
 

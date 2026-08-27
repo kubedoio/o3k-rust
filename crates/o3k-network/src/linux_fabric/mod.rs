@@ -184,6 +184,30 @@ impl LinuxFabricBackend {
         Ok(backend)
     }
 
+    /// Exposes only the derived Realm attachment directory needed by the
+    /// separate L3 gateway provider. Canonical Realm desired state remains in
+    /// the control-plane store; namespace and link names stay provider-local.
+    pub fn realm_execution_contexts(
+        &self,
+    ) -> BTreeMap<Uuid, crate::gateway::RealmExecutionContext> {
+        self.state
+            .realms
+            .values()
+            .map(|realm| {
+                (
+                    realm.realm_id,
+                    crate::gateway::RealmExecutionContext {
+                        realm_id: realm.realm_id,
+                        realm_generation: realm.directory_generation,
+                        namespace: realm.namespace.clone(),
+                        bridge: realm.bridge.clone(),
+                        realm_interface: realm.realm_veth.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     fn with_command(
         config: LinuxFabricConfig,

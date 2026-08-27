@@ -3,10 +3,10 @@ mod agent;
 use agent::proto::network_agent_server::NetworkAgentServer;
 use o3k_domain::NetworkPlanIntent;
 use o3k_network::{
-    FabricRealizer, FlatNetworkRealizer, HostNetworkConfig, LinuxRoutedProvider,
-    NetworkAgentIdentity, NetworkControllerLease, NetworkPlanExecutor, NetworkPlanRealizer,
-    NodeNetworkPlan, PolicyEndpoint, PublicAddressRealizer, RoutedExternalConfig,
-    StatefulPolicyProvider, TapAccess,
+    FabricRealizer, FlatNetworkRealizer, HostNetworkConfig, L3GatewayRealizer,
+    LinuxL3GatewayProvider, LinuxRoutedProvider, NetworkAgentIdentity, NetworkControllerLease,
+    NetworkPlanExecutor, NetworkPlanRealizer, NodeNetworkPlan, PolicyEndpoint,
+    PublicAddressRealizer, RoutedExternalConfig, StatefulPolicyProvider, TapAccess,
 };
 use std::collections::BTreeSet;
 use std::{env, fs, net::SocketAddr, path::PathBuf};
@@ -125,12 +125,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?)),
         Err(_) => None,
     };
+    let gateway = match env::var("O3K_NETWORK_GATEWAY_ROOT") {
+        Ok(root) => {
+            let contexts = match env::var("O3K_NETWORK_REALM_CONTEXTS") {
+                Ok(path) => serde_json::from_slice(&fs::read(path)?)?,
+                Err(_) => fabric
+                    .as_ref()
+                    .map(|fabric| fabric.backend().realm_execution_contexts())
+                    .unwrap_or_default(),
+            };
+            Some(L3GatewayRealizer::new(LinuxL3GatewayProvider::open(
+                root, contexts,
+            )?))
+        }
+        Err(_) => None,
+    };
     let realizer = CompositeRealizer {
         flat,
         routed,
         policy,
         public,
         fabric,
+        gateway,
     };
     let service = agent::NetworkAgentService::new(executor, realizer);
     let recovered = service.reconcile_pending()?;
@@ -157,6 +173,7 @@ struct CompositeRealizer {
     policy: Option<StatefulPolicyProvider>,
     public: Option<PublicAddressRealizer>,
     fabric: Option<FabricRealizer<o3k_network::LinuxFabricBackend>>,
+    gateway: Option<L3GatewayRealizer<LinuxL3GatewayProvider>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -181,12 +198,24 @@ enum CompositeRealizerError {
     Fabric(String),
     #[error("Edge fabric plan contains an intent not yet activated by the Fabric provider")]
     FabricUnsupportedIntent,
+    #[error("L3 gateway realization failed: {0}")]
+    Gateway(#[from] o3k_network::L3GatewayError),
 }
 
 impl NetworkPlanRealizer for CompositeRealizer {
     type Error = CompositeRealizerError;
 
     fn realize(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+        if let Some(gateway) = &plan.gateway {
+            self.gateway
+                .as_mut()
+                .ok_or(CompositeRealizerError::Gateway(
+                    o3k_network::L3GatewayError::Backend(
+                        "gateway plan requires O3K_NETWORK_GATEWAY_ROOT".to_owned(),
+                    ),
+                ))?
+                .apply(gateway)?;
+        }
         if plan.fabric.is_some() {
             if plan.intents.iter().any(|intent| {
                 is_routed_intent(intent)
@@ -237,6 +266,16 @@ impl NetworkPlanRealizer for CompositeRealizer {
     }
 
     fn remove(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+        if let Some(gateway) = &plan.gateway {
+            self.gateway
+                .as_mut()
+                .ok_or(CompositeRealizerError::Gateway(
+                    o3k_network::L3GatewayError::Backend(
+                        "gateway plan requires O3K_NETWORK_GATEWAY_ROOT".to_owned(),
+                    ),
+                ))?
+                .remove(gateway.gateway_id, &gateway.project_id)?;
+        }
         if plan.fabric.is_some() {
             if plan.intents.iter().any(|intent| {
                 is_routed_intent(intent)
@@ -285,6 +324,20 @@ impl NetworkPlanRealizer for CompositeRealizer {
     }
 
     fn observe(&mut self, plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
+        if let Some(gateway) = &plan.gateway {
+            let observed = self
+                .gateway
+                .as_ref()
+                .ok_or(CompositeRealizerError::Gateway(
+                    o3k_network::L3GatewayError::Backend(
+                        "gateway plan requires O3K_NETWORK_GATEWAY_ROOT".to_owned(),
+                    ),
+                ))?
+                .observe(gateway.gateway_id, &gateway.project_id)?;
+            if observed.as_ref() != Some(gateway) {
+                return Ok(false);
+            }
+        }
         if plan.fabric.is_some() {
             return self
                 .fabric
@@ -493,6 +546,7 @@ mod transport_tests {
             resource_generations: BTreeMap::new(),
             intents: Vec::new(),
             fabric: None,
+            gateway: None,
             fingerprint_sha256: String::new(),
         };
         plan.fingerprint_sha256 = o3k_network::canonical_plan_fingerprint(&plan)?;

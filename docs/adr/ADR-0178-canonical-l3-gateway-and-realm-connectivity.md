@@ -43,6 +43,14 @@ L3Gateway + L3GatewayAttachment + AddressRealm
 Provider state, nftables, and Neutron Router rows are derived observations or
 projections and never reconstruct canonical gateway state.
 
+Execution is a separate provider-independent boundary. The canonical graph is
+compiled into `L3GatewayExecutionPlan` and realized by an
+`L3GatewayBackend`/`L3GatewayRealizer`. `NamespacedRoutedFabricPlan` remains a
+single-host, single-Realm fabric unit and does not own gateway lifecycle. A
+Linux provider may rebuild one provider-owned aggregate topology, but it must
+preserve unrelated Realm realization through its derived Realm execution
+directory.
+
 The first bounded profile represents external gateway selection explicitly and
 supports SNAT-enabled external egress. `enable_snat=false` is admitted only
 where the selected provider can realize and observe a non-NAT external path;
@@ -71,4 +79,6 @@ created only by an explicit canonical or compatibility operation.
 The store must provide durable gateway and attachment identities, composite
 project ownership checks, positive generation fencing, restart reconstruction,
 and SQLite/PostgreSQL parity. The compiler and provider adapter must consume
-the canonical graph and publish complete realm-scoped snapshots.
+the canonical graph and publish complete gateway snapshots. Provider-local
+Realm namespace/interface mappings are derived execution state, not canonical
+desired state.

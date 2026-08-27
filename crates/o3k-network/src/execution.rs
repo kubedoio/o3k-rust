@@ -395,6 +395,10 @@ impl NetworkPlanExecutor {
             .plan
             .validate_fabric()
             .map_err(|_| NetworkExecutionError::InvalidCommand)?;
+        if let Some(gateway) = &command.plan.gateway {
+            crate::gateway::validate_plan(gateway)
+                .map_err(|_| NetworkExecutionError::InvalidCommand)?;
+        }
         if command.target != self.agent {
             return Err(NetworkExecutionError::StaleAgentEpoch);
         }

@@ -1671,20 +1671,49 @@ async fn dispatch_policy_network(
         .ok_or_else(|| network_error(NetworkError::NotFound))?;
     let mut gateway_routes = Vec::new();
     let mut gateway_egress = Vec::new();
-    for (gateway, attachments) in &network
+    let mut gateway_execution = None;
+    let realm_map = all_realms
+        .iter()
+        .cloned()
+        .map(|realm| (realm.id, realm))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for (gateway, _) in &network
         .reconstruct_canonical_network(project_id, network_id)
         .await
         .map_err(network_error)?
         .l3_gateways
     {
+        let attachments = network
+            .list_l3_gateway_attachments(project_id, &gateway.id)
+            .await
+            .map_err(network_error)?;
+        if attachments
+            .iter()
+            .any(|attachment| attachment.realm_id == realm.id && attachment.state == "active")
+        {
+            let compiled =
+                o3k_network::compile_l3_gateway_execution_plan(gateway, &attachments, &realm_map)
+                    .map_err(|error| {
+                    keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string())
+                })?;
+            if gateway_execution.replace(compiled).is_some() {
+                return Err(keystone_error(
+                    StatusCode::CONFLICT,
+                    "Conflict",
+                    "endpoint is attached to multiple L3 gateways",
+                ));
+            }
+        }
         if let Ok(compiled) = o3k_network::compile_l3_gateway_intents(
             gateway,
-            attachments,
+            &attachments,
             &all_realms,
             &std::collections::BTreeMap::new(),
         ) && let Some((routes, egress)) = compiled.get(&realm.id)
         {
-            gateway_routes.extend(routes.iter().cloned());
+            if gateway_execution.is_none() {
+                gateway_routes.extend(routes.iter().cloned());
+            }
             gateway_egress.extend(egress.iter().cloned());
         }
     }
@@ -1713,6 +1742,13 @@ async fn dispatch_policy_network(
         policy_defaults,
     )
     .map_err(|error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()))?;
+    let plan = if let Some(gateway) = gateway_execution {
+        plan.with_gateway(gateway).map_err(|error| {
+            keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string())
+        })?
+    } else {
+        plan
+    };
     let plan = o3k_network::add_l3_gateway_routing(plan, gateway_routes, gateway_egress).map_err(
         |error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()),
     )?;

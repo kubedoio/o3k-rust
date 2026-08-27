@@ -258,6 +258,7 @@ mod tests {
             resource_generations: std::collections::BTreeMap::new(),
             intents: vec![],
             fabric: Some(fabric),
+            gateway: None,
             fingerprint_sha256: String::new(),
         };
         plan.fingerprint_sha256 = crate::canonical_plan_fingerprint(&plan).expect("fingerprint");

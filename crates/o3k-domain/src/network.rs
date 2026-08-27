@@ -136,6 +136,48 @@ pub struct L3GatewayAttachment {
     pub state: L3GatewayAttachmentState,
 }
 
+/// Provider-independent execution input for one canonical L3 gateway.
+/// Unlike `NamespacedRoutedFabricPlan`, this plan may span multiple realms.
+/// Provider-local names are derived behind the execution boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct L3GatewayExecutionPlan {
+    pub gateway_id: Uuid,
+    pub project_id: String,
+    pub gateway_generation: u64,
+    pub attachments: Vec<L3GatewayExecutionAttachment>,
+    pub external_realm_id: Option<Uuid>,
+    /// Canonical external Realm address interpretation, when configured.
+    /// Provider-local uplink/interface details remain outside this plan.
+    #[serde(default)]
+    pub external_realm_prefix: Option<Ipv4Prefix>,
+    pub enable_snat: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct L3GatewayExecutionAttachment {
+    pub attachment_id: Uuid,
+    pub attachment_generation: u64,
+    pub realm_id: Uuid,
+    pub realm_generation: u64,
+    pub realm_prefix: Ipv4Prefix,
+    pub gateway_address: Ipv4Addr,
+}
+
+impl L3GatewayExecutionPlan {
+    /// A summary marker only. The complete serialized plan is the identity.
+    #[must_use]
+    pub fn summary_generation(&self) -> u64 {
+        self.attachments
+            .iter()
+            .map(|attachment| {
+                attachment
+                    .attachment_generation
+                    .max(attachment.realm_generation)
+            })
+            .fold(self.gateway_generation, u64::max)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum L3GatewayAttachmentState {

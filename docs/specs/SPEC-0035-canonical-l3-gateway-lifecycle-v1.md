@@ -48,6 +48,17 @@ No unattached Realm is implicitly connected. Detaching the last relation
 withdraws only that gateway's connectivity. Existing public-address authority
 remains `PublicAddress`/`PublicAddressBinding`.
 
+### 3.1 Execution boundary
+
+Gateway execution is independent of the one-Realm
+`NamespacedRoutedFabricPlan`. The service compiles a complete
+`L3GatewayExecutionPlan`; a gateway provider owns the provider topology and
+may atomically rebuild it. A provider-local Realm execution directory resolves
+canonical Realm IDs to existing Realm namespace/bridge/interface contexts.
+Those names are derived execution state and are never stored in the canonical
+gateway model. Per-attachment observation remains truthful when an aggregate
+provider topology is rebuilt.
+
 ## 4. Neutron projection
 
 `openstack_networking_router_v2` projects Router identity and metadata onto
