@@ -262,6 +262,7 @@ pub(crate) async fn add_router_interface(
         Ok(v) => v,
         Err(r) => return r,
     };
+    let project = auth.effective_scope().id().as_str();
     let realm_id = if let Some(realm_id) = body.router_interface.realm_id {
         realm_id
     } else if let Some(subnet_id) = body.router_interface.subnet_id {
@@ -289,8 +290,34 @@ pub(crate) async fn add_router_interface(
     } else {
         return network_error(NetworkError::InvalidRequest);
     };
-    match service.attach_l3_gateway_realm(auth.effective_scope().id().as_str(), &id, &realm_id).await {
-        Ok(a) => (StatusCode::CREATED, Json(serde_json::json!({"router_interface_info": RouterInterfaceResponse { id:a.id.to_string(), gateway_id:a.gateway_id.to_string(), realm_id:a.realm_id.to_string() }}))).into_response(),
+    match service
+        .attach_l3_gateway_realm(auth.effective_scope().id().as_str(), &id, &realm_id)
+        .await
+    {
+        Ok(a) => {
+            let realm = match service.get_canonical_realm(&auth, a.realm_id).await {
+                Ok(value) => value,
+                Err(error) => return network_error(error),
+            };
+            let ports = match service
+                .list_ports_for_project(auth.effective_scope().id().as_str())
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => return network_error(error),
+            };
+            for port in ports
+                .into_iter()
+                .filter(|port| port.network_id == realm.network_id)
+            {
+                if let Err(response) =
+                    dispatch_policy_network(&state, project, realm.network_id, port.id).await
+                {
+                    return response;
+                }
+            }
+            (StatusCode::CREATED, Json(serde_json::json!({"router_interface_info": RouterInterfaceResponse { id:a.id.to_string(), gateway_id:a.gateway_id.to_string(), realm_id:a.realm_id.to_string() }}))).into_response()
+        }
         Err(error) => network_error(error),
     }
 }
