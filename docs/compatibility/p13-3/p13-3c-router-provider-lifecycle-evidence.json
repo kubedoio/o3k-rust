@@ -27,11 +27,11 @@
     "terraform_state_is_authority": false
   },
   "scope": {
-    "external_gateway_snat": "not exercised in this bounded gate",
+    "external_gateway_snat": "external_network_id and enable_snat=false lifecycle exercised; traffic SNAT behavior remains unclaimed",
     "l3_connectivity": "not exercised in this provider lifecycle gate",
     "security_group_compatibility": "not exercised",
     "router_floating_ip": "not exercised"
   },
   "result": "passed",
-  "tested_implementation_sha": "2c922ba5ff10d2b926f3bd23a561606916b2d6b8"
+  "tested_implementation_sha": "f36ea90"
 }
