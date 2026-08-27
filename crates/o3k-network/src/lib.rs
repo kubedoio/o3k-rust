@@ -4898,6 +4898,29 @@ impl NetworkService {
             .map_err(map_store_error)
     }
 
+    /// Enumerates durable gateway deletion reservations for a fresh runtime.
+    /// The returned canonical rows are recovery inputs only; provider state
+    /// is never used to recreate them.
+    pub async fn list_deleting_l3_gateways(
+        &self,
+    ) -> Result<Vec<o3k_store::CanonicalL3GatewayRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_canonical_l3_gateways_by_state("deleting")
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_deleting_l3_gateway_attachments(
+        &self,
+    ) -> Result<Vec<o3k_store::CanonicalL3GatewayAttachmentRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_canonical_l3_gateway_attachments_by_state("deleting")
+            .await
+            .map_err(map_store_error)
+    }
+
     pub async fn get_l3_gateway_for_project(
         &self,
         project_id: &str,
@@ -10838,6 +10861,7 @@ mod tests {
             .await?;
         assert_eq!(deleting.state, "deleting");
         assert_eq!(deleting.generation, gateway.generation + 1);
+        assert_eq!(service.list_deleting_l3_gateways().await?.len(), 1);
 
         // A retry/restart can rebuild the exact removal target from the
         // durable reservation; it must not need the pre-delete row in memory.
@@ -10888,6 +10912,10 @@ mod tests {
 
         assert_eq!(deleting.state, "deleting");
         assert_eq!(deleting.generation, attachment.generation + 1);
+        assert_eq!(
+            service.list_deleting_l3_gateway_attachments().await?.len(),
+            1
+        );
         assert!(matches!(
             service
                 .attach_l3_gateway_realm("project-a", &gateway.id, &realm.id)

@@ -1391,6 +1391,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(agent) = network_agent_identity {
         state = state.with_network_agent_identity(agent);
     }
+    // Recover canonical gateway and gateway-attachment deletion reservations
+    // after the execution boundary is available.  This is intentionally
+    // startup work, not a replay of an HTTP request.
+    o3k_api::recover_l3_gateway_operations(&state).await;
     state.set_ready(compute_ready);
     let control_task = match (
         config.compute_server_certificate.clone(),

@@ -811,6 +811,122 @@ async fn dispatch_l3_gateway_snapshot(
     Ok(true)
 }
 
+/// Resume durable gateway/attachment deletion reservations after a process
+/// restart.  This pass is deliberately owned by the API composition root so
+/// it runs after the network-agent execution boundary has been wired.  It
+/// uses only canonical transitional rows and lets the provider/agent observe
+/// convergence before finalizing those rows.
+pub async fn recover_l3_gateway_operations(state: &AppState) {
+    let (Some(service), Some(_dispatcher), Some(_controller)) = (
+        state.network.as_ref(),
+        state.network_dispatcher.as_ref(),
+        state.network_controller.as_ref(),
+    ) else {
+        return;
+    };
+    let gateways = match service.list_deleting_l3_gateways().await {
+        Ok(gateways) => gateways,
+        Err(error) => {
+            tracing::error!(%error, "failed to enumerate deleting L3 gateways during startup recovery");
+            return;
+        }
+    };
+    for gateway in gateways {
+        let project = gateway.project_id.clone();
+        let gateway_id = gateway.id;
+        let generation = gateway.generation;
+        let snapshot = match service
+            .compile_l3_gateway_execution_plan_for_project(&project, &gateway_id)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(%error, %gateway_id, "cannot reconstruct deleting gateway removal target");
+                continue;
+            }
+        };
+        match dispatch_l3_gateway_snapshot(
+            state,
+            &project,
+            snapshot,
+            o3k_network::NetworkPlanAction::Remove,
+            generation,
+        )
+        .await
+        {
+            Ok(true) => {
+                if let Err(error) = service
+                    .finalize_l3_gateway_deletion_for_project(&project, &gateway_id, generation)
+                    .await
+                {
+                    tracing::warn!(%error, %gateway_id, "gateway removal observed but canonical finalization is pending");
+                }
+            }
+            Ok(false) => {
+                tracing::warn!(%gateway_id, "gateway deletion remains pending without an execution boundary")
+            }
+            Err(_) => tracing::warn!(%gateway_id, "gateway deletion recovery did not converge"),
+        }
+    }
+    let attachments = match service.list_deleting_l3_gateway_attachments().await {
+        Ok(attachments) => attachments,
+        Err(error) => {
+            tracing::error!(%error, "failed to enumerate deleting L3 gateway attachments during startup recovery");
+            return;
+        }
+    };
+    for attachment in attachments {
+        let gateway = match service
+            .get_l3_gateway_for_project(&attachment.project_id, &attachment.gateway_id)
+            .await
+        {
+            Ok(gateway) => gateway,
+            Err(error) => {
+                tracing::warn!(%error, attachment_id = %attachment.id, "cannot recover deleting gateway attachment");
+                continue;
+            }
+        };
+        let snapshot = match service
+            .compile_l3_gateway_execution_plan_for_project(&attachment.project_id, &gateway.id)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(%error, attachment_id = %attachment.id, "cannot reconstruct gateway attachment target");
+                continue;
+            }
+        };
+        match dispatch_l3_gateway_snapshot(
+            state,
+            &attachment.project_id,
+            snapshot,
+            o3k_network::NetworkPlanAction::Apply,
+            attachment.generation,
+        )
+        .await
+        {
+            Ok(true) => {
+                if let Err(error) = service
+                    .finalize_l3_gateway_realm_detachment_for_project(
+                        &attachment.project_id,
+                        &attachment.id,
+                        attachment.generation,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, attachment_id = %attachment.id, "attachment converged but canonical finalization is pending");
+                }
+            }
+            Ok(false) => {
+                tracing::warn!(attachment_id = %attachment.id, "attachment deletion remains pending without an execution boundary")
+            }
+            Err(_) => {
+                tracing::warn!(attachment_id = %attachment.id, "attachment deletion recovery did not converge")
+            }
+        }
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub(crate) struct NetworkRequestBody {
     network: CreateNetworkRequest,

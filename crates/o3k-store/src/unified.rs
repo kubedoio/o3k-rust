@@ -1777,6 +1777,15 @@ impl NetworkRepository for O3kStore {
             Self::Postgres(s) => s.list_canonical_l3_gateways(p).await,
         }
     }
+    async fn list_canonical_l3_gateways_by_state(
+        &self,
+        state: &str,
+    ) -> Result<Vec<CanonicalL3GatewayRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_canonical_l3_gateways_by_state(state).await,
+            Self::Postgres(s) => s.list_canonical_l3_gateways_by_state(state).await,
+        }
+    }
     async fn update_canonical_l3_gateway(
         &self,
         p: &str,
@@ -1840,6 +1849,21 @@ impl NetworkRepository for O3kStore {
         match self {
             Self::Sqlite(v) => v.list_canonical_l3_gateway_attachments(p, g).await,
             Self::Postgres(v) => v.list_canonical_l3_gateway_attachments(p, g).await,
+        }
+    }
+    async fn list_canonical_l3_gateway_attachments_by_state(
+        &self,
+        state: &str,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(v) => {
+                v.list_canonical_l3_gateway_attachments_by_state(state)
+                    .await
+            }
+            Self::Postgres(v) => {
+                v.list_canonical_l3_gateway_attachments_by_state(state)
+                    .await
+            }
         }
     }
     async fn list_canonical_realm_l3_gateway_attachments(

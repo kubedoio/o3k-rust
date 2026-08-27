@@ -1955,6 +1955,11 @@ pub trait NetworkRepository:
         &self,
         project_id: &str,
     ) -> Result<Vec<CanonicalL3GatewayRecord>, StoreError>;
+    /// Transitional-resource inventory used by startup recovery.
+    async fn list_canonical_l3_gateways_by_state(
+        &self,
+        state: &str,
+    ) -> Result<Vec<CanonicalL3GatewayRecord>, StoreError>;
     async fn update_canonical_l3_gateway(
         &self,
         project_id: &str,
@@ -1989,6 +1994,10 @@ pub trait NetworkRepository:
         &self,
         project_id: &str,
         gateway_id: &Uuid,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError>;
+    async fn list_canonical_l3_gateway_attachments_by_state(
+        &self,
+        state: &str,
     ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError>;
     async fn list_canonical_realm_l3_gateway_attachments(
         &self,
@@ -8905,6 +8914,33 @@ impl SqliteStore {
         }
         Ok(out)
     }
+    pub async fn list_canonical_l3_gateways_by_state(
+        &self,
+        state: &str,
+    ) -> Result<Vec<CanonicalL3GatewayRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, project_id FROM canonical_l3_gateways WHERE state=? ORDER BY project_id,id",
+        )
+        .bind(state)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let id: Uuid = row
+                .try_get::<String, _>("id")
+                .map_err(StoreError::Database)?
+                .parse()
+                .map_err(StoreError::InvalidUuid)?;
+            let project: String = row.try_get("project_id").map_err(StoreError::Database)?;
+            out.push(
+                self.get_canonical_l3_gateway(&project, &id)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("gateway disappeared".into()))?,
+            );
+        }
+        Ok(out)
+    }
     pub async fn update_canonical_l3_gateway(
         &self,
         project_id: &str,
@@ -9019,6 +9055,33 @@ impl SqliteStore {
                     .await?
                     .ok_or_else(|| StoreError::Corrupt("attachment disappeared".into()))?,
             )
+        }
+        Ok(out)
+    }
+    pub async fn list_canonical_l3_gateway_attachments_by_state(
+        &self,
+        state: &str,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, project_id FROM canonical_l3_gateway_attachments WHERE state=? ORDER BY project_id,id",
+        )
+        .bind(state)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let id: Uuid = row
+                .try_get::<String, _>("id")
+                .map_err(StoreError::Database)?
+                .parse()
+                .map_err(StoreError::InvalidUuid)?;
+            let project: String = row.try_get("project_id").map_err(StoreError::Database)?;
+            out.push(
+                self.get_canonical_l3_gateway_attachment(&project, &id)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("attachment disappeared".into()))?,
+            );
         }
         Ok(out)
     }
@@ -9148,6 +9211,12 @@ impl NetworkRepository for SqliteStore {
     ) -> Result<Vec<CanonicalL3GatewayRecord>, StoreError> {
         self.list_canonical_l3_gateways(p).await
     }
+    async fn list_canonical_l3_gateways_by_state(
+        &self,
+        state: &str,
+    ) -> Result<Vec<CanonicalL3GatewayRecord>, StoreError> {
+        self.list_canonical_l3_gateways_by_state(state).await
+    }
     async fn update_canonical_l3_gateway(
         &self,
         p: &str,
@@ -9194,6 +9263,13 @@ impl NetworkRepository for SqliteStore {
         g: &Uuid,
     ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
         self.list_canonical_l3_gateway_attachments(p, g).await
+    }
+    async fn list_canonical_l3_gateway_attachments_by_state(
+        &self,
+        state: &str,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        self.list_canonical_l3_gateway_attachments_by_state(state)
+            .await
     }
     async fn list_canonical_realm_l3_gateway_attachments(
         &self,

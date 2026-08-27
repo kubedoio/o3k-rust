@@ -997,9 +997,26 @@ impl LinuxL3GatewayProvider {
                     )
                     .map_err(|error| L3GatewayError::Backend(error.to_string()))?
             {
-                return Err(L3GatewayError::Backend(
-                    "cannot remove gateway route".to_owned(),
-                ));
+                let (still_exists, _) = self
+                    .command
+                    .output(
+                        "ip",
+                        &[
+                            "netns",
+                            "exec",
+                            &Self::namespace(old),
+                            "ip",
+                            "route",
+                            "show",
+                            &prefix,
+                        ],
+                    )
+                    .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+                if still_exists {
+                    return Err(L3GatewayError::Backend(
+                        "cannot remove gateway route".to_owned(),
+                    ));
+                }
             }
         }
         for source in &old_attachments {
@@ -1069,9 +1086,26 @@ impl LinuxL3GatewayProvider {
                     )
                     .map_err(|error| L3GatewayError::Backend(error.to_string()))?
                 {
-                    return Err(L3GatewayError::Backend(
-                        "cannot remove gateway route".to_owned(),
-                    ));
+                    let (still_exists, _) = self
+                        .command
+                        .output(
+                            "ip",
+                            &[
+                                "netns",
+                                "exec",
+                                &context.namespace,
+                                "ip",
+                                "route",
+                                "show",
+                                &prefix,
+                            ],
+                        )
+                        .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+                    if still_exists {
+                        return Err(L3GatewayError::Backend(
+                            "cannot remove gateway route".to_owned(),
+                        ));
+                    }
                 }
             }
         }
@@ -1136,6 +1170,42 @@ impl LinuxL3GatewayProvider {
             load_linux_gateway_pending(&self.root.join("gateway.pending.json"))?
                 .remove(&gateway_id),
         )
+    }
+
+    /// A deterministic namespace/table name is not ownership evidence.  When
+    /// the production command can read the O3K marker, require it to match
+    /// the exact durable removal target before touching any gateway object.
+    /// This keeps recovery fail-closed for foreign state while allowing
+    /// idempotent removal after an earlier process removed the table.
+    fn validate_removal_ownership(
+        &self,
+        plan: &L3GatewayExecutionPlan,
+    ) -> Result<(), L3GatewayError> {
+        if !self.command.supports_gateway_marker() {
+            return Ok(());
+        }
+        let namespace = Self::namespace(plan);
+        let table = Self::nft_table(plan);
+        let (table_exists, _) = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns", "exec", &namespace, "nft", "list", "table", "ip", &table,
+                ],
+            )
+            .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+        if !table_exists {
+            return Ok(());
+        }
+        let observed = self
+            .command
+            .gateway_marker(&namespace, &table)
+            .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+        if observed.as_deref() != Some(Self::nft_marker(plan)?.as_str()) {
+            return Err(L3GatewayError::Backend("foreign gateway table".to_owned()));
+        }
+        Ok(())
     }
 
     fn acquire_lease(&self) -> Result<GatewayLease, L3GatewayError> {
@@ -1326,6 +1396,10 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
             None
         };
         if let Some(old) = old {
+            // Validate provider ownership before the first withdrawal.  The
+            // deterministic namespace/table names are only lookup keys; a
+            // mismatched marker is foreign state and must remain untouched.
+            self.validate_removal_ownership(&old.plan)?;
             self.persist_pending(
                 gateway_id,
                 &LinuxGatewayPendingMutation::Remove {

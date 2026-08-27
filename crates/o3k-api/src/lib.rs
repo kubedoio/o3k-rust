@@ -48,6 +48,8 @@ mod network;
 mod placement;
 mod volume_attachment;
 
+pub use network::recover_l3_gateway_operations;
+
 use crate::{
     compute::{
         create_flavor, create_keypair, create_server, delete_flavor, delete_keypair, delete_server,
