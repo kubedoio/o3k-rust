@@ -207,14 +207,23 @@ impl NetworkPlanRealizer for CompositeRealizer {
 
     fn realize(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
         if let Some(gateway) = &plan.gateway {
-            self.gateway
+            let realizer = self
+                .gateway
                 .as_mut()
                 .ok_or(CompositeRealizerError::Gateway(
                     o3k_network::L3GatewayError::Backend(
                         "gateway plan requires O3K_NETWORK_GATEWAY_ROOT".to_owned(),
                     ),
-                ))?
-                .apply(gateway)?;
+                ))?;
+            if gateway.attachments.is_empty() && gateway.external_realm_id.is_none() {
+                // An unattached canonical gateway is valid desired state, but
+                // has no provider topology to realize.  Treat the empty
+                // execution snapshot as removal so an interface detach cannot
+                // leave an orphaned gateway namespace/table behind.
+                realizer.remove(gateway.gateway_id, &gateway.project_id)?;
+            } else {
+                realizer.apply(gateway)?;
+            }
         }
         if plan.fabric.is_some() {
             if plan.intents.iter().any(|intent| {

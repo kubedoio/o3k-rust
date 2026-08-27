@@ -419,8 +419,14 @@ pub(crate) async fn add_router_interface(
                 .into_iter()
                 .filter(|port| port.network_id == realm.network_id)
             {
-                if let Err(response) =
-                    dispatch_policy_network(&state, project, realm.network_id, port.id).await
+                if let Err(response) = dispatch_policy_network_with_gateway(
+                    &state,
+                    project,
+                    realm.network_id,
+                    port.id,
+                    Some(a.gateway_id),
+                )
+                .await
                 {
                     return response;
                 }
@@ -510,8 +516,14 @@ pub(crate) async fn remove_router_interface(
                 .into_iter()
                 .filter(|port| port.network_id == realm.network_id)
             {
-                if let Err(response) =
-                    dispatch_policy_network(&state, project, realm.network_id, port.id).await
+                if let Err(response) = dispatch_policy_network_with_gateway(
+                    &state,
+                    project,
+                    realm.network_id,
+                    port.id,
+                    Some(a.gateway_id),
+                )
+                .await
                 {
                     return response;
                 }
@@ -1585,6 +1597,21 @@ async fn dispatch_policy_network(
     network_id: Uuid,
     endpoint_id: Uuid,
 ) -> Result<(), axum::response::Response> {
+    dispatch_policy_network_with_gateway(state, project_id, network_id, endpoint_id, None).await
+}
+
+/// Dispatches a complete endpoint plan and, when requested, the complete
+/// canonical gateway plan that must be rebuilt with it.  The endpoint remains
+/// the scheduling/agent selection unit; `gateway_id` only widens the gateway
+/// selection after an interface mutation so a last-attachment removal cannot
+/// leave provider-owned gateway state behind.
+async fn dispatch_policy_network_with_gateway(
+    state: &AppState,
+    project_id: &str,
+    network_id: Uuid,
+    endpoint_id: Uuid,
+    gateway_id: Option<Uuid>,
+) -> Result<(), axum::response::Response> {
     let Some(dispatcher) = state.network_dispatcher.as_ref() else {
         return Ok(());
     };
@@ -1677,11 +1704,10 @@ async fn dispatch_policy_network(
         .cloned()
         .map(|realm| (realm.id, realm))
         .collect::<std::collections::BTreeMap<_, _>>();
-    for (gateway, _) in &network
-        .reconstruct_canonical_network(project_id, network_id)
+    for gateway in network
+        .list_l3_gateways_for_project(project_id)
         .await
         .map_err(network_error)?
-        .l3_gateways
     {
         let attachments = network
             .list_l3_gateway_attachments(project_id, &gateway.id)
@@ -1690,12 +1716,13 @@ async fn dispatch_policy_network(
         if attachments
             .iter()
             .any(|attachment| attachment.realm_id == realm.id && attachment.state == "active")
+            || gateway_id == Some(gateway.id)
         {
             let compiled =
-                o3k_network::compile_l3_gateway_execution_plan(gateway, &attachments, &realm_map)
+                o3k_network::compile_l3_gateway_execution_plan(&gateway, &attachments, &realm_map)
                     .map_err(|error| {
-                    keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string())
-                })?;
+                        keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string())
+                    })?;
             if gateway_execution.replace(compiled).is_some() {
                 return Err(keystone_error(
                     StatusCode::CONFLICT,
@@ -1705,7 +1732,7 @@ async fn dispatch_policy_network(
             }
         }
         if let Ok(compiled) = o3k_network::compile_l3_gateway_intents(
-            gateway,
+            &gateway,
             &attachments,
             &all_realms,
             &std::collections::BTreeMap::new(),
