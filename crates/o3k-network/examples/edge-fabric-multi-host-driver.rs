@@ -425,6 +425,7 @@ fn build_node_plan(fabric: NamespacedRoutedFabricPlan) -> Result<NodeNetworkPlan
         resource_generations: BTreeMap::new(),
         intents: Vec::new(),
         fabric: None,
+        gateway: None,
         fingerprint_sha256: String::new(),
     };
     plan = plan

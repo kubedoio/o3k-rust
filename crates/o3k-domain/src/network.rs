@@ -102,6 +102,95 @@ pub struct AddressPool {
     pub last_usable: Ipv4Addr,
 }
 
+/// Provider-independent L3 connectivity identity. AddressRealm remains the
+/// address interpretation and isolation identity; a gateway connects realms.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct L3Gateway {
+    pub id: Uuid,
+    pub project_id: String,
+    pub name: String,
+    pub external_realm_id: Option<Uuid>,
+    pub enable_snat: bool,
+    pub generation: u64,
+    pub state: L3GatewayState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum L3GatewayState {
+    Requested,
+    Active,
+    Deleting,
+    Deleted,
+    Error,
+}
+
+/// Durable relation between an L3Gateway and an AddressRealm.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct L3GatewayAttachment {
+    pub id: Uuid,
+    pub gateway_id: Uuid,
+    pub realm_id: Uuid,
+    pub project_id: String,
+    pub generation: u64,
+    pub state: L3GatewayAttachmentState,
+}
+
+/// Provider-independent execution input for one canonical L3 gateway.
+/// Unlike `NamespacedRoutedFabricPlan`, this plan may span multiple realms.
+/// Provider-local names are derived behind the execution boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct L3GatewayExecutionPlan {
+    pub gateway_id: Uuid,
+    pub project_id: String,
+    pub gateway_generation: u64,
+    pub attachments: Vec<L3GatewayExecutionAttachment>,
+    pub external_realm_id: Option<Uuid>,
+    /// Canonical external Realm address interpretation, when configured.
+    /// Provider-local uplink/interface details remain outside this plan.
+    #[serde(default)]
+    pub external_realm_prefix: Option<Ipv4Prefix>,
+    /// Canonical external Realm revision used to fence gateway execution.
+    #[serde(default)]
+    pub external_realm_generation: Option<u64>,
+    pub enable_snat: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct L3GatewayExecutionAttachment {
+    pub attachment_id: Uuid,
+    pub attachment_generation: u64,
+    pub realm_id: Uuid,
+    pub realm_generation: u64,
+    pub realm_prefix: Ipv4Prefix,
+    pub gateway_address: Ipv4Addr,
+}
+
+impl L3GatewayExecutionPlan {
+    /// A summary marker only. The complete serialized plan is the identity.
+    #[must_use]
+    pub fn summary_generation(&self) -> u64 {
+        self.attachments
+            .iter()
+            .map(|attachment| {
+                attachment
+                    .attachment_generation
+                    .max(attachment.realm_generation)
+            })
+            .fold(self.gateway_generation, u64::max)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum L3GatewayAttachmentState {
+    Requested,
+    Active,
+    Deleting,
+    Deleted,
+    Error,
+}
+
 /// Canonical desired network state owned by the control plane.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkIntent {
@@ -366,6 +455,35 @@ impl NamespacedRoutedFabricPlan {
         }
         self.policy_generation = policy_generation;
         self.policies = policies;
+        self.policy_defaults.clear();
+        Ok(self)
+    }
+
+    /// Replaces a complete derived snapshot compiled from reusable canonical
+    /// policies, including per-endpoint unmatched action semantics.
+    pub fn with_canonical_policy_snapshot(
+        mut self,
+        policy_generation: u64,
+        defaults: Vec<PolicyDefaultIntent>,
+        policies: Vec<PolicyIntent>,
+    ) -> Result<Self, EndpointDirectoryError> {
+        self = self.with_policy_snapshot(policy_generation, policies)?;
+        let mut default_endpoints = std::collections::BTreeSet::new();
+        if defaults.iter().any(|default| {
+            default.policy_id.is_nil()
+                || default.endpoint_id.is_nil()
+                || default.generation == 0
+                || default.stateful_mode != PolicyStatefulMode::Stateful
+                || !default_endpoints.insert(default.endpoint_id)
+                || !self
+                    .directory
+                    .entries
+                    .iter()
+                    .any(|entry| entry.endpoint_id == default.endpoint_id)
+        }) {
+            return Err(EndpointDirectoryError::InvalidPolicy);
+        }
+        self.policy_defaults = defaults;
         Ok(self)
     }
 
@@ -403,6 +521,7 @@ impl NamespacedRoutedFabricPlan {
             return Err(GenevePacketValidationError::StalePolicy);
         }
 
+        let mut matched_allow = false;
         for policy in &self.policies {
             let (endpoint_id, direction, address) = if policy.direction == PolicyDirection::Egress {
                 (
@@ -429,11 +548,25 @@ impl NamespacedRoutedFabricPlan {
             if policy.action == PolicyAction::Deny {
                 return Err(GenevePacketValidationError::PolicyDenied);
             }
+            matched_allow = true;
         }
 
-        // The existing bounded provider is stateful-allow by default: policy
-        // rules add targeted denies/allows, while established/related state is
-        // handled by the execution provider. A matching deny always wins.
+        if matched_allow {
+            return Ok(());
+        }
+        if self
+            .policy_defaults
+            .iter()
+            .find(|default| {
+                default.endpoint_id == destination_endpoint_id
+                    || default.endpoint_id == packet.source_endpoint_id
+            })
+            .is_some_and(|default| default.unmatched_action == PolicyAction::Deny)
+        {
+            return Err(GenevePacketValidationError::PolicyDenied);
+        }
+        // No attached policy, or an attached Allow-default policy, preserves
+        // the existing stateful baseline for unmatched traffic.
         Ok(())
     }
 
@@ -633,13 +766,17 @@ pub struct NamespacedRoutedFabricPlan {
     pub directory: RealmEndpointDirectory,
     pub proxy_mac: String,
     pub tenant_mtu: u16,
-    /// Canonical policy generation and rules compiled for this realm. Provider
-    /// implementations may derive nftables/nft flow state from this snapshot,
-    /// but may not authorize a packet from provider observations alone.
+    /// Derived policy generation and endpoint rules compiled from canonical
+    /// reusable policies. Providers may derive nftables/nft flow state from
+    /// this snapshot, but may not authorize a packet from observations alone.
     #[serde(default = "default_policy_generation")]
     pub policy_generation: u64,
     #[serde(default)]
     pub policies: Vec<PolicyIntent>,
+    /// Derived per-endpoint unmatched semantics from reusable canonical
+    /// policies. Empty preserves the legacy no-policy baseline.
+    #[serde(default)]
+    pub policy_defaults: Vec<PolicyDefaultIntent>,
     /// Canonical public-address bindings admitted for this realm. Public
     /// addresses are provider input; the provider derives all NAT state and
     /// never keys tenant ownership by private IP alone.
@@ -927,6 +1064,7 @@ impl RealmEndpointDirectory {
             tenant_mtu,
             policy_generation: default_policy_generation(),
             policies: Vec::new(),
+            policy_defaults: Vec::new(),
             public_bindings: Vec::new(),
             routes,
             peers,
@@ -1332,6 +1470,84 @@ mod endpoint_directory_tests {
             deny_plan.validate_geneve_egress(&stale_policy),
             Err(GenevePacketValidationError::StalePolicy)
         );
+        let deny_default_plan = plan
+            .clone()
+            .with_canonical_policy_snapshot(
+                4,
+                vec![PolicyDefaultIntent {
+                    policy_id: Uuid::from_u128(902),
+                    endpoint_id: Uuid::from_u128(1),
+                    unmatched_action: PolicyAction::Deny,
+                    stateful_mode: PolicyStatefulMode::Stateful,
+                    generation: 1,
+                }],
+                Vec::new(),
+            )
+            .expect("deny default policy snapshot");
+        let mut default_packet = packet.clone();
+        default_packet.policy_generation = 4;
+        assert_eq!(
+            deny_default_plan.validate_geneve_egress(&default_packet),
+            Err(GenevePacketValidationError::PolicyDenied)
+        );
+        let allow_default_plan = deny_default_plan
+            .with_canonical_policy_snapshot(
+                5,
+                vec![PolicyDefaultIntent {
+                    policy_id: Uuid::from_u128(903),
+                    endpoint_id: Uuid::from_u128(1),
+                    unmatched_action: PolicyAction::Allow,
+                    stateful_mode: PolicyStatefulMode::Stateful,
+                    generation: 1,
+                }],
+                Vec::new(),
+            )
+            .expect("allow default policy snapshot");
+        default_packet.policy_generation = 5;
+        assert_eq!(
+            allow_default_plan.validate_geneve_egress(&default_packet),
+            Ok(())
+        );
+        let precedence_plan = plan
+            .clone()
+            .with_canonical_policy_snapshot(
+                6,
+                vec![PolicyDefaultIntent {
+                    policy_id: Uuid::from_u128(904),
+                    endpoint_id: Uuid::from_u128(1),
+                    unmatched_action: PolicyAction::Allow,
+                    stateful_mode: PolicyStatefulMode::Stateful,
+                    generation: 1,
+                }],
+                vec![
+                    PolicyIntent {
+                        id: Uuid::from_u128(906),
+                        endpoint_id: Uuid::from_u128(1),
+                        direction: PolicyDirection::Egress,
+                        protocol: NetworkProtocol::Icmp,
+                        ports: None,
+                        source: None,
+                        destination: Ipv4Prefix::new(Ipv4Addr::new(10, 40, 1, 0), 24),
+                        action: PolicyAction::Allow,
+                    },
+                    PolicyIntent {
+                        id: Uuid::from_u128(905),
+                        endpoint_id: Uuid::from_u128(1),
+                        direction: PolicyDirection::Egress,
+                        protocol: NetworkProtocol::Icmp,
+                        ports: None,
+                        source: None,
+                        destination: Ipv4Prefix::new(Ipv4Addr::new(10, 40, 1, 0), 24),
+                        action: PolicyAction::Deny,
+                    },
+                ],
+            )
+            .expect("precedence policy snapshot");
+        default_packet.policy_generation = 6;
+        assert_eq!(
+            precedence_plan.validate_geneve_egress(&default_packet),
+            Err(GenevePacketValidationError::PolicyDenied)
+        );
         assert_eq!(
             plan.clone().with_policy_snapshot(0, Vec::new(),),
             Err(EndpointDirectoryError::InvalidPolicy)
@@ -1603,6 +1819,17 @@ pub struct PolicyAttachment {
     pub generation: u64,
 }
 
+/// Derived endpoint-scoped default semantics for an attached canonical
+/// policy. This is execution input, not reusable policy authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyDefaultIntent {
+    pub policy_id: Uuid,
+    pub endpoint_id: Uuid,
+    pub unmatched_action: PolicyAction,
+    pub stateful_mode: PolicyStatefulMode,
+    pub generation: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortRange {
     pub start: u16,
@@ -1718,5 +1945,6 @@ pub enum NetworkPlanIntent {
     Gateway(GatewayIntent),
     Egress(EgressIntent),
     PublicAddressBinding(PublicAddressBindingIntent),
+    PolicyDefault(PolicyDefaultIntent),
     Policy(PolicyIntent),
 }

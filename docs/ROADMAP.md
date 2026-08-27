@@ -409,7 +409,7 @@ discovery; runtime compatibility claims remain gated by SPEC-0032 evidence.
 ### P13.3 — Neutron adoption profile
 
 - Security groups and rules via canonical NetworkPolicy projection
-- Router and router interface via AddressRealm gateway projection
+- Router and router interface via canonical L3Gateway/L3GatewayAttachment projection
 - Floating IP via PublicAddress mapping
 
 ### P13.4 — Native Volume Cinder projection and Terraform volume lifecycle

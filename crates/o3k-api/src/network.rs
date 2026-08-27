@@ -10,6 +10,7 @@ use axum::{
     response::IntoResponse,
 };
 use o3k_domain::{NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange};
+use o3k_kernel::AuthContext;
 use o3k_network::{
     NetworkError, NetworkRecord, NetworkService, PortRecord, PublicAddressAllocator,
     PublicAddressBinding, PublicAddressError, SubnetRecord,
@@ -17,6 +18,1032 @@ use o3k_network::{
 use uuid::Uuid;
 
 use crate::{AppState, auth::require_auth_context, error::keystone_error};
+
+#[derive(serde::Deserialize)]
+pub(crate) struct RouterRequestBody {
+    router: RouterRequest,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct RouterRequest {
+    name: String,
+    #[serde(default)]
+    enable_snat: Option<bool>,
+    #[serde(default)]
+    external_realm_id: Option<Uuid>,
+    #[serde(default)]
+    /// `None` means omitted; `Some(None)` is an explicit Neutron clear.
+    external_gateway_info: Option<Option<ExternalGatewayInfo>>,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct ExternalGatewayInfo {
+    network_id: Option<Uuid>,
+    #[serde(default)]
+    enable_snat: Option<bool>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct RouterEnvelope {
+    router: RouterResponse,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct RouterList {
+    routers: Vec<RouterResponse>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct RouterResponse {
+    id: String,
+    name: String,
+    project_id: String,
+    tenant_id: String,
+    status: String,
+    admin_state_up: bool,
+    enable_snat: bool,
+    external_gateway_info: Option<ExternalGatewayInfoResponse>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct ExternalGatewayInfoResponse {
+    network_id: String,
+    enable_snat: bool,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct RouterInterfaceRequestBody {
+    #[serde(default)]
+    router_interface: Option<RouterInterfaceRequest>,
+    #[serde(default)]
+    realm_id: Option<Uuid>,
+    #[serde(default)]
+    subnet_id: Option<Uuid>,
+    #[serde(default)]
+    port_id: Option<Uuid>,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct RouterInterfaceRequest {
+    #[serde(default)]
+    realm_id: Option<Uuid>,
+    #[serde(default)]
+    subnet_id: Option<Uuid>,
+    #[serde(default)]
+    port_id: Option<Uuid>,
+}
+impl RouterInterfaceRequestBody {
+    fn into_request(self) -> RouterInterfaceRequest {
+        self.router_interface.unwrap_or(RouterInterfaceRequest {
+            realm_id: self.realm_id,
+            subnet_id: self.subnet_id,
+            port_id: self.port_id,
+        })
+    }
+}
+#[derive(serde::Serialize)]
+pub(crate) struct RouterInterfaceResponse {
+    #[serde(rename = "port_id")]
+    port_id: String,
+    #[serde(rename = "router_id")]
+    router_id: String,
+    subnet_id: String,
+}
+async fn router_response(
+    service: &NetworkService,
+    project: &str,
+    g: o3k_store::CanonicalL3GatewayRecord,
+) -> Result<RouterResponse, NetworkError> {
+    let external_network_id = match g.external_realm_id {
+        Some(realm_id) => Some(
+            service
+                .get_canonical_realm_for_project(project, realm_id)
+                .await?
+                .network_id,
+        ),
+        None => None,
+    };
+    Ok(RouterResponse {
+        id: g.id.to_string(),
+        name: g.name,
+        project_id: g.project_id.clone(),
+        tenant_id: g.project_id,
+        status: g.state.to_ascii_uppercase(),
+        admin_state_up: true,
+        enable_snat: g.enable_snat,
+        external_gateway_info: external_network_id.map(|id| ExternalGatewayInfoResponse {
+            network_id: id.to_string(),
+            enable_snat: g.enable_snat,
+        }),
+    })
+}
+
+async fn external_realm_for_router(
+    service: &NetworkService,
+    project: &str,
+    request: &RouterRequest,
+) -> Result<Option<Uuid>, NetworkError> {
+    if let Some(realm_id) = request.external_realm_id {
+        return Ok(Some(realm_id));
+    }
+    let Some(Some(info)) = request.external_gateway_info.as_ref() else {
+        return Ok(None);
+    };
+    let Some(network_id) = info.network_id else {
+        return Err(NetworkError::InvalidRequest);
+    };
+    let realms = service
+        .list_canonical_realms_for_project(project, network_id)
+        .await?;
+    realms
+        .into_iter()
+        .next()
+        .map(|realm| Some(realm.id))
+        .ok_or(NetworkError::NotFound)
+}
+
+pub(crate) async fn list_routers(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match service
+        .list_l3_gateways_for_project(auth.effective_scope().id().as_str())
+        .await
+    {
+        Ok(gateways) => {
+            let mut routers = Vec::with_capacity(gateways.len());
+            for gateway in gateways {
+                match router_response(service, auth.effective_scope().id().as_str(), gateway).await
+                {
+                    Ok(router) => routers.push(router),
+                    Err(error) => return network_error(error),
+                }
+            }
+            Json(RouterList { routers }).into_response()
+        }
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn create_router(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    request: Result<Json<RouterRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid router request",
+        );
+    };
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let external_realm_id = match external_realm_for_router(service, project, &body.router).await {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    let result = service
+        .create_l3_gateway_for_project(
+            project,
+            body.router.name,
+            external_realm_id,
+            body.router
+                .external_gateway_info
+                .as_ref()
+                .and_then(|info| info.as_ref())
+                .and_then(|info| info.enable_snat)
+                .or(body.router.enable_snat)
+                .unwrap_or(true),
+        )
+        .await;
+    match result {
+        Ok(gateway) => {
+            if state.network_dispatcher.is_some() && state.network_controller.is_some() {
+                let snapshot = match service
+                    .compile_l3_gateway_execution_plan_for_project(project, &gateway.id)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => return network_error(error),
+                };
+                if let Err(response) = dispatch_l3_gateway_snapshot(
+                    &state,
+                    project,
+                    snapshot,
+                    o3k_network::NetworkPlanAction::Apply,
+                    gateway.generation,
+                )
+                .await
+                {
+                    return response;
+                }
+            }
+            match router_response(service, project, gateway).await {
+                Ok(router) => {
+                    (StatusCode::CREATED, Json(RouterEnvelope { router })).into_response()
+                }
+                Err(error) => network_error(error),
+            }
+        }
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn show_router(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let project = auth.effective_scope().id().as_str();
+    match service
+        .get_l3_gateway_for_project(auth.effective_scope().id().as_str(), &id)
+        .await
+    {
+        Ok(gateway) => match router_response(service, project, gateway).await {
+            Ok(router) => Json(RouterEnvelope { router }).into_response(),
+            Err(error) => network_error(error),
+        },
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn update_router(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+    request: Result<Json<RouterRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid router request",
+        );
+    };
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let current = match service.get_l3_gateway_for_project(project, &id).await {
+        Ok(v) => v,
+        Err(e) => return network_error(e),
+    };
+    let external_realm_id = match body.router.external_gateway_info.as_ref() {
+        Some(Some(_)) => match external_realm_for_router(service, project, &body.router).await {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        },
+        Some(None) => None,
+        None => match external_realm_for_router(service, project, &body.router).await {
+            Ok(value) => value.or(current.external_realm_id),
+            Err(error) => return network_error(error),
+        },
+    };
+    match service
+        .update_l3_gateway_for_project(
+            project,
+            &id,
+            current.generation,
+            body.router.name,
+            external_realm_id,
+            body.router
+                .external_gateway_info
+                .as_ref()
+                .and_then(|info| info.as_ref())
+                .and_then(|info| info.enable_snat)
+                .or(body.router.enable_snat)
+                .unwrap_or(current.enable_snat),
+        )
+        .await
+    {
+        Ok(gateway) => {
+            if state.network_dispatcher.is_some() && state.network_controller.is_some() {
+                let snapshot = match service
+                    .compile_l3_gateway_execution_plan_for_project(project, &gateway.id)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => return network_error(error),
+                };
+                if let Err(response) = dispatch_l3_gateway_snapshot(
+                    &state,
+                    project,
+                    snapshot,
+                    o3k_network::NetworkPlanAction::Apply,
+                    gateway.generation,
+                )
+                .await
+                {
+                    return response;
+                }
+            }
+            match router_response(service, project, gateway).await {
+                Ok(router) => Json(RouterEnvelope { router }).into_response(),
+                Err(error) => network_error(error),
+            }
+        }
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn delete_router(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let current = match service.get_l3_gateway_for_project(project, &id).await {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    let deleting = match service
+        .delete_l3_gateway_for_project(project, &id, current.generation)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    if state.network_dispatcher.is_some() && state.network_controller.is_some() {
+        let snapshot = match service
+            .compile_l3_gateway_execution_plan_for_project(project, &id)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => return network_error(error),
+        };
+        let dispatched = match dispatch_l3_gateway_snapshot(
+            &state,
+            project,
+            snapshot,
+            o3k_network::NetworkPlanAction::Remove,
+            deleting.generation,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+        if dispatched
+            && let Err(error) = service
+                .finalize_l3_gateway_deletion_for_project(project, &id, deleting.generation)
+                .await
+        {
+            return network_error(error);
+        }
+    }
+    // A successful dispatch means the network executor completed its
+    // provider mutation and observation workflow; without an execution
+    // boundary the durable deleting reservation remains for restart-safe
+    // reconciliation.
+    StatusCode::ACCEPTED.into_response()
+}
+
+pub(crate) async fn add_router_interface(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+    request: Result<Json<RouterInterfaceRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid router interface request",
+        );
+    };
+    let body = body.into_request();
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let requested_port_id = body.port_id;
+    let realm_id = if let Some(realm_id) = body.realm_id {
+        realm_id
+    } else if let Some(port_id) = requested_port_id {
+        let port = match service.get_port_for_project(project, port_id).await {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let subnet_id = port
+            .subnet_id
+            .ok_or_else(|| network_error(NetworkError::NotFound));
+        let subnet_id = match subnet_id {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+        let subnet = match service.get_subnet_for_project(project, subnet_id).await {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let realms = match service
+            .list_canonical_realms_for_project(project, subnet.network_id)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let Some(realm) = realms.into_iter().find(|realm| realm.prefix == subnet.cidr) else {
+            return network_error(NetworkError::NotFound);
+        };
+        realm.id
+    } else if let Some(subnet_id) = body.subnet_id {
+        let subnet = match service
+            .get_subnet_for_project(auth.effective_scope().id().as_str(), subnet_id)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return network_error(e),
+        };
+        let realms = match service
+            .list_canonical_realms_for_project(
+                auth.effective_scope().id().as_str(),
+                subnet.network_id,
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return network_error(e),
+        };
+        let Some(realm) = realms.into_iter().next() else {
+            return network_error(NetworkError::NotFound);
+        };
+        realm.id
+    } else {
+        return network_error(NetworkError::InvalidRequest);
+    };
+    let response_subnet_id = body.subnet_id.unwrap_or(realm_id);
+    match service
+        .attach_l3_gateway_realm(auth.effective_scope().id().as_str(), &id, &realm_id)
+        .await
+    {
+        Ok(a) => {
+            let realm = match service.get_canonical_realm(&auth, a.realm_id).await {
+                Ok(value) => value,
+                Err(error) => return network_error(error),
+            };
+            let ports = match service
+                .list_ports_for_project(auth.effective_scope().id().as_str())
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => return network_error(error),
+            };
+            let mut provider_dispatched = false;
+            for port in ports
+                .into_iter()
+                .filter(|port| port.network_id == realm.network_id)
+            {
+                let dispatched = match dispatch_policy_network_with_gateway(
+                    &state,
+                    project,
+                    realm.network_id,
+                    port.id,
+                    Some(a.gateway_id),
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+                provider_dispatched |= dispatched;
+            }
+            if !provider_dispatched
+                && state.network_dispatcher.is_some()
+                && state.network_controller.is_some()
+            {
+                let snapshot = match service
+                    .compile_l3_gateway_execution_plan_for_project(project, &a.gateway_id)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => return network_error(error),
+                };
+                if let Err(response) = dispatch_l3_gateway_snapshot(
+                    &state,
+                    project,
+                    snapshot,
+                    o3k_network::NetworkPlanAction::Apply,
+                    a.generation,
+                )
+                .await
+                {
+                    return response;
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(RouterInterfaceResponse {
+                    port_id: requested_port_id.unwrap_or(a.id).to_string(),
+                    router_id: a.gateway_id.to_string(),
+                    subnet_id: response_subnet_id.to_string(),
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn remove_router_interface(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+    request: Result<Json<RouterInterfaceRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid router interface request",
+        );
+    };
+    let body = body.into_request();
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let attachments = match service.list_l3_gateway_attachments(project, &id).await {
+        Ok(v) => v,
+        Err(e) => return network_error(e),
+    };
+    let realm_id = if let Some(realm_id) = body.realm_id {
+        realm_id
+    } else if let Some(port_id) = body.port_id {
+        let port = match service.get_port_for_project(project, port_id).await {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let Some(subnet_id) = port.subnet_id else {
+            return network_error(NetworkError::NotFound);
+        };
+        let subnet = match service.get_subnet_for_project(project, subnet_id).await {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let realms = match service
+            .list_canonical_realms_for_project(project, subnet.network_id)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let Some(realm) = realms.into_iter().find(|realm| realm.prefix == subnet.cidr) else {
+            return network_error(NetworkError::NotFound);
+        };
+        realm.id
+    } else if let Some(subnet_id) = body.subnet_id {
+        let subnet = match service.get_subnet_for_project(project, subnet_id).await {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let realms = match service
+            .list_canonical_realms_for_project(project, subnet.network_id)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let Some(realm) = realms.into_iter().find(|realm| realm.prefix == subnet.cidr) else {
+            return network_error(NetworkError::NotFound);
+        };
+        realm.id
+    } else {
+        Uuid::nil()
+    };
+    let Some(a) = attachments
+        .into_iter()
+        .find(|a| a.state == "active" && (a.realm_id == realm_id || body.port_id == Some(a.id)))
+    else {
+        return network_error(NetworkError::NotFound);
+    };
+    let realm = match service.get_canonical_realm(&auth, a.realm_id).await {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    let result = service
+        .detach_l3_gateway_realm(project, &a.id, a.generation)
+        .await;
+    match result {
+        Ok(deleting) => {
+            let ports = match service.list_ports_for_project(project).await {
+                Ok(value) => value,
+                Err(error) => return network_error(error),
+            };
+            let network_ports = ports
+                .into_iter()
+                .filter(|port| port.network_id == realm.network_id)
+                .collect::<Vec<_>>();
+            let mut provider_dispatched = false;
+            for port in &network_ports {
+                let dispatched = match dispatch_policy_network_with_gateway(
+                    &state,
+                    project,
+                    realm.network_id,
+                    port.id,
+                    Some(a.gateway_id),
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+                provider_dispatched |= dispatched;
+            }
+            if !provider_dispatched
+                && state.network_dispatcher.is_some()
+                && state.network_controller.is_some()
+            {
+                let snapshot = match service
+                    .compile_l3_gateway_execution_plan_for_project(project, &a.gateway_id)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => return network_error(error),
+                };
+                if let Err(response) = dispatch_l3_gateway_snapshot(
+                    &state,
+                    project,
+                    snapshot,
+                    o3k_network::NetworkPlanAction::Apply,
+                    deleting.generation,
+                )
+                .await
+                {
+                    return response;
+                }
+                provider_dispatched = true;
+            }
+            if provider_dispatched
+                && let Err(error) = service
+                    .finalize_l3_gateway_realm_detachment_for_project(
+                        project,
+                        &deleting.id,
+                        deleting.generation,
+                    )
+                    .await
+            {
+                return network_error(error);
+            }
+            // Router Interface removal is synchronous at the compatibility
+            // boundary: the pinned OpenStack provider expects the successful
+            // remove operation to return 200, just like the corresponding
+            // create/read path.  The canonical attachment lifecycle remains
+            // durable and is finalized only after reconciliation.
+            StatusCode::OK.into_response()
+        }
+        Err(error) => network_error(error),
+    }
+}
+
+async fn dispatch_l3_gateway_snapshot(
+    state: &AppState,
+    project_id: &str,
+    gateway: o3k_domain::L3GatewayExecutionPlan,
+    action: o3k_network::NetworkPlanAction,
+    generation: u64,
+) -> Result<bool, axum::response::Response> {
+    let Some(dispatcher) = state.network_dispatcher.as_ref() else {
+        return Ok(false);
+    };
+    let Some(controller) = state.network_controller.as_ref() else {
+        return Ok(false);
+    };
+    let Some(agent) = state.network_agent.as_ref() else {
+        return Err(keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "gateway provider agent is unavailable",
+        ));
+    };
+    if gateway.project_id != project_id {
+        return Err(keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "gateway project ownership mismatch",
+        ));
+    }
+    let fingerprint = o3k_network::gateway_plan_fingerprint(&gateway).map_err(|error| {
+        keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string())
+    })?;
+    let operation_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!(
+            "o3k:network:gateway:{action:?}:{project_id}:{}:{generation}:{fingerprint}",
+            gateway.gateway_id
+        )
+        .as_bytes(),
+    );
+    let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
+    let plan = o3k_network::compile_l3_gateway_network_plan(
+        gateway,
+        &agent.agent_id,
+        operation_id,
+        deadline_unix_ms,
+    )
+    .map_err(|error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()))?;
+    let command_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:network:gateway-command:{operation_id}").as_bytes(),
+    );
+    let status = dispatcher
+        .dispatch(o3k_network::NetworkPlanCommand {
+            command_id,
+            operation_id,
+            idempotency_key: format!(
+                "o3k:network:gateway:{project_id}:{}:{generation}:{fingerprint}:{action:?}",
+                plan.plan_id
+            ),
+            action,
+            target: agent.clone(),
+            controller: controller.clone(),
+            deadline_unix_ms,
+            plan,
+        })
+        .await
+        .map_err(|error| {
+            keystone_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Service Unavailable",
+                error.to_string(),
+            )
+        })?;
+    if status != o3k_network::NetworkPlanStatus::Succeeded {
+        return Err(keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "gateway realization requires observation",
+        ));
+    }
+    Ok(true)
+}
+
+/// Resume durable gateway/attachment deletion reservations after a process
+/// restart.  This pass is deliberately owned by the API composition root so
+/// it runs after the network-agent execution boundary has been wired.  It
+/// uses only canonical transitional rows and lets the provider/agent observe
+/// convergence before finalizing those rows.
+pub async fn recover_l3_gateway_operations(state: &AppState) {
+    let (Some(service), Some(_dispatcher), Some(_controller)) = (
+        state.network.as_ref(),
+        state.network_dispatcher.as_ref(),
+        state.network_controller.as_ref(),
+    ) else {
+        return;
+    };
+    let gateways = match service.list_deleting_l3_gateways().await {
+        Ok(gateways) => gateways,
+        Err(error) => {
+            tracing::error!(%error, "failed to enumerate deleting L3 gateways during startup recovery");
+            return;
+        }
+    };
+    for gateway in gateways {
+        let project = gateway.project_id.clone();
+        let gateway_id = gateway.id;
+        let generation = gateway.generation;
+        let snapshot = match service
+            .compile_l3_gateway_execution_plan_for_project(&project, &gateway_id)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(%error, %gateway_id, "cannot reconstruct deleting gateway removal target");
+                continue;
+            }
+        };
+        match dispatch_l3_gateway_snapshot(
+            state,
+            &project,
+            snapshot,
+            o3k_network::NetworkPlanAction::Remove,
+            generation,
+        )
+        .await
+        {
+            Ok(true) => {
+                if let Err(error) = service
+                    .finalize_l3_gateway_deletion_for_project(&project, &gateway_id, generation)
+                    .await
+                {
+                    tracing::warn!(%error, %gateway_id, "gateway removal observed but canonical finalization is pending");
+                }
+            }
+            Ok(false) => {
+                tracing::warn!(%gateway_id, "gateway deletion remains pending without an execution boundary")
+            }
+            Err(_) => tracing::warn!(%gateway_id, "gateway deletion recovery did not converge"),
+        }
+    }
+    let attachments = match service.list_deleting_l3_gateway_attachments().await {
+        Ok(attachments) => attachments,
+        Err(error) => {
+            tracing::error!(%error, "failed to enumerate deleting L3 gateway attachments during startup recovery");
+            return;
+        }
+    };
+    for attachment in attachments {
+        let gateway = match service
+            .get_l3_gateway_for_project(&attachment.project_id, &attachment.gateway_id)
+            .await
+        {
+            Ok(gateway) => gateway,
+            Err(error) => {
+                tracing::warn!(%error, attachment_id = %attachment.id, "cannot recover deleting gateway attachment");
+                continue;
+            }
+        };
+        let snapshot = match service
+            .compile_l3_gateway_execution_plan_for_project(&attachment.project_id, &gateway.id)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(%error, attachment_id = %attachment.id, "cannot reconstruct gateway attachment target");
+                continue;
+            }
+        };
+        match dispatch_l3_gateway_snapshot(
+            state,
+            &attachment.project_id,
+            snapshot,
+            o3k_network::NetworkPlanAction::Apply,
+            attachment.generation,
+        )
+        .await
+        {
+            Ok(true) => {
+                if let Err(error) = service
+                    .finalize_l3_gateway_realm_detachment_for_project(
+                        &attachment.project_id,
+                        &attachment.id,
+                        attachment.generation,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, attachment_id = %attachment.id, "attachment converged but canonical finalization is pending");
+                }
+            }
+            Ok(false) => {
+                tracing::warn!(attachment_id = %attachment.id, "attachment deletion remains pending without an execution boundary")
+            }
+            Err(_) => {
+                tracing::warn!(attachment_id = %attachment.id, "attachment deletion recovery did not converge")
+            }
+        }
+    }
+
+    // Policy child deletion reservations use the same startup owner and the
+    // same endpoint execution boundary.  The canonical rows are deliberately
+    // finalized only after every affected endpoint has been dispatched; a
+    // failed or unavailable endpoint leaves the child durably deleting.
+    let deleting_attachments = match service.list_deleting_policy_attachments().await {
+        Ok(attachments) => attachments,
+        Err(error) => {
+            tracing::error!(%error, "failed to enumerate deleting policy attachments during startup recovery");
+            return;
+        }
+    };
+    for attachment in deleting_attachments {
+        let network_id = match service
+            .network_id_for_canonical_endpoint(&attachment.project_id, &attachment.endpoint_id)
+            .await
+        {
+            Ok(network_id) => network_id,
+            Err(error) => {
+                tracing::warn!(%error, attachment_id = %attachment.id, "cannot resolve policy attachment execution context");
+                continue;
+            }
+        };
+        match dispatch_policy_network_with_gateway(
+            state,
+            &attachment.project_id,
+            network_id,
+            attachment.endpoint_id,
+            None,
+        )
+        .await
+        {
+            Ok(true) => {
+                if let Err(error) = service
+                    .finalize_policy_attachment_deletion_for_project(
+                        &attachment.project_id,
+                        attachment.id,
+                        attachment.generation,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, attachment_id = %attachment.id, "policy attachment converged but canonical finalization is pending");
+                }
+            }
+            Ok(false) => {
+                tracing::warn!(attachment_id = %attachment.id, "policy attachment remains deleting without an execution boundary")
+            }
+            Err(_error) => {
+                tracing::warn!(attachment_id = %attachment.id, "policy attachment recovery did not converge")
+            }
+        }
+    }
+
+    let deleting_rules = match service.list_deleting_policy_rules().await {
+        Ok(rules) => rules,
+        Err(error) => {
+            tracing::error!(%error, "failed to enumerate deleting policy rules during startup recovery");
+            return;
+        }
+    };
+    for rule in deleting_rules {
+        let endpoints = match service
+            .affected_endpoints_for_canonical_policy(&rule.project_id, rule.policy_id)
+            .await
+        {
+            Ok(endpoints) => endpoints,
+            Err(error) => {
+                tracing::warn!(%error, rule_id = %rule.id, "cannot resolve deleting policy rule endpoints");
+                continue;
+            }
+        };
+        let mut converged = true;
+        for endpoint_id in endpoints {
+            let network_id = match service
+                .network_id_for_canonical_endpoint(&rule.project_id, &endpoint_id)
+                .await
+            {
+                Ok(network_id) => network_id,
+                Err(error) => {
+                    tracing::warn!(%error, rule_id = %rule.id, %endpoint_id, "cannot resolve policy rule execution context");
+                    converged = false;
+                    continue;
+                }
+            };
+            match dispatch_policy_network_with_gateway(
+                state,
+                &rule.project_id,
+                network_id,
+                endpoint_id,
+                None,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => converged = false,
+                Err(_error) => {
+                    tracing::warn!(rule_id = %rule.id, %endpoint_id, "policy rule recovery did not converge");
+                    converged = false;
+                }
+            }
+        }
+        if converged
+            && let Err(error) = service
+                .finalize_security_group_rule_deletion_for_project(
+                    &rule.project_id,
+                    rule.id,
+                    rule.generation,
+                )
+                .await
+        {
+            tracing::warn!(%error, rule_id = %rule.id, "policy rule recovery converged but canonical finalization is pending");
+        }
+    }
+}
 
 #[derive(serde::Deserialize)]
 pub(crate) struct NetworkRequestBody {
@@ -273,9 +1300,12 @@ pub(crate) struct SecurityGroupRequestBody {
 }
 #[derive(serde::Deserialize)]
 pub(crate) struct SecurityGroupRequest {
-    name: String,
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    stateful: Option<bool>,
 }
 #[derive(serde::Serialize)]
 pub(crate) struct SecurityGroupEnvelope {
@@ -291,6 +1321,7 @@ pub(crate) struct SecurityGroupResponse {
     project_id: String,
     name: String,
     description: String,
+    stateful: bool,
     security_group_rules: Vec<SecurityGroupRuleResponse>,
 }
 #[derive(serde::Deserialize)]
@@ -469,6 +1500,7 @@ async fn security_group_response(
         project_id: group.project_id,
         name: group.name,
         description: group.description,
+        stateful: true,
         security_group_rules: rules,
     })
 }
@@ -541,12 +1573,18 @@ pub(crate) async fn create_security_group(
         Err(response) => return response,
     };
     let project = auth.effective_scope().id().as_str();
+    if body.security_group.stateful == Some(false) {
+        return network_error(NetworkError::InvalidRequest);
+    }
+    let Some(name) = body.security_group.name else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "security group name is required",
+        );
+    };
     match service
-        .create_security_group_for_project(
-            project,
-            body.security_group.name,
-            body.security_group.description,
-        )
+        .create_security_group_for_project(project, name, body.security_group.description)
         .await
     {
         Ok(group) => match security_group_response(service, project, group).await {
@@ -612,11 +1650,18 @@ pub(crate) async fn update_security_group(
         Err(response) => return response,
     };
     let project = auth.effective_scope().id().as_str();
+    if body.security_group.stateful == Some(false) {
+        return network_error(NetworkError::InvalidRequest);
+    }
+    let current = match service.get_security_group_for_project(project, id).await {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
     let group = match service
         .update_security_group_for_project(
             project,
             id,
-            body.security_group.name,
+            body.security_group.name.unwrap_or(current.name),
             body.security_group.description,
         )
         .await
@@ -796,16 +1841,23 @@ pub(crate) async fn delete_security_group_rule(
         Ok(value) => value,
         Err(error) => return network_error(error),
     };
-    if let Err(error) = service
-        .delete_security_group_rule_for_project(project, id)
+    let deleting_rule = match service
+        .begin_security_group_rule_deletion_for_project(project, id)
         .await
     {
-        return network_error(error);
-    }
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
     if let Err(response) =
         dispatch_security_group_endpoints(&state, project, rule.security_group_id).await
     {
         return response;
+    }
+    if let Err(error) = service
+        .finalize_security_group_rule_deletion_for_project(project, id, deleting_rule.generation)
+        .await
+    {
+        return network_error(error);
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1058,11 +2110,27 @@ async fn dispatch_policy_network(
     network_id: Uuid,
     endpoint_id: Uuid,
 ) -> Result<(), axum::response::Response> {
+    dispatch_policy_network_with_gateway(state, project_id, network_id, endpoint_id, None)
+        .await
+        .map(|_| ())
+}
+
+/// Dispatches a complete endpoint plan and, when requested, the complete
+/// canonical gateway plan that must be rebuilt with it. The endpoint remains
+/// the scheduling/agent selection unit; an interface mutation supplies the
+/// exact gateway whose complete snapshot must be rebuilt.
+async fn dispatch_policy_network_with_gateway(
+    state: &AppState,
+    project_id: &str,
+    network_id: Uuid,
+    endpoint_id: Uuid,
+    gateway_id: Option<Uuid>,
+) -> Result<bool, axum::response::Response> {
     let Some(dispatcher) = state.network_dispatcher.as_ref() else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(controller) = state.network_controller.as_ref() else {
-        return Ok(());
+        return Ok(false);
     };
     let network = network_service(state)?;
     let ports = network
@@ -1077,7 +2145,7 @@ async fn dispatch_policy_network(
     // provider projection pending until the normal binding lifecycle can
     // dispatch the complete attachment plan.
     let Some(host) = port.binding_host.clone() else {
-        return Ok(());
+        return Ok(false);
     };
     let agent = if let Some(registry) = state.agent_registry.as_ref()
         && let Some(agent) = registry.snapshot(&host).await
@@ -1115,28 +2183,131 @@ async fn dispatch_policy_network(
         .into_iter()
         .filter(|policy| policy.endpoint_id == port.id)
         .collect();
+    let policy_defaults = network
+        .policy_defaults_for_endpoint(project_id, port.id)
+        .await
+        .map_err(network_error)?;
+    let network_records = network
+        .list_canonical_networks_for_project(project_id)
+        .await
+        .map_err(network_error)?;
+    let mut all_realms = Vec::new();
+    for network_record in network_records {
+        all_realms.extend(
+            network
+                .list_canonical_realms_for_project(project_id, network_record.id)
+                .await
+                .map_err(network_error)?,
+        );
+    }
+    let realms = all_realms
+        .iter()
+        .filter(|realm| realm.network_id == network_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let realm = realms
+        .iter()
+        .find(|realm| realm.prefix == subnet.cidr)
+        .or_else(|| realms.first())
+        .ok_or_else(|| network_error(NetworkError::NotFound))?;
+    let mut gateway_routes = Vec::new();
+    let mut gateway_egress = Vec::new();
+    let mut gateway_execution = None;
+    let realm_map = all_realms
+        .iter()
+        .cloned()
+        .map(|realm| (realm.id, realm))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let gateways = if let Some(gateway_id) = gateway_id {
+        vec![
+            network
+                .get_l3_gateway_for_project(project_id, &gateway_id)
+                .await
+                .map_err(network_error)?,
+        ]
+    } else {
+        network
+            .list_l3_gateways_for_project(project_id)
+            .await
+            .map_err(network_error)?
+    };
+    for gateway in gateways {
+        let attachments = network
+            .list_l3_gateway_attachments(project_id, &gateway.id)
+            .await
+            .map_err(network_error)?;
+        if attachments
+            .iter()
+            .any(|attachment| attachment.realm_id == realm.id && attachment.state == "active")
+            || gateway_id == Some(gateway.id)
+        {
+            let compiled =
+                o3k_network::compile_l3_gateway_execution_plan(&gateway, &attachments, &realm_map)
+                    .map_err(|error| {
+                        keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string())
+                    })?;
+            if gateway_execution.replace(compiled).is_some() {
+                return Err(keystone_error(
+                    StatusCode::CONFLICT,
+                    "Conflict",
+                    "endpoint is attached to multiple L3 gateways",
+                ));
+            }
+        }
+        if let Ok(compiled) = o3k_network::compile_l3_gateway_intents(
+            &gateway,
+            &attachments,
+            &all_realms,
+            &std::collections::BTreeMap::new(),
+        ) && let Some((routes, egress)) = compiled.get(&realm.id)
+        {
+            if gateway_execution.is_none() {
+                gateway_routes.extend(routes.iter().cloned());
+            }
+            gateway_egress.extend(egress.iter().cloned());
+        }
+    }
     let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
     let operation_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
-        serde_json::to_string(&policies)
-            .unwrap_or_default()
-            .as_bytes(),
+        &serde_json::to_string(&(&policies, &policy_defaults))
+            .map_err(|_| {
+                keystone_error(
+                    StatusCode::BAD_REQUEST,
+                    "Bad Request",
+                    "policy identity serialization failed",
+                )
+            })?
+            .into_bytes(),
     );
-    let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
-        endpoint_id: port.id,
-        realm_id: port.network_id,
-        project_id,
-        mac: &port.mac_address,
-        fixed_ip: port.fixed_ip,
-        subnet_cidr: &subnet.cidr,
-        node_id: &host,
-        operation_id,
-        deadline_unix_ms,
-        public_address: None,
-        external_realm_id: state.network_external_realm_id,
-        policies,
-    })
+    let plan = o3k_network::compile_attachment_plan_with_defaults(
+        o3k_network::AttachmentPlanInput {
+            endpoint_id: port.id,
+            realm_id: realm.id,
+            project_id,
+            mac: &port.mac_address,
+            fixed_ip: port.fixed_ip,
+            subnet_cidr: &subnet.cidr,
+            node_id: &host,
+            operation_id,
+            deadline_unix_ms,
+            public_address: None,
+            external_realm_id: state.network_external_realm_id,
+            policies,
+        },
+        policy_defaults,
+    )
     .map_err(|error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()))?;
+    let plan = if let Some(gateway) = gateway_execution {
+        plan.with_gateway(gateway).map_err(|error| {
+            keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string())
+        })?
+    } else {
+        plan
+    };
+    let plan = o3k_network::add_l3_gateway_routing(plan, gateway_routes, gateway_egress).map_err(
+        |error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()),
+    )?;
     let status = dispatcher
         .dispatch(o3k_network::NetworkPlanCommand {
             command_id: Uuid::new_v5(
@@ -1170,7 +2341,7 @@ async fn dispatch_policy_network(
         .mark_network_intent_active_for_project(project_id, network_id)
         .await
         .map_err(network_error)?;
-    Ok(())
+    Ok(true)
 }
 
 pub(crate) fn port_response(value: PortRecord, security_groups: Vec<Uuid>) -> PortResponse {
@@ -1200,6 +2371,64 @@ pub(crate) fn port_response(value: PortRecord, security_groups: Vec<Uuid>) -> Po
         device_owner: String::new(),
         port_security_enabled: false,
     }
+}
+
+async fn router_interface_port(
+    service: &NetworkService,
+    auth: &AuthContext,
+    port_id: Uuid,
+) -> Result<Option<PortResponse>, NetworkError> {
+    let project = auth.effective_scope().id().as_str();
+    for gateway in service.list_l3_gateways_for_project(project).await? {
+        for attachment in service
+            .list_l3_gateway_attachments(project, &gateway.id)
+            .await?
+        {
+            if attachment.id != port_id || attachment.state != "active" {
+                continue;
+            }
+            let realm = service
+                .get_canonical_realm(auth, attachment.realm_id)
+                .await?;
+            let subnet_id = service
+                .list_subnets_for_project(project)
+                .await?
+                .into_iter()
+                .find(|subnet| subnet.network_id == realm.network_id && subnet.cidr == realm.prefix)
+                .map(|subnet| subnet.id)
+                .unwrap_or(realm.id);
+            let network = realm
+                .prefix
+                .split_once('/')
+                .and_then(|(address, _)| address.parse::<Ipv4Addr>().ok())
+                .and_then(|address| u32::from(address).checked_add(1).map(Ipv4Addr::from))
+                .ok_or(NetworkError::InvalidRequest)?;
+            let bytes = port_id.as_bytes();
+            let mac_address = format!(
+                "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                bytes[0], bytes[1], bytes[2], bytes[14], bytes[15]
+            );
+            return Ok(Some(PortResponse {
+                id: port_id.to_string(),
+                network_id: realm.network_id.to_string(),
+                project_id: project.to_owned(),
+                name: format!("router-interface-{}", attachment.id),
+                mac_address,
+                fixed_ips: vec![FixedIpResponse {
+                    subnet_id: subnet_id.to_string(),
+                    ip_address: network,
+                }],
+                status: "ACTIVE".to_owned(),
+                security_groups: Vec::new(),
+                tenant_id: project.to_owned(),
+                admin_state_up: true,
+                device_id: gateway.id.to_string(),
+                device_owner: "network:router_interface".to_owned(),
+                port_security_enabled: false,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn network_error(error: NetworkError) -> axum::response::Response {
@@ -1270,15 +2499,20 @@ pub(crate) struct FloatingIpList {
 pub(crate) struct FloatingIpResponse {
     id: String,
     project_id: String,
+    floating_network_id: Option<String>,
     floating_ip_address: Ipv4Addr,
     port_id: Option<String>,
     status: &'static str,
 }
 
-fn floating_ip_response(binding: PublicAddressBinding) -> FloatingIpResponse {
+fn floating_ip_response(
+    binding: PublicAddressBinding,
+    floating_network_id: Option<Uuid>,
+) -> FloatingIpResponse {
     FloatingIpResponse {
         id: binding.allocation_id.to_string(),
         project_id: binding.project_id,
+        floating_network_id: floating_network_id.map(|id| id.to_string()),
         floating_ip_address: binding.public_address,
         port_id: binding.endpoint_id.map(|id| id.to_string()),
         // Allocation/association is control-plane state only. Host realization
@@ -1462,7 +2696,10 @@ pub(crate) async fn list_floating_ips(
     };
     match allocator.list(auth.effective_scope().id().as_str()) {
         Ok(values) => Json(FloatingIpList {
-            floatingips: values.into_iter().map(floating_ip_response).collect(),
+            floatingips: values
+                .into_iter()
+                .map(|value| floating_ip_response(value, state.network_external_realm_id))
+                .collect(),
         })
         .into_response(),
         Err(error) => public_error(error),
@@ -1537,7 +2774,7 @@ pub(crate) async fn create_floating_ip(
     (
         StatusCode::CREATED,
         Json(FloatingIpEnvelope {
-            floatingip: floating_ip_response(binding),
+            floatingip: floating_ip_response(binding, state.network_external_realm_id),
         }),
     )
         .into_response()
@@ -1558,7 +2795,7 @@ pub(crate) async fn show_floating_ip(
     };
     match allocator.get(auth.effective_scope().id().as_str(), id) {
         Ok(value) => Json(FloatingIpEnvelope {
-            floatingip: floating_ip_response(value),
+            floatingip: floating_ip_response(value, state.network_external_realm_id),
         })
         .into_response(),
         Err(error) => public_error(error),
@@ -1628,7 +2865,7 @@ pub(crate) async fn update_floating_ip(
     };
     match result {
         Ok(value) => Json(FloatingIpEnvelope {
-            floatingip: floating_ip_response(value),
+            floatingip: floating_ip_response(value, state.network_external_realm_id),
         })
         .into_response(),
         Err(error) => public_error(error),
@@ -2036,19 +3273,14 @@ pub(crate) async fn create_port(
             "this profile requires one canonical fixed IP",
         );
     }
-    if !body.port.security_groups.is_empty() {
-        return keystone_error(
-            StatusCode::BAD_REQUEST,
-            "Bad Request",
-            "security groups are deferred by this profile",
-        );
-    }
     let fixed_ip = body
         .port
         .fixed_ips
         .into_iter()
         .next()
         .map(|value| (value.subnet_id, value.ip_address));
+    let project = auth.effective_scope().id().as_str();
+    let security_groups = body.port.security_groups;
     match service
         .create_port_with_fixed_ip(
             &auth,
@@ -2058,13 +3290,31 @@ pub(crate) async fn create_port(
         )
         .await
     {
-        Ok(value) => (
-            StatusCode::CREATED,
-            Json(PortEnvelope {
-                port: port_response(value, Vec::new()),
-            }),
-        )
-            .into_response(),
+        Ok(value) => {
+            if let Err(error) = service
+                .replace_security_group_bindings_for_project(
+                    auth.effective_scope().id().as_str(),
+                    value.id,
+                    security_groups.clone(),
+                )
+                .await
+            {
+                return network_error(error);
+            }
+            if !security_groups.is_empty()
+                && let Err(response) =
+                    dispatch_security_group_endpoints(&state, project, security_groups[0]).await
+            {
+                return response;
+            }
+            (
+                StatusCode::CREATED,
+                Json(PortEnvelope {
+                    port: port_response(value, security_groups),
+                }),
+            )
+                .into_response()
+        }
         Err(error) => network_error(error),
     }
 }
@@ -2140,6 +3390,11 @@ pub(crate) async fn show_port(
             })
             .into_response()
         }
+        Err(NetworkError::NotFound) => match router_interface_port(service, &auth, id).await {
+            Ok(Some(port)) => Json(PortEnvelope { port }).into_response(),
+            Ok(None) => network_error(NetworkError::NotFound),
+            Err(error) => network_error(error),
+        },
         Err(error) => network_error(error),
     }
 }
@@ -2169,13 +3424,7 @@ pub(crate) async fn update_port(
     if let Err(error) = service.get_port_for_project(project, id).await {
         return network_error(error);
     }
-    if !body.port.security_groups.is_empty() {
-        return keystone_error(
-            StatusCode::BAD_REQUEST,
-            "Bad Request",
-            "security groups are deferred by this profile",
-        );
-    }
+    let security_groups = body.port.security_groups;
     if let Some(name) = body.port.name
         && let Err(error) = service
             .update_port_name_for_project(project, id, name)
@@ -2183,9 +3432,35 @@ pub(crate) async fn update_port(
     {
         return network_error(error);
     }
+    let removed_attachments = match service
+        .replace_security_group_bindings_for_project(project, id, security_groups.clone())
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    let port = match service.get_port_for_project(project, id).await {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    if let Err(response) = dispatch_policy_network(&state, project, port.network_id, id).await {
+        return response;
+    }
+    for attachment in removed_attachments {
+        if let Err(error) = service
+            .finalize_policy_attachment_deletion_for_project(
+                project,
+                attachment.id,
+                attachment.generation,
+            )
+            .await
+        {
+            return network_error(error);
+        }
+    }
     match service.get_port_for_project(project, id).await {
         Ok(value) => Json(PortEnvelope {
-            port: port_response(value, Vec::new()),
+            port: port_response(value, security_groups),
         })
         .into_response(),
         Err(error) => network_error(error),

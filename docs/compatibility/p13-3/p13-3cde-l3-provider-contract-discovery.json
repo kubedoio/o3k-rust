@@ -1,0 +1,84 @@
+{
+  "artifact_type": "o3k-p13-3cde-l3-provider-contract-discovery",
+  "provider": {
+    "name": "terraform-provider-openstack/openstack",
+    "version": "3.4.0",
+    "source_tag": "v3.4.0",
+    "source_commit": "4fd8eba1f85edfdc7aed2d17bae3f3c814abad41",
+    "modified": false,
+    "gophercloud": "v2.8.0",
+    "provider_source_revision": "4fd8eba1f85edfdc7aed2d17bae3f3c814abad41"
+  },
+  "router": {
+    "provider_source": "openstack/resource_openstack_networking_router_v2.go; openstack/networking_router_v2.go",
+    "operations": [
+      "POST /v2.0/routers",
+      "GET /v2.0/routers/{id}",
+      "PUT /v2.0/routers/{id}",
+      "DELETE /v2.0/routers/{id}"
+    ],
+    "import": "passthrough UUID",
+    "bounded_attributes": [
+      "name",
+      "description",
+      "admin_state_up",
+      "external_network_id",
+      "enable_snat"
+    ],
+    "deferred_attributes": [
+      "distributed",
+      "external_qos_policy_id",
+      "external_fixed_ip",
+      "external_subnet_ids",
+      "availability_zone_hints",
+      "vendor_options",
+      "tags"
+    ]
+  },
+  "router_interface": {
+    "provider_source": "openstack/networking_router_interface_v2.go",
+    "operations": [
+      "PUT /v2.0/routers/{router_id}/add_router_interface",
+      "PUT /v2.0/routers/{router_id}/remove_router_interface"
+    ],
+    "accepted_identity": "router_id plus subnet_id or port_id",
+    "deferred": ["force_destroy", "extra_routes", "IPv6-specific behavior"]
+  },
+  "floating_ip": {
+    "provider_source": "openstack/resource_openstack_networking_floatingip_v2.go",
+    "operations": [
+      "POST /v2.0/floatingips",
+      "GET /v2.0/floatingips/{id}",
+      "PUT /v2.0/floatingips/{id}",
+      "DELETE /v2.0/floatingips/{id}"
+    ],
+    "import": "passthrough UUID",
+    "bounded_attributes": [
+      "pool",
+      "address",
+      "port_id",
+      "fixed_ip",
+      "subnet_id",
+      "description"
+    ],
+    "deferred_attributes": [
+      "subnet_ids",
+      "dns_name",
+      "dns_domain",
+      "tags",
+      "all_tags",
+      "value_specs"
+    ]
+  },
+  "canonical_mapping": {
+    "router": "canonical L3Gateway with independent project-owned identity; Neutron Router is a compatibility projection",
+    "router_interface": "canonical L3GatewayAttachment relating the gateway to an AddressRealm",
+    "floating_ip": "existing canonical PublicAddress, PublicAddressPool, and PublicAddressBinding model",
+    "provider_state": "observation only; never canonical desired-state authority"
+  },
+  "verification": {
+    "real_provider_lifecycle": "executed against O3K with pinned OpenTofu/provider; bounded Router and Router Interface lifecycle evidence is committed separately",
+    "provider_source_inspection": "completed",
+    "implementation_status": "canonical L3Gateway projection implemented; bounded provider lifecycle evidence is historical after subsequent gateway changes, and isolated L3 connectivity requires a current-code rerun"
+  }
+}

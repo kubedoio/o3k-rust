@@ -90,7 +90,7 @@ curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST 
   --data '{"keypair":{"name":"p13-2a-import-keypair","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}' >/dev/null
 sed -i 's/p13-2a-keypair/p13-2a-import-keypair/' keypair.tf
 run import 'openstack_compute_keypair_v2.managed' p13-2a-import-keypair
-run plan -detailed-exitcode || [[ "$?" == 2 ]]
+run plan -detailed-exitcode
 run destroy -auto-approve
 rm -f keypair.tf
 
@@ -116,11 +116,11 @@ cat >network.tf <<'EOF'
 resource "openstack_networking_network_v2" "managed" { name = "p13-2a-import-network" }
 EOF
 run import 'openstack_networking_network_v2.managed' "$network_id"
-run plan -detailed-exitcode || [[ "$?" == 2 ]]
+run plan -detailed-exitcode
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST "http://127.0.0.1:${port}/v2.0/subnets" \
   --data "{\"subnet\":{\"name\":\"p13-2a-realm-fixture\",\"network_id\":\"${network_id}\",\"cidr\":\"198.51.100.0/24\"}}" >"$work_dir/realm.json"
 realm_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["subnet"]["id"])' "$work_dir/realm.json")"
-run plan -detailed-exitcode || [[ "$?" == 2 ]]
+run plan -detailed-exitcode
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:${port}/v2.0/subnets/${realm_id}"
 run destroy -auto-approve
 

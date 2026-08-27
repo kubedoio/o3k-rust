@@ -81,7 +81,7 @@ server_id="$($tofu show -json | python3 -c 'import json,sys; d=json.load(sys.std
 run state rm openstack_compute_instance_v2.server
 run import openstack_compute_instance_v2.server "$server_id"
 run apply -auto-approve
-run plan -detailed-exitcode || [[ "$?" == 2 ]]
+run plan -detailed-exitcode
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
   "http://127.0.0.1:$port/v2.1/$project_id/servers/$server_id/action" \
   --data '{"reboot":{"type":"SOFT"}}' >/dev/null

@@ -187,6 +187,7 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0175](ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md) (accepted)
 - [ADR-0176](ADR-0176-canonical-network-and-addressrealm-lifecycle-separation.md) (accepted)
 - [ADR-0177](ADR-0177-canonical-networkpolicy-and-reusable-policy-set.md) (accepted)
+- [ADR-0178](ADR-0178-canonical-l3-gateway-and-realm-connectivity.md) (accepted)
 
 ## Required audit
 

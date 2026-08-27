@@ -333,8 +333,8 @@ resources:
     type: managed
     service: network
     api: neutron-v2
-    canonical_mapping: AddressRealm gateway/route (projection)
-    projection: pending-p13.3
+    canonical_mapping: canonical L3Gateway (projection)
+    projection: implemented; provider-verification pending
     required_operations:
       - POST /v2.0/routers
       - GET /v2.0/routers/{id}
@@ -342,15 +342,12 @@ resources:
       - PUT /v2.0/routers/{id}
       - DELETE /v2.0/routers/{id}
     known_deviations:
-      - Mapped onto canonical AddressRealm gateway/route semantics.
-      - No native NeutronRouter domain concept is introduced.
+      - Mapped onto canonical provider-independent L3Gateway semantics.
+      - No compatibility-only Neutron Router authority is introduced.
       - L3 agent, HA router, DVR are not implemented.
       - Router lifecycle identity persistence, owner scope, uniqueness, restart
-        reconstruction, mapping cardinality, and deletion semantics must be
-        frozen by the mandatory P13.3 provider-contract discovery gate before
-        implementation.
-      - A future canonical L3 Gateway/Router resource (not Neutron specific)
-        may be needed if AddressRealm is not a true lifecycle match.
+        reconstruction, mapping cardinality, and deletion semantics are defined
+        by ADR-0178/SPEC-0035; bounded provider verification remains pending.
     route_evidence:
       create: missing
       list: missing
@@ -364,13 +361,13 @@ resources:
     type: managed
     service: network
     api: neutron-v2
-    canonical_mapping: route/endpoint (projection)
-    projection: pending-p13.3
+    canonical_mapping: L3GatewayAttachment (projection)
+    projection: implemented; provider-verification pending
     required_operations:
       - PUT /v2.0/routers/{router_id}/add_router_interface
       - PUT /v2.0/routers/{router_id}/remove_router_interface
     known_deviations:
-      - Mapped onto canonical route/endpoint semantics.
+      - Mapped onto canonical L3GatewayAttachment and AddressRealm relations.
     route_evidence:
       add_interface: missing
       remove_interface: missing
@@ -489,21 +486,17 @@ identity_projection:
       canonical_type: network_policy_rule (projection)
       mapping: compatibility adapter maps security-group-rule CRUD to NetworkPolicy rule CRUD
     - openstack_type: OS::Neutron::Router
-      canonical_type: address_realm_gateway (projection)
-      status: pending-p13.3
-      mapping: compatibility adapter maps router CRUD to AddressRealm gateway/route CRUD
-        (lifecycle identity persistence, owner scope, uniqueness, restart
-        reconstruction, mapping cardinality, and deletion semantics to be frozen
-        by the mandatory P13.3 provider-contract discovery gate)
+      canonical_type: l3_gateway (projection)
+      status: implemented; provider-verification pending
+      mapping: compatibility adapter maps router CRUD to canonical L3Gateway
     - openstack_type: OS::Neutron::FloatingIP
       canonical_type: public_address
       mapping: one-to-one with canonical PublicAddress
     - openstack_type: OS::Neutron::RouterInterface
-      canonical_type: route/endpoint (projection)
-      status: pending-p13.3
+      canonical_type: l3_gateway_attachment (projection)
+      status: implemented; provider-verification pending
       mapping: compatibility adapter maps add/remove_router_interface to canonical
-        route/endpoint semantics (lifecycle identity and mapping cardinality to
-        be frozen by the mandatory P13.3 provider-contract discovery gate)
+        L3GatewayAttachment and AddressRealm relations
 
 security:
   project_isolation: true

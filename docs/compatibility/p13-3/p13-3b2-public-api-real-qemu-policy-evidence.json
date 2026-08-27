@@ -1,0 +1,29 @@
+{
+  "artifact_type": "o3k-p13-3b2-public-api-real-qemu-policy-evidence",
+  "schema_version": 1,
+  "evidence_tier": "fake-control-plane-real-qemu-guest",
+  "implementation_sha": "22b203d3560b979a4b07e08d3d73f76ba69c6ff7",
+  "canonical_authority": "NetworkPolicy/NetworkPolicyRule/PolicyAttachment",
+  "provider_mode": "real Linux network provider with disposable QEMU guest",
+  "verified": {
+    "public_api_lifecycle": true,
+    "fixed_ip_packet_path": true,
+    "routed_snat": true,
+    "public_dnat": true,
+    "stateful_policy_allow": true,
+    "stateful_policy_deny": true,
+    "security_group_projection": true,
+    "policy_update_under_real_traffic": true,
+    "external_unavailable_recovery": true,
+    "network_agent_restart_replay": true,
+    "controller_restart": true,
+    "owned_leaks": 0,
+    "owned_inconsistencies": 0,
+    "foreign_mutations": 0
+  },
+  "not_claimed": [
+    "Router or Router Interface compatibility",
+    "Neutron default Security Group materialization",
+    "full P13.3 completion"
+  ]
+}

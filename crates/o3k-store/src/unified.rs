@@ -11,8 +11,9 @@ use o3k_kernel::{
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
-    CanonicalNetworkPolicyRecord, CanonicalNetworkPolicyRuleRecord, CanonicalNetworkRecord,
-    CanonicalOperationRecord, CanonicalPolicyAttachmentRecord, CanonicalPolicyRepository,
+    CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord,
+    CanonicalNetworkPolicyRuleRecord, CanonicalNetworkRecord, CanonicalOperationRecord,
+    CanonicalPolicyAttachmentRecord, CanonicalPolicyRealizationRecord, CanonicalPolicyRepository,
     CanonicalRealmBindingRecord, CanonicalReusableNetworkPolicyRecord, ComputeRepository,
     ControllerEpoch, ControllerId, ControllerSession, CoordinationRepository, DatabaseHealth,
     DurableStore, FencingToken, IdempotencyReservation, IdempotencyReservationRequest,
@@ -175,6 +176,14 @@ impl CanonicalPolicyRepository for O3kStore {
             Self::Postgres(s) => s.list_policy_rules(project, policy).await,
         }
     }
+    async fn list_deleting_policy_rules(
+        &self,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_deleting_policy_rules().await,
+            Self::Postgres(s) => s.list_deleting_policy_rules().await,
+        }
+    }
     async fn begin_policy_rule_deletion(
         &self,
         project: &str,
@@ -248,6 +257,31 @@ impl CanonicalPolicyRepository for O3kStore {
             Self::Postgres(s) => s.list_endpoint_policy_attachments(project, endpoint).await,
         }
     }
+    async fn list_deleting_policy_attachments(
+        &self,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_deleting_policy_attachments().await,
+            Self::Postgres(s) => s.list_deleting_policy_attachments().await,
+        }
+    }
+    async fn replace_policy_attachment_set(
+        &self,
+        project: &str,
+        endpoint: &Uuid,
+        policy_ids: &[Uuid],
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.replace_policy_attachment_set(project, endpoint, policy_ids)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.replace_policy_attachment_set(project, endpoint, policy_ids)
+                    .await
+            }
+        }
+    }
     async fn begin_policy_attachment_deletion(
         &self,
         project: &str,
@@ -286,6 +320,94 @@ impl CanonicalPolicyRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.delete_policy_attachment(project, id).await,
             Self::Postgres(s) => s.delete_policy_attachment(project, id).await,
+        }
+    }
+    async fn upsert_policy_realization(
+        &self,
+        realization: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.upsert_policy_realization(realization).await,
+            Self::Postgres(s) => s.upsert_policy_realization(realization).await,
+        }
+    }
+    async fn get_policy_realization(
+        &self,
+        project: &str,
+        endpoint: &Uuid,
+    ) -> Result<Option<CanonicalPolicyRealizationRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_policy_realization(project, endpoint).await,
+            Self::Postgres(s) => s.get_policy_realization(project, endpoint).await,
+        }
+    }
+    async fn list_policy_realizations(
+        &self,
+        project: &str,
+    ) -> Result<Vec<CanonicalPolicyRealizationRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_policy_realizations(project).await,
+            Self::Postgres(s) => s.list_policy_realizations(project).await,
+        }
+    }
+    async fn set_policy_realization_outcome(
+        &self,
+        project: &str,
+        endpoint: &Uuid,
+        expected: &str,
+        attempt_id: &Uuid,
+        state: &str,
+        observed: Option<&str>,
+        generation: Option<u64>,
+        provider_resource_id: Option<&str>,
+        last_outcome: Option<&str>,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.set_policy_realization_outcome(
+                    project,
+                    endpoint,
+                    expected,
+                    attempt_id,
+                    state,
+                    observed,
+                    generation,
+                    provider_resource_id,
+                    last_outcome,
+                )
+                .await
+            }
+            Self::Postgres(s) => {
+                s.set_policy_realization_outcome(
+                    project,
+                    endpoint,
+                    expected,
+                    attempt_id,
+                    state,
+                    observed,
+                    generation,
+                    provider_resource_id,
+                    last_outcome,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn requeue_policy_realization(
+        &self,
+        expected_attempt_id: &Uuid,
+        realization: &CanonicalPolicyRealizationRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.requeue_policy_realization(expected_attempt_id, realization)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.requeue_policy_realization(expected_attempt_id, realization)
+                    .await
+            }
         }
     }
 }
@@ -1657,6 +1779,167 @@ impl NetworkRepository for O3kStore {
                     admin_state_up,
                 )
                 .await
+            }
+        }
+    }
+    async fn insert_canonical_l3_gateway(
+        &self,
+        g: &CanonicalL3GatewayRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_canonical_l3_gateway(g).await,
+            Self::Postgres(s) => s.insert_canonical_l3_gateway(g).await,
+        }
+    }
+    async fn get_canonical_l3_gateway(
+        &self,
+        p: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalL3GatewayRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_canonical_l3_gateway(p, id).await,
+            Self::Postgres(s) => s.get_canonical_l3_gateway(p, id).await,
+        }
+    }
+    async fn list_canonical_l3_gateways(
+        &self,
+        p: &str,
+    ) -> Result<Vec<CanonicalL3GatewayRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_canonical_l3_gateways(p).await,
+            Self::Postgres(s) => s.list_canonical_l3_gateways(p).await,
+        }
+    }
+    async fn list_canonical_l3_gateways_by_state(
+        &self,
+        state: &str,
+    ) -> Result<Vec<CanonicalL3GatewayRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_canonical_l3_gateways_by_state(state).await,
+            Self::Postgres(s) => s.list_canonical_l3_gateways_by_state(state).await,
+        }
+    }
+    async fn update_canonical_l3_gateway(
+        &self,
+        p: &str,
+        id: &Uuid,
+        e: u64,
+        n: &str,
+        x: Option<Uuid>,
+        s: bool,
+    ) -> Result<CanonicalL3GatewayRecord, StoreError> {
+        match self {
+            Self::Sqlite(v) => v.update_canonical_l3_gateway(p, id, e, n, x, s).await,
+            Self::Postgres(v) => v.update_canonical_l3_gateway(p, id, e, n, x, s).await,
+        }
+    }
+    async fn begin_canonical_l3_gateway_deletion(
+        &self,
+        p: &str,
+        id: &Uuid,
+        e: u64,
+    ) -> Result<CanonicalL3GatewayRecord, StoreError> {
+        match self {
+            Self::Sqlite(v) => v.begin_canonical_l3_gateway_deletion(p, id, e).await,
+            Self::Postgres(v) => v.begin_canonical_l3_gateway_deletion(p, id, e).await,
+        }
+    }
+    async fn finalize_canonical_l3_gateway_deletion(
+        &self,
+        p: &str,
+        id: &Uuid,
+        e: u64,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(v) => v.finalize_canonical_l3_gateway_deletion(p, id, e).await,
+            Self::Postgres(v) => v.finalize_canonical_l3_gateway_deletion(p, id, e).await,
+        }
+    }
+    async fn insert_canonical_l3_gateway_attachment(
+        &self,
+        a: &CanonicalL3GatewayAttachmentRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(v) => v.insert_canonical_l3_gateway_attachment(a).await,
+            Self::Postgres(v) => v.insert_canonical_l3_gateway_attachment(a).await,
+        }
+    }
+    async fn get_canonical_l3_gateway_attachment(
+        &self,
+        p: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(v) => v.get_canonical_l3_gateway_attachment(p, id).await,
+            Self::Postgres(v) => v.get_canonical_l3_gateway_attachment(p, id).await,
+        }
+    }
+    async fn list_canonical_l3_gateway_attachments(
+        &self,
+        p: &str,
+        g: &Uuid,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(v) => v.list_canonical_l3_gateway_attachments(p, g).await,
+            Self::Postgres(v) => v.list_canonical_l3_gateway_attachments(p, g).await,
+        }
+    }
+    async fn list_canonical_l3_gateway_attachments_by_state(
+        &self,
+        state: &str,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(v) => {
+                v.list_canonical_l3_gateway_attachments_by_state(state)
+                    .await
+            }
+            Self::Postgres(v) => {
+                v.list_canonical_l3_gateway_attachments_by_state(state)
+                    .await
+            }
+        }
+    }
+    async fn list_canonical_realm_l3_gateway_attachments(
+        &self,
+        p: &str,
+        r: &Uuid,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(v) => v.list_canonical_realm_l3_gateway_attachments(p, r).await,
+            Self::Postgres(v) => v.list_canonical_realm_l3_gateway_attachments(p, r).await,
+        }
+    }
+    async fn begin_canonical_l3_gateway_attachment_deletion(
+        &self,
+        p: &str,
+        id: &Uuid,
+        e: u64,
+    ) -> Result<CanonicalL3GatewayAttachmentRecord, StoreError> {
+        match self {
+            Self::Sqlite(v) => {
+                v.begin_canonical_l3_gateway_attachment_deletion(p, id, e)
+                    .await
+            }
+            Self::Postgres(v) => {
+                v.begin_canonical_l3_gateway_attachment_deletion(p, id, e)
+                    .await
+            }
+        }
+    }
+    async fn finalize_canonical_l3_gateway_attachment_deletion(
+        &self,
+        p: &str,
+        id: &Uuid,
+        e: u64,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(v) => {
+                v.finalize_canonical_l3_gateway_attachment_deletion(p, id, e)
+                    .await
+            }
+            Self::Postgres(v) => {
+                v.finalize_canonical_l3_gateway_attachment_deletion(p, id, e)
+                    .await
             }
         }
     }

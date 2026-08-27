@@ -1,0 +1,27 @@
+{
+  "artifact_type": "o3k-p13-3-port-security-group-provider-lifecycle",
+  "schema_version": 1,
+  "evidence_tier": "local-real-opentofu-provider",
+  "implementation_sha": "ac75a3a802b7ebd32e071fedbe494dafc256cb74",
+  "opentofu_version": "1.12.6",
+  "provider_version": "3.4.0",
+  "provider_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+  "provider_modified": false,
+  "canonical_authority": "NetworkPolicy/NetworkPolicyRule/PolicyAttachment",
+  "resources": {
+    "port_id": "01a0421f-a070-7a81-9841-0d9153aaff55",
+    "security_group_id": "01a0421f-a031-70f3-9ccb-49cad70f5965"
+  },
+  "operations": [
+    "create",
+    "read",
+    "attach",
+    "detach",
+    "reattach",
+    "refresh",
+    "import",
+    "plan",
+    "delete"
+  ],
+  "external_neutron": false
+}

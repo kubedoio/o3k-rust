@@ -1,0 +1,119 @@
+{
+  "artifact_type": "o3k-p13-3b2-canonical-policy-enforcement-evidence",
+  "implementation_sha": "bfcdf38",
+  "branch": "p13-3b2-policy-enforcement",
+  "scope": "native O3K canonical policy enforcement only; Neutron compatibility is not claimed",
+  "provider_mode": "isolated Linux network namespaces with nftables",
+  "test": {
+    "realm_id": "not persisted by direct provider gate",
+    "endpoint_id": "00000000-0000-0000-0000-0000000002bc",
+    "endpoint_address": "10.0.1.2",
+    "remote_endpoint_address": "10.0.0.2",
+    "default_policy_id": "00000000-0000-0000-0000-0000000002be",
+    "rule_ids": [
+      "00000000-0000-0000-0000-0000000002bd",
+      "00000000-0000-0000-0000-0000000002bf",
+      "00000000-0000-0000-0000-0000000002c0",
+      "00000000-0000-0000-0000-0000000002c1",
+      "00000000-0000-0000-0000-0000000002c2"
+    ],
+    "generation": 2,
+    "results": [
+      {
+        "case": "explicit_allow",
+        "direction": "ingress",
+        "protocol": "tcp",
+        "port": 18080,
+        "remote_cidr": "10.0.0.2/32",
+        "expected": "allow",
+        "actual": "allow"
+      },
+      {
+        "case": "deny_over_allow",
+        "direction": "ingress",
+        "protocol": "tcp",
+        "port": 18080,
+        "remote_cidr": "10.0.0.2/32",
+        "expected": "deny",
+        "actual": "deny"
+      },
+      {
+        "case": "multiple_policy_union",
+        "direction": "ingress",
+        "protocol": "tcp",
+        "port": 18081,
+        "remote_cidr": "10.0.0.2/32",
+        "expected": "allow",
+        "actual": "allow"
+      },
+      {
+        "case": "multiple_policy_union",
+        "direction": "ingress",
+        "protocol": "tcp",
+        "port": 18082,
+        "remote_cidr": "10.0.0.2/32",
+        "expected": "allow",
+        "actual": "allow"
+      },
+      {
+        "case": "multiple_policy_unmatched",
+        "direction": "ingress",
+        "protocol": "tcp",
+        "port": 18083,
+        "remote_cidr": "10.0.0.2/32",
+        "expected": "deny",
+        "actual": "deny"
+      },
+      {
+        "case": "egress_allow",
+        "direction": "egress",
+        "protocol": "tcp",
+        "port": 18084,
+        "remote_cidr": "10.0.0.2/32",
+        "expected": "allow",
+        "actual": "allow"
+      },
+      {
+        "case": "allow_default_zero_rules",
+        "direction": "ingress",
+        "protocol": "tcp",
+        "port": 18080,
+        "remote_cidr": "10.0.0.2/32",
+        "expected": "allow",
+        "actual": "allow"
+      },
+      {
+        "case": "no_policy_baseline",
+        "direction": "ingress",
+        "protocol": "tcp",
+        "port": 18080,
+        "remote_cidr": "10.0.0.2/32",
+        "expected": "allow",
+        "actual": "allow"
+      },
+      {
+        "case": "deny_default_zero_rules",
+        "direction": "ingress",
+        "protocol": "tcp",
+        "port": 18080,
+        "remote_cidr": "10.0.0.2/32",
+        "expected": "deny",
+        "actual": "deny"
+      },
+      {
+        "case": "stateful_established_after_policy_update",
+        "direction": "ingress",
+        "protocol": "tcp",
+        "port": 18080,
+        "remote_cidr": "10.0.0.2/32",
+        "expected": "existing connection remains allowed; new connection denied",
+        "actual": "existing connection allowed; new connection denied"
+      }
+    ]
+  },
+  "not_claimed": [
+    "Neutron SecurityGroup compatibility",
+    "Terraform SecurityGroup lifecycle",
+    "full stateful established/new-flow acceptance beyond the bounded native gate"
+  ]
+}

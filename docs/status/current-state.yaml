@@ -1,7 +1,7 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: cee2a8e892588a7b27ea8585d6843b71360908f8
-updated_at: 2026-08-25T00:00:00Z
+source_commit: 20e623941ce6ddf3317c68078978f0976d2c2b30
+updated_at: 2026-08-27T00:00:00Z
 release_context: >-
   The first native alpha candidate v0.2.0-alpha.1 at
   952dcf9c4a1ae958996e4ae9444763e5524eddc5 is rejected and permanently
@@ -258,7 +258,7 @@ profiles:
       - generic cross-cloud connectivity
   p13-iac-compatibility-v1:
     implementation_state: >-
-      Specified. This profile extends native-rust-testlab for Terraform/OpenTofu
+      Specified and bounded P13.3 implementation-complete. This profile extends native-rust-testlab for Terraform/OpenTofu
       IaC compatibility. ADR-0175 and SPEC-0032 are accepted. The bounded P13.2
       core managed-resource slice is complete and provider-lifecycle-verified
       from committed real-provider evidence at
@@ -301,6 +301,20 @@ profiles:
           docs/compatibility/p13-2/p13-2b-subnet-lifecycle-evidence.json;
           docs/compatibility/p13-2/p13-2c-provider-port-lifecycle-evidence.json;
           docs/compatibility/p13-2/p13-2d-provider-server-lifecycle-evidence.json.
+      - name: p13-3-bounded-provider-lifecycle
+        state: not-proven
+        note: >-
+          Historical evidence exists for the bounded Security Group, Port
+          security-group attachment, Floating IP, and L3Gateway/Router
+          projection paths, but the gateway lifecycle/provider changes on the
+          current branch require those protected real-provider gates to be
+          rerun before this claim can be restored.
+      - name: p13-3-native-policy-real-traffic
+        state: not-proven
+        note: >-
+          Historical real-QEMU evidence exists, but current gateway/provider
+          lifecycle changes require the protected policy traffic and recovery
+          gate to be rerun before this claim can be restored.
     full_profile_evidence:
       - name: iac-full-lifecycle-gate
         state: not-proven
@@ -308,14 +322,10 @@ profiles:
       Non-blocking for the first native alpha (v0.2.0-alpha.1). This profile
       extends native-rust-testlab but does not alter its release gate.
     blockers:
-      - P13.3B1 canonical NetworkPolicy / PolicyRule / PolicyAttachment implementation and persistence
-      - equivalent provider contract discovery gates before P13.3/P13.4 runtime work
-      - P13.3-P13.7 implementation evidence as defined in SPEC-0032
+      - protected P13.3 provider, privileged, traffic, and recovery gates must be rerun from the current implementation
     next_evidence_action: >-
-      Implement and validate the accepted canonical NetworkPolicy /
-      PolicyRule / PolicyAttachment model in P13.3B1. P13.3A provider
-      discovery is architecture-accepted but provider lifecycle evidence and
-      Security Group runtime remain unverified.
+      Rerun the protected P13.3 provider, privileged, traffic, and recovery
+      gates from the current implementation before restoring completion claims.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)

@@ -10,7 +10,8 @@ use std::{
 
 use o3k_domain::{
     AddressRealm, Ipv4Prefix, NamespacedRoutedFabricPlan, NetworkCapability, NetworkIntent,
-    NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange,
+    NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDefaultIntent, PolicyDirection,
+    PolicyIntent, PolicyStatefulMode, PortRange,
 };
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
@@ -21,13 +22,20 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod canonical_policy;
 pub mod execution;
 pub mod fabric;
+pub mod gateway;
 pub mod linux_fabric;
 pub mod policy;
 pub mod public;
 pub use policy::{PolicyEndpoint, PolicyNetworkError, StatefulPolicyProvider};
 pub mod routed;
+pub use canonical_policy::{
+    CanonicalPolicyCompileError, CanonicalPolicyService, CanonicalPolicyServiceError,
+    LinuxPolicySnapshotRealizer, PolicyApplyOutcome, PolicyObservation, PolicySnapshotRealizer,
+    compile_endpoint_policy,
+};
 pub use execution::{
     FlatNetworkError, FlatNetworkRealizer, NetworkAgentIdentity, NetworkControllerLease,
     NetworkDispatchError, NetworkExecutionError, NetworkPlanAction, NetworkPlanCommand,
@@ -35,6 +43,11 @@ pub use execution::{
     PlanAdmission, journal_path,
 };
 pub use fabric::{FabricBackend, FabricError, FabricRealizer, InMemoryFabricBackend};
+pub use gateway::{
+    InMemoryL3GatewayBackend, L3GatewayBackend, L3GatewayError, L3GatewayRealizer,
+    LinuxL3GatewayProvider, RealmExecutionContext, compile_l3_gateway_execution_plan,
+    gateway_plan_fingerprint,
+};
 pub use linux_fabric::{LinuxFabricBackend, LinuxFabricConfig, LinuxFabricError};
 pub use public::{
     PublicAddressAllocator, PublicAddressBinding, PublicAddressError, PublicAddressPool,
@@ -288,6 +301,7 @@ mod p9_plan_tests {
             tenant_mtu: 1400,
             policy_generation: 1,
             policies: Vec::new(),
+            policy_defaults: Vec::new(),
             public_bindings: Vec::new(),
             routes: vec![FabricEndpointRoute {
                 realm_id: Uuid::from_u128(2),
@@ -471,6 +485,69 @@ mod p9_plan_tests {
             plan.intents
                 .iter()
                 .any(|item| matches!(item, NetworkPlanIntent::PublicAddressBinding(_)))
+        );
+    }
+
+    #[test]
+    fn canonical_l3_gateway_compiles_connected_realm_intents() {
+        let gateway = o3k_store::CanonicalL3GatewayRecord {
+            id: Uuid::from_u128(100),
+            project_id: "project-a".into(),
+            name: "gw".into(),
+            external_realm_id: Some(Uuid::from_u128(200)),
+            enable_snat: true,
+            generation: 1,
+            state: "active".into(),
+        };
+        let realms = vec![
+            o3k_store::CanonicalAddressRealmRecord {
+                id: Uuid::from_u128(1),
+                network_id: Uuid::from_u128(10),
+                project_id: "project-a".into(),
+                prefix: "10.0.0.0/24".into(),
+                overlapping_prefixes: false,
+                generation: 1,
+                state: "active".into(),
+            },
+            o3k_store::CanonicalAddressRealmRecord {
+                id: Uuid::from_u128(2),
+                network_id: Uuid::from_u128(11),
+                project_id: "project-a".into(),
+                prefix: "10.1.0.0/24".into(),
+                overlapping_prefixes: false,
+                generation: 1,
+                state: "active".into(),
+            },
+        ];
+        let attachments = vec![
+            o3k_store::CanonicalL3GatewayAttachmentRecord {
+                id: Uuid::from_u128(3),
+                gateway_id: gateway.id,
+                realm_id: realms[0].id,
+                project_id: "project-a".into(),
+                generation: 1,
+                state: "active".into(),
+            },
+            o3k_store::CanonicalL3GatewayAttachmentRecord {
+                id: Uuid::from_u128(4),
+                gateway_id: gateway.id,
+                realm_id: realms[1].id,
+                project_id: "project-a".into(),
+                generation: 1,
+                state: "active".into(),
+            },
+        ];
+        let compiled =
+            compile_l3_gateway_intents(&gateway, &attachments, &realms, &BTreeMap::new())
+                .expect("gateway plan");
+        assert_eq!(compiled.len(), 2);
+        assert_eq!(
+            compiled[&realms[0].id].0[0].destination.network,
+            Ipv4Addr::new(10, 1, 0, 0)
+        );
+        assert_eq!(
+            compiled[&realms[0].id].1[0].external_realm_id,
+            Uuid::from_u128(200)
         );
     }
 
@@ -3685,6 +3762,10 @@ pub struct NodeNetworkPlan {
     /// wire shape and legacy fingerprint for non-P11 plans.
     #[serde(default)]
     pub fabric: Option<NamespacedRoutedFabricPlan>,
+    /// Independent multi-Realm gateway execution unit. This is not part of
+    /// the Realm-scoped `fabric` plan.
+    #[serde(default)]
+    pub gateway: Option<o3k_domain::L3GatewayExecutionPlan>,
     pub fingerprint_sha256: String,
 }
 
@@ -3712,6 +3793,8 @@ pub enum NetworkPlanError {
     InvalidPrefix,
     #[error("P11 fabric plan is invalid")]
     InvalidFabricPlan,
+    #[error("L3 gateway execution plan is invalid")]
+    InvalidGatewayPlan,
 }
 
 pub const NODE_NETWORK_PLAN_SCHEMA_VERSION: u16 = 1;
@@ -3725,6 +3808,17 @@ impl NodeNetworkPlan {
     ) -> Result<Self, NetworkPlanError> {
         self.fabric = Some(fabric);
         self.validate_fabric()?;
+        self.fingerprint_sha256 = canonical_plan_fingerprint(&self)?;
+        Ok(self)
+    }
+
+    /// Attaches the separate provider-independent L3 gateway execution unit.
+    pub fn with_gateway(
+        mut self,
+        gateway: o3k_domain::L3GatewayExecutionPlan,
+    ) -> Result<Self, NetworkPlanError> {
+        gateway::validate_plan(&gateway).map_err(|_| NetworkPlanError::InvalidGatewayPlan)?;
+        self.gateway = Some(gateway);
         self.fingerprint_sha256 = canonical_plan_fingerprint(&self)?;
         Ok(self)
     }
@@ -3775,6 +3869,22 @@ impl NodeNetworkPlan {
                     .entries
                     .iter()
                     .all(|entry| entry.endpoint_id != policy.endpoint_id)
+            {
+                return Err(NetworkPlanError::InvalidFabricPlan);
+            }
+        }
+        let mut default_endpoints = BTreeSet::new();
+        for default in &fabric.policy_defaults {
+            if default.policy_id.is_nil()
+                || default.endpoint_id.is_nil()
+                || default.generation == 0
+                || default.stateful_mode != o3k_domain::PolicyStatefulMode::Stateful
+                || !default_endpoints.insert(default.endpoint_id)
+                || fabric
+                    .directory
+                    .entries
+                    .iter()
+                    .all(|entry| entry.endpoint_id != default.endpoint_id)
             {
                 return Err(NetworkPlanError::InvalidFabricPlan);
             }
@@ -3858,6 +3968,35 @@ impl NodeNetworkPlan {
     }
 }
 
+/// Builds a node plan whose only execution unit is one complete canonical L3
+/// gateway snapshot. This is used for gateway lifecycle operations that have
+/// no endpoint plan to carry the gateway, such as deleting an unattached
+/// gateway or detaching a Realm with no ports.
+pub fn compile_l3_gateway_network_plan(
+    gateway: o3k_domain::L3GatewayExecutionPlan,
+    node_id: &str,
+    operation_id: Uuid,
+    deadline_unix_ms: u64,
+) -> Result<NodeNetworkPlan, NetworkPlanError> {
+    if node_id.trim().is_empty() {
+        return Err(NetworkPlanError::InvalidGatewayPlan);
+    }
+    let mut plan = NodeNetworkPlan {
+        schema_version: NODE_NETWORK_PLAN_SCHEMA_VERSION,
+        plan_id: gateway.gateway_id,
+        node_id: node_id.to_owned(),
+        operation_id,
+        deadline_unix_ms,
+        resource_generations: BTreeMap::from([(gateway.gateway_id, gateway.gateway_generation)]),
+        intents: Vec::new(),
+        fabric: None,
+        gateway: Some(gateway),
+        fingerprint_sha256: String::new(),
+    };
+    plan.fingerprint_sha256 = canonical_plan_fingerprint(&plan)?;
+    Ok(plan)
+}
+
 /// Compile the currently supported flat attachment projection into the same
 /// canonical per-node plan used by routed providers. This helper is kept in
 /// the network application boundary so callers cannot construct a wire-only
@@ -3880,6 +4019,13 @@ pub struct AttachmentPlanInput<'a> {
 pub fn compile_attachment_plan(
     input: AttachmentPlanInput<'_>,
 ) -> Result<NodeNetworkPlan, NetworkPlanError> {
+    compile_attachment_plan_with_defaults(input, Vec::new())
+}
+
+pub fn compile_attachment_plan_with_defaults(
+    input: AttachmentPlanInput<'_>,
+    policy_defaults: Vec<PolicyDefaultIntent>,
+) -> Result<NodeNetworkPlan, NetworkPlanError> {
     let AttachmentPlanInput {
         endpoint_id,
         realm_id,
@@ -3894,7 +4040,7 @@ pub fn compile_attachment_plan(
         external_realm_id,
         policies,
     } = input;
-    let has_policies = !policies.is_empty();
+    let has_policies = !policies.is_empty() || !policy_defaults.is_empty();
     let (network, prefix_len) = subnet_cidr
         .split_once('/')
         .ok_or(NetworkPlanError::InvalidPrefix)?;
@@ -3967,14 +4113,52 @@ pub fn compile_attachment_plan(
     if has_policies {
         capabilities.insert(NetworkCapability::StatefulPolicy);
     }
-    compile_node_network_plan(
+    let mut plan = compile_node_network_plan(
         &intent,
         node_id,
         operation_id,
         deadline_unix_ms,
         &capabilities,
         &[],
-    )
+    )?;
+    for default in policy_defaults {
+        if default.endpoint_id != endpoint_id
+            || default.policy_id.is_nil()
+            || default.generation == 0
+            || default.stateful_mode != PolicyStatefulMode::Stateful
+        {
+            return Err(NetworkPlanError::InvalidPolicy);
+        }
+        plan.resource_generations
+            .insert(default.policy_id, default.generation);
+        plan.intents.push(NetworkPlanIntent::PolicyDefault(default));
+    }
+    plan.intents
+        .sort_by_key(|intent| serde_json::to_string(intent).unwrap_or_default());
+    plan.fingerprint_sha256 = canonical_plan_fingerprint(&plan)?;
+    Ok(plan)
+}
+
+/// Adds routing derived from the canonical L3Gateway graph to a complete
+/// endpoint plan. The mutation is applied to the derived plan only; gateway
+/// records remain the source of truth and the existing attachment-plan API
+/// remains compatible for callers that have no gateway.
+pub fn add_l3_gateway_routing(
+    mut plan: NodeNetworkPlan,
+    routes: Vec<o3k_domain::GatewayIntent>,
+    egress: Vec<o3k_domain::EgressIntent>,
+) -> Result<NodeNetworkPlan, NetworkPlanError> {
+    if routes.is_empty() && egress.is_empty() {
+        return Ok(plan);
+    }
+    plan.intents
+        .extend(routes.into_iter().map(NetworkPlanIntent::Gateway));
+    plan.intents
+        .extend(egress.into_iter().map(NetworkPlanIntent::Egress));
+    plan.intents
+        .sort_by_key(|value| serde_json::to_string(value).unwrap_or_default());
+    plan.fingerprint_sha256 = canonical_plan_fingerprint(&plan)?;
+    Ok(plan)
 }
 
 /// Compiles one canonical intent into a stable semantic node plan. The
@@ -4178,6 +4362,7 @@ pub fn compile_node_network_plan(
         resource_generations: generations,
         intents,
         fabric: None,
+        gateway: None,
         fingerprint_sha256,
     })
 }
@@ -4205,8 +4390,37 @@ pub fn validate_plan_replay(
 /// arbitrary mutated payload with a syntactically valid but unrelated hash.
 pub fn canonical_plan_fingerprint(plan: &NodeNetworkPlan) -> Result<String, NetworkPlanError> {
     let mut intents = plan.intents.clone();
-    intents.sort_by_key(|value| serde_json::to_string(value).unwrap_or_default());
+    let mut keyed = Vec::with_capacity(intents.len());
+    for intent in intents.drain(..) {
+        let key = serde_json::to_vec(&intent).map_err(|_| NetworkPlanError::Serialization)?;
+        keyed.push((key, intent));
+    }
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    intents = keyed.into_iter().map(|(_, intent)| intent).collect();
     let bytes = if let Some(fabric) = &plan.fabric {
+        if let Some(gateway) = &plan.gateway {
+            serde_json::to_vec(&(
+                &plan.plan_id,
+                &plan.node_id,
+                &plan.operation_id,
+                &plan.schema_version,
+                &plan.resource_generations,
+                &intents,
+                gateway,
+                fabric,
+            ))
+        } else {
+            serde_json::to_vec(&(
+                &plan.plan_id,
+                &plan.node_id,
+                &plan.operation_id,
+                &plan.schema_version,
+                &plan.resource_generations,
+                &intents,
+                fabric,
+            ))
+        }
+    } else if let Some(gateway) = &plan.gateway {
         serde_json::to_vec(&(
             &plan.plan_id,
             &plan.node_id,
@@ -4214,7 +4428,7 @@ pub fn canonical_plan_fingerprint(plan: &NodeNetworkPlan) -> Result<String, Netw
             &plan.schema_version,
             &plan.resource_generations,
             &intents,
-            fabric,
+            gateway,
         ))
     } else {
         serde_json::to_vec(&(
@@ -4293,6 +4507,32 @@ fn canonical_policy_record(
         action: format!("{:?}", policy.action),
         generation: 1,
         state: "active".to_owned(),
+    }
+}
+
+fn security_group_from_policy(
+    policy: o3k_store::CanonicalReusableNetworkPolicyRecord,
+) -> o3k_store::SecurityGroupRecord {
+    o3k_store::SecurityGroupRecord {
+        id: policy.id,
+        project_id: policy.project_id,
+        name: policy.name,
+        description: policy.description,
+    }
+}
+
+fn security_group_rule_from_policy(
+    rule: o3k_store::CanonicalNetworkPolicyRuleRecord,
+) -> o3k_store::SecurityGroupRuleRecord {
+    o3k_store::SecurityGroupRuleRecord {
+        id: rule.id,
+        security_group_id: rule.policy_id,
+        project_id: rule.project_id,
+        direction: rule.direction.to_lowercase(),
+        protocol: rule.protocol.to_lowercase(),
+        port_min: rule.port_min,
+        port_max: rule.port_max,
+        remote_ip_prefix: rule.remote_selector,
     }
 }
 
@@ -4502,6 +4742,87 @@ pub struct CanonicalNetworkSnapshot {
     pub realms: Vec<o3k_store::CanonicalAddressRealmRecord>,
     pub pools: BTreeMap<Uuid, Vec<o3k_store::CanonicalAddressPoolRecord>>,
     pub endpoints: BTreeMap<Uuid, Vec<o3k_store::CanonicalEndpointRecord>>,
+    /// Canonical L3 gateway authority relevant to this network's realms.
+    /// Provider plans are derived from this graph; it is not compatibility
+    /// state and does not redefine AddressRealm identity.
+    pub l3_gateways: Vec<(
+        o3k_store::CanonicalL3GatewayRecord,
+        Vec<o3k_store::CanonicalL3GatewayAttachmentRecord>,
+    )>,
+}
+
+/// Compiles the canonical gateway graph into the existing provider-neutral
+/// routing intents. AddressRealm remains the unit of address interpretation;
+/// this function only derives connectivity from the gateway attachments.
+pub type GatewayIntentMap = BTreeMap<
+    Uuid,
+    (
+        Vec<o3k_domain::GatewayIntent>,
+        Vec<o3k_domain::EgressIntent>,
+    ),
+>;
+
+pub fn compile_l3_gateway_intents(
+    gateway: &o3k_store::CanonicalL3GatewayRecord,
+    attachments: &[o3k_store::CanonicalL3GatewayAttachmentRecord],
+    realms: &[o3k_store::CanonicalAddressRealmRecord],
+    pools: &BTreeMap<Uuid, Vec<o3k_store::CanonicalAddressPoolRecord>>,
+) -> Result<GatewayIntentMap, NetworkError> {
+    if gateway.state != "active" || gateway.generation == 0 {
+        return Err(NetworkError::InvalidRequest);
+    }
+    let mut realm_map = BTreeMap::new();
+    for realm in realms {
+        if realm.project_id != gateway.project_id || realm.state != "active" {
+            continue;
+        }
+        let (network, prefix) = realm
+            .prefix
+            .split_once('/')
+            .ok_or(NetworkError::InvalidRequest)?;
+        let address = network.parse().map_err(|_| NetworkError::InvalidRequest)?;
+        let prefix_len = prefix.parse().map_err(|_| NetworkError::InvalidRequest)?;
+        let prefix = Ipv4Prefix::new(address, prefix_len).ok_or(NetworkError::InvalidRequest)?;
+        realm_map.insert(realm.id, prefix);
+    }
+    let attached: BTreeSet<Uuid> = attachments
+        .iter()
+        .filter(|attachment| {
+            attachment.project_id == gateway.project_id && attachment.state == "active"
+        })
+        .map(|attachment| attachment.realm_id)
+        .collect();
+    let mut result = BTreeMap::new();
+    for realm_id in &attached {
+        let local = realm_map.get(realm_id).ok_or(NetworkError::NotFound)?;
+        let local_gateway = pools
+            .get(realm_id)
+            .and_then(|items| items.iter().find_map(|pool| pool.gateway))
+            .or_else(|| u32::from(local.network).checked_add(1).map(Ipv4Addr::from))
+            .ok_or(NetworkError::InvalidRequest)?;
+        let mut routes = Vec::new();
+        for remote_id in &attached {
+            if remote_id != realm_id {
+                routes.push(o3k_domain::GatewayIntent {
+                    destination: *realm_map.get(remote_id).ok_or(NetworkError::NotFound)?,
+                    gateway: local_gateway,
+                    external: false,
+                });
+            }
+        }
+        let egress = gateway
+            .external_realm_id
+            .map(|external_realm_id| {
+                vec![o3k_domain::EgressIntent {
+                    external_realm_id,
+                    enabled: true,
+                    nat: gateway.enable_snat,
+                }]
+            })
+            .unwrap_or_default();
+        result.insert(*realm_id, (routes, egress));
+    }
+    Ok(result)
 }
 
 /// Result of observing one provider-owned Realm cleanup identity.  A Realm
@@ -4524,6 +4845,361 @@ pub enum RealmCleanupProgress {
 }
 
 impl NetworkService {
+    /// Creates the provider-independent L3 gateway authority. This is
+    /// intentionally persistence-only; Neutron projection and provider
+    /// realization are layered above the canonical graph.
+    pub async fn create_l3_gateway_for_project(
+        &self,
+        project_id: &str,
+        name: String,
+        external_realm_id: Option<Uuid>,
+        enable_snat: bool,
+    ) -> Result<o3k_store::CanonicalL3GatewayRecord, NetworkError> {
+        if name.trim().is_empty() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        if let Some(realm_id) = external_realm_id {
+            let realm = self
+                .inner
+                .repository
+                .get_canonical_realm(project_id, &realm_id)
+                .await
+                .map_err(map_store_error)?
+                .ok_or(NetworkError::NotFound)?;
+            if realm.state != "active" {
+                return Err(NetworkError::Conflict);
+            }
+        }
+        let gateway = o3k_store::CanonicalL3GatewayRecord {
+            id: Uuid::now_v7(),
+            project_id: project_id.to_owned(),
+            name,
+            external_realm_id,
+            enable_snat,
+            generation: 1,
+            state: "active".to_owned(),
+        };
+        self.inner
+            .repository
+            .insert_canonical_l3_gateway(&gateway)
+            .await
+            .map_err(map_store_error)?;
+        Ok(gateway)
+    }
+
+    pub async fn list_l3_gateways_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<o3k_store::CanonicalL3GatewayRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_canonical_l3_gateways(project_id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    /// Enumerates durable gateway deletion reservations for a fresh runtime.
+    /// The returned canonical rows are recovery inputs only; provider state
+    /// is never used to recreate them.
+    pub async fn list_deleting_l3_gateways(
+        &self,
+    ) -> Result<Vec<o3k_store::CanonicalL3GatewayRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_canonical_l3_gateways_by_state("deleting")
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_deleting_l3_gateway_attachments(
+        &self,
+    ) -> Result<Vec<o3k_store::CanonicalL3GatewayAttachmentRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_canonical_l3_gateway_attachments_by_state("deleting")
+            .await
+            .map_err(map_store_error)
+    }
+
+    /// Enumerates policy child deletion reservations for startup recovery.
+    /// These rows are canonical transitional state; provider observations are
+    /// used only to decide when they may be finalized.
+    pub async fn list_deleting_policy_rules(
+        &self,
+    ) -> Result<Vec<o3k_store::CanonicalNetworkPolicyRuleRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_deleting_policy_rules()
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_deleting_policy_attachments(
+        &self,
+    ) -> Result<Vec<o3k_store::CanonicalPolicyAttachmentRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_deleting_policy_attachments()
+            .await
+            .map_err(map_store_error)
+    }
+
+    /// Resolves the network execution context for a canonical endpoint. The
+    /// endpoint and realm remain canonical authority; this is only dispatch
+    /// input for the host-local network execution boundary.
+    pub async fn network_id_for_canonical_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<Uuid, NetworkError> {
+        let endpoint = self
+            .inner
+            .repository
+            .get_canonical_endpoint(project_id, endpoint_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        self.inner
+            .repository
+            .get_canonical_realm(project_id, &endpoint.realm_id)
+            .await
+            .map_err(map_store_error)?
+            .map(|realm| realm.network_id)
+            .ok_or(NetworkError::NotFound)
+    }
+
+    pub async fn get_l3_gateway_for_project(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+    ) -> Result<o3k_store::CanonicalL3GatewayRecord, NetworkError> {
+        self.inner
+            .repository
+            .get_canonical_l3_gateway(project_id, gateway_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)
+    }
+
+    pub async fn attach_l3_gateway_realm(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+        realm_id: &Uuid,
+    ) -> Result<o3k_store::CanonicalL3GatewayAttachmentRecord, NetworkError> {
+        let gateway = self
+            .get_l3_gateway_for_project(project_id, gateway_id)
+            .await?;
+        if gateway.state != "active" {
+            return Err(NetworkError::Conflict);
+        }
+        if self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, realm_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
+        {
+            return Err(NetworkError::NotFound);
+        }
+        if self
+            .inner
+            .repository
+            .list_canonical_l3_gateway_attachments(project_id, gateway_id)
+            .await
+            .map_err(map_store_error)?
+            .iter()
+            .any(|attachment| attachment.realm_id == *realm_id)
+        {
+            // The relation is a durable deletion reservation as well as a
+            // compatibility object. Do not replace it while the provider is
+            // still converging the detach.
+            return Err(NetworkError::Conflict);
+        }
+        let attachment = o3k_store::CanonicalL3GatewayAttachmentRecord {
+            id: Uuid::now_v7(),
+            gateway_id: *gateway_id,
+            realm_id: *realm_id,
+            project_id: project_id.to_owned(),
+            generation: 1,
+            state: "active".to_owned(),
+        };
+        self.inner
+            .repository
+            .insert_canonical_l3_gateway_attachment(&attachment)
+            .await
+            .map_err(map_store_error)?;
+        Ok(attachment)
+    }
+
+    pub async fn update_l3_gateway_for_project(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+        expected_generation: u64,
+        name: String,
+        external_realm_id: Option<Uuid>,
+        enable_snat: bool,
+    ) -> Result<o3k_store::CanonicalL3GatewayRecord, NetworkError> {
+        if name.trim().is_empty() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        if let Some(realm_id) = external_realm_id {
+            let realm = self
+                .inner
+                .repository
+                .get_canonical_realm(project_id, &realm_id)
+                .await
+                .map_err(map_store_error)?
+                .ok_or(NetworkError::NotFound)?;
+            if realm.state != "active" {
+                return Err(NetworkError::Conflict);
+            }
+        }
+        self.inner
+            .repository
+            .update_canonical_l3_gateway(
+                project_id,
+                gateway_id,
+                expected_generation,
+                &name,
+                external_realm_id,
+                enable_snat,
+            )
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn delete_l3_gateway_for_project(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<o3k_store::CanonicalL3GatewayRecord, NetworkError> {
+        self.inner
+            .repository
+            .begin_canonical_l3_gateway_deletion(project_id, gateway_id, expected_generation)
+            .await
+            .map_err(map_store_error)
+    }
+
+    /// Finalizes a gateway deletion only after the provider has withdrawn the
+    /// complete gateway realization and absence has been observed.  Keeping
+    /// this separate from reservation makes the deleting row restart-safe.
+    pub async fn finalize_l3_gateway_deletion_for_project(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), NetworkError> {
+        self.inner
+            .repository
+            .finalize_canonical_l3_gateway_deletion(project_id, gateway_id, expected_generation)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn detach_l3_gateway_realm(
+        &self,
+        project_id: &str,
+        attachment_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<o3k_store::CanonicalL3GatewayAttachmentRecord, NetworkError> {
+        self.inner
+            .repository
+            .begin_canonical_l3_gateway_attachment_deletion(
+                project_id,
+                attachment_id,
+                expected_generation,
+            )
+            .await
+            .map_err(map_store_error)
+    }
+
+    /// Finalizes an attachment deletion only after the complete remaining
+    /// gateway snapshot has converged and the detached provider link is absent.
+    pub async fn finalize_l3_gateway_realm_detachment_for_project(
+        &self,
+        project_id: &str,
+        attachment_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), NetworkError> {
+        self.inner
+            .repository
+            .finalize_canonical_l3_gateway_attachment_deletion(
+                project_id,
+                attachment_id,
+                expected_generation,
+            )
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_l3_gateway_attachments(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+    ) -> Result<Vec<o3k_store::CanonicalL3GatewayAttachmentRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_canonical_l3_gateway_attachments(project_id, gateway_id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    /// Reconstructs the provider-independent multi-Realm gateway execution
+    /// unit from canonical persistence. Linux namespace/interface details are
+    /// intentionally supplied by the provider's derived Realm directory,
+    /// never persisted in this plan.
+    pub async fn compile_l3_gateway_execution_plan_for_project(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+    ) -> Result<o3k_domain::L3GatewayExecutionPlan, NetworkError> {
+        let gateway = self
+            .get_l3_gateway_for_project(project_id, gateway_id)
+            .await?;
+        let mut compilable_gateway = gateway.clone();
+        if !matches!(gateway.state.as_str(), "active" | "deleting") {
+            return Err(NetworkError::Conflict);
+        }
+        // The provider-neutral compiler validates an active desired snapshot.
+        // A deleting row is nevertheless a valid durable removal reservation:
+        // compile that snapshot without changing its persisted generation.
+        compilable_gateway.state = "active".to_owned();
+        let attachments = self
+            .list_l3_gateway_attachments(project_id, gateway_id)
+            .await?;
+        let mut realms = BTreeMap::new();
+        for attachment in &attachments {
+            if let Some(realm) = self
+                .inner
+                .repository
+                .get_canonical_realm(project_id, &attachment.realm_id)
+                .await
+                .map_err(map_store_error)?
+            {
+                realms.insert(realm.id, realm);
+            }
+        }
+        if let Some(external_realm_id) = gateway.external_realm_id {
+            let external = self
+                .inner
+                .repository
+                .get_canonical_realm(project_id, &external_realm_id)
+                .await
+                .map_err(map_store_error)?
+                .ok_or(NetworkError::NotFound)?;
+            if external.state != "active" {
+                return Err(NetworkError::Conflict);
+            }
+            realms.insert(external.id, external);
+        }
+        compile_l3_gateway_execution_plan(&compilable_gateway, &attachments, &realms)
+            .map_err(|_| NetworkError::InvalidRequest)
+    }
+
     pub async fn open(
         root: impl Into<PathBuf>,
         repository: Arc<dyn o3k_store::NetworkRepository>,
@@ -4552,6 +5228,72 @@ impl NetworkService {
         };
         service.recover_realm_deletion_operations().await?;
         Ok(service)
+    }
+
+    /// Rebuilds one endpoint's effective policy from canonical reusable policy
+    /// state. This is the runtime integration seam; the returned snapshot is
+    /// still derived execution input and is never written back as policy
+    /// authority.
+    pub async fn compile_canonical_policy_for_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: Uuid,
+    ) -> Result<(Vec<NetworkPlanIntent>, String), CanonicalPolicyServiceError> {
+        CanonicalPolicyService::new(self.inner.repository.clone())
+            .compile_endpoint(project_id, endpoint_id)
+            .await
+    }
+
+    pub async fn affected_endpoints_for_canonical_policy(
+        &self,
+        project_id: &str,
+        policy_id: Uuid,
+    ) -> Result<Vec<Uuid>, CanonicalPolicyServiceError> {
+        CanonicalPolicyService::new(self.inner.repository.clone())
+            .affected_endpoints_for_policy(project_id, policy_id)
+            .await
+    }
+
+    pub async fn reconcile_canonical_policy_for_endpoint<P>(
+        &self,
+        project_id: &str,
+        endpoint_id: Uuid,
+        expected_fingerprint: Option<&str>,
+        provider: &P,
+    ) -> Result<PolicyApplyOutcome, CanonicalPolicyServiceError>
+    where
+        P: PolicySnapshotRealizer,
+    {
+        CanonicalPolicyService::new(self.inner.repository.clone())
+            .reconcile_endpoint_policy(project_id, endpoint_id, expected_fingerprint, provider)
+            .await
+    }
+
+    pub async fn reconcile_canonical_policy_endpoints<P>(
+        &self,
+        project_id: &str,
+        policy_id: Uuid,
+        provider: &P,
+    ) -> Result<Vec<(Uuid, PolicyApplyOutcome)>, CanonicalPolicyServiceError>
+    where
+        P: PolicySnapshotRealizer,
+    {
+        CanonicalPolicyService::new(self.inner.repository.clone())
+            .reconcile_policy_endpoints(project_id, policy_id, provider)
+            .await
+    }
+
+    pub async fn recover_canonical_policy_realizations<P>(
+        &self,
+        project_id: &str,
+        provider: &P,
+    ) -> Result<Vec<(Uuid, PolicyApplyOutcome)>, CanonicalPolicyServiceError>
+    where
+        P: PolicySnapshotRealizer,
+    {
+        CanonicalPolicyService::new(self.inner.repository.clone())
+            .recover_policy_realizations(project_id, provider)
+            .await
     }
 
     #[must_use]
@@ -5100,6 +5842,21 @@ impl NetworkService {
             result.as_ref().map(|_| ()),
         );
         result
+    }
+
+    /// Owner-scoped lookup used by compatibility projections after the
+    /// request has already been authorized at the API boundary.
+    pub async fn get_canonical_realm_for_project(
+        &self,
+        project_id: &str,
+        realm_id: Uuid,
+    ) -> Result<o3k_store::CanonicalAddressRealmRecord, NetworkError> {
+        self.inner
+            .repository
+            .get_canonical_realm(project_id, &realm_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)
     }
 
     pub async fn delete_canonical_realm_for_project(
@@ -5779,11 +6536,35 @@ impl NetworkService {
                     .map_err(map_store_error)?,
             );
         }
+        let realm_ids: BTreeSet<Uuid> = realms.iter().map(|realm| realm.id).collect();
+        let mut l3_gateways = Vec::new();
+        for gateway in self
+            .inner
+            .repository
+            .list_canonical_l3_gateways(project_id)
+            .await
+            .map_err(map_store_error)?
+        {
+            let attachments = self
+                .inner
+                .repository
+                .list_canonical_l3_gateway_attachments(project_id, &gateway.id)
+                .await
+                .map_err(map_store_error)?;
+            let relevant: Vec<_> = attachments
+                .into_iter()
+                .filter(|attachment| realm_ids.contains(&attachment.realm_id))
+                .collect();
+            if !relevant.is_empty() {
+                l3_gateways.push((gateway, relevant));
+            }
+        }
         Ok(CanonicalNetworkSnapshot {
             network,
             realms,
             pools,
             endpoints,
+            l3_gateways,
         })
     }
 
@@ -5950,8 +6731,14 @@ impl NetworkService {
     ) -> Result<Vec<o3k_store::SecurityGroupRecord>, NetworkError> {
         self.inner
             .repository
-            .list_security_groups(project_id)
+            .list_reusable_policies(project_id)
             .await
+            .map(|policies| {
+                policies
+                    .into_iter()
+                    .map(security_group_from_policy)
+                    .collect()
+            })
             .map_err(map_store_error)
     }
 
@@ -5962,9 +6749,10 @@ impl NetworkService {
     ) -> Result<o3k_store::SecurityGroupRecord, NetworkError> {
         self.inner
             .repository
-            .get_security_group(project_id, &id)
+            .get_reusable_policy(project_id, &id)
             .await
             .map_err(map_store_error)?
+            .map(security_group_from_policy)
             .ok_or(NetworkError::NotFound)
     }
 
@@ -5986,7 +6774,18 @@ impl NetworkService {
         };
         self.inner
             .repository
-            .insert_security_group(&group)
+            .insert_reusable_policy(&o3k_store::CanonicalReusableNetworkPolicyRecord {
+                id: group.id,
+                project_id: group.project_id.clone(),
+                name: group.name.clone(),
+                description: group.description.clone(),
+                stateful_mode: "Stateful".to_owned(),
+                unmatched_action: "Deny".to_owned(),
+                generation: 1,
+                state: "active".to_owned(),
+                created_at: "2026-08-26T00:00:00Z".to_owned(),
+                updated_at: "2026-08-26T00:00:00Z".to_owned(),
+            })
             .await
             .map_err(map_store_error)?;
         Ok(group)
@@ -6003,11 +6802,29 @@ impl NetworkService {
             return Err(NetworkError::InvalidRequest);
         }
         let _guard = self.lock().await;
-        self.inner
+        let current = self
+            .inner
             .repository
-            .update_security_group(project_id, &id, &name, &description)
+            .get_reusable_policy(project_id, &id)
             .await
-            .map_err(map_store_error)
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        let updated = self
+            .inner
+            .repository
+            .update_reusable_policy(
+                &o3k_store::CanonicalReusableNetworkPolicyRecord {
+                    name,
+                    description,
+                    updated_at: "2026-08-26T00:00:00Z".to_owned(),
+                    generation: current.generation.saturating_add(1),
+                    ..current
+                },
+                current.generation,
+            )
+            .await
+            .map_err(map_store_error)?;
+        Ok(security_group_from_policy(updated))
     }
 
     pub async fn delete_security_group_for_project(
@@ -6018,7 +6835,7 @@ impl NetworkService {
         let _guard = self.lock().await;
         self.inner
             .repository
-            .delete_security_group(project_id, &id)
+            .delete_reusable_policy(project_id, &id)
             .await
             .map_err(map_store_error)
     }
@@ -6031,7 +6848,7 @@ impl NetworkService {
         if self
             .inner
             .repository
-            .get_security_group(project_id, &group_id)
+            .get_reusable_policy(project_id, &group_id)
             .await
             .map_err(map_store_error)?
             .is_none()
@@ -6040,8 +6857,14 @@ impl NetworkService {
         }
         self.inner
             .repository
-            .list_security_group_rules(project_id, &group_id)
+            .list_policy_rules(project_id, &group_id)
             .await
+            .map(|rules| {
+                rules
+                    .into_iter()
+                    .map(security_group_rule_from_policy)
+                    .collect()
+            })
             .map_err(map_store_error)
     }
 
@@ -6052,9 +6875,10 @@ impl NetworkService {
     ) -> Result<o3k_store::SecurityGroupRuleRecord, NetworkError> {
         self.inner
             .repository
-            .get_security_group_rule(project_id, &id)
+            .get_policy_rule(project_id, &id)
             .await
             .map_err(map_store_error)?
+            .map(security_group_rule_from_policy)
             .ok_or(NetworkError::NotFound)
     }
 
@@ -6088,33 +6912,57 @@ impl NetworkService {
         if self
             .inner
             .repository
-            .get_security_group(project_id, &group_id)
+            .get_reusable_policy(project_id, &group_id)
             .await
             .map_err(map_store_error)?
             .is_none()
         {
             return Err(NetworkError::NotFound);
         }
-        let rule = o3k_store::SecurityGroupRuleRecord {
+        let rule = o3k_store::CanonicalNetworkPolicyRuleRecord {
             id: Uuid::now_v7(),
-            security_group_id: group_id,
+            policy_id: group_id,
             project_id: project_id.to_owned(),
             direction: match direction {
-                PolicyDirection::Ingress => "ingress",
-                PolicyDirection::Egress => "egress",
+                PolicyDirection::Ingress => "Ingress",
+                PolicyDirection::Egress => "Egress",
             }
             .to_owned(),
-            protocol,
+            protocol: match protocol_value {
+                NetworkProtocol::Any => "Any",
+                NetworkProtocol::Tcp => "Tcp",
+                NetworkProtocol::Udp => "Udp",
+                NetworkProtocol::Icmp => "Icmp",
+            }
+            .to_owned(),
+            address_family: "Ipv4".to_owned(),
             port_min,
             port_max,
-            remote_ip_prefix,
+            remote_selector: remote_ip_prefix,
+            action: "Allow".to_owned(),
+            state: "active".to_owned(),
+            generation: 1,
+            enforcement_key: String::new(),
         };
+        let remote = rule
+            .remote_selector
+            .clone()
+            .unwrap_or_else(|| "-".to_owned());
+        let ports = rule
+            .port_min
+            .zip(rule.port_max)
+            .map_or_else(|| "-".to_owned(), |(min, max)| format!("{min}-{max}"));
+        let mut rule = rule;
+        rule.enforcement_key = format!(
+            "{}|{}|{}|{}|{}|{}",
+            rule.direction, rule.address_family, rule.protocol, ports, remote, rule.action
+        );
         self.inner
             .repository
-            .insert_security_group_rule(&rule)
+            .insert_policy_rule(&rule)
             .await
             .map_err(map_store_error)?;
-        Ok(rule)
+        Ok(security_group_rule_from_policy(rule))
     }
 
     pub async fn delete_security_group_rule_for_project(
@@ -6125,7 +6973,41 @@ impl NetworkService {
         let _guard = self.lock().await;
         self.inner
             .repository
-            .delete_security_group_rule(project_id, &id)
+            .delete_policy_rule(project_id, &id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn begin_security_group_rule_deletion_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<o3k_store::CanonicalNetworkPolicyRuleRecord, NetworkError> {
+        let _guard = self.lock().await;
+        let rule = self
+            .inner
+            .repository
+            .get_policy_rule(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        self.inner
+            .repository
+            .begin_policy_rule_deletion(project_id, &id, rule.generation)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn finalize_security_group_rule_deletion_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        deleting_generation: u64,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .finalize_policy_rule_deletion(project_id, &id, deleting_generation)
             .await
             .map_err(map_store_error)
     }
@@ -6135,11 +7017,40 @@ impl NetworkService {
         project_id: &str,
         endpoint_id: Option<Uuid>,
     ) -> Result<Vec<o3k_store::SecurityGroupBindingRecord>, NetworkError> {
-        self.inner
-            .repository
-            .list_security_group_bindings(project_id, endpoint_id.as_ref())
-            .await
-            .map_err(map_store_error)
+        let attachments = if let Some(endpoint_id) = endpoint_id {
+            self.inner
+                .repository
+                .list_endpoint_policy_attachments(project_id, &endpoint_id)
+                .await
+                .map_err(map_store_error)?
+        } else {
+            let policies = self
+                .inner
+                .repository
+                .list_reusable_policies(project_id)
+                .await
+                .map_err(map_store_error)?;
+            let mut all = Vec::new();
+            for policy in policies {
+                all.extend(
+                    self.inner
+                        .repository
+                        .list_policy_attachments(project_id, &policy.id)
+                        .await
+                        .map_err(map_store_error)?,
+                );
+            }
+            all
+        };
+        Ok(attachments
+            .into_iter()
+            .filter(|attachment| attachment.state == "active")
+            .map(|attachment| o3k_store::SecurityGroupBindingRecord {
+                project_id: attachment.project_id,
+                endpoint_id: attachment.endpoint_id,
+                security_group_id: attachment.policy_id,
+            })
+            .collect())
     }
 
     pub async fn replace_security_group_bindings_for_project(
@@ -6147,7 +7058,7 @@ impl NetworkService {
         project_id: &str,
         endpoint_id: Uuid,
         group_ids: Vec<Uuid>,
-    ) -> Result<(), NetworkError> {
+    ) -> Result<Vec<o3k_store::CanonicalPolicyAttachmentRecord>, NetworkError> {
         let _guard = self.lock().await;
         if self
             .inner
@@ -6159,21 +7070,23 @@ impl NetworkService {
         {
             return Err(NetworkError::NotFound);
         }
-        for group_id in &group_ids {
-            if self
-                .inner
-                .repository
-                .get_security_group(project_id, group_id)
-                .await
-                .map_err(map_store_error)?
-                .is_none()
-            {
-                return Err(NetworkError::NotFound);
-            }
-        }
         self.inner
             .repository
-            .replace_security_group_bindings(project_id, &endpoint_id, &group_ids)
+            .replace_policy_attachment_set(project_id, &endpoint_id, &group_ids)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn finalize_policy_attachment_deletion_for_project(
+        &self,
+        project_id: &str,
+        attachment_id: Uuid,
+        deleting_generation: u64,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .finalize_policy_attachment_deletion(project_id, &attachment_id, deleting_generation)
             .await
             .map_err(map_store_error)
     }
@@ -6214,14 +7127,17 @@ impl NetworkService {
             let bindings = self
                 .inner
                 .repository
-                .list_security_group_bindings(project_id, Some(&port.id))
+                .list_endpoint_policy_attachments(project_id, &port.id)
                 .await
                 .map_err(map_store_error)?;
-            for binding in bindings {
+            for binding in bindings
+                .into_iter()
+                .filter(|binding| binding.state == "active")
+            {
                 let Some(group) = self
                     .inner
                     .repository
-                    .get_security_group(project_id, &binding.security_group_id)
+                    .get_reusable_policy(project_id, &binding.policy_id)
                     .await
                     .map_err(map_store_error)?
                 else {
@@ -6230,13 +7146,15 @@ impl NetworkService {
                 for rule in self
                     .inner
                     .repository
-                    .list_security_group_rules(project_id, &group.id)
+                    .list_policy_rules(project_id, &group.id)
                     .await
                     .map_err(map_store_error)?
+                    .into_iter()
+                    .filter(|rule| rule.state == "active")
                 {
                     let direction = parse_security_group_direction(&rule.direction)?;
                     let remote = rule
-                        .remote_ip_prefix
+                        .remote_selector
                         .as_deref()
                         .map(parse_security_group_prefix)
                         .transpose()?;
@@ -6264,6 +7182,49 @@ impl NetworkService {
         }
         policies.sort_by_key(|policy| policy.id);
         Ok(policies)
+    }
+
+    /// Resolves canonical unmatched-action defaults for the active policies
+    /// attached to one endpoint. Defaults are derived execution input; the
+    /// reusable policy repository remains the sole desired-state authority.
+    pub async fn policy_defaults_for_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: Uuid,
+    ) -> Result<Vec<PolicyDefaultIntent>, NetworkError> {
+        let attachments = self
+            .inner
+            .repository
+            .list_endpoint_policy_attachments(project_id, &endpoint_id)
+            .await
+            .map_err(map_store_error)?;
+        let mut defaults = Vec::new();
+        for attachment in attachments.into_iter().filter(|a| a.state == "active") {
+            let policy = self
+                .inner
+                .repository
+                .get_reusable_policy(project_id, &attachment.policy_id)
+                .await
+                .map_err(map_store_error)?
+                .ok_or(NetworkError::InvalidRequest)?;
+            if policy.state != "active" || policy.stateful_mode != "Stateful" {
+                return Err(NetworkError::InvalidRequest);
+            }
+            let unmatched_action = match policy.unmatched_action.as_str() {
+                "Allow" => PolicyAction::Allow,
+                "Deny" => PolicyAction::Deny,
+                _ => return Err(NetworkError::InvalidRequest),
+            };
+            defaults.push(PolicyDefaultIntent {
+                policy_id: policy.id,
+                endpoint_id,
+                unmatched_action,
+                stateful_mode: PolicyStatefulMode::Stateful,
+                generation: policy.generation.max(attachment.generation),
+            });
+        }
+        defaults.sort_by_key(|default| default.policy_id);
+        Ok(defaults)
     }
 
     /// Adds or replaces one canonical policy rule. NetworkIntent is not
@@ -7528,6 +8489,24 @@ impl NetworkService {
         project_id: &str,
         id: Uuid,
     ) -> Result<(), NetworkError> {
+        // Endpoint deletion owns only the endpoint and its canonical
+        // attachment relations.  Remove those relations explicitly before
+        // the endpoint row so the reusable policy and its rules remain
+        // independent and the endpoint delete cannot leave dangling
+        // attachments.
+        let attachments = self
+            .inner
+            .repository
+            .list_endpoint_policy_attachments(project_id, &id)
+            .await
+            .map_err(map_store_error)?;
+        for attachment in attachments {
+            self.inner
+                .repository
+                .delete_policy_attachment(project_id, &attachment.id)
+                .await
+                .map_err(map_store_error)?;
+        }
         self.inner
             .repository
             .delete_canonical_endpoint_and_port(project_id, &id)
@@ -8100,7 +9079,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store).await?;
+        let service = NetworkService::open(&path, store.clone()).await?;
         let network = service
             .create_canonical_network_for_project("project-a", "canonical".to_owned())
             .await?;
@@ -9817,7 +10796,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store).await?;
+        let service = NetworkService::open(&path, store.clone()).await?;
         let network = service
             .create_network(&auth("project-a"), "net".to_owned())
             .await?;
@@ -9838,6 +10817,9 @@ mod tests {
         let group = service
             .create_security_group_for_project("project-a", "web".to_owned(), String::new())
             .await?;
+        let second_group = service
+            .create_security_group_for_project("project-a", "api".to_owned(), String::new())
+            .await?;
         let rule = service
             .create_security_group_rule_for_project(
                 "project-a",
@@ -9849,9 +10831,117 @@ mod tests {
                 Some("0.0.0.0/0".to_owned()),
             )
             .await?;
-        service
+        let first_change = service
             .replace_security_group_bindings_for_project("project-a", port.id, vec![group.id])
             .await?;
+        assert!(first_change.is_empty());
+        let first_attachment = store
+            .list_endpoint_policy_attachments("project-a", &port.id)
+            .await?
+            .into_iter()
+            .find(|attachment| attachment.policy_id == group.id)
+            .ok_or("initial attachment missing")?;
+        let unchanged = service
+            .replace_security_group_bindings_for_project("project-a", port.id, vec![group.id])
+            .await?;
+        assert!(unchanged.is_empty());
+        let unchanged_attachment = store
+            .list_endpoint_policy_attachments("project-a", &port.id)
+            .await?
+            .into_iter()
+            .find(|attachment| attachment.policy_id == group.id)
+            .ok_or("unchanged attachment missing")?;
+        assert_eq!(unchanged_attachment.id, first_attachment.id);
+        assert_eq!(unchanged_attachment.generation, first_attachment.generation);
+        let added = service
+            .replace_security_group_bindings_for_project(
+                "project-a",
+                port.id,
+                vec![group.id, second_group.id],
+            )
+            .await?;
+        assert!(added.is_empty());
+        let attachments = store
+            .list_endpoint_policy_attachments("project-a", &port.id)
+            .await?;
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(
+            attachments
+                .iter()
+                .find(|attachment| attachment.policy_id == group.id)
+                .map(|attachment| attachment.id),
+            Some(first_attachment.id)
+        );
+        let updated_group = service
+            .update_security_group_for_project(
+                "project-a",
+                group.id,
+                "web-renamed".to_owned(),
+                "updated".to_owned(),
+            )
+            .await?;
+        assert_eq!(updated_group.name, "web-renamed");
+        let canonical_group = store
+            .get_reusable_policy("project-a", &group.id)
+            .await?
+            .ok_or("canonical security group missing")?;
+        assert_eq!(canonical_group.generation, 2);
+        assert_eq!(canonical_group.stateful_mode, "Stateful");
+        assert_eq!(canonical_group.unmatched_action, "Deny");
+        let defaults = service
+            .policy_defaults_for_endpoint("project-a", port.id)
+            .await?;
+        assert_eq!(defaults.len(), 2);
+        assert!(
+            defaults
+                .iter()
+                .all(|default| default.endpoint_id == port.id)
+        );
+        assert!(
+            defaults
+                .iter()
+                .all(|default| default.unmatched_action == PolicyAction::Deny)
+        );
+        let default_plan = compile_attachment_plan_with_defaults(
+            AttachmentPlanInput {
+                endpoint_id: port.id,
+                realm_id: network.id,
+                project_id: "project-a",
+                mac: &port.mac_address,
+                fixed_ip: port.fixed_ip,
+                subnet_cidr: "192.0.2.0/29",
+                node_id: "network-agent-1",
+                operation_id: Uuid::now_v7(),
+                deadline_unix_ms: 1,
+                public_address: None,
+                external_realm_id: None,
+                policies: Vec::new(),
+            },
+            defaults,
+        )?;
+        assert!(default_plan.intents.iter().any(|intent| matches!(
+            intent,
+            NetworkPlanIntent::PolicyDefault(default)
+                if default.policy_id == group.id
+                    && default.unmatched_action == PolicyAction::Deny
+        )));
+        let canonical_rules = store.list_policy_rules("project-a", &group.id).await?;
+        assert_eq!(canonical_rules.len(), 1);
+        assert_eq!(canonical_rules[0].id, rule.id);
+        let canonical_attachments = store
+            .list_endpoint_policy_attachments("project-a", &port.id)
+            .await?;
+        assert_eq!(canonical_attachments.len(), 2);
+        assert!(
+            canonical_attachments
+                .iter()
+                .any(|attachment| attachment.policy_id == group.id)
+        );
+        assert!(
+            canonical_attachments
+                .iter()
+                .all(|attachment| attachment.id != attachment.policy_id)
+        );
         let policies = service
             .list_policies_for_project("project-a", network.id)
             .await?;
@@ -9868,6 +10958,114 @@ mod tests {
         let _ = fs::remove_file(&sqlite_path);
         let _ = fs::remove_file(format!("{sqlite_path}-wal"));
         let _ = fs::remove_file(format!("{sqlite_path}-shm"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gateway_delete_reservation_reconstructs_a_generation_fenced_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("gateway-delete-reservation");
+        let _ = fs::remove_dir_all(&path);
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let gateway = service
+            .create_l3_gateway_for_project("project-a", "edge".to_owned(), None, true)
+            .await?;
+
+        let deleting = service
+            .delete_l3_gateway_for_project("project-a", &gateway.id, gateway.generation)
+            .await?;
+        assert_eq!(deleting.state, "deleting");
+        assert_eq!(deleting.generation, gateway.generation + 1);
+        assert_eq!(service.list_deleting_l3_gateways().await?.len(), 1);
+
+        // A retry/restart can rebuild the exact removal target from the
+        // durable reservation; it must not need the pre-delete row in memory.
+        let snapshot = service
+            .compile_l3_gateway_execution_plan_for_project("project-a", &gateway.id)
+            .await?;
+        assert_eq!(snapshot.gateway_id, gateway.id);
+        assert_eq!(snapshot.gateway_generation, deleting.generation);
+        assert!(snapshot.attachments.is_empty());
+        assert_eq!(
+            store
+                .get_canonical_l3_gateway("project-a", &gateway.id)
+                .await?
+                .ok_or("gateway reservation disappeared")?
+                .state,
+            "deleting"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attachment_detach_reservation_is_gateway_scoped_and_not_finalized_implicitly()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("gateway-detach-reservation");
+        let _ = fs::remove_dir_all(&path);
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let network = service
+            .create_canonical_network_for_project("project-a", "net".to_owned())
+            .await?;
+        let realm = service
+            .create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "192.0.2.0/24".to_owned(),
+                false,
+            )
+            .await?;
+        let gateway = service
+            .create_l3_gateway_for_project("project-a", "edge".to_owned(), None, true)
+            .await?;
+        let attachment = service
+            .attach_l3_gateway_realm("project-a", &gateway.id, &realm.id)
+            .await?;
+        let deleting = service
+            .detach_l3_gateway_realm("project-a", &attachment.id, attachment.generation)
+            .await?;
+
+        assert_eq!(deleting.state, "deleting");
+        assert_eq!(deleting.generation, attachment.generation + 1);
+        assert_eq!(
+            service.list_deleting_l3_gateway_attachments().await?.len(),
+            1
+        );
+        assert!(matches!(
+            service
+                .attach_l3_gateway_realm("project-a", &gateway.id, &realm.id)
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+
+        // The relation remains present until an external provider observation
+        // authorizes finalization, while the gateway snapshot excludes it.
+        let snapshot = service
+            .compile_l3_gateway_execution_plan_for_project("project-a", &gateway.id)
+            .await?;
+        assert_eq!(snapshot.gateway_id, gateway.id);
+        assert!(snapshot.attachments.is_empty());
+        let persisted = store
+            .get_canonical_l3_gateway_attachment("project-a", &attachment.id)
+            .await?
+            .ok_or("attachment reservation disappeared")?;
+        assert_eq!(persisted.state, "deleting");
+        assert_eq!(persisted.generation, deleting.generation);
+
+        service
+            .finalize_l3_gateway_realm_detachment_for_project(
+                "project-a",
+                &attachment.id,
+                deleting.generation,
+            )
+            .await?;
+        assert!(
+            store
+                .get_canonical_l3_gateway_attachment("project-a", &attachment.id)
+                .await?
+                .is_none()
+        );
         Ok(())
     }
 }

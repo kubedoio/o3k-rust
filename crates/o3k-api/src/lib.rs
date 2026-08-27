@@ -26,7 +26,7 @@ use axum::{
     extract::{FromRef, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use o3k_compute::ComputeService;
 use o3k_compute_agent::NodeRegistry;
@@ -48,6 +48,8 @@ mod network;
 mod placement;
 mod volume_attachment;
 
+pub use network::recover_l3_gateway_operations;
+
 use crate::{
     compute::{
         create_flavor, create_keypair, create_server, delete_flavor, delete_keypair, delete_server,
@@ -58,14 +60,16 @@ use crate::{
     image::{create_image, delete_image, download_image, list_images, show_image, upload_image},
     middleware::{compatibility_trace_middleware, microversion_middleware},
     network::{
-        create_floating_ip, create_network, create_network_policy, create_port,
-        create_security_group, create_security_group_rule, create_subnet, delete_floating_ip,
-        delete_network, delete_network_policy, delete_port, delete_security_group,
-        delete_security_group_rule, delete_subnet, list_extensions, list_floating_ips,
-        list_network_policies, list_networks, list_ports, list_security_group_rules,
-        list_security_groups, list_subnets, show_floating_ip, show_network, show_network_policy,
-        show_port, show_security_group, show_security_group_rule, show_subnet, update_floating_ip,
-        update_network, update_network_policy, update_port, update_security_group, update_subnet,
+        add_router_interface, create_floating_ip, create_network, create_network_policy,
+        create_port, create_router, create_security_group, create_security_group_rule,
+        create_subnet, delete_floating_ip, delete_network, delete_network_policy, delete_port,
+        delete_router, delete_security_group, delete_security_group_rule, delete_subnet,
+        list_extensions, list_floating_ips, list_network_policies, list_networks, list_ports,
+        list_routers, list_security_group_rules, list_security_groups, list_subnets,
+        remove_router_interface, show_floating_ip, show_network, show_network_policy, show_port,
+        show_router, show_security_group, show_security_group_rule, show_subnet,
+        update_floating_ip, update_network, update_network_policy, update_port, update_router,
+        update_security_group, update_subnet,
     },
     placement::placement_discovery,
     volume_attachment::{
@@ -298,6 +302,19 @@ pub fn router_with_state(state: AppState) -> Router {
             get(show_network_policy)
                 .put(update_network_policy)
                 .delete(delete_network_policy),
+        )
+        .route("/v2.0/routers", get(list_routers).post(create_router))
+        .route(
+            "/v2.0/routers/{id}",
+            get(show_router).put(update_router).delete(delete_router),
+        )
+        .route(
+            "/v2.0/routers/{id}/add_router_interface",
+            put(add_router_interface),
+        )
+        .route(
+            "/v2.0/routers/{id}/remove_router_interface",
+            put(remove_router_interface),
         )
         .route(
             "/v2.0/floatingips",
