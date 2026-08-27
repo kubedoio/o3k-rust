@@ -1728,16 +1728,23 @@ pub(crate) async fn delete_security_group_rule(
         Ok(value) => value,
         Err(error) => return network_error(error),
     };
-    if let Err(error) = service
-        .delete_security_group_rule_for_project(project, id)
+    let deleting_rule = match service
+        .begin_security_group_rule_deletion_for_project(project, id)
         .await
     {
-        return network_error(error);
-    }
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
     if let Err(response) =
         dispatch_security_group_endpoints(&state, project, rule.security_group_id).await
     {
         return response;
+    }
+    if let Err(error) = service
+        .finalize_security_group_rule_deletion_for_project(project, id, deleting_rule.generation)
+        .await
+    {
+        return network_error(error);
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -3304,17 +3311,6 @@ pub(crate) async fn update_port(
     if let Err(error) = service.get_port_for_project(project, id).await {
         return network_error(error);
     }
-    let previous_groups = service
-        .list_security_group_bindings_for_project(project, Some(id))
-        .await
-        .map_err(network_error);
-    let previous_groups = match previous_groups {
-        Ok(bindings) => bindings
-            .into_iter()
-            .map(|binding| binding.security_group_id)
-            .collect::<Vec<_>>(),
-        Err(response) => return response,
-    };
     let security_groups = body.port.security_groups;
     if let Some(name) = body.port.name
         && let Err(error) = service
@@ -3323,19 +3319,30 @@ pub(crate) async fn update_port(
     {
         return network_error(error);
     }
-    if let Err(error) = service
+    let removed_attachments = match service
         .replace_security_group_bindings_for_project(project, id, security_groups.clone())
         .await
     {
-        return network_error(error);
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    let port = match service.get_port_for_project(project, id).await {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    if let Err(response) = dispatch_policy_network(&state, project, port.network_id, id).await {
+        return response;
     }
-    let groups_to_reconcile = previous_groups
-        .into_iter()
-        .chain(security_groups.iter().copied())
-        .collect::<std::collections::BTreeSet<_>>();
-    for group_id in groups_to_reconcile {
-        if let Err(response) = dispatch_security_group_endpoints(&state, project, group_id).await {
-            return response;
+    for attachment in removed_attachments {
+        if let Err(error) = service
+            .finalize_policy_attachment_deletion_for_project(
+                project,
+                attachment.id,
+                attachment.generation,
+            )
+            .await
+        {
+            return network_error(error);
         }
     }
     match service.get_port_for_project(project, id).await {

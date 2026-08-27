@@ -997,7 +997,7 @@ impl LinuxL3GatewayProvider {
                     )
                     .map_err(|error| L3GatewayError::Backend(error.to_string()))?
             {
-                let (still_exists, _) = self
+                let (still_exists, still_exists_output) = self
                     .command
                     .output(
                         "ip",
@@ -1012,7 +1012,7 @@ impl LinuxL3GatewayProvider {
                         ],
                     )
                     .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
-                if still_exists {
+                if still_exists && !still_exists_output.trim().is_empty() {
                     return Err(L3GatewayError::Backend(
                         "cannot remove gateway route".to_owned(),
                     ));
@@ -1024,11 +1024,18 @@ impl LinuxL3GatewayProvider {
                 L3GatewayError::Backend("missing Realm execution context".to_owned())
             })?;
             for destination in &old_attachments {
+                let source_remains = next_attachments.iter().any(|item| {
+                    item.attachment_id == source.attachment_id
+                        && item.realm_id == source.realm_id
+                        && item.realm_prefix == source.realm_prefix
+                });
+                let destination_remains = next_attachments.iter().any(|item| {
+                    item.attachment_id == destination.attachment_id
+                        && item.realm_id == destination.realm_id
+                        && item.realm_prefix == destination.realm_prefix
+                });
                 if source.realm_id == destination.realm_id
-                    || next_attachments.iter().any(|item| {
-                        item.realm_id == destination.realm_id
-                            && item.realm_prefix == destination.realm_prefix
-                    })
+                    || (source_remains && destination_remains)
                 {
                     continue;
                 }
@@ -1086,7 +1093,7 @@ impl LinuxL3GatewayProvider {
                     )
                     .map_err(|error| L3GatewayError::Backend(error.to_string()))?
                 {
-                    let (still_exists, _) = self
+                    let (still_exists, still_exists_output) = self
                         .command
                         .output(
                             "ip",
@@ -1101,7 +1108,7 @@ impl LinuxL3GatewayProvider {
                             ],
                         )
                         .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
-                    if still_exists {
+                    if still_exists && !still_exists_output.trim().is_empty() {
                         return Err(L3GatewayError::Backend(
                             "cannot remove gateway route".to_owned(),
                         ));
@@ -1589,14 +1596,24 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
                     "{}/{}",
                     destination.realm_prefix.network, destination.realm_prefix.prefix_len
                 );
-                let (route_exists, _) = self
+                let (route_exists, route_output) = self
                     .command
                     .output(
                         "ip",
                         &["netns", "exec", &namespace, "ip", "route", "show", &prefix],
                     )
                     .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
-                if !route_exists {
+                let (gateway_if, _) = link_names(&state.plan, destination);
+                let expected_gateway_ip =
+                    provider_link_addresses(state.plan.gateway_id, destination.attachment_id)
+                        .0
+                        .to_string();
+                if !route_exists
+                    || route_output.trim().is_empty()
+                    || !route_output.contains(&prefix)
+                    || !route_output.contains(&expected_gateway_ip)
+                    || !route_output.contains(&gateway_if)
+                {
                     return Err(L3GatewayError::Backend(
                         "gateway route is not observable".to_owned(),
                     ));
@@ -1632,6 +1649,18 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
                     if !route_ok || route_output.trim().is_empty() {
                         return Err(L3GatewayError::Backend(
                             "Realm gateway route is not observable".to_owned(),
+                        ));
+                    }
+                    let expected_via =
+                        provider_link_addresses(state.plan.gateway_id, destination.attachment_id)
+                            .1
+                            .to_string();
+                    if !route_output.contains(&peer_prefix)
+                        || !route_output.contains(&expected_via)
+                        || !route_output.contains(&context.realm_interface)
+                    {
+                        return Err(L3GatewayError::Backend(
+                            "Realm gateway route does not match expected next hop".to_owned(),
                         ));
                     }
                 }

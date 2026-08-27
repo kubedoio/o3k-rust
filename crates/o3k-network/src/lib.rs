@@ -6931,6 +6931,40 @@ impl NetworkService {
             .map_err(map_store_error)
     }
 
+    pub async fn begin_security_group_rule_deletion_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<o3k_store::CanonicalNetworkPolicyRuleRecord, NetworkError> {
+        let _guard = self.lock().await;
+        let rule = self
+            .inner
+            .repository
+            .get_policy_rule(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        self.inner
+            .repository
+            .begin_policy_rule_deletion(project_id, &id, rule.generation)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn finalize_security_group_rule_deletion_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        deleting_generation: u64,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .finalize_policy_rule_deletion(project_id, &id, deleting_generation)
+            .await
+            .map_err(map_store_error)
+    }
+
     pub async fn list_security_group_bindings_for_project(
         &self,
         project_id: &str,
@@ -6977,7 +7011,7 @@ impl NetworkService {
         project_id: &str,
         endpoint_id: Uuid,
         group_ids: Vec<Uuid>,
-    ) -> Result<(), NetworkError> {
+    ) -> Result<Vec<o3k_store::CanonicalPolicyAttachmentRecord>, NetworkError> {
         let _guard = self.lock().await;
         if self
             .inner
@@ -6989,46 +7023,25 @@ impl NetworkService {
         {
             return Err(NetworkError::NotFound);
         }
-        for group_id in &group_ids {
-            if self
-                .inner
-                .repository
-                .get_reusable_policy(project_id, group_id)
-                .await
-                .map_err(map_store_error)?
-                .is_none()
-            {
-                return Err(NetworkError::NotFound);
-            }
-        }
-        let existing = self
-            .inner
+        self.inner
             .repository
-            .list_endpoint_policy_attachments(project_id, &endpoint_id)
+            .replace_policy_attachment_set(project_id, &endpoint_id, &group_ids)
             .await
-            .map_err(map_store_error)?;
-        for attachment in existing.into_iter().filter(|a| a.state == "active") {
-            self.inner
-                .repository
-                .delete_policy_attachment(project_id, &attachment.id)
-                .await
-                .map_err(map_store_error)?;
-        }
-        for group_id in group_ids {
-            self.inner
-                .repository
-                .insert_policy_attachment(&o3k_store::CanonicalPolicyAttachmentRecord {
-                    id: Uuid::now_v7(),
-                    policy_id: group_id,
-                    endpoint_id,
-                    project_id: project_id.to_owned(),
-                    state: "active".to_owned(),
-                    generation: 1,
-                })
-                .await
-                .map_err(map_store_error)?;
-        }
-        Ok(())
+            .map_err(map_store_error)
+    }
+
+    pub async fn finalize_policy_attachment_deletion_for_project(
+        &self,
+        project_id: &str,
+        attachment_id: Uuid,
+        deleting_generation: u64,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .finalize_policy_attachment_deletion(project_id, &attachment_id, deleting_generation)
+            .await
+            .map_err(map_store_error)
     }
 
     /// Returns the durable canonical policy rules for a network. A network
@@ -10757,6 +10770,9 @@ mod tests {
         let group = service
             .create_security_group_for_project("project-a", "web".to_owned(), String::new())
             .await?;
+        let second_group = service
+            .create_security_group_for_project("project-a", "api".to_owned(), String::new())
+            .await?;
         let rule = service
             .create_security_group_rule_for_project(
                 "project-a",
@@ -10768,9 +10784,47 @@ mod tests {
                 Some("0.0.0.0/0".to_owned()),
             )
             .await?;
-        service
+        let first_change = service
             .replace_security_group_bindings_for_project("project-a", port.id, vec![group.id])
             .await?;
+        assert!(first_change.is_empty());
+        let first_attachment = store
+            .list_endpoint_policy_attachments("project-a", &port.id)
+            .await?
+            .into_iter()
+            .find(|attachment| attachment.policy_id == group.id)
+            .ok_or("initial attachment missing")?;
+        let unchanged = service
+            .replace_security_group_bindings_for_project("project-a", port.id, vec![group.id])
+            .await?;
+        assert!(unchanged.is_empty());
+        let unchanged_attachment = store
+            .list_endpoint_policy_attachments("project-a", &port.id)
+            .await?
+            .into_iter()
+            .find(|attachment| attachment.policy_id == group.id)
+            .ok_or("unchanged attachment missing")?;
+        assert_eq!(unchanged_attachment.id, first_attachment.id);
+        assert_eq!(unchanged_attachment.generation, first_attachment.generation);
+        let added = service
+            .replace_security_group_bindings_for_project(
+                "project-a",
+                port.id,
+                vec![group.id, second_group.id],
+            )
+            .await?;
+        assert!(added.is_empty());
+        let attachments = store
+            .list_endpoint_policy_attachments("project-a", &port.id)
+            .await?;
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(
+            attachments
+                .iter()
+                .find(|attachment| attachment.policy_id == group.id)
+                .map(|attachment| attachment.id),
+            Some(first_attachment.id)
+        );
         let updated_group = service
             .update_security_group_for_project(
                 "project-a",
@@ -10790,10 +10844,17 @@ mod tests {
         let defaults = service
             .policy_defaults_for_endpoint("project-a", port.id)
             .await?;
-        assert_eq!(defaults.len(), 1);
-        assert_eq!(defaults[0].policy_id, group.id);
-        assert_eq!(defaults[0].endpoint_id, port.id);
-        assert_eq!(defaults[0].unmatched_action, PolicyAction::Deny);
+        assert_eq!(defaults.len(), 2);
+        assert!(
+            defaults
+                .iter()
+                .all(|default| default.endpoint_id == port.id)
+        );
+        assert!(
+            defaults
+                .iter()
+                .all(|default| default.unmatched_action == PolicyAction::Deny)
+        );
         let default_plan = compile_attachment_plan_with_defaults(
             AttachmentPlanInput {
                 endpoint_id: port.id,
@@ -10823,9 +10884,17 @@ mod tests {
         let canonical_attachments = store
             .list_endpoint_policy_attachments("project-a", &port.id)
             .await?;
-        assert_eq!(canonical_attachments.len(), 1);
-        assert_eq!(canonical_attachments[0].policy_id, group.id);
-        assert_ne!(canonical_attachments[0].id, group.id);
+        assert_eq!(canonical_attachments.len(), 2);
+        assert!(
+            canonical_attachments
+                .iter()
+                .any(|attachment| attachment.policy_id == group.id)
+        );
+        assert!(
+            canonical_attachments
+                .iter()
+                .all(|attachment| attachment.id != attachment.policy_id)
+        );
         let policies = service
             .list_policies_for_project("project-a", network.id)
             .await?;

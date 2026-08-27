@@ -249,6 +249,23 @@ impl CanonicalPolicyRepository for O3kStore {
             Self::Postgres(s) => s.list_endpoint_policy_attachments(project, endpoint).await,
         }
     }
+    async fn replace_policy_attachment_set(
+        &self,
+        project: &str,
+        endpoint: &Uuid,
+        policy_ids: &[Uuid],
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.replace_policy_attachment_set(project, endpoint, policy_ids)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.replace_policy_attachment_set(project, endpoint, policy_ids)
+                    .await
+            }
+        }
+    }
     async fn begin_policy_attachment_deletion(
         &self,
         project: &str,
