@@ -2,15 +2,15 @@
   "artifact_type": "o3k-p13-3-floating-ip-provider-lifecycle",
   "schema_version": 1,
   "evidence_tier": "local-real-opentofu-provider",
-  "implementation_sha": "c2ffd47154e6d0b10c5da44537186ca085a9e9eb",
+  "implementation_sha": "ac75a3a802b7ebd32e071fedbe494dafc256cb74",
   "opentofu_version": "1.12.6",
   "provider_version": "3.4.0",
   "provider_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
   "provider_modified": false,
   "canonical_authority": "PublicAddress/PublicAddressBinding",
   "resources": {
-    "floating_ip_id": "01a041fe-66e2-7fe1-85d5-6669cd578f42",
-    "external_realm_id": "01a041fe-4927-7d60-9f9e-15fba841698a"
+    "floating_ip_id": "01a04220-684b-77a2-b6a1-c729b7d02a07",
+    "external_realm_id": "01a04220-4ac3-7313-a1ad-b1a48cad5acc"
   },
   "operations": [
     "allocate",
