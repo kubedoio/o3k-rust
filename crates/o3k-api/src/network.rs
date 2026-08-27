@@ -450,8 +450,36 @@ pub(crate) async fn add_router_interface(
         Err(r) => return r,
     };
     let project = auth.effective_scope().id().as_str();
+    let requested_port_id = body.port_id;
     let realm_id = if let Some(realm_id) = body.realm_id {
         realm_id
+    } else if let Some(port_id) = requested_port_id {
+        let port = match service.get_port_for_project(project, port_id).await {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let subnet_id = port
+            .subnet_id
+            .ok_or_else(|| network_error(NetworkError::NotFound));
+        let subnet_id = match subnet_id {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+        let subnet = match service.get_subnet_for_project(project, subnet_id).await {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let realms = match service
+            .list_canonical_realms_for_project(project, subnet.network_id)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let Some(realm) = realms.into_iter().find(|realm| realm.prefix == subnet.cidr) else {
+            return network_error(NetworkError::NotFound);
+        };
+        realm.id
     } else if let Some(subnet_id) = body.subnet_id {
         let subnet = match service
             .get_subnet_for_project(auth.effective_scope().id().as_str(), subnet_id)
@@ -539,7 +567,7 @@ pub(crate) async fn add_router_interface(
             (
                 StatusCode::OK,
                 Json(RouterInterfaceResponse {
-                    port_id: a.id.to_string(),
+                    port_id: requested_port_id.unwrap_or(a.id).to_string(),
                     router_id: a.gateway_id.to_string(),
                     subnet_id: response_subnet_id.to_string(),
                 }),
@@ -579,6 +607,29 @@ pub(crate) async fn remove_router_interface(
     };
     let realm_id = if let Some(realm_id) = body.realm_id {
         realm_id
+    } else if let Some(port_id) = body.port_id {
+        let port = match service.get_port_for_project(project, port_id).await {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let Some(subnet_id) = port.subnet_id else {
+            return network_error(NetworkError::NotFound);
+        };
+        let subnet = match service.get_subnet_for_project(project, subnet_id).await {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let realms = match service
+            .list_canonical_realms_for_project(project, subnet.network_id)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let Some(realm) = realms.into_iter().find(|realm| realm.prefix == subnet.cidr) else {
+            return network_error(NetworkError::NotFound);
+        };
+        realm.id
     } else if let Some(subnet_id) = body.subnet_id {
         let subnet = match service.get_subnet_for_project(project, subnet_id).await {
             Ok(value) => value,
