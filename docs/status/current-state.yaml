@@ -309,6 +309,13 @@ profiles:
           Evidence: docs/compatibility/p13-3/p13-3b3-security-group-provider-lifecycle-evidence.json;
           docs/compatibility/p13-3/p13-3b3-port-security-group-provider-lifecycle-evidence.json;
           docs/compatibility/p13-3/p13-3e-floating-ip-provider-lifecycle-evidence.json.
+      - name: p13-3-native-policy-real-traffic
+        state: passed
+        note: >-
+          The real-QEMU packet gate verifies native policy allow/deny,
+          stateful policy update behavior, Security Group projection traffic,
+          restart/recovery, and owned-resource cleanup. Evidence:
+          docs/compatibility/p13-3/p13-3b2-public-api-real-qemu-policy-evidence.json.
     full_profile_evidence:
       - name: iac-full-lifecycle-gate
         state: not-proven
