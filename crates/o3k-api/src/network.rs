@@ -337,10 +337,32 @@ pub(crate) async fn update_router(
         )
         .await
     {
-        Ok(gateway) => match router_response(service, project, gateway).await {
-            Ok(router) => Json(RouterEnvelope { router }).into_response(),
-            Err(error) => network_error(error),
-        },
+        Ok(gateway) => {
+            if state.network_dispatcher.is_some() && state.network_controller.is_some() {
+                let snapshot = match service
+                    .compile_l3_gateway_execution_plan_for_project(project, &gateway.id)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => return network_error(error),
+                };
+                if let Err(response) = dispatch_l3_gateway_snapshot(
+                    &state,
+                    project,
+                    snapshot,
+                    o3k_network::NetworkPlanAction::Apply,
+                    gateway.generation,
+                )
+                .await
+                {
+                    return response;
+                }
+            }
+            match router_response(service, project, gateway).await {
+                Ok(router) => Json(RouterEnvelope { router }).into_response(),
+                Err(error) => network_error(error),
+            }
+        }
         Err(error) => network_error(error),
     }
 }

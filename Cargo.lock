@@ -1786,6 +1786,7 @@ dependencies = [
  "o3k-kernel",
  "o3k-network-protocol",
  "o3k-store",
+ "rustix 0.38.44",
  "serde",
  "serde_json",
  "sha2",

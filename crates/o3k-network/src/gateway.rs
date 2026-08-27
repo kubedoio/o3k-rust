@@ -6,6 +6,7 @@
 //! semantic plan.
 
 use o3k_domain::{Ipv4Prefix, L3GatewayExecutionAttachment, L3GatewayExecutionPlan};
+use rustix::fs::{FlockOperation, flock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -239,13 +240,9 @@ enum LinuxGatewayPendingMutation {
 }
 
 struct GatewayLease {
-    path: PathBuf,
-}
-
-impl Drop for GatewayLease {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
+    /// The kernel releases this advisory lock if the provider is terminated,
+    /// so a crash cannot strand a mutation behind a stale sentinel file.
+    _file: File,
 }
 
 /// Linux implementation of the separate gateway provider boundary.
@@ -1143,90 +1140,27 @@ impl LinuxL3GatewayProvider {
 
     fn acquire_lease(&self) -> Result<GatewayLease, L3GatewayError> {
         let path = self.root.join("gateway.lock");
-        for attempt in 0..2 {
-            match File::options().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    let owner = format!("{} {}\n", std::process::id(), process_start_time());
-                    file.write_all(owner.as_bytes())
-                        .and_then(|_| file.sync_all())
-                        .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
-                    return Ok(GatewayLease { path });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists && attempt == 0 => {
-                    let owner = fs::read_to_string(&path).map_err(|read_error| {
-                        L3GatewayError::Backend(format!("gateway provider is busy: {read_error}"))
-                    })?;
-                    let mut fields = owner.split_whitespace();
-                    let Some(pid) = fields.next().and_then(|value| value.parse::<u32>().ok())
-                    else {
-                        return Err(L3GatewayError::Backend(
-                            "gateway provider has an unreadable live lock".to_owned(),
-                        ));
-                    };
-                    let Some(start_time) =
-                        fields.next().and_then(|value| value.parse::<u64>().ok())
-                    else {
-                        return Err(L3GatewayError::Backend(
-                            "gateway provider has an unreadable live lock".to_owned(),
-                        ));
-                    };
-                    if process_is_alive(pid, start_time) {
-                        return Err(L3GatewayError::Backend(
-                            "gateway provider is busy".to_owned(),
-                        ));
-                    }
-                    // The recorded process is gone, or its PID was reused
-                    // with a different start time.  Removing only this
-                    // validated stale lock permits crash recovery without
-                    // ever stealing a live writer's lease.
-                    fs::remove_file(&path).map_err(|remove_error| {
-                        L3GatewayError::Backend(format!("gateway provider is busy: {remove_error}"))
-                    })?;
-                }
-                Err(error) => {
-                    return Err(L3GatewayError::Backend(format!(
-                        "gateway provider is busy: {error}"
-                    )));
-                }
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+        flock(&file, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+            if error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN {
+                L3GatewayError::Backend("gateway provider is busy".to_owned())
+            } else {
+                L3GatewayError::Backend(format!("gateway provider lock failed: {error}"))
             }
-        }
-        Err(L3GatewayError::Backend(
-            "gateway provider is busy".to_owned(),
-        ))
+        })?;
+        Ok(GatewayLease { _file: file })
     }
 
     fn reload_under_lease(&mut self) -> Result<(), L3GatewayError> {
         self.state = load_linux_gateway_state(&self.root.join("gateway.json"))?;
         self.validate_loaded_state()
     }
-}
-
-fn process_start_time() -> u64 {
-    #[cfg(target_os = "linux")]
-    {
-        return fs::read_to_string("/proc/self/stat")
-            .ok()
-            .and_then(|stat| stat.rsplit_once(") ").map(|(_, rest)| rest.to_owned()))
-            .and_then(|rest| rest.split_whitespace().nth(19)?.parse().ok())
-            .unwrap_or_default();
-    }
-    #[allow(unreachable_code)]
-    0
-}
-
-fn process_is_alive(pid: u32, expected_start_time: u64) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        let path = format!("/proc/{pid}/stat");
-        return fs::read_to_string(path)
-            .ok()
-            .and_then(|stat| stat.rsplit_once(") ").map(|(_, rest)| rest.to_owned()))
-            .and_then(|rest| rest.split_whitespace().nth(19)?.parse::<u64>().ok())
-            .is_some_and(|actual| actual == expected_start_time);
-    }
-    #[allow(unreachable_code)]
-    let _ = (pid, expected_start_time);
-    false
 }
 
 impl L3GatewayBackend for LinuxL3GatewayProvider {
@@ -1918,6 +1852,21 @@ mod tests {
             external_realm_generation: None,
             enable_snat: false,
         }
+    }
+
+    #[test]
+    fn gateway_provider_uses_kernel_lock_for_live_writer_exclusion() {
+        let root = std::env::temp_dir().join(format!("o3k-gateway-lock-{}", Uuid::now_v7()));
+        let first = LinuxL3GatewayProvider::open(&root, BTreeMap::new()).expect("first provider");
+        let first_lease = first.acquire_lease().expect("first lease");
+        let second = LinuxL3GatewayProvider::open(&root, BTreeMap::new()).expect("second provider");
+        assert!(matches!(
+            second.acquire_lease(),
+            Err(L3GatewayError::Backend(message)) if message == "gateway provider is busy"
+        ));
+        drop(first_lease);
+        assert!(second.acquire_lease().is_ok());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
