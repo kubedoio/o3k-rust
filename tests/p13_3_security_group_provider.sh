@@ -58,7 +58,7 @@ provider "openstack" {
 resource "openstack_networking_secgroup_v2" "sg" {
   name = "p13-3-sg"
   description = "bounded canonical policy"
-  delete_default_rules = true
+  delete_default_rules = false
 }
 resource "openstack_networking_secgroup_rule_v2" "https" {
   direction = "ingress"
@@ -75,11 +75,14 @@ cd "$project"
 "$tofu" init -input=false -upgrade=false >/dev/null
 "$tofu" apply -auto-approve >/dev/null
 sg_id="$("$tofu" show -json | python3 -c 'import json,sys; r=json.load(sys.stdin)["values"]["root_module"]["resources"]; print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_secgroup_v2.sg"))')"
+rule_id="$("$tofu" show -json | python3 -c 'import json,sys; r=json.load(sys.stdin)["values"]["root_module"]["resources"]; print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_secgroup_rule_v2.https"))')"
 sed -i 's/bounded canonical policy/bounded canonical policy updated/' "$project/provider.tf"
 "$tofu" apply -auto-approve >/dev/null
 "$tofu" refresh >/dev/null
 "$tofu" state rm openstack_networking_secgroup_v2.sg >/dev/null
+"$tofu" state rm openstack_networking_secgroup_rule_v2.https >/dev/null
 "$tofu" import openstack_networking_secgroup_v2.sg "$sg_id" >/dev/null
+"$tofu" import openstack_networking_secgroup_rule_v2.https "$rule_id" >/dev/null
 plan_status=0
 "$tofu" plan -detailed-exitcode >/dev/null || plan_status=$?
 if [[ "$plan_status" -ne 0 ]]; then
@@ -87,7 +90,6 @@ if [[ "$plan_status" -ne 0 ]]; then
   exit "$plan_status"
 fi
 mkdir -p "$(dirname "$evidence_output")"
-rule_id="$("$tofu" show -json | python3 -c 'import json,sys; r=json.load(sys.stdin)["values"]["root_module"]["resources"]; print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_secgroup_rule_v2.https"))')"
 python3 - "$evidence_output" "$sg_id" "$rule_id" "$provider_sha" "$root_dir" <<'PY'
 import json, pathlib, subprocess, sys
 output, sg_id, rule_id, provider_sha, root = sys.argv[1:]
