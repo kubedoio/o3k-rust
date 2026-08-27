@@ -1502,10 +1502,24 @@ async fn dispatch_policy_network(
         .policy_defaults_for_endpoint(project_id, port.id)
         .await
         .map_err(network_error)?;
-    let realms = network
-        .list_canonical_realms_for_project(project_id, network_id)
+    let network_records = network
+        .list_canonical_networks_for_project(project_id)
         .await
         .map_err(network_error)?;
+    let mut all_realms = Vec::new();
+    for network_record in network_records {
+        all_realms.extend(
+            network
+                .list_canonical_realms_for_project(project_id, network_record.id)
+                .await
+                .map_err(network_error)?,
+        );
+    }
+    let realms = all_realms
+        .iter()
+        .filter(|realm| realm.network_id == network_id)
+        .cloned()
+        .collect::<Vec<_>>();
     let realm = realms
         .iter()
         .find(|realm| realm.prefix == subnet.cidr)
@@ -1522,7 +1536,7 @@ async fn dispatch_policy_network(
         if let Ok(compiled) = o3k_network::compile_l3_gateway_intents(
             gateway,
             attachments,
-            &realms,
+            &all_realms,
             &std::collections::BTreeMap::new(),
         ) {
             if let Some((routes, egress)) = compiled.get(&realm.id) {
