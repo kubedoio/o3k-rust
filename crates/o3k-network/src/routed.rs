@@ -66,6 +66,8 @@ pub enum RoutedNetworkError {
     UnauthorizedExternalRealm,
     #[error("routed plan has no enabled egress intent")]
     MissingEgress,
+    #[error("internal Realm gateway routes require the namespaced fabric provider")]
+    InternalRealmRoutingUnsupported,
     #[error("routed host command failed")]
     CommandFailed,
     #[error("routed provider state storage failed: {0}")]
@@ -121,6 +123,11 @@ impl LinuxRoutedProvider {
     }
 
     pub fn apply(&mut self, intents: &[NetworkPlanIntent]) -> Result<(), RoutedNetworkError> {
+        if intents.iter().any(
+            |intent| matches!(intent, NetworkPlanIntent::Gateway(gateway) if !gateway.external),
+        ) {
+            return Err(RoutedNetworkError::InternalRealmRoutingUnsupported);
+        }
         let prefix = realm_prefix(intents).ok_or(RoutedNetworkError::MissingEgress)?;
         let egress = intents.iter().find_map(|intent| match intent {
             NetworkPlanIntent::Egress(egress) if egress.enabled => Some(egress),
@@ -536,6 +543,30 @@ mod tests {
         assert!(matches!(
             provider.apply(&intents(false, Uuid::from_u128(9))),
             Err(RoutedNetworkError::MissingEgress)
+        ));
+        assert!(command.calls.lock().expect("calls").is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn internal_gateway_routes_fail_closed_before_external_mutation() {
+        let root = std::env::temp_dir().join(format!("o3k-routed-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand::new((false, "")));
+        let mut provider = LinuxRoutedProvider::with_command(
+            config(),
+            &root,
+            Arc::clone(&command) as Arc<dyn RoutedCommand>,
+        )
+        .expect("provider");
+        let mut plan = intents(true, Uuid::from_u128(9));
+        plan.push(NetworkPlanIntent::Gateway(o3k_domain::GatewayIntent {
+            destination: Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24).expect("prefix"),
+            gateway: Ipv4Addr::new(10, 0, 0, 1),
+            external: false,
+        }));
+        assert!(matches!(
+            provider.apply(&plan),
+            Err(RoutedNetworkError::InternalRealmRoutingUnsupported)
         ));
         assert!(command.calls.lock().expect("calls").is_empty());
         let _ = fs::remove_dir_all(root);
