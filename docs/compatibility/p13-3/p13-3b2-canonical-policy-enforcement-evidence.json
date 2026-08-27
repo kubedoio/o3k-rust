@@ -1,6 +1,6 @@
 {
   "artifact_type": "o3k-p13-3b2-canonical-policy-enforcement-evidence",
-  "implementation_sha": "3e71c4a39257335e01ee9b9e10ebf0bd613ea99f",
+  "implementation_sha": "acae22ea4c2cd8d88fa8f5846af76478a0e6bc84",
   "branch": "p13-3b2-policy-enforcement",
   "scope": "native O3K canonical policy enforcement only; Neutron compatibility is not claimed",
   "provider_mode": "isolated Linux network namespaces with nftables",
