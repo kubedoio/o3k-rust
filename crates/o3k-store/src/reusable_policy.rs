@@ -67,6 +67,10 @@ pub trait CanonicalPolicyRepository {
         id: &Uuid,
         expected_generation: u64,
     ) -> Result<CanonicalNetworkPolicyRuleRecord, StoreError>;
+    /// Durable transitional inventory used by policy startup recovery.
+    async fn list_deleting_policy_rules(
+        &self,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError>;
     async fn finalize_policy_rule_deletion(
         &self,
         project_id: &str,
@@ -109,6 +113,10 @@ pub trait CanonicalPolicyRepository {
         id: &Uuid,
         expected_generation: u64,
     ) -> Result<CanonicalPolicyAttachmentRecord, StoreError>;
+    /// Durable transitional inventory used by policy startup recovery.
+    async fn list_deleting_policy_attachments(
+        &self,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError>;
     async fn finalize_policy_attachment_deletion(
         &self,
         project_id: &str,
@@ -588,6 +596,17 @@ impl crate::SqliteStore {
         let rows=sqlx::query(&format!("SELECT {RULE_COLUMNS} FROM canonical_network_policy_rules WHERE policy_id=? AND project_id=? ORDER BY id")).bind(policy.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         rows.iter().map(sqlite_rule).collect()
     }
+    pub async fn list_deleting_policy_rules(
+        &self,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {RULE_COLUMNS} FROM canonical_network_policy_rules WHERE state='deleting' ORDER BY project_id,id"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(sqlite_rule).collect()
+    }
     pub async fn begin_policy_rule_deletion(
         &self,
         project: &str,
@@ -697,6 +716,17 @@ impl crate::SqliteStore {
         endpoint: &Uuid,
     ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
         let rows=sqlx::query(&format!("SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE endpoint_id=? AND project_id=? ORDER BY id")).bind(endpoint.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(sqlite_attachment).collect()
+    }
+    pub async fn list_deleting_policy_attachments(
+        &self,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE state='deleting' ORDER BY project_id,id"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
         rows.iter().map(sqlite_attachment).collect()
     }
     pub async fn replace_policy_attachment_set(
@@ -1013,6 +1043,11 @@ impl CanonicalPolicyRepository for crate::SqliteStore {
     ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
         self.list_policy_rules(p, i).await
     }
+    async fn list_deleting_policy_rules(
+        &self,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        self.list_deleting_policy_rules().await
+    }
     async fn begin_policy_rule_deletion(
         &self,
         p: &str,
@@ -1058,6 +1093,11 @@ impl CanonicalPolicyRepository for crate::SqliteStore {
         i: &Uuid,
     ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
         self.list_endpoint_policy_attachments(p, i).await
+    }
+    async fn list_deleting_policy_attachments(
+        &self,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        self.list_deleting_policy_attachments().await
     }
     async fn replace_policy_attachment_set(
         &self,
@@ -1407,6 +1447,15 @@ impl crate::PostgresStore {
         let r=sqlx::query("SELECT id,policy_id,project_id,direction,address_family,protocol,port_min,port_max,remote_selector::text AS remote_selector,action,state,generation,enforcement_key FROM canonical_network_policy_rules WHERE policy_id=$1 AND project_id=$2 ORDER BY id").bind(policy.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         r.iter().map(pg_rule).collect()
     }
+    pub async fn list_deleting_policy_rules(
+        &self,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        let r = sqlx::query("SELECT id,policy_id,project_id,direction,address_family,protocol,port_min,port_max,remote_selector::text AS remote_selector,action,state,generation,enforcement_key FROM canonical_network_policy_rules WHERE state='deleting' ORDER BY project_id,id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        r.iter().map(pg_rule).collect()
+    }
     pub async fn begin_policy_rule_deletion(
         &self,
         project: &str,
@@ -1516,6 +1565,17 @@ impl crate::PostgresStore {
         endpoint: &Uuid,
     ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
         let r=sqlx::query(&format!("SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE endpoint_id=$1 AND project_id=$2 ORDER BY id")).bind(endpoint.to_string()).bind(project).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        r.iter().map(pg_attachment).collect()
+    }
+    pub async fn list_deleting_policy_attachments(
+        &self,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        let r = sqlx::query(&format!(
+            "SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE state='deleting' ORDER BY project_id,id"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
         r.iter().map(pg_attachment).collect()
     }
     pub async fn replace_policy_attachment_set(
@@ -1823,6 +1883,11 @@ impl CanonicalPolicyRepository for crate::PostgresStore {
     ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
         self.list_policy_rules(p, i).await
     }
+    async fn list_deleting_policy_rules(
+        &self,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        self.list_deleting_policy_rules().await
+    }
     async fn begin_policy_rule_deletion(
         &self,
         p: &str,
@@ -1868,6 +1933,11 @@ impl CanonicalPolicyRepository for crate::PostgresStore {
         i: &Uuid,
     ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
         self.list_endpoint_policy_attachments(p, i).await
+    }
+    async fn list_deleting_policy_attachments(
+        &self,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        self.list_deleting_policy_attachments().await
     }
     async fn replace_policy_attachment_set(
         &self,
@@ -2305,6 +2375,50 @@ mod tests {
                 .is_none()
         );
         std::fs::remove_file(path).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deleting_policy_children_are_restart_inventory() -> Result<(), StoreError> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let policy_id = Uuid::from_u128(50);
+        let rule_id = Uuid::from_u128(51);
+        let endpoint_id = Uuid::from_u128(52);
+        let attachment_id = Uuid::from_u128(53);
+        store
+            .insert_reusable_policy(&policy(policy_id, "Allow"))
+            .await?;
+        store.insert_policy_rule(&rule(rule_id, policy_id)).await?;
+        endpoint_fixture(&store, endpoint_id).await?;
+        store
+            .insert_policy_attachment(&CanonicalPolicyAttachmentRecord {
+                id: attachment_id,
+                policy_id,
+                endpoint_id,
+                project_id: "project-a".into(),
+                state: "active".into(),
+                generation: 1,
+            })
+            .await?;
+
+        store
+            .begin_policy_rule_deletion("project-a", &rule_id, 1)
+            .await?;
+        store
+            .begin_policy_attachment_deletion("project-a", &attachment_id, 1)
+            .await?;
+        let rules = store.list_deleting_policy_rules().await?;
+        let attachments = store.list_deleting_policy_attachments().await?;
+        assert_eq!(
+            rules.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![rule_id]
+        );
+        assert_eq!(
+            attachments.iter().map(|a| a.id).collect::<Vec<_>>(),
+            vec![attachment_id]
+        );
+        assert_eq!(attachments[0].endpoint_id, endpoint_id);
+        assert_eq!(attachments[0].policy_id, policy_id);
         Ok(())
     }
 

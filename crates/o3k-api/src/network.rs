@@ -930,6 +930,119 @@ pub async fn recover_l3_gateway_operations(state: &AppState) {
             }
         }
     }
+
+    // Policy child deletion reservations use the same startup owner and the
+    // same endpoint execution boundary.  The canonical rows are deliberately
+    // finalized only after every affected endpoint has been dispatched; a
+    // failed or unavailable endpoint leaves the child durably deleting.
+    let deleting_attachments = match service.list_deleting_policy_attachments().await {
+        Ok(attachments) => attachments,
+        Err(error) => {
+            tracing::error!(%error, "failed to enumerate deleting policy attachments during startup recovery");
+            return;
+        }
+    };
+    for attachment in deleting_attachments {
+        let network_id = match service
+            .network_id_for_canonical_endpoint(&attachment.project_id, &attachment.endpoint_id)
+            .await
+        {
+            Ok(network_id) => network_id,
+            Err(error) => {
+                tracing::warn!(%error, attachment_id = %attachment.id, "cannot resolve policy attachment execution context");
+                continue;
+            }
+        };
+        match dispatch_policy_network_with_gateway(
+            state,
+            &attachment.project_id,
+            network_id,
+            attachment.endpoint_id,
+            None,
+        )
+        .await
+        {
+            Ok(true) => {
+                if let Err(error) = service
+                    .finalize_policy_attachment_deletion_for_project(
+                        &attachment.project_id,
+                        attachment.id,
+                        attachment.generation,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, attachment_id = %attachment.id, "policy attachment converged but canonical finalization is pending");
+                }
+            }
+            Ok(false) => {
+                tracing::warn!(attachment_id = %attachment.id, "policy attachment remains deleting without an execution boundary")
+            }
+            Err(_error) => {
+                tracing::warn!(attachment_id = %attachment.id, "policy attachment recovery did not converge")
+            }
+        }
+    }
+
+    let deleting_rules = match service.list_deleting_policy_rules().await {
+        Ok(rules) => rules,
+        Err(error) => {
+            tracing::error!(%error, "failed to enumerate deleting policy rules during startup recovery");
+            return;
+        }
+    };
+    for rule in deleting_rules {
+        let endpoints = match service
+            .affected_endpoints_for_canonical_policy(&rule.project_id, rule.policy_id)
+            .await
+        {
+            Ok(endpoints) => endpoints,
+            Err(error) => {
+                tracing::warn!(%error, rule_id = %rule.id, "cannot resolve deleting policy rule endpoints");
+                continue;
+            }
+        };
+        let mut converged = true;
+        for endpoint_id in endpoints {
+            let network_id = match service
+                .network_id_for_canonical_endpoint(&rule.project_id, &endpoint_id)
+                .await
+            {
+                Ok(network_id) => network_id,
+                Err(error) => {
+                    tracing::warn!(%error, rule_id = %rule.id, %endpoint_id, "cannot resolve policy rule execution context");
+                    converged = false;
+                    continue;
+                }
+            };
+            match dispatch_policy_network_with_gateway(
+                state,
+                &rule.project_id,
+                network_id,
+                endpoint_id,
+                None,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => converged = false,
+                Err(_error) => {
+                    tracing::warn!(rule_id = %rule.id, %endpoint_id, "policy rule recovery did not converge");
+                    converged = false;
+                }
+            }
+        }
+        if converged
+            && let Err(error) = service
+                .finalize_security_group_rule_deletion_for_project(
+                    &rule.project_id,
+                    rule.id,
+                    rule.generation,
+                )
+                .await
+        {
+            tracing::warn!(%error, rule_id = %rule.id, "policy rule recovery converged but canonical finalization is pending");
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]

@@ -176,6 +176,14 @@ impl CanonicalPolicyRepository for O3kStore {
             Self::Postgres(s) => s.list_policy_rules(project, policy).await,
         }
     }
+    async fn list_deleting_policy_rules(
+        &self,
+    ) -> Result<Vec<CanonicalNetworkPolicyRuleRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_deleting_policy_rules().await,
+            Self::Postgres(s) => s.list_deleting_policy_rules().await,
+        }
+    }
     async fn begin_policy_rule_deletion(
         &self,
         project: &str,
@@ -247,6 +255,14 @@ impl CanonicalPolicyRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.list_endpoint_policy_attachments(project, endpoint).await,
             Self::Postgres(s) => s.list_endpoint_policy_attachments(project, endpoint).await,
+        }
+    }
+    async fn list_deleting_policy_attachments(
+        &self,
+    ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_deleting_policy_attachments().await,
+            Self::Postgres(s) => s.list_deleting_policy_attachments().await,
         }
     }
     async fn replace_policy_attachment_set(

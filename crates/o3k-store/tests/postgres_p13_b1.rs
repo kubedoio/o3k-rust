@@ -476,3 +476,115 @@ async fn postgres_p13_b1_attachment_lifecycle_and_races() -> Result<(), StoreErr
         .await?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance"]
+async fn postgres_p13_policy_child_deletion_inventory_survives_reopen() -> Result<(), StoreError> {
+    let url = database_url()?;
+    let store = PostgresStore::connect(&url).await?;
+    let project = format!("p13-policy-recovery-{}", Uuid::now_v7());
+    let network_id = Uuid::now_v7();
+    let realm_id = Uuid::now_v7();
+    let endpoint_id = Uuid::now_v7();
+    let policy_id = Uuid::now_v7();
+    let rule_id = Uuid::now_v7();
+    let attachment_id = Uuid::now_v7();
+    let remote = format!("10.{}.0.0/16", endpoint_id.as_bytes()[0]);
+    store
+        .insert_canonical_network(&CanonicalNetworkRecord {
+            id: network_id,
+            project_id: project.clone(),
+            name: "network".into(),
+            admin_state_up: true,
+            generation: 1,
+            state: "active".into(),
+        })
+        .await?;
+    store
+        .insert_canonical_realm(&CanonicalAddressRealmRecord {
+            id: realm_id,
+            network_id,
+            project_id: project.clone(),
+            prefix: "10.251.0.0/24".into(),
+            overlapping_prefixes: false,
+            generation: 1,
+            state: "active".into(),
+        })
+        .await?;
+    store
+        .insert_canonical_endpoint(&CanonicalEndpointRecord {
+            id: endpoint_id,
+            realm_id,
+            project_id: project.clone(),
+            fixed_ip: Ipv4Addr::new(10, 251, 0, 10),
+            mac: format!(
+                "02:00:{:02x}:{:02x}:{:02x}:{:02x}",
+                endpoint_id.as_bytes()[12],
+                endpoint_id.as_bytes()[13],
+                endpoint_id.as_bytes()[14],
+                endpoint_id.as_bytes()[15]
+            ),
+            generation: 1,
+            state: "active".into(),
+        })
+        .await?;
+    let mut p = policy(policy_id);
+    p.project_id = project.clone();
+    store.insert_reusable_policy(&p).await?;
+    store
+        .insert_policy_rule(&CanonicalNetworkPolicyRuleRecord {
+            id: rule_id,
+            policy_id,
+            project_id: project.clone(),
+            direction: "Ingress".into(),
+            address_family: "Ipv4".into(),
+            protocol: "Tcp".into(),
+            port_min: Some(443),
+            port_max: Some(443),
+            remote_selector: Some(remote.clone()),
+            action: "Allow".into(),
+            state: "active".into(),
+            generation: 1,
+            enforcement_key: format!("Ingress|Ipv4|Tcp|443-443|{remote}|Allow"),
+        })
+        .await?;
+    store
+        .insert_policy_attachment(&CanonicalPolicyAttachmentRecord {
+            id: attachment_id,
+            policy_id,
+            endpoint_id,
+            project_id: project.clone(),
+            state: "active".into(),
+            generation: 1,
+        })
+        .await?;
+    store
+        .begin_policy_rule_deletion(&project, &rule_id, 1)
+        .await?;
+    store
+        .begin_policy_attachment_deletion(&project, &attachment_id, 1)
+        .await?;
+    drop(store);
+
+    let reopened = PostgresStore::connect(&url).await?;
+    let rules = reopened.list_deleting_policy_rules().await?;
+    let attachments = reopened.list_deleting_policy_attachments().await?;
+    assert!(
+        rules
+            .iter()
+            .any(|rule| rule.id == rule_id && rule.policy_id == policy_id)
+    );
+    assert!(
+        attachments
+            .iter()
+            .any(|attachment| attachment.id == attachment_id
+                && attachment.endpoint_id == endpoint_id)
+    );
+    reopened
+        .finalize_policy_rule_deletion(&project, &rule_id, 2)
+        .await?;
+    reopened
+        .finalize_policy_attachment_deletion(&project, &attachment_id, 2)
+        .await?;
+    Ok(())
+}

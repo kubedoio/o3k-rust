@@ -4921,6 +4921,53 @@ impl NetworkService {
             .map_err(map_store_error)
     }
 
+    /// Enumerates policy child deletion reservations for startup recovery.
+    /// These rows are canonical transitional state; provider observations are
+    /// used only to decide when they may be finalized.
+    pub async fn list_deleting_policy_rules(
+        &self,
+    ) -> Result<Vec<o3k_store::CanonicalNetworkPolicyRuleRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_deleting_policy_rules()
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_deleting_policy_attachments(
+        &self,
+    ) -> Result<Vec<o3k_store::CanonicalPolicyAttachmentRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_deleting_policy_attachments()
+            .await
+            .map_err(map_store_error)
+    }
+
+    /// Resolves the network execution context for a canonical endpoint. The
+    /// endpoint and realm remain canonical authority; this is only dispatch
+    /// input for the host-local network execution boundary.
+    pub async fn network_id_for_canonical_endpoint(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<Uuid, NetworkError> {
+        let endpoint = self
+            .inner
+            .repository
+            .get_canonical_endpoint(project_id, endpoint_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        self.inner
+            .repository
+            .get_canonical_realm(project_id, &endpoint.realm_id)
+            .await
+            .map_err(map_store_error)?
+            .map(|realm| realm.network_id)
+            .ok_or(NetworkError::NotFound)
+    }
+
     pub async fn get_l3_gateway_for_project(
         &self,
         project_id: &str,
