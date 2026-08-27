@@ -55,7 +55,10 @@ pub(crate) struct RouterInterfaceRequestBody {
 }
 #[derive(serde::Deserialize)]
 pub(crate) struct RouterInterfaceRequest {
-    realm_id: Uuid,
+    #[serde(default)]
+    realm_id: Option<Uuid>,
+    #[serde(default)]
+    subnet_id: Option<Uuid>,
 }
 #[derive(serde::Serialize)]
 pub(crate) struct RouterInterfaceResponse {
@@ -259,7 +262,34 @@ pub(crate) async fn add_router_interface(
         Ok(v) => v,
         Err(r) => return r,
     };
-    match service.attach_l3_gateway_realm(auth.effective_scope().id().as_str(), &id, &body.router_interface.realm_id).await {
+    let realm_id = if let Some(realm_id) = body.router_interface.realm_id {
+        realm_id
+    } else if let Some(subnet_id) = body.router_interface.subnet_id {
+        let subnet = match service
+            .get_subnet_for_project(auth.effective_scope().id().as_str(), subnet_id)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return network_error(e),
+        };
+        let realms = match service
+            .list_canonical_realms_for_project(
+                auth.effective_scope().id().as_str(),
+                subnet.network_id,
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return network_error(e),
+        };
+        let Some(realm) = realms.into_iter().next() else {
+            return network_error(NetworkError::NotFound);
+        };
+        realm.id
+    } else {
+        return network_error(NetworkError::InvalidRequest);
+    };
+    match service.attach_l3_gateway_realm(auth.effective_scope().id().as_str(), &id, &realm_id).await {
         Ok(a) => (StatusCode::CREATED, Json(serde_json::json!({"router_interface_info": RouterInterfaceResponse { id:a.id.to_string(), gateway_id:a.gateway_id.to_string(), realm_id:a.realm_id.to_string() }}))).into_response(),
         Err(error) => network_error(error),
     }
@@ -291,10 +321,10 @@ pub(crate) async fn remove_router_interface(
         Ok(v) => v,
         Err(e) => return network_error(e),
     };
-    let Some(a) = attachments
-        .into_iter()
-        .find(|a| a.realm_id == body.router_interface.realm_id)
-    else {
+    let Some(realm_id) = body.router_interface.realm_id else {
+        return network_error(NetworkError::InvalidRequest);
+    };
+    let Some(a) = attachments.into_iter().find(|a| a.realm_id == realm_id) else {
         return network_error(NetworkError::NotFound);
     };
     let result = service
