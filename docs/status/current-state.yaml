@@ -301,6 +301,14 @@ profiles:
           docs/compatibility/p13-2/p13-2b-subnet-lifecycle-evidence.json;
           docs/compatibility/p13-2/p13-2c-provider-port-lifecycle-evidence.json;
           docs/compatibility/p13-2/p13-2d-provider-server-lifecycle-evidence.json.
+      - name: p13-3-bounded-provider-lifecycle
+        state: passed
+        note: >-
+          Local real-provider evidence verifies the bounded Security Group,
+          Port security-group attachment, and Floating IP projection paths.
+          Evidence: docs/compatibility/p13-3/p13-3b3-security-group-provider-lifecycle-evidence.json;
+          docs/compatibility/p13-3/p13-3b3-port-security-group-provider-lifecycle-evidence.json;
+          docs/compatibility/p13-3/p13-3e-floating-ip-provider-lifecycle-evidence.json.
     full_profile_evidence:
       - name: iac-full-lifecycle-gate
         state: not-proven
@@ -308,14 +316,15 @@ profiles:
       Non-blocking for the first native alpha (v0.2.0-alpha.1). This profile
       extends native-rust-testlab but does not alter its release gate.
     blockers:
-      - P13.3B1 canonical NetworkPolicy / PolicyRule / PolicyAttachment implementation and persistence
-      - equivalent provider contract discovery gates before P13.3/P13.4 runtime work
+      - P13.3B2 native policy traffic and recovery evidence closure
+      - P13.3C router authority decision and bounded provider lifecycle evidence
       - P13.3-P13.7 implementation evidence as defined in SPEC-0032
     next_evidence_action: >-
-      Implement and validate the accepted canonical NetworkPolicy /
-      PolicyRule / PolicyAttachment model in P13.3B1. P13.3A provider
-      discovery is architecture-accepted but provider lifecycle evidence and
-      Security Group runtime remain unverified.
+      Complete native policy traffic/recovery evidence, then resolve the
+      documented P13.3C router authority decision before implementing Router
+      compatibility. The bounded Security Group, Port attachment, and
+      Floating IP provider evidence is committed, but does not establish full
+      P13.3 completion.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)
