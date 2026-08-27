@@ -82,8 +82,8 @@ sed -i 's/bounded canonical policy/bounded canonical policy updated/' "$project/
 "$tofu" import openstack_networking_secgroup_v2.sg "$sg_id" >/dev/null
 plan_status=0
 "$tofu" plan -detailed-exitcode >/dev/null || plan_status=$?
-if [[ "$plan_status" -ne 0 && "$plan_status" -ne 2 ]]; then
-  echo "unexpected post-import plan exit status: $plan_status" >&2
+if [[ "$plan_status" -ne 0 ]]; then
+  echo "post-import Security Group plan is not converged (exit $plan_status)" >&2
   exit "$plan_status"
 fi
 mkdir -p "$(dirname "$evidence_output")"

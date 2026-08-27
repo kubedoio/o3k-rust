@@ -76,6 +76,11 @@ $tofu apply -auto-approve
 $tofu refresh
 $tofu state rm openstack_networking_router_v2.router >/dev/null
 $tofu import openstack_networking_router_v2.router "$router_id" >/dev/null
-$tofu plan -detailed-exitcode >/dev/null || test $? -eq 2
+plan_status=0
+$tofu plan -detailed-exitcode >/dev/null || plan_status=$?
+if [[ "$plan_status" -ne 0 ]]; then
+  echo "post-import Router plan is not converged (exit $plan_status)" >&2
+  exit "$plan_status"
+fi
 $tofu destroy -auto-approve
 echo "P13.3 Router provider lifecycle passed"

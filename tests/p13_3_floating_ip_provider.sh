@@ -69,7 +69,7 @@ resource "openstack_networking_floatingip_v2" "fip" {
 EOF
 export TF_CLI_CONFIG_FILE="$work_dir/tofu.tfrc" TF_IN_AUTOMATION=1
 cd "$project_dir"
-plan() { local status=0; "$tofu" plan -detailed-exitcode >/dev/null || status=$?; [[ "$status" -eq 0 || "$status" -eq 2 ]]; }
+plan() { local status=0; "$tofu" plan -detailed-exitcode >/dev/null || status=$?; [[ "$status" -eq 0 ]]; }
 "$tofu" init -input=false -upgrade=false >/dev/null
 "$tofu" apply -auto-approve >/dev/null
 fip_id="$("$tofu" show -json | python3 -c 'import json,sys; r=json.load(sys.stdin)["values"]["root_module"]["resources"]; print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_floatingip_v2.fip"))')"

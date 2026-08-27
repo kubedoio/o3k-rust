@@ -4961,16 +4961,26 @@ impl NetworkService {
         project_id: &str,
         gateway_id: &Uuid,
         expected_generation: u64,
-    ) -> Result<(), NetworkError> {
-        let deleting = self
-            .inner
+    ) -> Result<o3k_store::CanonicalL3GatewayRecord, NetworkError> {
+        self.inner
             .repository
             .begin_canonical_l3_gateway_deletion(project_id, gateway_id, expected_generation)
             .await
-            .map_err(map_store_error)?;
+            .map_err(map_store_error)
+    }
+
+    /// Finalizes a gateway deletion only after the provider has withdrawn the
+    /// complete gateway realization and absence has been observed.  Keeping
+    /// this separate from reservation makes the deleting row restart-safe.
+    pub async fn finalize_l3_gateway_deletion_for_project(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), NetworkError> {
         self.inner
             .repository
-            .finalize_canonical_l3_gateway_deletion(project_id, gateway_id, deleting.generation)
+            .finalize_canonical_l3_gateway_deletion(project_id, gateway_id, expected_generation)
             .await
             .map_err(map_store_error)
     }
@@ -4980,9 +4990,8 @@ impl NetworkService {
         project_id: &str,
         attachment_id: &Uuid,
         expected_generation: u64,
-    ) -> Result<(), NetworkError> {
-        let deleting = self
-            .inner
+    ) -> Result<o3k_store::CanonicalL3GatewayAttachmentRecord, NetworkError> {
+        self.inner
             .repository
             .begin_canonical_l3_gateway_attachment_deletion(
                 project_id,
@@ -4990,13 +4999,23 @@ impl NetworkService {
                 expected_generation,
             )
             .await
-            .map_err(map_store_error)?;
+            .map_err(map_store_error)
+    }
+
+    /// Finalizes an attachment deletion only after the complete remaining
+    /// gateway snapshot has converged and the detached provider link is absent.
+    pub async fn finalize_l3_gateway_realm_detachment_for_project(
+        &self,
+        project_id: &str,
+        attachment_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), NetworkError> {
         self.inner
             .repository
             .finalize_canonical_l3_gateway_attachment_deletion(
                 project_id,
                 attachment_id,
-                deleting.generation,
+                expected_generation,
             )
             .await
             .map_err(map_store_error)

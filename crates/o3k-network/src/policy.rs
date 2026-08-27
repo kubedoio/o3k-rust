@@ -938,6 +938,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires CAP_NET_ADMIN; run in the privileged Linux provider gate"]
     fn isolated_namespace_proves_native_policy_traffic_allow_and_deny() {
         let namespace = format!("o3k-policy-router-{}", Uuid::now_v7().simple());
         let client_namespace = format!("{namespace}-client");

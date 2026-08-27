@@ -103,7 +103,7 @@ resource "openstack_networking_subnet_v2" "managed" {
 }
 EOF
 run import 'openstack_networking_subnet_v2.managed' "$import_subnet_id"
-run plan -detailed-exitcode || [[ "$?" == 2 ]]
+run plan -detailed-exitcode
 run destroy -auto-approve
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$import_network_id" >/dev/null
 python3 - "$trace_path" "$evidence_output" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$head_sha" "$run_id" "$tofu_version" <<'PY'

@@ -1487,6 +1487,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires CAP_NET_ADMIN; run in the privileged Linux provider gate"]
     async fn linux_realizer_observes_exact_fingerprint_after_fresh_instances() {
         let namespace = format!("o3k-r2a-{}", Uuid::now_v7().simple());
         let root = std::env::temp_dir().join(format!("o3k-r2a-{}", Uuid::now_v7()));
@@ -1593,6 +1594,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires CAP_NET_ADMIN; run in the privileged Linux provider gate"]
     async fn linux_realizer_rebuilds_one_endpoint_without_removing_another() {
         let namespace = format!("o3k-r2a-ab-{}", Uuid::now_v7().simple());
         let root = std::env::temp_dir().join(format!("o3k-r2a-ab-{}", Uuid::now_v7()));

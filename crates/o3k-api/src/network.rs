@@ -343,7 +343,9 @@ pub(crate) async fn delete_router(
         .delete_l3_gateway_for_project(project, &id, current.generation)
         .await
     {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        // Deletion is a durable reservation.  A reconciler must withdraw and
+        // observe provider absence before the canonical row is finalized.
+        Ok(_) => StatusCode::ACCEPTED.into_response(),
         Err(error) => network_error(error),
     }
 }
@@ -507,7 +509,7 @@ pub(crate) async fn remove_router_interface(
         .detach_l3_gateway_realm(project, &a.id, a.generation)
         .await;
     match result {
-        Ok(()) => {
+        Ok(deleting) => {
             let ports = match service.list_ports_for_project(project).await {
                 Ok(value) => value,
                 Err(error) => return network_error(error),
@@ -527,6 +529,16 @@ pub(crate) async fn remove_router_interface(
                 {
                     return response;
                 }
+            }
+            if let Err(error) = service
+                .finalize_l3_gateway_realm_detachment_for_project(
+                    project,
+                    &deleting.id,
+                    deleting.generation,
+                )
+                .await
+            {
+                return network_error(error);
             }
             Json(RouterInterfaceResponse {
                 port_id: a.id.to_string(),

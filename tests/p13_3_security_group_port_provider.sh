@@ -76,7 +76,10 @@ sed -i 's/security_group_ids = \[\]/security_group_ids = [openstack_networking_s
 "$tofu" import openstack_networking_port_v2.port "$port_id" >/dev/null
 plan_status=0
 "$tofu" plan -detailed-exitcode >/dev/null || plan_status=$?
-[[ "$plan_status" -eq 0 || "$plan_status" -eq 2 ]]
+if [[ "$plan_status" -ne 0 ]]; then
+  echo "post-import port plan is not converged (exit $plan_status)" >&2
+  exit "$plan_status"
+fi
 mkdir -p "$(dirname "$evidence_output")"
 python3 - "$evidence_output" "$port_id" "$sg_id" "$provider_sha" "$root_dir" <<'PY'
 import json, pathlib, subprocess, sys

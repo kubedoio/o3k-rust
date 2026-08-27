@@ -214,6 +214,24 @@ struct LinuxGatewayState {
     aggregate_fingerprint: String,
 }
 
+/// Durable evidence that this provider instance owns an in-flight mutation.
+///
+/// This is intentionally separate from the realized state file: during a
+/// crash window the provider must be able to distinguish its own partial
+/// topology from foreign objects without treating deterministic names as
+/// ownership evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum LinuxGatewayPendingMutation {
+    Apply {
+        plan: L3GatewayExecutionPlan,
+    },
+    Remove {
+        gateway_id: Uuid,
+        project_id: String,
+    },
+}
+
 struct GatewayLease {
     path: PathBuf,
 }
@@ -301,6 +319,8 @@ impl LinuxL3GatewayProvider {
         &self,
         namespace: &str,
         plan: &L3GatewayExecutionPlan,
+        already_owned: bool,
+        previous_marker: Option<&str>,
     ) -> Result<(), L3GatewayError> {
         let table = Self::nft_table(plan);
         let marker = Self::nft_marker(plan)?;
@@ -311,6 +331,9 @@ impl LinuxL3GatewayProvider {
         {
             if existing == marker {
                 return Ok(());
+            }
+            if !already_owned || previous_marker != Some(existing.as_str()) {
+                return Err(L3GatewayError::Backend("foreign gateway table".to_owned()));
             }
             if !self
                 .command
@@ -910,6 +933,60 @@ impl LinuxL3GatewayProvider {
         Ok(())
     }
 
+    fn persist_pending(
+        &self,
+        gateway_id: Uuid,
+        pending: &LinuxGatewayPendingMutation,
+    ) -> Result<(), L3GatewayError> {
+        let mut all = load_linux_gateway_pending(&self.root.join("gateway.pending.json"))?;
+        all.insert(gateway_id, pending.clone());
+        let bytes = serde_json::to_vec_pretty(&all).map_err(|_| L3GatewayError::Serialization)?;
+        let temporary = self.root.join("gateway.pending.json.tmp");
+        let mut file =
+            File::create(&temporary).map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+        file.write_all(&bytes)
+            .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+        fs::rename(temporary, self.root.join("gateway.pending.json"))
+            .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+        Ok(())
+    }
+
+    fn clear_pending(&self, gateway_id: Uuid) -> Result<(), L3GatewayError> {
+        let mut all = load_linux_gateway_pending(&self.root.join("gateway.pending.json"))?;
+        all.remove(&gateway_id);
+        if all.is_empty() {
+            match fs::remove_file(self.root.join("gateway.pending.json")) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(L3GatewayError::Backend(error.to_string())),
+            }
+        } else {
+            let bytes =
+                serde_json::to_vec_pretty(&all).map_err(|_| L3GatewayError::Serialization)?;
+            let temporary = self.root.join("gateway.pending.json.tmp");
+            let mut file = File::create(&temporary)
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+            file.write_all(&bytes)
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+            file.sync_all()
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+            fs::rename(temporary, self.root.join("gateway.pending.json"))
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))
+        }
+    }
+
+    fn pending(
+        &self,
+        gateway_id: Uuid,
+    ) -> Result<Option<LinuxGatewayPendingMutation>, L3GatewayError> {
+        Ok(
+            load_linux_gateway_pending(&self.root.join("gateway.pending.json"))?
+                .remove(&gateway_id),
+        )
+    }
+
     fn acquire_lease(&self) -> Result<GatewayLease, L3GatewayError> {
         let path = self.root.join("gateway.lock");
         File::options()
@@ -942,28 +1019,89 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
         }
         let namespace = Self::namespace(plan);
         let current = self.state.get(&plan.gateway_id);
-        self.ensure_namespace(&namespace, current.is_some())?;
+        let pending = self.pending(plan.gateway_id)?;
+        let pending_owns_gateway = matches!(
+            &pending,
+            Some(LinuxGatewayPendingMutation::Apply { plan: pending_plan })
+                if pending_plan.gateway_id == plan.gateway_id
+                    && pending_plan.project_id == plan.project_id
+        );
+        let already_owned = current.is_some() || pending_owns_gateway;
+        if !pending_owns_gateway {
+            let (namespace_exists, _) = self
+                .command
+                .output("ip", &["netns", "exec", &namespace, "true"])
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+            if namespace_exists && current.is_none() {
+                return Err(L3GatewayError::Backend(
+                    "foreign gateway namespace".to_owned(),
+                ));
+            }
+            let target_attachments = Self::execution_attachments(plan)?;
+            let previous = current
+                .map(|value| Self::execution_attachments(&value.plan))
+                .transpose()?;
+            for attachment in &target_attachments {
+                let owned = previous.as_ref().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item.attachment_id == attachment.attachment_id)
+                });
+                if !owned {
+                    let (_, realm_if) = link_names(plan, attachment);
+                    let (link_exists, _) = self
+                        .command
+                        .output("ip", &["link", "show", "dev", &realm_if])
+                        .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+                    if link_exists {
+                        return Err(L3GatewayError::Backend(
+                            "foreign gateway attachment".to_owned(),
+                        ));
+                    }
+                }
+            }
+            if current.is_none()
+                && self.command.supports_gateway_marker()
+                && self
+                    .command
+                    .gateway_marker(&namespace, &Self::nft_table(plan))
+                    .map_err(|error| L3GatewayError::Backend(error.to_string()))?
+                    .is_some()
+            {
+                return Err(L3GatewayError::Backend("foreign gateway table".to_owned()));
+            }
+        }
+        self.persist_pending(
+            plan.gateway_id,
+            &LinuxGatewayPendingMutation::Apply { plan: plan.clone() },
+        )?;
+        self.ensure_namespace(&namespace, already_owned)?;
         if let Some(current) = self.state.get(&plan.gateway_id) {
             self.remove_routes(&current.plan, plan)?;
             self.remove_attachment_links(&current.plan, plan)?;
         }
         let execution_attachments = Self::execution_attachments(plan)?;
+        let previous_execution_attachments = current
+            .map(|current| Self::execution_attachments(&current.plan))
+            .transpose()?;
         for attachment in &execution_attachments {
             self.ensure_attachment(
                 &namespace,
                 plan.gateway_id,
                 attachment,
-                current.is_some_and(|current| {
-                    current
-                        .plan
-                        .attachments
-                        .iter()
-                        .any(|old| old.attachment_id == attachment.attachment_id)
-                }),
+                already_owned
+                    && (pending_owns_gateway
+                        || previous_execution_attachments.as_ref().is_some_and(|old| {
+                            old.iter()
+                                .any(|item| item.attachment_id == attachment.attachment_id)
+                        })),
             )?;
         }
         self.ensure_routes(&namespace, plan.gateway_id, &execution_attachments)?;
-        self.ensure_nft_marker(&namespace, plan)?;
+        let previous_marker = current
+            .map(|current| Self::nft_marker(&current.plan))
+            .transpose()?;
+        self.ensure_nft_marker(&namespace, plan, already_owned, previous_marker.as_deref())?;
         self.ensure_snat(&namespace, plan, &execution_attachments)?;
         let state = LinuxGatewayState {
             plan: plan.clone(),
@@ -972,6 +1110,7 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
         let mut next = self.state.clone();
         next.insert(plan.gateway_id, state);
         self.persist(&next)?;
+        self.clear_pending(plan.gateway_id)?;
         self.state = next;
         Ok(())
     }
@@ -988,8 +1127,15 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
                 "gateway ownership conflict".to_owned(),
             ));
         }
-        let old = self.state.remove(&gateway_id);
+        let old = self.state.get(&gateway_id).cloned();
         if let Some(old) = old {
+            self.persist_pending(
+                gateway_id,
+                &LinuxGatewayPendingMutation::Remove {
+                    gateway_id,
+                    project_id: project_id.to_owned(),
+                },
+            )?;
             let empty = L3GatewayExecutionPlan {
                 gateway_id,
                 project_id: project_id.to_owned(),
@@ -1044,16 +1190,25 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
                     "cannot remove gateway ownership marker".to_owned(),
                 ));
             }
-            if !self
+            let (namespace_exists, _) = self
                 .command
-                .run("ip", &["netns", "delete", &namespace])
-                .map_err(|error| L3GatewayError::Backend(error.to_string()))?
+                .output("ip", &["netns", "exec", &namespace, "true"])
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+            if namespace_exists
+                && !self
+                    .command
+                    .run("ip", &["netns", "delete", &namespace])
+                    .map_err(|error| L3GatewayError::Backend(error.to_string()))?
             {
                 return Err(L3GatewayError::Backend(
                     "cannot remove gateway namespace".to_owned(),
                 ));
             }
-            self.persist(&self.state)?;
+            let mut next = self.state.clone();
+            next.remove(&gateway_id);
+            self.persist(&next)?;
+            self.clear_pending(gateway_id)?;
+            self.state = next;
         }
         Ok(())
     }
@@ -1090,7 +1245,7 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
                 "gateway namespace is absent".to_owned(),
             ));
         }
-        for attachment in &state.plan.attachments {
+        for attachment in &Self::execution_attachments(&state.plan)? {
             let (_, realm_if) = link_names(&state.plan, attachment);
             let (link_exists, _) = self
                 .command
@@ -1130,6 +1285,17 @@ fn load_linux_gateway_state(
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|_| L3GatewayError::Backend("gateway state is corrupt".to_owned())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(error) => Err(L3GatewayError::Backend(error.to_string())),
+    }
+}
+
+fn load_linux_gateway_pending(
+    path: &Path,
+) -> Result<BTreeMap<Uuid, LinuxGatewayPendingMutation>, L3GatewayError> {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|_| L3GatewayError::Backend("gateway pending state is corrupt".to_owned())),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(BTreeMap::new()),
         Err(error) => Err(L3GatewayError::Backend(error.to_string())),
     }
@@ -1520,6 +1686,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[ignore = "requires CAP_NET_ADMIN; run in the privileged Linux provider gate"]
     fn linux_provider_preserves_unaffected_realms_after_fresh_reopen() {
         fn ip(args: &[&str]) -> bool {
             Command::new("ip")
