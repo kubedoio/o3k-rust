@@ -354,10 +354,33 @@ pub(crate) async fn remove_router_interface(
     let Some(a) = attachments.into_iter().find(|a| a.realm_id == realm_id) else {
         return network_error(NetworkError::NotFound);
     };
+    let realm = match service.get_canonical_realm(&auth, a.realm_id).await {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
     let result = service
         .detach_l3_gateway_realm(project, &a.id, a.generation)
         .await;
-    match result { Ok(()) => Json(serde_json::json!({"router_interface_info": {"id": a.id.to_string(), "gateway_id": a.gateway_id.to_string(), "realm_id": a.realm_id.to_string()}})).into_response(), Err(e) => network_error(e) }
+    match result {
+        Ok(()) => {
+            let ports = match service.list_ports_for_project(project).await {
+                Ok(value) => value,
+                Err(error) => return network_error(error),
+            };
+            for port in ports
+                .into_iter()
+                .filter(|port| port.network_id == realm.network_id)
+            {
+                if let Err(response) =
+                    dispatch_policy_network(&state, project, realm.network_id, port.id).await
+                {
+                    return response;
+                }
+            }
+            Json(serde_json::json!({"router_interface_info": {"id": a.id.to_string(), "gateway_id": a.gateway_id.to_string(), "realm_id": a.realm_id.to_string()}})).into_response()
+        }
+        Err(error) => network_error(error),
+    }
 }
 
 #[derive(serde::Deserialize)]
