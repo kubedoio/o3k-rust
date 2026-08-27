@@ -2,15 +2,15 @@
   "artifact_type": "o3k-p13-3-port-security-group-provider-lifecycle",
   "schema_version": 1,
   "evidence_tier": "local-real-opentofu-provider",
-  "implementation_sha": "c2a2f8d181db0c5e279cfa31e0e06b171868a19c",
+  "implementation_sha": "b24f8c42bce5f5256f039e323d3a234c291f826f",
   "opentofu_version": "1.12.6",
   "provider_version": "3.4.0",
   "provider_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
   "provider_modified": false,
   "canonical_authority": "NetworkPolicy/NetworkPolicyRule/PolicyAttachment",
   "resources": {
-    "port_id": "01a0406b-dd6e-7562-a54b-fd92f8620530",
-    "security_group_id": "01a0406b-dd30-7d12-9e89-f235a9590f33"
+    "port_id": "01a0407d-23cd-70a2-9cfd-569acdb2111c",
+    "security_group_id": "01a0407d-2390-7bb2-8233-7076a3b78ac1"
   },
   "operations": [
     "create",
