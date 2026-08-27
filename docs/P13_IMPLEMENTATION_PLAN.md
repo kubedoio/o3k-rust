@@ -89,19 +89,19 @@ provider evidence is recorded in:
 - `docs/compatibility/p13-2/p13-2d-provider-server-lifecycle-evidence.json`
 
 This is an operation- and attribute-level claim, not general OpenStack or
-general Terraform compatibility. P13.3 remains an evidence-gated, in-progress
-implementation; its accepted architecture and bounded native policy work do
-not by themselves establish provider lifecycle compatibility.
+general Terraform compatibility. P13.3 is complete for its bounded,
+evidence-gated operation-level profile; this does not establish broad provider
+compatibility or production readiness.
 
 ### P13.3 — Neutron adoption profile — BOUNDED RUNTIME COMPLETE
 
 The P13.3A provider discovery checkpoint found that the existing endpoint-
 scoped `PolicyIntent` and policy persistence cannot represent an unattached,
 reusable Security Group. The reusable canonical policy architecture is
-accepted in ADR-0177/SPEC-0034. P13.3B1 persistence is complete and B2 native
-policy compilation/realization work is in progress. The bounded Security Group
-projection is now backed by canonical policy state, while provider lifecycle
-verification remains a later gate.
+accepted in ADR-0177/SPEC-0034. P13.3B1 persistence and B2 native policy
+compilation/realization are complete for the bounded profile. The bounded
+Security Group projection is backed by canonical policy state and its provider
+lifecycle is verified.
 
 - `openstack_networking_secgroup_v2` — security group CRUD
 - `openstack_networking_secgroup_rule_v2` — security group rule CRUD
