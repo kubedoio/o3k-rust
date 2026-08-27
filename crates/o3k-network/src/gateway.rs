@@ -1245,6 +1245,11 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
         let target_fingerprint = gateway_plan_fingerprint(plan)?;
         let current = self.state.get(&plan.gateway_id);
         let pending = self.pending(plan.gateway_id)?;
+        if matches!(pending, Some(LinuxGatewayPendingMutation::Remove { .. })) {
+            return Err(L3GatewayError::Backend(
+                "gateway removal is pending; reconcile it before applying a new target".to_owned(),
+            ));
+        }
         let pending_owns_gateway = matches!(
             &pending,
             Some(LinuxGatewayPendingMutation::Apply { plan: pending_plan })

@@ -225,10 +225,34 @@ pub(crate) async fn create_router(
         )
         .await;
     match result {
-        Ok(gateway) => match router_response(service, project, gateway).await {
-            Ok(router) => (StatusCode::CREATED, Json(RouterEnvelope { router })).into_response(),
-            Err(error) => network_error(error),
-        },
+        Ok(gateway) => {
+            if state.network_dispatcher.is_some() && state.network_controller.is_some() {
+                let snapshot = match service
+                    .compile_l3_gateway_execution_plan_for_project(project, &gateway.id)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => return network_error(error),
+                };
+                if let Err(response) = dispatch_l3_gateway_snapshot(
+                    &state,
+                    project,
+                    snapshot,
+                    o3k_network::NetworkPlanAction::Apply,
+                    gateway.generation,
+                )
+                .await
+                {
+                    return response;
+                }
+            }
+            match router_response(service, project, gateway).await {
+                Ok(router) => {
+                    (StatusCode::CREATED, Json(RouterEnvelope { router })).into_response()
+                }
+                Err(error) => network_error(error),
+            }
+        }
         Err(error) => network_error(error),
     }
 }
@@ -354,7 +378,7 @@ pub(crate) async fn delete_router(
             Ok(snapshot) => snapshot,
             Err(error) => return network_error(error),
         };
-        if let Err(response) = dispatch_l3_gateway_snapshot(
+        let dispatched = match dispatch_l3_gateway_snapshot(
             &state,
             project,
             snapshot,
@@ -363,11 +387,13 @@ pub(crate) async fn delete_router(
         )
         .await
         {
-            return response;
-        }
-        if let Err(error) = service
-            .finalize_l3_gateway_deletion_for_project(project, &id, deleting.generation)
-            .await
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+        if dispatched
+            && let Err(error) = service
+                .finalize_l3_gateway_deletion_for_project(project, &id, deleting.generation)
+                .await
         {
             return network_error(error);
         }
@@ -552,7 +578,7 @@ pub(crate) async fn remove_router_interface(
     };
     let Some(a) = attachments
         .into_iter()
-        .find(|a| a.realm_id == realm_id || body.port_id == Some(a.id))
+        .find(|a| a.state == "active" && (a.realm_id == realm_id || body.port_id == Some(a.id)))
     else {
         return network_error(NetworkError::NotFound);
     };
@@ -636,12 +662,12 @@ async fn dispatch_l3_gateway_snapshot(
     gateway: o3k_domain::L3GatewayExecutionPlan,
     action: o3k_network::NetworkPlanAction,
     generation: u64,
-) -> Result<(), axum::response::Response> {
+) -> Result<bool, axum::response::Response> {
     let Some(dispatcher) = state.network_dispatcher.as_ref() else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(controller) = state.network_controller.as_ref() else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(agent) = state.network_agent.as_ref() else {
         return Err(keystone_error(
@@ -709,7 +735,7 @@ async fn dispatch_l3_gateway_snapshot(
             "gateway realization requires observation",
         ));
     }
-    Ok(())
+    Ok(true)
 }
 
 #[derive(serde::Deserialize)]
