@@ -158,6 +158,17 @@ impl L3GatewayBackend for InMemoryL3GatewayBackend {
 trait LinuxGatewayCommand: Send + Sync {
     fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)>;
     fn run(&self, program: &str, args: &[&str]) -> io::Result<bool>;
+    fn supports_gateway_marker(&self) -> bool {
+        false
+    }
+
+    /// Reads provider-owned state that is visible from the execution
+    /// namespace. Test doubles may return `None`; production commands must
+    /// return the table comment when the gateway table exists.
+    fn gateway_marker(&self, namespace: &str, table: &str) -> io::Result<Option<String>> {
+        let _ = (namespace, table);
+        Ok(None)
+    }
 }
 
 struct SystemLinuxGatewayCommand;
@@ -173,6 +184,27 @@ impl LinuxGatewayCommand for SystemLinuxGatewayCommand {
 
     fn run(&self, program: &str, args: &[&str]) -> io::Result<bool> {
         Ok(Command::new(program).args(args).status()?.success())
+    }
+
+    fn gateway_marker(&self, namespace: &str, table: &str) -> io::Result<Option<String>> {
+        let output = Command::new("ip")
+            .args([
+                "netns", "exec", namespace, "nft", "list", "table", "ip", table,
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        Ok(text
+            .split("comment ")
+            .nth(1)
+            .and_then(|value| value.split('"').nth(1))
+            .map(ToOwned::to_owned))
+    }
+
+    fn supports_gateway_marker(&self) -> bool {
+        true
     }
 }
 
@@ -247,6 +279,81 @@ impl LinuxL3GatewayProvider {
             "o3k-gw-{:02x}{:02x}{:02x}{:02x}",
             digest[0], digest[1], digest[2], digest[3]
         )
+    }
+
+    fn nft_table(plan: &L3GatewayExecutionPlan) -> String {
+        let digest = Sha256::digest(plan.gateway_id.as_bytes());
+        format!(
+            "o3kgw{:02x}{:02x}{:02x}{:02x}",
+            digest[0], digest[1], digest[2], digest[3]
+        )
+    }
+
+    fn nft_marker(plan: &L3GatewayExecutionPlan) -> Result<String, L3GatewayError> {
+        Ok(format!(
+            "o3k-l3-gateway:{}:{}",
+            plan.gateway_id,
+            gateway_plan_fingerprint(plan)?
+        ))
+    }
+
+    fn ensure_nft_marker(
+        &self,
+        namespace: &str,
+        plan: &L3GatewayExecutionPlan,
+    ) -> Result<(), L3GatewayError> {
+        let table = Self::nft_table(plan);
+        let marker = Self::nft_marker(plan)?;
+        if let Some(existing) = self
+            .command
+            .gateway_marker(namespace, &table)
+            .map_err(|error| L3GatewayError::Backend(error.to_string()))?
+        {
+            if existing == marker {
+                return Ok(());
+            }
+            if !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns", "exec", namespace, "nft", "delete", "table", "ip", &table,
+                    ],
+                )
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))?
+            {
+                return Err(L3GatewayError::Backend(
+                    "cannot replace foreign gateway table".to_owned(),
+                ));
+            }
+        }
+        if !self
+            .command
+            .run(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    namespace,
+                    "nft",
+                    "add",
+                    "table",
+                    "ip",
+                    &table,
+                    "{",
+                    "comment",
+                    &format!("\"{}\"", marker),
+                    ";",
+                    "}",
+                ],
+            )
+            .map_err(|error| L3GatewayError::Backend(error.to_string()))?
+        {
+            return Err(L3GatewayError::Backend(
+                "cannot create gateway ownership marker".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     fn validate_loaded_state(&self) -> Result<(), L3GatewayError> {
@@ -328,6 +435,7 @@ impl LinuxL3GatewayProvider {
             attachments: Vec::new(),
             external_realm_id: None,
             external_realm_prefix: None,
+            external_realm_generation: None,
             enable_snat: false,
         };
         let (gateway_if, realm_if) = link_names(&link_plan, attachment);
@@ -446,17 +554,49 @@ impl LinuxL3GatewayProvider {
         gateway_id: Uuid,
         attachments: &[L3GatewayExecutionAttachment],
     ) -> Result<(), L3GatewayError> {
+        // In the gateway namespace a destination is owned by its own veth.
+        // The previous source-oriented loop could install the same destination
+        // repeatedly and leave the final source as the route owner.
+        let link_plan = L3GatewayExecutionPlan {
+            gateway_id,
+            project_id: String::new(),
+            gateway_generation: 1,
+            attachments: Vec::new(),
+            external_realm_id: None,
+            external_realm_prefix: None,
+            external_realm_generation: None,
+            enable_snat: false,
+        };
+        for destination in attachments {
+            let (gateway_if, _) = link_names(&link_plan, destination);
+            let prefix = format!(
+                "{}/{}",
+                destination.realm_prefix.network, destination.realm_prefix.prefix_len
+            );
+            if !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        namespace,
+                        "ip",
+                        "route",
+                        "replace",
+                        &prefix,
+                        "dev",
+                        &gateway_if,
+                    ],
+                )
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))?
+            {
+                return Err(L3GatewayError::Backend(
+                    "cannot configure gateway route".to_owned(),
+                ));
+            }
+        }
         for source in attachments {
-            let link_plan = L3GatewayExecutionPlan {
-                gateway_id,
-                project_id: String::new(),
-                gateway_generation: 1,
-                attachments: Vec::new(),
-                external_realm_id: None,
-                external_realm_prefix: None,
-                enable_snat: false,
-            };
-            let (gateway_if, _) = link_names(&link_plan, source);
             let source_context = self.realm_contexts.get(&source.realm_id).ok_or_else(|| {
                 L3GatewayError::Backend("missing Realm execution context".to_owned())
             })?;
@@ -475,40 +615,23 @@ impl LinuxL3GatewayProvider {
                         &[
                             "netns",
                             "exec",
-                            namespace,
+                            &source_context.namespace,
                             "ip",
                             "route",
                             "replace",
                             &prefix,
+                            "via",
+                            &provider_link_addresses(gateway_id, source.attachment_id)
+                                .1
+                                .to_string(),
                             "dev",
-                            &gateway_if,
+                            &source_context.realm_interface,
                         ],
                     )
                     .map_err(|error| L3GatewayError::Backend(error.to_string()))?
-                    || !self
-                        .command
-                        .run(
-                            "ip",
-                            &[
-                                "netns",
-                                "exec",
-                                &source_context.namespace,
-                                "ip",
-                                "route",
-                                "replace",
-                                &prefix,
-                                "via",
-                                &provider_link_addresses(gateway_id, source.attachment_id)
-                                    .1
-                                    .to_string(),
-                                "dev",
-                                &source_context.realm_interface,
-                            ],
-                        )
-                        .map_err(|error| L3GatewayError::Backend(error.to_string()))?
                 {
                     return Err(L3GatewayError::Backend(
-                        "cannot configure gateway route".to_owned(),
+                        "cannot configure Realm gateway route".to_owned(),
                     ));
                 }
             }
@@ -516,14 +639,160 @@ impl LinuxL3GatewayProvider {
         Ok(())
     }
 
+    fn ensure_snat(
+        &self,
+        namespace: &str,
+        plan: &L3GatewayExecutionPlan,
+        attachments: &[L3GatewayExecutionAttachment],
+    ) -> Result<(), L3GatewayError> {
+        if !plan.enable_snat || plan.external_realm_id.is_none() {
+            return Ok(());
+        }
+        let external = attachments
+            .iter()
+            .find(|attachment| Some(attachment.realm_id) == plan.external_realm_id)
+            .ok_or(L3GatewayError::InvalidPlan)?;
+        let table = Self::nft_table(plan);
+        let marker = Self::nft_marker(plan)?;
+        let chain = "postrouting";
+        let chain_args = [
+            "netns",
+            "exec",
+            namespace,
+            "nft",
+            "add",
+            "chain",
+            "ip",
+            &table,
+            chain,
+            "{",
+            "type",
+            "nat",
+            "hook",
+            "postrouting",
+            "priority",
+            "100",
+            ";",
+            "policy",
+            "accept",
+            ";",
+            "}",
+        ];
+        if !self
+            .command
+            .run("ip", &chain_args)
+            .map_err(|error| L3GatewayError::Backend(error.to_string()))?
+        {
+            let (_, existing) = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns", "exec", namespace, "nft", "list", "chain", "ip", &table, chain,
+                    ],
+                )
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+            if !existing.contains("type nat") {
+                return Err(L3GatewayError::Backend(
+                    "gateway SNAT chain is foreign".to_owned(),
+                ));
+            }
+        }
+        let (_, external_if) = link_names(plan, external);
+        for source in attachments {
+            if source.realm_id == external.realm_id {
+                continue;
+            }
+            let prefix = format!(
+                "{}/{}",
+                source.realm_prefix.network, source.realm_prefix.prefix_len
+            );
+            let (_, existing) = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns", "exec", namespace, "nft", "list", "chain", "ip", &table, chain,
+                    ],
+                )
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+            if existing.contains(&prefix)
+                && existing.contains(&external_if)
+                && existing.contains("masquerade")
+            {
+                continue;
+            }
+            if !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        namespace,
+                        "nft",
+                        "add",
+                        "rule",
+                        "ip",
+                        &table,
+                        chain,
+                        "ip",
+                        "saddr",
+                        &prefix,
+                        "oifname",
+                        &format!("\"{}\"", external_if),
+                        "masquerade",
+                        "comment",
+                        &marker,
+                    ],
+                )
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))?
+            {
+                return Err(L3GatewayError::Backend(
+                    "cannot configure gateway SNAT".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn execution_attachments(
+        plan: &L3GatewayExecutionPlan,
+    ) -> Result<Vec<L3GatewayExecutionAttachment>, L3GatewayError> {
+        let mut attachments = plan.attachments.clone();
+        if let (Some(realm_id), Some(realm_prefix)) =
+            (plan.external_realm_id, plan.external_realm_prefix)
+        {
+            let attachment_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_OID,
+                format!("{}:external:{}", plan.gateway_id, realm_id).as_bytes(),
+            );
+            let gateway_address = u32::from(realm_prefix.network)
+                .checked_add(1)
+                .map(Ipv4Addr::from)
+                .ok_or(L3GatewayError::InvalidPlan)?;
+            attachments.push(L3GatewayExecutionAttachment {
+                attachment_id,
+                attachment_generation: 1,
+                realm_id,
+                realm_generation: plan.external_realm_generation.unwrap_or(0),
+                realm_prefix,
+                gateway_address,
+            });
+        }
+        attachments.sort_by_key(|attachment| attachment.attachment_id);
+        Ok(attachments)
+    }
+
     fn remove_attachment_links(
         &self,
         old: &L3GatewayExecutionPlan,
         next: &L3GatewayExecutionPlan,
     ) -> Result<(), L3GatewayError> {
-        for attachment in &old.attachments {
-            if next
-                .attachments
+        let old_attachments = Self::execution_attachments(old)?;
+        let next_attachments = Self::execution_attachments(next)?;
+        for attachment in &old_attachments {
+            if next_attachments
                 .iter()
                 .any(|current| current.attachment_id == attachment.attachment_id)
             {
@@ -553,16 +822,18 @@ impl LinuxL3GatewayProvider {
         old: &L3GatewayExecutionPlan,
         next: &L3GatewayExecutionPlan,
     ) -> Result<(), L3GatewayError> {
-        for source in &old.attachments {
+        let old_attachments = Self::execution_attachments(old)?;
+        let next_attachments = Self::execution_attachments(next)?;
+        for source in &old_attachments {
             let context = self.realm_contexts.get(&source.realm_id).ok_or_else(|| {
                 L3GatewayError::Backend("missing Realm execution context".to_owned())
             })?;
-            for destination in &old.attachments {
+            for destination in &old_attachments {
                 if source.realm_id == destination.realm_id
-                    || next
-                        .attachments
-                        .iter()
-                        .any(|item| item.realm_id == destination.realm_id)
+                    || next_attachments.iter().any(|item| {
+                        item.realm_id == destination.realm_id
+                            && item.realm_prefix == destination.realm_prefix
+                    })
                 {
                     continue;
                 }
@@ -652,7 +923,8 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
             self.remove_routes(&current.plan, plan)?;
             self.remove_attachment_links(&current.plan, plan)?;
         }
-        for attachment in &plan.attachments {
+        let execution_attachments = Self::execution_attachments(plan)?;
+        for attachment in &execution_attachments {
             self.ensure_attachment(
                 &namespace,
                 plan.gateway_id,
@@ -666,7 +938,9 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
                 }),
             )?;
         }
-        self.ensure_routes(&namespace, plan.gateway_id, &plan.attachments)?;
+        self.ensure_routes(&namespace, plan.gateway_id, &execution_attachments)?;
+        self.ensure_nft_marker(&namespace, plan)?;
+        self.ensure_snat(&namespace, plan, &execution_attachments)?;
         let state = LinuxGatewayState {
             plan: plan.clone(),
             aggregate_fingerprint: gateway_plan_fingerprint(plan)?,
@@ -699,10 +973,11 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
                 attachments: Vec::new(),
                 external_realm_id: old.plan.external_realm_id,
                 external_realm_prefix: old.plan.external_realm_prefix,
+                external_realm_generation: old.plan.external_realm_generation,
                 enable_snat: old.plan.enable_snat,
             };
             self.remove_routes(&old.plan, &empty)?;
-            for attachment in &old.plan.attachments {
+            for attachment in &Self::execution_attachments(&old.plan)? {
                 let (_, realm_if) = link_names(&old.plan, attachment);
                 let (exists, _) = self
                     .command
@@ -720,6 +995,31 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
                 }
             }
             let namespace = Self::namespace(&old.plan);
+            let table = Self::nft_table(&old.plan);
+            let (table_exists, _) = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns", "exec", &namespace, "nft", "list", "table", "ip", &table,
+                    ],
+                )
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
+            if table_exists
+                && !self
+                    .command
+                    .run(
+                        "ip",
+                        &[
+                            "netns", "exec", &namespace, "nft", "delete", "table", "ip", &table,
+                        ],
+                    )
+                    .map_err(|error| L3GatewayError::Backend(error.to_string()))?
+            {
+                return Err(L3GatewayError::Backend(
+                    "cannot remove gateway ownership marker".to_owned(),
+                ));
+            }
             if !self
                 .command
                 .run("ip", &["netns", "delete", &namespace])
@@ -775,6 +1075,24 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
             if !link_exists {
                 return Err(L3GatewayError::Backend(
                     "gateway attachment is absent".to_owned(),
+                ));
+            }
+        }
+        if self.command.supports_gateway_marker() {
+            let table = Self::nft_table(&state.plan);
+            let expected_marker = Self::nft_marker(&state.plan)?;
+            let Some(observed_marker) = self
+                .command
+                .gateway_marker(&namespace, &table)
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))?
+            else {
+                return Err(L3GatewayError::Backend(
+                    "gateway ownership marker is not observable".to_owned(),
+                ));
+            };
+            if observed_marker != expected_marker {
+                return Err(L3GatewayError::Backend(
+                    "gateway ownership marker mismatch".to_owned(),
                 ));
             }
         }
@@ -848,6 +1166,9 @@ pub fn validate_plan(plan: &L3GatewayExecutionPlan) -> Result<(), L3GatewayError
     if plan.external_realm_id.is_some() != plan.external_realm_prefix.is_some() {
         return Err(L3GatewayError::InvalidPlan);
     }
+    if plan.external_realm_id.is_some() && plan.external_realm_generation.unwrap_or_default() == 0 {
+        return Err(L3GatewayError::InvalidPlan);
+    }
     Ok(())
 }
 
@@ -899,6 +1220,10 @@ pub fn compile_l3_gateway_execution_plan(
             .and_then(|id| realms.get(&id))
             .map(|realm| parse_prefix(&realm.prefix))
             .transpose()?,
+        external_realm_generation: gateway
+            .external_realm_id
+            .and_then(|id| realms.get(&id))
+            .map(|realm| realm.generation),
         enable_snat: gateway.enable_snat,
     })
 }
@@ -950,6 +1275,7 @@ mod tests {
         calls: Mutex<Vec<(String, Vec<String>)>>,
         namespace: Mutex<bool>,
         link: Mutex<bool>,
+        links: Mutex<std::collections::BTreeSet<String>>,
     }
 
     impl FakeGatewayCommand {
@@ -958,6 +1284,7 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 namespace: Mutex::new(namespace),
                 link: Mutex::new(link),
+                links: Mutex::new(std::collections::BTreeSet::new()),
             }
         }
     }
@@ -972,7 +1299,13 @@ mod tests {
                 return Ok((*self.namespace.lock().expect("namespace"), String::new()));
             }
             if args.starts_with(&["link", "show"]) {
-                return Ok((*self.link.lock().expect("link"), String::new()));
+                let known = *self.link.lock().expect("link");
+                let named = args
+                    .iter()
+                    .position(|arg| *arg == "dev")
+                    .and_then(|index| args.get(index + 1))
+                    .is_some_and(|name| self.links.lock().expect("links").contains(*name));
+                return Ok((known || named, String::new()));
             }
             Ok((true, String::new()))
         }
@@ -986,7 +1319,12 @@ mod tests {
                 *self.namespace.lock().expect("namespace") = true;
             }
             if args.starts_with(&["link", "add"]) {
-                *self.link.lock().expect("link") = true;
+                if let Some(name) = args.get(2) {
+                    self.links.lock().expect("links").insert((*name).to_owned());
+                }
+                if let Some(name) = args.last() {
+                    self.links.lock().expect("links").insert((*name).to_owned());
+                }
             }
             Ok(true)
         }
@@ -1007,6 +1345,7 @@ mod tests {
             }],
             external_realm_id: None,
             external_realm_prefix: None,
+            external_realm_generation: None,
             enable_snat: false,
         }
     }
@@ -1102,6 +1441,55 @@ mod tests {
                 .observe(desired.gateway_id, "project-a")
                 .expect("observe"),
             Some(desired)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn external_realm_is_realized_as_a_provider_attachment_with_snat() {
+        let root = std::env::temp_dir().join(format!("o3k-gateway-external-{}", Uuid::now_v7()));
+        let internal_id = Uuid::from_u128(3);
+        let external_id = Uuid::from_u128(4);
+        let mut contexts = BTreeMap::new();
+        for (realm_id, generation) in [(internal_id, 2), (external_id, 3)] {
+            contexts.insert(
+                realm_id,
+                RealmExecutionContext {
+                    realm_id,
+                    realm_generation: generation,
+                    namespace: format!("o3k-r-{}", realm_id.simple()),
+                    bridge: format!("o3k-b-{}", realm_id.simple()),
+                    realm_interface: format!("o3k-i-{}", &realm_id.simple().to_string()[..8]),
+                },
+            );
+        }
+        let mut desired = plan(Uuid::from_u128(1), Uuid::from_u128(11));
+        desired.attachments[0].realm_generation = 2;
+        desired.external_realm_id = Some(external_id);
+        desired.external_realm_prefix =
+            Some(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24).expect("prefix"));
+        desired.external_realm_generation = Some(3);
+        desired.enable_snat = true;
+        let command = Arc::new(FakeGatewayCommand::new(false, false));
+        let calls = Arc::clone(&command);
+        let mut provider =
+            LinuxL3GatewayProvider::with_command(&root, contexts, command).expect("provider");
+        provider.apply(&desired).expect("apply");
+        assert!(
+            calls
+                .calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .any(|(_, args)| { args.iter().any(|arg| arg == "masquerade") })
+        );
+        assert!(
+            calls
+                .calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .any(|(_, args)| { args.iter().any(|arg| arg == "192.0.2.0/24") })
         );
         let _ = fs::remove_dir_all(root);
     }

@@ -28,6 +28,23 @@ struct CompiledGraph {
     generation: u64,
 }
 
+async fn clear_postgres_graph(store: &PostgresStore) {
+    for table in [
+        "canonical_policy_attachments",
+        "canonical_network_policy_rules",
+        "canonical_reusable_network_policies",
+        "canonical_endpoints",
+        "canonical_address_realms",
+        "canonical_networks",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE project_id = $1"))
+            .bind(PROJECT)
+            .execute(store.pool())
+            .await
+            .expect("cleanup");
+    }
+}
+
 async fn seed<R: NetworkRepository + 'static>(store: Arc<R>, reverse_order: bool) -> CompiledGraph {
     store
         .insert_canonical_network(&CanonicalNetworkRecord {
@@ -184,10 +201,16 @@ async fn sqlite_insertion_order_does_not_change_fingerprint() {
 #[ignore = "requires a disposable PostgreSQL conformance database"]
 async fn postgres_insertion_order_does_not_change_fingerprint() {
     let url = std::env::var("O3K_DATABASE_URL").expect("O3K_DATABASE_URL");
+    let initial_store = PostgresStore::connect(&url).await.expect("postgres");
+    clear_postgres_graph(&initial_store).await;
     let first_store = Arc::new(PostgresStore::connect(&url).await.expect("postgres"));
     let first = seed(first_store, false).await;
-    // The conformance database is disposable; this second graph uses the same
-    // values so the comparison is against the same canonical identity.
+    // The conformance database is disposable. Clear only this test's
+    // project-owned graph before inserting the same explicit IDs again; this
+    // keeps the comparison against identical canonical identities without
+    // requiring a second database.
+    let cleanup = PostgresStore::connect(&url).await.expect("postgres");
+    clear_postgres_graph(&cleanup).await;
     let second_url = std::env::var("O3K_DATABASE_URL_PARITY").expect("O3K_DATABASE_URL_PARITY");
     let second_store = Arc::new(PostgresStore::connect(&second_url).await.expect("postgres"));
     let second = seed(second_store, true).await;

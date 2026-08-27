@@ -150,6 +150,9 @@ pub struct L3GatewayExecutionPlan {
     /// Provider-local uplink/interface details remain outside this plan.
     #[serde(default)]
     pub external_realm_prefix: Option<Ipv4Prefix>,
+    /// Canonical external Realm revision used to fence gateway execution.
+    #[serde(default)]
+    pub external_realm_generation: Option<u64>,
     pub enable_snat: bool,
 }
 

@@ -58,6 +58,10 @@ canonical Realm IDs to existing Realm namespace/bridge/interface contexts.
 Those names are derived execution state and are never stored in the canonical
 gateway model. Per-attachment observation remains truthful when an aggregate
 provider topology is rebuilt.
+The Linux provider also writes an O3K-owned fingerprint marker inside the
+gateway namespace. This is derived realization evidence that binds the
+observed aggregate topology to the durable execution record; it never
+reconstructs canonical gateway or Realm resources.
 
 ## 4. Neutron projection
 
