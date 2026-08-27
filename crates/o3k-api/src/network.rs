@@ -723,7 +723,12 @@ pub(crate) async fn remove_router_interface(
             {
                 return network_error(error);
             }
-            StatusCode::ACCEPTED.into_response()
+            // Router Interface removal is synchronous at the compatibility
+            // boundary: the pinned OpenStack provider expects the successful
+            // remove operation to return 200, just like the corresponding
+            // create/read path.  The canonical attachment lifecycle remains
+            // durable and is finalized only after reconciliation.
+            StatusCode::OK.into_response()
         }
         Err(error) => network_error(error),
     }

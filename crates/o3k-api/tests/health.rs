@@ -2313,7 +2313,7 @@ async fn router_detach_dispatches_only_the_requested_gateway_and_finalizes_after
                 ))?,
         )
         .await?;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.status(), StatusCode::OK);
 
     {
         let commands = commands
