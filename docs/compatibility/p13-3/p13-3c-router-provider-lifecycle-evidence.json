@@ -1,0 +1,37 @@
+{
+  "profile": "p13-3-router-l3-gateway",
+  "tested_operations": [
+    "router_create",
+    "router_read",
+    "router_update",
+    "router_refresh",
+    "router_restart_reconstruction",
+    "router_import",
+    "router_interface_attach",
+    "router_interface_read",
+    "router_interface_detach",
+    "router_delete"
+  ],
+  "toolchain": {
+    "engine": "OpenTofu",
+    "engine_version": "1.12.6",
+    "provider": "terraform-provider-openstack/openstack",
+    "provider_version": "3.4.0",
+    "provider_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+    "provider_modified": false
+  },
+  "authority": {
+    "router": "canonical L3Gateway",
+    "router_interface": "canonical L3GatewayAttachment",
+    "provider_state_is_authority": false,
+    "terraform_state_is_authority": false
+  },
+  "scope": {
+    "external_gateway_snat": "not exercised in this bounded gate",
+    "l3_connectivity": "not exercised in this provider lifecycle gate",
+    "security_group_compatibility": "not exercised",
+    "router_floating_ip": "not exercised"
+  },
+  "result": "passed",
+  "tested_implementation_sha": "2c922ba5ff10d2b926f3bd23a561606916b2d6b8"
+}
