@@ -605,6 +605,10 @@ impl LinuxL3GatewayProvider {
                         "route",
                         "replace",
                         &prefix,
+                        "via",
+                        &provider_link_addresses(gateway_id, destination.attachment_id)
+                            .0
+                            .to_string(),
                         "dev",
                         &gateway_if,
                     ],
@@ -1531,22 +1535,50 @@ mod tests {
         let realm_b_ns = format!("o3k-gb-{}", &suffix[..5]);
         let bridge_a = format!("o3k-ba-{}", &suffix[..5]);
         let bridge_b = format!("o3k-bb-{}", &suffix[..5]);
+        let endpoint_a_ns = format!("o3k-ea-{}", &suffix[..5]);
+        let endpoint_b_ns = format!("o3k-eb-{}", &suffix[..5]);
+        let endpoint_a = format!("o3k-ea-i-{}", &suffix[..4]);
+        let endpoint_b = format!("o3k-eb-i-{}", &suffix[..4]);
+        let endpoint_a_host = format!("o3k-ea-h-{}", &suffix[..4]);
+        let endpoint_b_host = format!("o3k-eb-h-{}", &suffix[..4]);
         let old_link_a = "o3kr0000300";
         let old_link_b = "o3kr0000400";
         let root = std::env::temp_dir().join(format!("o3k-gateway-real-{}", &suffix[..8]));
         let cleanup = || {
             let _ = ip(&["netns", "del", &realm_a_ns]);
             let _ = ip(&["netns", "del", &realm_b_ns]);
+            let _ = ip(&["netns", "del", &endpoint_a_ns]);
+            let _ = ip(&["netns", "del", &endpoint_b_ns]);
             let _ = ip(&["netns", "del", &gateway_namespace]);
             let _ = ip(&["link", "del", &bridge_a]);
             let _ = ip(&["link", "del", &bridge_b]);
             let _ = ip(&["link", "del", old_link_a]);
             let _ = ip(&["link", "del", old_link_b]);
+            let _ = ip(&["link", "del", &endpoint_a_host]);
+            let _ = ip(&["link", "del", &endpoint_b_host]);
             let _ = fs::remove_dir_all(&root);
         };
         cleanup();
         assert!(ip(&["netns", "add", &realm_a_ns]));
         assert!(ip(&["netns", "add", &realm_b_ns]));
+        assert!(ip(&["netns", "add", &endpoint_a_ns]));
+        assert!(ip(&["netns", "add", &endpoint_b_ns]));
+        assert!(ip(&[
+            "netns",
+            "exec",
+            &realm_a_ns,
+            "sysctl",
+            "-w",
+            "net.ipv4.ip_forward=1",
+        ]));
+        assert!(ip(&[
+            "netns",
+            "exec",
+            &realm_b_ns,
+            "sysctl",
+            "-w",
+            "net.ipv4.ip_forward=1",
+        ]));
         assert!(ip(&["link", "add", &bridge_a, "type", "bridge"]));
         assert!(ip(&["link", "add", &bridge_b, "type", "bridge"]));
         assert!(ip(&["link", "set", &bridge_a, "up"]));
@@ -1585,6 +1617,57 @@ mod tests {
                 },
             );
         }
+        for (endpoint_ns, endpoint_if, host_if, bridge, address) in [
+            (
+                &endpoint_a_ns,
+                &endpoint_a,
+                &endpoint_a_host,
+                &bridge_a,
+                "10.30.0.10/24",
+            ),
+            (
+                &endpoint_b_ns,
+                &endpoint_b,
+                &endpoint_b_host,
+                &bridge_b,
+                "10.40.0.10/24",
+            ),
+        ] {
+            assert!(ip(&[
+                "link",
+                "add",
+                endpoint_if,
+                "type",
+                "veth",
+                "peer",
+                "name",
+                host_if,
+            ]));
+            assert!(ip(&["link", "set", endpoint_if, "netns", endpoint_ns]));
+            assert!(ip(&["link", "set", host_if, "master", bridge]));
+            assert!(ip(&["link", "set", host_if, "up"]));
+            assert!(ip(&[
+                "netns",
+                "exec",
+                endpoint_ns,
+                "ip",
+                "addr",
+                "add",
+                address,
+                "dev",
+                endpoint_if,
+            ]));
+            assert!(ip(&[
+                "netns",
+                "exec",
+                endpoint_ns,
+                "ip",
+                "link",
+                "set",
+                endpoint_if,
+                "up",
+            ]));
+        }
         let attachment_a = L3GatewayExecutionAttachment {
             attachment_id: Uuid::from_u128(11),
             attachment_generation: 1,
@@ -1607,6 +1690,53 @@ mod tests {
         updated.attachments[0].attachment_generation = 2;
         let mut provider = LinuxL3GatewayProvider::open(&root, contexts.clone()).expect("open");
         provider.apply(&initial).expect("initial apply");
+        assert!(ip(&[
+            "netns",
+            "exec",
+            &endpoint_a_ns,
+            "ip",
+            "route",
+            "replace",
+            "10.40.0.0/24",
+            "via",
+            "10.30.0.1",
+        ]));
+        assert!(ip(&[
+            "netns",
+            "exec",
+            &endpoint_b_ns,
+            "ip",
+            "route",
+            "replace",
+            "10.30.0.0/24",
+            "via",
+            "10.40.0.1",
+        ]));
+        let listener = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &endpoint_b_ns,
+                "python3",
+                "-c",
+                "import socket; s=socket.socket(); s.bind(('10.40.0.10',18080)); s.listen(1); c,_=s.accept(); c.close()",
+            ])
+            .spawn()
+            .expect("listener");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let connection = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &endpoint_a_ns,
+                "python3",
+                "-c",
+                "import socket; s=socket.create_connection(('10.40.0.10',18080), 2); s.close()",
+            ])
+            .status()
+            .expect("connection");
+        assert!(connection.success());
+        let _ = listener.wait_with_output();
         drop(provider);
         let mut provider = LinuxL3GatewayProvider::open(&root, contexts.clone()).expect("reopen");
         assert_eq!(
@@ -1627,6 +1757,31 @@ mod tests {
         let mut only_b = updated.clone();
         only_b.attachments = vec![attachment_b];
         provider.apply(&only_b).expect("remove A");
+        let listener = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &endpoint_b_ns,
+                "python3",
+                "-c",
+                "import socket; s=socket.socket(); s.bind(('10.40.0.10',18080)); s.listen(1); s.settimeout(2); c,_=s.accept(); c.close()",
+            ])
+            .spawn()
+            .expect("listener after detach");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let blocked = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &endpoint_a_ns,
+                "python3",
+                "-c",
+                "import socket; socket.create_connection(('10.40.0.10',18080), 1)",
+            ])
+            .status()
+            .expect("blocked connection");
+        assert!(!blocked.success());
+        let _ = listener.wait_with_output();
         drop(provider);
         let provider = LinuxL3GatewayProvider::open(&root, contexts).expect("reopen 3");
         assert_eq!(
