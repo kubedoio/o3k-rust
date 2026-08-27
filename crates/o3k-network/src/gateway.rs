@@ -540,6 +540,26 @@ impl LinuxL3GatewayProvider {
                     ],
                 )
                 .map_err(|error| L3GatewayError::Backend(error.to_string()))?
+            || !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &context.namespace,
+                        "ip",
+                        "addr",
+                        "replace",
+                        &format!(
+                            "{}/{}",
+                            attachment.gateway_address, attachment.realm_prefix.prefix_len
+                        ),
+                        "dev",
+                        &context.realm_interface,
+                    ],
+                )
+                .map_err(|error| L3GatewayError::Backend(error.to_string()))?
         {
             return Err(L3GatewayError::Backend(
                 "cannot configure gateway attachment".to_owned(),
