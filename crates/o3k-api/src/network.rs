@@ -31,7 +31,8 @@ pub(crate) struct RouterRequest {
     #[serde(default)]
     external_realm_id: Option<Uuid>,
     #[serde(default)]
-    external_gateway_info: Option<ExternalGatewayInfo>,
+    /// `None` means omitted; `Some(None)` is an explicit Neutron clear.
+    external_gateway_info: Option<Option<ExternalGatewayInfo>>,
 }
 #[derive(serde::Deserialize)]
 pub(crate) struct ExternalGatewayInfo {
@@ -137,7 +138,7 @@ async fn external_realm_for_router(
     if let Some(realm_id) = request.external_realm_id {
         return Ok(Some(realm_id));
     }
-    let Some(info) = request.external_gateway_info.as_ref() else {
+    let Some(Some(info)) = request.external_gateway_info.as_ref() else {
         return Ok(None);
     };
     let Some(network_id) = info.network_id else {
@@ -217,6 +218,7 @@ pub(crate) async fn create_router(
             body.router
                 .external_gateway_info
                 .as_ref()
+                .and_then(|info| info.as_ref())
                 .and_then(|info| info.enable_snat)
                 .or(body.router.enable_snat)
                 .unwrap_or(true),
@@ -283,9 +285,16 @@ pub(crate) async fn update_router(
         Ok(v) => v,
         Err(e) => return network_error(e),
     };
-    let external_realm_id = match external_realm_for_router(service, project, &body.router).await {
-        Ok(value) => value.or(current.external_realm_id),
-        Err(error) => return network_error(error),
+    let external_realm_id = match body.router.external_gateway_info.as_ref() {
+        Some(Some(_)) => match external_realm_for_router(service, project, &body.router).await {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        },
+        Some(None) => None,
+        None => match external_realm_for_router(service, project, &body.router).await {
+            Ok(value) => value.or(current.external_realm_id),
+            Err(error) => return network_error(error),
+        },
     };
     match service
         .update_l3_gateway_for_project(
@@ -297,6 +306,7 @@ pub(crate) async fn update_router(
             body.router
                 .external_gateway_info
                 .as_ref()
+                .and_then(|info| info.as_ref())
                 .and_then(|info| info.enable_snat)
                 .or(body.router.enable_snat)
                 .unwrap_or(current.enable_snat),
