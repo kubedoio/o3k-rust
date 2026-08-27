@@ -3,6 +3,8 @@
   "schema_version": 1,
   "implementation_sha": "bfcdf38",
   "evidence_tier": "isolated-linux-netns-real-provider",
+  "evidence_status": "stale_requires_rerun",
+  "evidence_note": "Gateway execution and recovery code changed after this run; verified values below are historical and must not be used as current-code evidence.",
   "authority": {
     "canonical": "L3Gateway/L3GatewayAttachment/AddressRealm",
     "execution": "L3GatewayExecutionPlan -> LinuxL3GatewayProvider",

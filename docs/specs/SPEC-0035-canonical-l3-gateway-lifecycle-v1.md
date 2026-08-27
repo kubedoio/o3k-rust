@@ -5,6 +5,11 @@ Accepted-by: project-requester on 2026-08-27; bounded runtime and compatibility 
 Decision: [ADR-0178](../adr/ADR-0178-canonical-l3-gateway-and-realm-connectivity.md)
 Applies-to: canonical L3 gateway domain, store, network execution, Neutron Router projection
 
+Current evidence note: the committed gateway lifecycle/execution artifacts were
+run against `bfcdf38`. Subsequent gateway changes invalidate those artifacts as
+current-code verification; the bounded runtime and compatibility gates require
+a rerun before this specification is used to support a current P13.3 claim.
+
 ## 1. Canonical model
 
 ```text

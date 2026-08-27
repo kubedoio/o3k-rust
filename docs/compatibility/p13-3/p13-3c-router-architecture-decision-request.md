@@ -50,5 +50,8 @@ and external SNAT traffic remain separately bounded evidence gates.
 The project requester accepted Option 1 on 2026-08-27. The canonical
 L3Gateway/L3GatewayAttachment implementation and bounded real-provider Router
 and Router Interface lifecycle gate are now recorded in the accepted ADR/SPEC
-and the companion lifecycle evidence artifact. Realm-to-Realm connectivity
-and external SNAT traffic remain separately bounded evidence gates.
+and the companion lifecycle evidence artifact. That artifact is retained as
+historical evidence because the gateway implementation changed afterward; it
+does not verify the current revision. Realm-to-Realm connectivity and external
+SNAT traffic therefore remain separately bounded evidence gates and require a
+current-code rerun before being claimed as verified.

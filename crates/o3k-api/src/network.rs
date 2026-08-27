@@ -339,15 +339,52 @@ pub(crate) async fn delete_router(
         Ok(v) => v,
         Err(e) => return network_error(e),
     };
-    match service
+    let provider_snapshot =
+        if state.network_dispatcher.is_some() && state.network_controller.is_some() {
+            match service
+                .compile_l3_gateway_execution_plan_for_project(project, &id)
+                .await
+            {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => return network_error(error),
+            }
+        } else {
+            None
+        };
+    let deleting = match service
         .delete_l3_gateway_for_project(project, &id, current.generation)
         .await
     {
-        // Deletion is a durable reservation.  A reconciler must withdraw and
-        // observe provider absence before the canonical row is finalized.
-        Ok(_) => StatusCode::ACCEPTED.into_response(),
-        Err(error) => network_error(error),
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    let provider_dispatched = if let Some(snapshot) = provider_snapshot
+        && let Err(response) = dispatch_l3_gateway_snapshot(
+            &state,
+            project,
+            snapshot,
+            o3k_network::NetworkPlanAction::Remove,
+            deleting.generation,
+        )
+        .await
+    {
+        return response;
+    } else {
+        state.network_dispatcher.is_some() && state.network_controller.is_some()
+    };
+    if !provider_dispatched {
+        // Keep the durable deleting reservation until a configured network
+        // agent can withdraw and observe provider absence.  Returning 202 is
+        // truthful; finalization without an execution boundary is not.
+        return StatusCode::ACCEPTED.into_response();
     }
+    if let Err(error) = service
+        .finalize_l3_gateway_deletion_for_project(project, &id, deleting.generation)
+        .await
+    {
+        return network_error(error);
+    }
+    StatusCode::ACCEPTED.into_response()
 }
 
 pub(crate) async fn add_router_interface(
@@ -514,10 +551,11 @@ pub(crate) async fn remove_router_interface(
                 Ok(value) => value,
                 Err(error) => return network_error(error),
             };
-            for port in ports
+            let network_ports = ports
                 .into_iter()
                 .filter(|port| port.network_id == realm.network_id)
-            {
+                .collect::<Vec<_>>();
+            for port in &network_ports {
                 if let Err(response) = dispatch_policy_network_with_gateway(
                     &state,
                     project,
@@ -529,6 +567,34 @@ pub(crate) async fn remove_router_interface(
                 {
                     return response;
                 }
+            }
+            if network_ports.is_empty()
+                && state.network_dispatcher.is_some()
+                && state.network_controller.is_some()
+            {
+                let snapshot = match service
+                    .compile_l3_gateway_execution_plan_for_project(project, &a.gateway_id)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => return network_error(error),
+                };
+                if let Err(response) = dispatch_l3_gateway_snapshot(
+                    &state,
+                    project,
+                    snapshot,
+                    o3k_network::NetworkPlanAction::Apply,
+                    deleting.generation,
+                )
+                .await
+                {
+                    return response;
+                }
+            }
+            let provider_dispatched =
+                state.network_dispatcher.is_some() && state.network_controller.is_some();
+            if !provider_dispatched {
+                return StatusCode::ACCEPTED.into_response();
             }
             if let Err(error) = service
                 .finalize_l3_gateway_realm_detachment_for_project(
@@ -549,6 +615,88 @@ pub(crate) async fn remove_router_interface(
         }
         Err(error) => network_error(error),
     }
+}
+
+async fn dispatch_l3_gateway_snapshot(
+    state: &AppState,
+    project_id: &str,
+    gateway: o3k_domain::L3GatewayExecutionPlan,
+    action: o3k_network::NetworkPlanAction,
+    generation: u64,
+) -> Result<(), axum::response::Response> {
+    let Some(dispatcher) = state.network_dispatcher.as_ref() else {
+        return Ok(());
+    };
+    let Some(controller) = state.network_controller.as_ref() else {
+        return Ok(());
+    };
+    let Some(agent) = state.network_agent.as_ref() else {
+        return Err(keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "gateway provider agent is unavailable",
+        ));
+    };
+    if gateway.project_id != project_id {
+        return Err(keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "gateway project ownership mismatch",
+        ));
+    }
+    let fingerprint = o3k_network::gateway_plan_fingerprint(&gateway).map_err(|error| {
+        keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string())
+    })?;
+    let operation_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!(
+            "o3k:network:gateway:{action:?}:{project_id}:{}:{generation}:{fingerprint}",
+            gateway.gateway_id
+        )
+        .as_bytes(),
+    );
+    let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
+    let plan = o3k_network::compile_l3_gateway_network_plan(
+        gateway,
+        &agent.agent_id,
+        operation_id,
+        deadline_unix_ms,
+    )
+    .map_err(|error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()))?;
+    let command_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:network:gateway-command:{operation_id}").as_bytes(),
+    );
+    let status = dispatcher
+        .dispatch(o3k_network::NetworkPlanCommand {
+            command_id,
+            operation_id,
+            idempotency_key: format!(
+                "o3k:network:gateway:{project_id}:{}:{generation}:{fingerprint}:{action:?}",
+                plan.plan_id
+            ),
+            action,
+            target: agent.clone(),
+            controller: controller.clone(),
+            deadline_unix_ms,
+            plan,
+        })
+        .await
+        .map_err(|error| {
+            keystone_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Service Unavailable",
+                error.to_string(),
+            )
+        })?;
+    if status != o3k_network::NetworkPlanStatus::Succeeded {
+        return Err(keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "gateway realization requires observation",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]

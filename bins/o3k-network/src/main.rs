@@ -223,6 +223,14 @@ impl NetworkPlanRealizer for CompositeRealizer {
                 realizer.remove(gateway.gateway_id, &gateway.project_id)?;
             } else {
                 realizer.apply(gateway)?;
+                let observed = realizer.observe(gateway.gateway_id, &gateway.project_id)?;
+                if observed.as_ref() != Some(gateway) {
+                    return Err(CompositeRealizerError::Gateway(
+                        o3k_network::L3GatewayError::Backend(
+                            "gateway apply was not observed at the requested snapshot".to_owned(),
+                        ),
+                    ));
+                }
             }
         }
         if plan.fabric.is_some() {
@@ -276,14 +284,25 @@ impl NetworkPlanRealizer for CompositeRealizer {
 
     fn remove(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
         if let Some(gateway) = &plan.gateway {
-            self.gateway
+            let realizer = self
+                .gateway
                 .as_mut()
                 .ok_or(CompositeRealizerError::Gateway(
                     o3k_network::L3GatewayError::Backend(
                         "gateway plan requires O3K_NETWORK_GATEWAY_ROOT".to_owned(),
                     ),
-                ))?
-                .remove(gateway.gateway_id, &gateway.project_id)?;
+                ))?;
+            realizer.remove(gateway.gateway_id, &gateway.project_id)?;
+            if realizer
+                .observe(gateway.gateway_id, &gateway.project_id)?
+                .is_some()
+            {
+                return Err(CompositeRealizerError::Gateway(
+                    o3k_network::L3GatewayError::Backend(
+                        "gateway removal was not observed as absent".to_owned(),
+                    ),
+                ));
+            }
         }
         if plan.fabric.is_some() {
             if plan.intents.iter().any(|intent| {

@@ -3968,6 +3968,35 @@ impl NodeNetworkPlan {
     }
 }
 
+/// Builds a node plan whose only execution unit is one complete canonical L3
+/// gateway snapshot. This is used for gateway lifecycle operations that have
+/// no endpoint plan to carry the gateway, such as deleting an unattached
+/// gateway or detaching a Realm with no ports.
+pub fn compile_l3_gateway_network_plan(
+    gateway: o3k_domain::L3GatewayExecutionPlan,
+    node_id: &str,
+    operation_id: Uuid,
+    deadline_unix_ms: u64,
+) -> Result<NodeNetworkPlan, NetworkPlanError> {
+    if node_id.trim().is_empty() {
+        return Err(NetworkPlanError::InvalidGatewayPlan);
+    }
+    let mut plan = NodeNetworkPlan {
+        schema_version: NODE_NETWORK_PLAN_SCHEMA_VERSION,
+        plan_id: gateway.gateway_id,
+        node_id: node_id.to_owned(),
+        operation_id,
+        deadline_unix_ms,
+        resource_generations: BTreeMap::from([(gateway.gateway_id, gateway.gateway_generation)]),
+        intents: Vec::new(),
+        fabric: None,
+        gateway: Some(gateway),
+        fingerprint_sha256: String::new(),
+    };
+    plan.fingerprint_sha256 = canonical_plan_fingerprint(&plan)?;
+    Ok(plan)
+}
+
 /// Compile the currently supported flat attachment projection into the same
 /// canonical per-node plan used by routed providers. This helper is kept in
 /// the network application boundary so callers cannot construct a wire-only
