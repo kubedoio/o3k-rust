@@ -26,7 +26,7 @@ use axum::{
     extract::{FromRef, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use o3k_compute::ComputeService;
 use o3k_compute_agent::NodeRegistry;
@@ -308,11 +308,11 @@ pub fn router_with_state(state: AppState) -> Router {
         )
         .route(
             "/v2.0/routers/{id}/add_router_interface",
-            post(add_router_interface),
+            put(add_router_interface),
         )
         .route(
             "/v2.0/routers/{id}/remove_router_interface",
-            post(remove_router_interface),
+            put(remove_router_interface),
         )
         .route(
             "/v2.0/floatingips",

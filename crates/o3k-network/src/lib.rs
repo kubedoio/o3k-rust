@@ -6127,12 +6127,21 @@ impl NetworkService {
         }
         let realm_ids: BTreeSet<Uuid> = realms.iter().map(|realm| realm.id).collect();
         let mut l3_gateways = Vec::new();
-        for gateway in self.inner.repository.list_canonical_l3_gateways(project_id).await
-            .map_err(map_store_error)? {
-            let attachments = self.inner.repository
+        for gateway in self
+            .inner
+            .repository
+            .list_canonical_l3_gateways(project_id)
+            .await
+            .map_err(map_store_error)?
+        {
+            let attachments = self
+                .inner
+                .repository
                 .list_canonical_l3_gateway_attachments(project_id, &gateway.id)
-                .await.map_err(map_store_error)?;
-            let relevant: Vec<_> = attachments.into_iter()
+                .await
+                .map_err(map_store_error)?;
+            let relevant: Vec<_> = attachments
+                .into_iter()
                 .filter(|attachment| realm_ids.contains(&attachment.realm_id))
                 .collect();
             if !relevant.is_empty() {
