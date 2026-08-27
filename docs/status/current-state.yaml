@@ -1,7 +1,7 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: 7b8bd4dbfd84f7c1d76afd14efe7b86a75fd1cb8
-updated_at: 2026-08-26T00:00:00Z
+source_commit: 20e623941ce6ddf3317c68078978f0976d2c2b30
+updated_at: 2026-08-27T00:00:00Z
 release_context: >-
   The first native alpha candidate v0.2.0-alpha.1 at
   952dcf9c4a1ae958996e4ae9444763e5524eddc5 is rejected and permanently

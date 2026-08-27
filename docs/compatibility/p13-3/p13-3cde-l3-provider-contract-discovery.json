@@ -79,6 +79,6 @@
   "verification": {
     "real_provider_lifecycle": "executed against O3K with pinned OpenTofu/provider; bounded Router and Router Interface lifecycle evidence is committed separately",
     "provider_source_inspection": "completed",
-    "implementation_status": "canonical L3Gateway projection implemented; bounded provider lifecycle verified; L3 connectivity remains a separate gate"
+    "implementation_status": "canonical L3Gateway projection implemented; bounded provider lifecycle and isolated L3 connectivity verified"
   }
 }

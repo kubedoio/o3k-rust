@@ -119,8 +119,8 @@ remain unmodified. No O3K fork or patch is permitted.
 |---|---|---|---|
 | `openstack_networking_secgroup_v2` | Neutron v2 security group CRUD | Canonical NetworkPolicy (projection) | P13.3 |
 | `openstack_networking_secgroup_rule_v2` | Neutron v2 security group rule CRUD | Canonical NetworkPolicy rule (projection) | P13.3 |
-| `openstack_networking_router_v2` | Neutron v2 router CRUD | Canonical AddressRealm gateway/route (projection) | P13.3 |
-| `openstack_networking_router_interface_v2` | Neutron v2 router add/remove interface | Canonical route/endpoint (projection) | P13.3 |
+| `openstack_networking_router_v2` | Neutron v2 router CRUD | Canonical L3Gateway (projection) | P13.3 |
+| `openstack_networking_router_interface_v2` | Neutron v2 router add/remove interface | Canonical L3GatewayAttachment / AddressRealm relation (projection) | P13.3 |
 | `openstack_networking_floatingip_v2` | Neutron v2 floating IP CRUD | Canonical PublicAddress | P13.3 |
 
 ### Managed resources — storage
@@ -237,17 +237,15 @@ mapped onto canonical NetworkPolicy rules. P13.3 implements this.
 - `PUT /v2.0/routers/{id}` (update)
 - `DELETE /v2.0/routers/{id}` (delete)
 
-These operations require a Neutron router compatibility projection over
-canonical AddressRealm gateway/route semantics.
+These operations require a Neutron router compatibility projection over the
+canonical provider-independent `L3Gateway` resource and its
+`L3GatewayAttachment` relations.
 
-**Identity caveat:** Neutron router has durable lifecycle identity that does
-not map one-to-one to any single existing O3K canonical resource. The
-compatibility projection's identity persistence, owner scope, uniqueness,
-restart reconstruction, mapping cardinality, and deletion semantics must be
-frozen by the mandatory P13.3 provider-contract discovery gate before
-implementation. The
-possibility of a future canonical L3 Gateway/Router resource (not Neutron
-specific) must remain open.
+Neutron Router identity maps to the independent canonical `L3Gateway` identity;
+Router Interface identity maps to `L3GatewayAttachment`. AddressRealm remains
+the independently valid routing/address-interpretation resource and is not
+reused as Router identity. The mapping, ownership, restart, cardinality, and
+deletion rules are defined by accepted ADR-0178/SPEC-0035.
 
 P13.3 implements this.
 
