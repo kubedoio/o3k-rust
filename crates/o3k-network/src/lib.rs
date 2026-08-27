@@ -4932,6 +4932,20 @@ impl NetworkService {
         {
             return Err(NetworkError::NotFound);
         }
+        if self
+            .inner
+            .repository
+            .list_canonical_l3_gateway_attachments(project_id, gateway_id)
+            .await
+            .map_err(map_store_error)?
+            .iter()
+            .any(|attachment| attachment.realm_id == *realm_id)
+        {
+            // The relation is a durable deletion reservation as well as a
+            // compatibility object. Do not replace it while the provider is
+            // still converging the detach.
+            return Err(NetworkError::Conflict);
+        }
         let attachment = o3k_store::CanonicalL3GatewayAttachmentRecord {
             id: Uuid::now_v7(),
             gateway_id: *gateway_id,
@@ -5074,6 +5088,14 @@ impl NetworkService {
         let gateway = self
             .get_l3_gateway_for_project(project_id, gateway_id)
             .await?;
+        let mut compilable_gateway = gateway.clone();
+        if !matches!(gateway.state.as_str(), "active" | "deleting") {
+            return Err(NetworkError::Conflict);
+        }
+        // The provider-neutral compiler validates an active desired snapshot.
+        // A deleting row is nevertheless a valid durable removal reservation:
+        // compile that snapshot without changing its persisted generation.
+        compilable_gateway.state = "active".to_owned();
         let attachments = self
             .list_l3_gateway_attachments(project_id, gateway_id)
             .await?;
@@ -5102,7 +5124,7 @@ impl NetworkService {
             }
             realms.insert(external.id, external);
         }
-        compile_l3_gateway_execution_plan(&gateway, &attachments, &realms)
+        compile_l3_gateway_execution_plan(&compilable_gateway, &attachments, &realms)
             .map_err(|_| NetworkError::InvalidRequest)
     }
 
@@ -10795,6 +10817,109 @@ mod tests {
         let _ = fs::remove_file(&sqlite_path);
         let _ = fs::remove_file(format!("{sqlite_path}-wal"));
         let _ = fs::remove_file(format!("{sqlite_path}-shm"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gateway_delete_reservation_reconstructs_a_generation_fenced_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("gateway-delete-reservation");
+        let _ = fs::remove_dir_all(&path);
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let gateway = service
+            .create_l3_gateway_for_project("project-a", "edge".to_owned(), None, true)
+            .await?;
+
+        let deleting = service
+            .delete_l3_gateway_for_project("project-a", &gateway.id, gateway.generation)
+            .await?;
+        assert_eq!(deleting.state, "deleting");
+        assert_eq!(deleting.generation, gateway.generation + 1);
+
+        // A retry/restart can rebuild the exact removal target from the
+        // durable reservation; it must not need the pre-delete row in memory.
+        let snapshot = service
+            .compile_l3_gateway_execution_plan_for_project("project-a", &gateway.id)
+            .await?;
+        assert_eq!(snapshot.gateway_id, gateway.id);
+        assert_eq!(snapshot.gateway_generation, deleting.generation);
+        assert!(snapshot.attachments.is_empty());
+        assert_eq!(
+            store
+                .get_canonical_l3_gateway("project-a", &gateway.id)
+                .await?
+                .ok_or("gateway reservation disappeared")?
+                .state,
+            "deleting"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attachment_detach_reservation_is_gateway_scoped_and_not_finalized_implicitly()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("gateway-detach-reservation");
+        let _ = fs::remove_dir_all(&path);
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let network = service
+            .create_canonical_network_for_project("project-a", "net".to_owned())
+            .await?;
+        let realm = service
+            .create_canonical_realm_for_project(
+                "project-a",
+                network.id,
+                "192.0.2.0/24".to_owned(),
+                false,
+            )
+            .await?;
+        let gateway = service
+            .create_l3_gateway_for_project("project-a", "edge".to_owned(), None, true)
+            .await?;
+        let attachment = service
+            .attach_l3_gateway_realm("project-a", &gateway.id, &realm.id)
+            .await?;
+        let deleting = service
+            .detach_l3_gateway_realm("project-a", &attachment.id, attachment.generation)
+            .await?;
+
+        assert_eq!(deleting.state, "deleting");
+        assert_eq!(deleting.generation, attachment.generation + 1);
+        assert!(matches!(
+            service
+                .attach_l3_gateway_realm("project-a", &gateway.id, &realm.id)
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+
+        // The relation remains present until an external provider observation
+        // authorizes finalization, while the gateway snapshot excludes it.
+        let snapshot = service
+            .compile_l3_gateway_execution_plan_for_project("project-a", &gateway.id)
+            .await?;
+        assert_eq!(snapshot.gateway_id, gateway.id);
+        assert!(snapshot.attachments.is_empty());
+        let persisted = store
+            .get_canonical_l3_gateway_attachment("project-a", &attachment.id)
+            .await?
+            .ok_or("attachment reservation disappeared")?;
+        assert_eq!(persisted.state, "deleting");
+        assert_eq!(persisted.generation, deleting.generation);
+
+        service
+            .finalize_l3_gateway_realm_detachment_for_project(
+                "project-a",
+                &attachment.id,
+                deleting.generation,
+            )
+            .await?;
+        assert!(
+            store
+                .get_canonical_l3_gateway_attachment("project-a", &attachment.id)
+                .await?
+                .is_none()
+        );
         Ok(())
     }
 }

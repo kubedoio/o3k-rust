@@ -2172,3 +2172,182 @@ async fn nova_volume_attachment_lifecycle_list_create_show_delete()
 
     Ok(())
 }
+
+#[tokio::test]
+async fn router_detach_dispatches_only_the_requested_gateway_and_preserves_reservations()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::path::PathBuf::from(format!(
+        "/tmp/o3k-api-router-lifecycle-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let identity = test_service("http://127.0.0.1:8080").await?;
+    let project_id = "eba29e2d-53de-461d-ae91-ede7402713cb";
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let network = NetworkService::open(root.join("network"), store).await?;
+    let network_record = network
+        .create_network_for_project(project_id, "router-network".to_owned())
+        .await?;
+    network
+        .create_subnet_for_project(
+            project_id,
+            network_record.id,
+            "router-subnet".to_owned(),
+            "10.42.0.0/24".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .await?;
+    let port = network
+        .create_port_for_project(project_id, network_record.id, "router-port".to_owned())
+        .await?;
+    network
+        .record_binding_intent(project_id, port.id, "network-agent")
+        .await?;
+    let realm = network
+        .list_canonical_realms_for_project(project_id, network_record.id)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or("router realm missing")?;
+    let gateway_a = network
+        .create_l3_gateway_for_project(project_id, "gateway-a".to_owned(), None, true)
+        .await?;
+    let gateway_b = network
+        .create_l3_gateway_for_project(project_id, "gateway-b".to_owned(), None, true)
+        .await?;
+    let gateway_c = network
+        .create_l3_gateway_for_project(project_id, "gateway-c".to_owned(), None, true)
+        .await?;
+    let attachment_a = network
+        .attach_l3_gateway_realm(project_id, &gateway_a.id, &realm.id)
+        .await?;
+    network
+        .attach_l3_gateway_realm(project_id, &gateway_b.id, &realm.id)
+        .await?;
+
+    let dispatcher = RecordingNetworkDispatcher::default();
+    let commands = dispatcher.commands.clone();
+    let state = o3k_api::AppState::new()
+        .with_identity(identity)
+        .with_network(network.clone())
+        .with_network_dispatcher(
+            Arc::new(dispatcher),
+            o3k_network::NetworkControllerLease {
+                controller_id: "controller-test".to_owned(),
+                controller_epoch: "epoch-1".to_owned(),
+                fencing_token: 1,
+            },
+        )
+        .with_network_agent_identity(o3k_network::NetworkAgentIdentity {
+            agent_id: "network-agent".to_owned(),
+            agent_epoch: "network-epoch-1".to_owned(),
+        });
+    let auth = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
+    let token_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(auth.to_string()))?,
+        )
+        .await?;
+    let token = token_response
+        .headers()
+        .get("x-subject-token")
+        .ok_or("token missing")?
+        .to_str()?
+        .to_owned();
+
+    let response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2.0/routers/{}", gateway_c.id))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    {
+        let commands = commands
+            .lock()
+            .map_err(|_| std::io::Error::other("recording dispatcher lock poisoned"))?;
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].action, NetworkPlanAction::Remove);
+        assert_eq!(
+            commands[0]
+                .plan
+                .gateway
+                .as_ref()
+                .ok_or("gateway removal snapshot missing")?
+                .gateway_id,
+            gateway_c.id
+        );
+    }
+    assert_eq!(
+        network
+            .list_l3_gateways_for_project(project_id)
+            .await?
+            .into_iter()
+            .find(|gateway| gateway.id == gateway_c.id)
+            .ok_or("gateway deletion reservation disappeared")?
+            .state,
+        "deleting"
+    );
+
+    let response = o3k_api::router_with_state(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!(
+                    "/v2.0/routers/{}/remove_router_interface",
+                    gateway_a.id
+                ))
+                .header("x-auth-token", token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "router_interface": {"subnet_id": realm.id}
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    {
+        let commands = commands
+            .lock()
+            .map_err(|_| std::io::Error::other("recording dispatcher lock poisoned"))?;
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[1].action, NetworkPlanAction::Apply);
+        assert_eq!(
+            commands[1]
+                .plan
+                .gateway
+                .as_ref()
+                .ok_or("gateway snapshot missing")?
+                .gateway_id,
+            gateway_a.id
+        );
+    }
+    let detached = network
+        .list_l3_gateway_attachments(project_id, &gateway_a.id)
+        .await?;
+    assert_eq!(detached.len(), 1);
+    assert_eq!(detached[0].id, attachment_a.id);
+    assert_eq!(detached[0].state, "deleting");
+    assert_eq!(
+        network
+            .list_l3_gateway_attachments(project_id, &gateway_b.id)
+            .await?
+            .first()
+            .ok_or("unrelated gateway attachment missing")?
+            .state,
+        "active"
+    );
+    Ok(())
+}

@@ -1094,6 +1094,7 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
             return Err(L3GatewayError::StaleGeneration);
         }
         let namespace = Self::namespace(plan);
+        let target_fingerprint = gateway_plan_fingerprint(plan)?;
         let current = self.state.get(&plan.gateway_id);
         let pending = self.pending(plan.gateway_id)?;
         let pending_owns_gateway = matches!(
@@ -1101,6 +1102,8 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
             Some(LinuxGatewayPendingMutation::Apply { plan: pending_plan })
                 if pending_plan.gateway_id == plan.gateway_id
                     && pending_plan.project_id == plan.project_id
+                    && pending_plan.gateway_generation == plan.gateway_generation
+                    && gateway_plan_fingerprint(pending_plan)? == target_fingerprint
         );
         let already_owned = current.is_some() || pending_owns_gateway;
         if !pending_owns_gateway {
@@ -1181,7 +1184,7 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
         self.ensure_snat(&namespace, plan, &execution_attachments)?;
         let state = LinuxGatewayState {
             plan: plan.clone(),
-            aggregate_fingerprint: gateway_plan_fingerprint(plan)?,
+            aggregate_fingerprint: target_fingerprint,
         };
         let mut next = self.state.clone();
         next.insert(plan.gateway_id, state);

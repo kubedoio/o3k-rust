@@ -336,21 +336,9 @@ pub(crate) async fn delete_router(
     };
     let project = auth.effective_scope().id().as_str();
     let current = match service.get_l3_gateway_for_project(project, &id).await {
-        Ok(v) => v,
-        Err(e) => return network_error(e),
+        Ok(value) => value,
+        Err(error) => return network_error(error),
     };
-    let provider_snapshot =
-        if state.network_dispatcher.is_some() && state.network_controller.is_some() {
-            match service
-                .compile_l3_gateway_execution_plan_for_project(project, &id)
-                .await
-            {
-                Ok(snapshot) => Some(snapshot),
-                Err(error) => return network_error(error),
-            }
-        } else {
-            None
-        };
     let deleting = match service
         .delete_l3_gateway_for_project(project, &id, current.generation)
         .await
@@ -358,8 +346,15 @@ pub(crate) async fn delete_router(
         Ok(value) => value,
         Err(error) => return network_error(error),
     };
-    let provider_dispatched = if let Some(snapshot) = provider_snapshot
-        && let Err(response) = dispatch_l3_gateway_snapshot(
+    if state.network_dispatcher.is_some() && state.network_controller.is_some() {
+        let snapshot = match service
+            .compile_l3_gateway_execution_plan_for_project(project, &id)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => return network_error(error),
+        };
+        if let Err(response) = dispatch_l3_gateway_snapshot(
             &state,
             project,
             snapshot,
@@ -367,23 +362,12 @@ pub(crate) async fn delete_router(
             deleting.generation,
         )
         .await
-    {
-        return response;
-    } else {
-        state.network_dispatcher.is_some() && state.network_controller.is_some()
-    };
-    if !provider_dispatched {
-        // Keep the durable deleting reservation until a configured network
-        // agent can withdraw and observe provider absence.  Returning 202 is
-        // truthful; finalization without an execution boundary is not.
-        return StatusCode::ACCEPTED.into_response();
+        {
+            return response;
+        }
     }
-    if let Err(error) = service
-        .finalize_l3_gateway_deletion_for_project(project, &id, deleting.generation)
-        .await
-    {
-        return network_error(error);
-    }
+    // Dispatch success is not a provider observation. Keep the durable
+    // deleting reservation until a reconciler observes gateway absence.
     StatusCode::ACCEPTED.into_response()
 }
 
@@ -555,8 +539,9 @@ pub(crate) async fn remove_router_interface(
                 .into_iter()
                 .filter(|port| port.network_id == realm.network_id)
                 .collect::<Vec<_>>();
+            let mut provider_dispatched = false;
             for port in &network_ports {
-                if let Err(response) = dispatch_policy_network_with_gateway(
+                let dispatched = match dispatch_policy_network_with_gateway(
                     &state,
                     project,
                     realm.network_id,
@@ -565,10 +550,12 @@ pub(crate) async fn remove_router_interface(
                 )
                 .await
                 {
-                    return response;
-                }
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+                provider_dispatched |= dispatched;
             }
-            if network_ports.is_empty()
+            if !provider_dispatched
                 && state.network_dispatcher.is_some()
                 && state.network_controller.is_some()
             {
@@ -591,27 +578,10 @@ pub(crate) async fn remove_router_interface(
                     return response;
                 }
             }
-            let provider_dispatched =
-                state.network_dispatcher.is_some() && state.network_controller.is_some();
-            if !provider_dispatched {
-                return StatusCode::ACCEPTED.into_response();
-            }
-            if let Err(error) = service
-                .finalize_l3_gateway_realm_detachment_for_project(
-                    project,
-                    &deleting.id,
-                    deleting.generation,
-                )
-                .await
-            {
-                return network_error(error);
-            }
-            Json(RouterInterfaceResponse {
-                port_id: a.id.to_string(),
-                router_id: a.gateway_id.to_string(),
-                subnet_id: a.realm_id.to_string(),
-            })
-            .into_response()
+            // Dispatch success is not a provider observation. Keep the
+            // durable deleting reservation until a reconciler observes the
+            // detached link absent.
+            StatusCode::ACCEPTED.into_response()
         }
         Err(error) => network_error(error),
     }
@@ -1757,26 +1727,27 @@ async fn dispatch_policy_network(
     network_id: Uuid,
     endpoint_id: Uuid,
 ) -> Result<(), axum::response::Response> {
-    dispatch_policy_network_with_gateway(state, project_id, network_id, endpoint_id, None).await
+    dispatch_policy_network_with_gateway(state, project_id, network_id, endpoint_id, None)
+        .await
+        .map(|_| ())
 }
 
 /// Dispatches a complete endpoint plan and, when requested, the complete
-/// canonical gateway plan that must be rebuilt with it.  The endpoint remains
-/// the scheduling/agent selection unit; `gateway_id` only widens the gateway
-/// selection after an interface mutation so a last-attachment removal cannot
-/// leave provider-owned gateway state behind.
+/// canonical gateway plan that must be rebuilt with it. The endpoint remains
+/// the scheduling/agent selection unit; an interface mutation supplies the
+/// exact gateway whose complete snapshot must be rebuilt.
 async fn dispatch_policy_network_with_gateway(
     state: &AppState,
     project_id: &str,
     network_id: Uuid,
     endpoint_id: Uuid,
     gateway_id: Option<Uuid>,
-) -> Result<(), axum::response::Response> {
+) -> Result<bool, axum::response::Response> {
     let Some(dispatcher) = state.network_dispatcher.as_ref() else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(controller) = state.network_controller.as_ref() else {
-        return Ok(());
+        return Ok(false);
     };
     let network = network_service(state)?;
     let ports = network
@@ -1791,7 +1762,7 @@ async fn dispatch_policy_network_with_gateway(
     // provider projection pending until the normal binding lifecycle can
     // dispatch the complete attachment plan.
     let Some(host) = port.binding_host.clone() else {
-        return Ok(());
+        return Ok(false);
     };
     let agent = if let Some(registry) = state.agent_registry.as_ref()
         && let Some(agent) = registry.snapshot(&host).await
@@ -1864,11 +1835,20 @@ async fn dispatch_policy_network_with_gateway(
         .cloned()
         .map(|realm| (realm.id, realm))
         .collect::<std::collections::BTreeMap<_, _>>();
-    for gateway in network
-        .list_l3_gateways_for_project(project_id)
-        .await
-        .map_err(network_error)?
-    {
+    let gateways = if let Some(gateway_id) = gateway_id {
+        vec![
+            network
+                .get_l3_gateway_for_project(project_id, &gateway_id)
+                .await
+                .map_err(network_error)?,
+        ]
+    } else {
+        network
+            .list_l3_gateways_for_project(project_id)
+            .await
+            .map_err(network_error)?
+    };
+    for gateway in gateways {
         let attachments = network
             .list_l3_gateway_attachments(project_id, &gateway.id)
             .await
@@ -1972,7 +1952,7 @@ async fn dispatch_policy_network_with_gateway(
         .mark_network_intent_active_for_project(project_id, network_id)
         .await
         .map_err(network_error)?;
-    Ok(())
+    Ok(true)
 }
 
 pub(crate) fn port_response(value: PortRecord, security_groups: Vec<Uuid>) -> PortResponse {
