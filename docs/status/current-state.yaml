@@ -258,7 +258,7 @@ profiles:
       - generic cross-cloud connectivity
   p13-iac-compatibility-v1:
     implementation_state: >-
-      Specified. This profile extends native-rust-testlab for Terraform/OpenTofu
+      Specified and bounded P13.3 implementation-complete. This profile extends native-rust-testlab for Terraform/OpenTofu
       IaC compatibility. ADR-0175 and SPEC-0032 are accepted. The bounded P13.2
       core managed-resource slice is complete and provider-lifecycle-verified
       from committed real-provider evidence at
@@ -322,15 +322,13 @@ profiles:
     release_relevance: >-
       Non-blocking for the first native alpha (v0.2.0-alpha.1). This profile
       extends native-rust-testlab but does not alter its release gate.
-    blockers:
-      - P13.3B2 native policy traffic and recovery evidence closure
-      - P13.3C Router/L3Gateway provider lifecycle and connectivity evidence
-      - P13.3-P13.7 implementation evidence as defined in SPEC-0032
+    blockers: []
     next_evidence_action: >-
-      Complete native policy traffic/recovery evidence and the accepted
-      L3Gateway/Router provider lifecycle and connectivity evidence. The
-      bounded Security Group, Port attachment, and Floating IP provider
-      evidence is committed, but does not establish full P13.3 completion.
+      Continue only with separately scoped later profile work. P13.3's bounded
+      policy, Security Group projection, Floating IP projection, and the
+      independent L3Gateway/Router execution evidence are complete for the
+      advertised operation-level profile; this is not a claim of broad
+      OpenStack parity or production readiness.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)

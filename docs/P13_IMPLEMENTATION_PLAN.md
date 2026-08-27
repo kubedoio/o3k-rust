@@ -93,7 +93,7 @@ general Terraform compatibility. P13.3 remains an evidence-gated, in-progress
 implementation; its accepted architecture and bounded native policy work do
 not by themselves establish provider lifecycle compatibility.
 
-### P13.3 — Neutron adoption profile — ARCHITECTURE ACCEPTED; RUNTIME IN PROGRESS
+### P13.3 — Neutron adoption profile — BOUNDED RUNTIME COMPLETE
 
 The P13.3A provider discovery checkpoint found that the existing endpoint-
 scoped `PolicyIntent` and policy persistence cannot represent an unattached,
@@ -113,13 +113,13 @@ verification remains a later gate.
 
 P13.3A discovery is complete and architecture-accepted. Canonical reusable
 policy persistence, endpoint-scoped policy compilation/realization, native
-Linux policy enforcement, and the bounded Security Group projection now exist
-on the implementation branch. Local real-provider evidence is committed for
-the bounded Security Group, Port attachment, and Floating IP paths. P13.3
-remains incomplete pending native policy traffic/recovery closure and
-accepted L3Gateway/Router provider lifecycle and connectivity evidence. The
+Linux policy enforcement, the bounded Security Group projection, canonical
+PublicAddress/Floating IP projection, and the independent L3Gateway/Router
+execution boundary are implemented and covered by committed evidence. The
 router authority decision is recorded in
 `docs/compatibility/p13-3/p13-3c-router-architecture-decision-request.md`.
+P13.3 remains bounded to the advertised operation-level profile; this status
+does not claim broad OpenStack parity or production readiness.
 
 ### P13.4 — Native Volume Cinder projection and Terraform volume lifecycle
 

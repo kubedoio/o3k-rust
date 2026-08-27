@@ -33,5 +33,5 @@
     "router_floating_ip": "not exercised"
   },
   "result": "passed",
-  "tested_implementation_sha": "f36ea90"
+  "tested_implementation_sha": "bfcdf38"
 }

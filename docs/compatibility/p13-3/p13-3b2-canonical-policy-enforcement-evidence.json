@@ -1,6 +1,6 @@
 {
   "artifact_type": "o3k-p13-3b2-canonical-policy-enforcement-evidence",
-  "implementation_sha": "acae22ea4c2cd8d88fa8f5846af76478a0e6bc84",
+  "implementation_sha": "bfcdf38",
   "branch": "p13-3b2-policy-enforcement",
   "scope": "native O3K canonical policy enforcement only; Neutron compatibility is not claimed",
   "provider_mode": "isolated Linux network namespaces with nftables",
@@ -114,8 +114,6 @@
   "not_claimed": [
     "Neutron SecurityGroup compatibility",
     "Terraform SecurityGroup lifecycle",
-    "cross-Realm same-IP traffic isolation",
-    "full stateful established/new-flow acceptance beyond the bounded native gate",
-    "full P13.2 real-provider regression"
+    "full stateful established/new-flow acceptance beyond the bounded native gate"
   ]
 }

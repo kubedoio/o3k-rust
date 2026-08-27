@@ -1,0 +1,46 @@
+{
+  "artifact_type": "o3k-p13-3c-l3-gateway-execution-evidence",
+  "schema_version": 1,
+  "implementation_sha": "bfcdf38",
+  "evidence_tier": "isolated-linux-netns-real-provider",
+  "authority": {
+    "canonical": "L3Gateway/L3GatewayAttachment/AddressRealm",
+    "execution": "L3GatewayExecutionPlan -> LinuxL3GatewayProvider",
+    "provider_state_is_authority": false
+  },
+  "realization_units": {
+    "logical": "one effective L3Gateway snapshot",
+    "physical": "one O3K-owned gateway namespace and nftables topology"
+  },
+  "verified": {
+    "gateway_namespace_isolated": true,
+    "realm_attachments_are_provider_owned": true,
+    "inter_realm_tcp_connectivity": true,
+    "unrelated_realm_preserved_during_update": true,
+    "fresh_provider_observation": true,
+    "stale_gateway_generation_rejected": true,
+    "external_snat_topology": true,
+    "host_global_tenant_routes": false
+  },
+  "scenario": {
+    "gateway_id": "deterministic-test-gateway",
+    "realm_a": "10.30.0.0/24",
+    "realm_b": "10.40.0.0/24",
+    "endpoint_a": "10.30.0.10",
+    "endpoint_b": "10.40.0.10",
+    "initial_connectivity": "endpoint A reached endpoint B through the gateway",
+    "update": "A attachment was removed from the gateway plan",
+    "post_update": "B remained observable and A could no longer reach B"
+  },
+  "compatibility_projection": {
+    "router": "Neutron Router projects to canonical L3Gateway",
+    "router_interface": "Neutron Router Interface projects to canonical L3GatewayAttachment",
+    "external_gateway": "bounded external Realm/uplink projection",
+    "security_group_compatibility": "not claimed",
+    "floating_ip_traffic": "not claimed"
+  },
+  "limitations": [
+    "The provider lifecycle gate does not claim broad Neutron parity.",
+    "External connectivity/SNAT traffic remains bounded to the provider capability profile."
+  ]
+}
