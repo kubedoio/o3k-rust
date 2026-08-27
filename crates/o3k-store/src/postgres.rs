@@ -44,7 +44,7 @@ impl PostgresStore {
     ) -> Result<(), StoreError> {
         crate::validate_canonical_state(&g.state)?;
         crate::checked_generation(g.generation)?;
-        sqlx::query("INSERT INTO canonical_l3_gateways (id,project_id,name,external_realm_id,enable_snat,generation,state) VALUES ($1,$2,$3,$4,$5,$6,$7)").bind(g.id).bind(&g.project_id).bind(&g.name).bind(g.external_realm_id).bind(g.enable_snat).bind(g.generation as i64).bind(&g.state).execute(&self.pool).await.map_err(crate::map_canonical_insert_error).map(|_|())
+        sqlx::query("INSERT INTO canonical_l3_gateways (id,project_id,name,external_realm_id,enable_snat,generation,state) VALUES ($1,$2,$3,$4,$5,$6,$7)").bind(g.id).bind(&g.project_id).bind(&g.name).bind(g.external_realm_id.map(|value| value.to_string())).bind(g.enable_snat).bind(g.generation as i64).bind(&g.state).execute(&self.pool).await.map_err(crate::map_canonical_insert_error).map(|_|())
     }
     pub async fn get_canonical_l3_gateway(
         &self,
@@ -58,8 +58,10 @@ impl PostgresStore {
                 project_id: x.try_get("project_id").map_err(StoreError::Database)?,
                 name: x.try_get("name").map_err(StoreError::Database)?,
                 external_realm_id: x
-                    .try_get("external_realm_id")
-                    .map_err(StoreError::Database)?,
+                    .try_get::<Option<String>, _>("external_realm_id")
+                    .map_err(StoreError::Database)?
+                    .map(|value| value.parse().map_err(StoreError::InvalidUuid))
+                    .transpose()?,
                 enable_snat: x.try_get("enable_snat").map_err(StoreError::Database)?,
                 generation: crate::checked_generation(
                     x.try_get::<i64, _>("generation")
@@ -100,7 +102,7 @@ impl PostgresStore {
         x: Option<Uuid>,
         s: bool,
     ) -> Result<CanonicalL3GatewayRecord, StoreError> {
-        let r=sqlx::query("UPDATE canonical_l3_gateways SET name=$1,external_realm_id=$2,enable_snat=$3,generation=generation+1 WHERE id=$4 AND project_id=$5 AND generation=$6 AND state='active'").bind(n).bind(x).bind(s).bind(id).bind(p).bind(e as i64).execute(&self.pool).await.map_err(StoreError::Database)?;
+        let r=sqlx::query("UPDATE canonical_l3_gateways SET name=$1,external_realm_id=$2,enable_snat=$3,generation=generation+1 WHERE id=$4 AND project_id=$5 AND generation=$6 AND state='active'").bind(n).bind(x.map(|value| value.to_string())).bind(s).bind(id).bind(p).bind(e as i64).execute(&self.pool).await.map_err(StoreError::Database)?;
         if r.rows_affected() == 0 {
             return Err(StoreError::StaleGeneration);
         }
@@ -141,7 +143,7 @@ impl PostgresStore {
     ) -> Result<(), StoreError> {
         crate::validate_canonical_state(&a.state)?;
         crate::checked_generation(a.generation)?;
-        sqlx::query("INSERT INTO canonical_l3_gateway_attachments (id,gateway_id,realm_id,project_id,generation,state) VALUES ($1,$2,$3,$4,$5,$6)").bind(a.id).bind(a.gateway_id).bind(a.realm_id).bind(&a.project_id).bind(a.generation as i64).bind(&a.state).execute(&self.pool).await.map_err(crate::map_canonical_insert_error).map(|_|())
+        sqlx::query("INSERT INTO canonical_l3_gateway_attachments (id,gateway_id,realm_id,project_id,generation,state) VALUES ($1,$2,$3,$4,$5,$6)").bind(a.id).bind(a.gateway_id).bind(a.realm_id.to_string()).bind(&a.project_id).bind(a.generation as i64).bind(&a.state).execute(&self.pool).await.map_err(crate::map_canonical_insert_error).map(|_|())
     }
     pub async fn get_canonical_l3_gateway_attachment(
         &self,
@@ -153,7 +155,11 @@ impl PostgresStore {
             Ok(CanonicalL3GatewayAttachmentRecord {
                 id: x.try_get("id").map_err(StoreError::Database)?,
                 gateway_id: x.try_get("gateway_id").map_err(StoreError::Database)?,
-                realm_id: x.try_get("realm_id").map_err(StoreError::Database)?,
+                realm_id: x
+                    .try_get::<String, _>("realm_id")
+                    .map_err(StoreError::Database)?
+                    .parse()
+                    .map_err(StoreError::InvalidUuid)?,
                 project_id: x.try_get("project_id").map_err(StoreError::Database)?,
                 generation: crate::checked_generation(
                     x.try_get::<i64, _>("generation")

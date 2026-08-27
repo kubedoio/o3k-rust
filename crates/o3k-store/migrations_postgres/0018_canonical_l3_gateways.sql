@@ -1,8 +1,11 @@
+ALTER TABLE canonical_address_realms
+    ADD CONSTRAINT canonical_address_realms_id_project_unique UNIQUE (id, project_id);
+
 CREATE TABLE canonical_l3_gateways (
     id UUID PRIMARY KEY,
     project_id TEXT NOT NULL,
     name TEXT NOT NULL,
-    external_realm_id UUID,
+    external_realm_id TEXT,
     enable_snat BOOLEAN NOT NULL,
     generation BIGINT NOT NULL CHECK (generation > 0),
     state TEXT NOT NULL CHECK (state IN ('requested', 'active', 'deleting', 'deleted', 'error')),
@@ -10,13 +13,10 @@ CREATE TABLE canonical_l3_gateways (
     FOREIGN KEY (external_realm_id, project_id) REFERENCES canonical_address_realms(id, project_id)
 );
 
-CREATE UNIQUE INDEX canonical_address_realms_id_project_idx
-    ON canonical_address_realms (id, project_id);
-
 CREATE TABLE canonical_l3_gateway_attachments (
     id UUID PRIMARY KEY,
     gateway_id UUID NOT NULL,
-    realm_id UUID NOT NULL,
+    realm_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
     generation BIGINT NOT NULL CHECK (generation > 0),
     state TEXT NOT NULL CHECK (state IN ('requested', 'active', 'deleting', 'deleted', 'error')),

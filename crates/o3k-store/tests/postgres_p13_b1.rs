@@ -1,6 +1,7 @@
 use o3k_store::{
-    CanonicalAddressRealmRecord, CanonicalEndpointRecord, CanonicalNetworkPolicyRuleRecord,
-    CanonicalNetworkRecord, CanonicalPolicyAttachmentRecord, CanonicalPolicyRealizationRecord,
+    CanonicalAddressRealmRecord, CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord,
+    CanonicalL3GatewayRecord, CanonicalNetworkPolicyRuleRecord, CanonicalNetworkRecord,
+    CanonicalPolicyAttachmentRecord, CanonicalPolicyRealizationRecord,
     CanonicalReusableNetworkPolicyRecord, PostgresStore, StoreError,
 };
 use std::net::Ipv4Addr;
@@ -9,6 +10,87 @@ use uuid::Uuid;
 fn database_url() -> Result<String, StoreError> {
     std::env::var("O3K_DATABASE_URL")
         .map_err(|_| StoreError::Corrupt("O3K_DATABASE_URL is required".into()))
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance"]
+async fn postgres_p13_b1_l3_gateway_attachment_reopens_and_fences() -> Result<(), StoreError> {
+    let url = database_url()?;
+    let store = PostgresStore::connect(&url).await?;
+    let project = "p13-b1-gateway-project";
+    let network_id = Uuid::now_v7();
+    let realm_id = Uuid::now_v7();
+    store
+        .insert_canonical_network(&CanonicalNetworkRecord {
+            id: network_id,
+            project_id: project.into(),
+            name: "net".into(),
+            admin_state_up: true,
+            generation: 1,
+            state: "active".into(),
+        })
+        .await?;
+    store
+        .insert_canonical_realm(&CanonicalAddressRealmRecord {
+            id: realm_id,
+            network_id,
+            project_id: project.into(),
+            prefix: "10.90.0.0/24".into(),
+            overlapping_prefixes: false,
+            generation: 1,
+            state: "active".into(),
+        })
+        .await?;
+    let gateway = CanonicalL3GatewayRecord {
+        id: Uuid::now_v7(),
+        project_id: project.into(),
+        name: "gateway".into(),
+        external_realm_id: None,
+        enable_snat: true,
+        generation: 1,
+        state: "active".into(),
+    };
+    store.insert_canonical_l3_gateway(&gateway).await?;
+    let attachment = CanonicalL3GatewayAttachmentRecord {
+        id: Uuid::now_v7(),
+        gateway_id: gateway.id,
+        realm_id,
+        project_id: project.into(),
+        generation: 1,
+        state: "active".into(),
+    };
+    store
+        .insert_canonical_l3_gateway_attachment(&attachment)
+        .await?;
+    drop(store);
+    let reopened = PostgresStore::connect(&url).await?;
+    assert_eq!(
+        reopened
+            .get_canonical_l3_gateway_attachment(project, &attachment.id)
+            .await?
+            .expect("attachment"),
+        attachment
+    );
+    let deleting = reopened
+        .begin_canonical_l3_gateway_attachment_deletion(project, &attachment.id, 1)
+        .await?;
+    assert_eq!(deleting.generation, 2);
+    assert!(matches!(
+        reopened
+            .finalize_canonical_l3_gateway_attachment_deletion(project, &attachment.id, 1)
+            .await,
+        Err(StoreError::StaleGeneration)
+    ));
+    reopened
+        .finalize_canonical_l3_gateway_attachment_deletion(project, &attachment.id, 2)
+        .await?;
+    let deleting_gateway = reopened
+        .begin_canonical_l3_gateway_deletion(project, &gateway.id, 1)
+        .await?;
+    reopened
+        .finalize_canonical_l3_gateway_deletion(project, &gateway.id, deleting_gateway.generation)
+        .await?;
+    Ok(())
 }
 
 fn policy(id: Uuid) -> CanonicalReusableNetworkPolicyRecord {
