@@ -2,7 +2,7 @@
   "artifact_type": "o3k-p13-3b2-public-api-real-qemu-policy-evidence",
   "schema_version": 1,
   "evidence_tier": "fake-control-plane-real-qemu-guest",
-  "implementation_sha": "17b068090390a9774d709bd45800096c0592c038",
+  "implementation_sha": "22b203d3560b979a4b07e08d3d73f76ba69c6ff7",
   "canonical_authority": "NetworkPolicy/NetworkPolicyRule/PolicyAttachment",
   "provider_mode": "real Linux network provider with disposable QEMU guest",
   "verified": {
