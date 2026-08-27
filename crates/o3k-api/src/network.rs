@@ -29,6 +29,14 @@ pub(crate) struct RouterRequest {
     enable_snat: Option<bool>,
     #[serde(default)]
     external_realm_id: Option<Uuid>,
+    #[serde(default)]
+    external_gateway_info: Option<ExternalGatewayInfo>,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct ExternalGatewayInfo {
+    network_id: Option<Uuid>,
+    #[serde(default)]
+    enable_snat: Option<bool>,
 }
 #[derive(serde::Serialize)]
 pub(crate) struct RouterEnvelope {
@@ -47,7 +55,12 @@ pub(crate) struct RouterResponse {
     status: String,
     admin_state_up: bool,
     enable_snat: bool,
-    external_realm_id: Option<String>,
+    external_gateway_info: Option<ExternalGatewayInfoResponse>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct ExternalGatewayInfoResponse {
+    network_id: String,
+    enable_snat: bool,
 }
 #[derive(serde::Deserialize)]
 pub(crate) struct RouterInterfaceRequestBody {
@@ -75,8 +88,35 @@ fn router_response(g: o3k_store::CanonicalL3GatewayRecord) -> RouterResponse {
         status: g.state.to_ascii_uppercase(),
         admin_state_up: true,
         enable_snat: g.enable_snat,
-        external_realm_id: g.external_realm_id.map(|id| id.to_string()),
+        external_gateway_info: g.external_realm_id.map(|id| ExternalGatewayInfoResponse {
+            network_id: id.to_string(),
+            enable_snat: g.enable_snat,
+        }),
     }
+}
+
+async fn external_realm_for_router(
+    service: &NetworkService,
+    project: &str,
+    request: &RouterRequest,
+) -> Result<Option<Uuid>, NetworkError> {
+    if let Some(realm_id) = request.external_realm_id {
+        return Ok(Some(realm_id));
+    }
+    let Some(info) = request.external_gateway_info.as_ref() else {
+        return Ok(None);
+    };
+    let Some(network_id) = info.network_id else {
+        return Err(NetworkError::InvalidRequest);
+    };
+    let realms = service
+        .list_canonical_realms_for_project(project, network_id)
+        .await?;
+    realms
+        .into_iter()
+        .next()
+        .map(|realm| Some(realm.id))
+        .ok_or(NetworkError::NotFound)
 }
 
 pub(crate) async fn list_routers(
@@ -124,12 +164,21 @@ pub(crate) async fn create_router(
         Err(r) => return r,
     };
     let project = auth.effective_scope().id().as_str();
+    let external_realm_id = match external_realm_for_router(service, project, &body.router).await {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
     let result = service
         .create_l3_gateway_for_project(
             project,
             body.router.name,
-            body.router.external_realm_id,
-            body.router.enable_snat.unwrap_or(true),
+            external_realm_id,
+            body.router
+                .external_gateway_info
+                .as_ref()
+                .and_then(|info| info.enable_snat)
+                .or(body.router.enable_snat)
+                .unwrap_or(true),
         )
         .await;
     match result {
@@ -195,14 +244,23 @@ pub(crate) async fn update_router(
         Ok(v) => v,
         Err(e) => return network_error(e),
     };
+    let external_realm_id = match external_realm_for_router(service, project, &body.router).await {
+        Ok(value) => value.or(current.external_realm_id),
+        Err(error) => return network_error(error),
+    };
     match service
         .update_l3_gateway_for_project(
             project,
             &id,
             current.generation,
             body.router.name,
-            body.router.external_realm_id.or(current.external_realm_id),
-            body.router.enable_snat.unwrap_or(current.enable_snat),
+            external_realm_id,
+            body.router
+                .external_gateway_info
+                .as_ref()
+                .and_then(|info| info.enable_snat)
+                .or(body.router.enable_snat)
+                .unwrap_or(current.enable_snat),
         )
         .await
     {
