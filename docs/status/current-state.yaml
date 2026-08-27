@@ -302,33 +302,30 @@ profiles:
           docs/compatibility/p13-2/p13-2c-provider-port-lifecycle-evidence.json;
           docs/compatibility/p13-2/p13-2d-provider-server-lifecycle-evidence.json.
       - name: p13-3-bounded-provider-lifecycle
-        state: passed
+        state: not-proven
         note: >-
-          Local real-provider evidence verifies the bounded Security Group,
-          Port security-group attachment, and Floating IP projection paths.
-          Evidence: docs/compatibility/p13-3/p13-3b3-security-group-provider-lifecycle-evidence.json;
-          docs/compatibility/p13-3/p13-3b3-port-security-group-provider-lifecycle-evidence.json;
-          docs/compatibility/p13-3/p13-3e-floating-ip-provider-lifecycle-evidence.json.
+          Historical evidence exists for the bounded Security Group, Port
+          security-group attachment, Floating IP, and L3Gateway/Router
+          projection paths, but the gateway lifecycle/provider changes on the
+          current branch require those protected real-provider gates to be
+          rerun before this claim can be restored.
       - name: p13-3-native-policy-real-traffic
-        state: passed
+        state: not-proven
         note: >-
-          The real-QEMU packet gate verifies native policy allow/deny,
-          stateful policy update behavior, Security Group projection traffic,
-          restart/recovery, and owned-resource cleanup. Evidence:
-          docs/compatibility/p13-3/p13-3b2-public-api-real-qemu-policy-evidence.json.
+          Historical real-QEMU evidence exists, but current gateway/provider
+          lifecycle changes require the protected policy traffic and recovery
+          gate to be rerun before this claim can be restored.
     full_profile_evidence:
       - name: iac-full-lifecycle-gate
         state: not-proven
     release_relevance: >-
       Non-blocking for the first native alpha (v0.2.0-alpha.1). This profile
       extends native-rust-testlab but does not alter its release gate.
-    blockers: []
+    blockers:
+      - protected P13.3 provider, privileged, traffic, and recovery gates must be rerun from the current implementation
     next_evidence_action: >-
-      Continue only with separately scoped later profile work. P13.3's bounded
-      policy, Security Group projection, Floating IP projection, and the
-      independent L3Gateway/Router execution evidence are complete for the
-      advertised operation-level profile; this is not a claim of broad
-      OpenStack parity or production readiness.
+      Rerun the protected P13.3 provider, privileged, traffic, and recovery
+      gates from the current implementation before restoring completion claims.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)

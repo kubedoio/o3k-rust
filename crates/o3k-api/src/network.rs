@@ -365,9 +365,17 @@ pub(crate) async fn delete_router(
         {
             return response;
         }
+        if let Err(error) = service
+            .finalize_l3_gateway_deletion_for_project(project, &id, deleting.generation)
+            .await
+        {
+            return network_error(error);
+        }
     }
-    // Dispatch success is not a provider observation. Keep the durable
-    // deleting reservation until a reconciler observes gateway absence.
+    // A successful dispatch means the network executor completed its
+    // provider mutation and observation workflow; without an execution
+    // boundary the durable deleting reservation remains for restart-safe
+    // reconciliation.
     StatusCode::ACCEPTED.into_response()
 }
 
@@ -603,10 +611,19 @@ pub(crate) async fn remove_router_interface(
                 {
                     return response;
                 }
+                provider_dispatched = true;
             }
-            // Dispatch success is not a provider observation. Keep the
-            // durable deleting reservation until a reconciler observes the
-            // detached link absent.
+            if provider_dispatched
+                && let Err(error) = service
+                    .finalize_l3_gateway_realm_detachment_for_project(
+                        project,
+                        &deleting.id,
+                        deleting.generation,
+                    )
+                    .await
+            {
+                return network_error(error);
+            }
             StatusCode::ACCEPTED.into_response()
         }
         Err(error) => network_error(error),

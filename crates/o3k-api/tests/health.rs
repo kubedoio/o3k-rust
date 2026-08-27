@@ -2174,7 +2174,7 @@ async fn nova_volume_attachment_lifecycle_list_create_show_delete()
 }
 
 #[tokio::test]
-async fn router_detach_dispatches_only_the_requested_gateway_and_preserves_reservations()
+async fn router_detach_dispatches_only_the_requested_gateway_and_finalizes_after_dispatch()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::PathBuf::from(format!(
         "/tmp/o3k-api-router-lifecycle-{}",
@@ -2220,7 +2220,7 @@ async fn router_detach_dispatches_only_the_requested_gateway_and_preserves_reser
     let gateway_c = network
         .create_l3_gateway_for_project(project_id, "gateway-c".to_owned(), None, true)
         .await?;
-    let attachment_a = network
+    network
         .attach_l3_gateway_realm(project_id, &gateway_a.id, &realm.id)
         .await?;
     network
@@ -2287,15 +2287,12 @@ async fn router_detach_dispatches_only_the_requested_gateway_and_preserves_reser
             gateway_c.id
         );
     }
-    assert_eq!(
+    assert!(
         network
             .list_l3_gateways_for_project(project_id)
             .await?
             .into_iter()
-            .find(|gateway| gateway.id == gateway_c.id)
-            .ok_or("gateway deletion reservation disappeared")?
-            .state,
-        "deleting"
+            .all(|gateway| gateway.id != gateway_c.id)
     );
 
     let response = o3k_api::router_with_state(state)
@@ -2337,9 +2334,7 @@ async fn router_detach_dispatches_only_the_requested_gateway_and_preserves_reser
     let detached = network
         .list_l3_gateway_attachments(project_id, &gateway_a.id)
         .await?;
-    assert_eq!(detached.len(), 1);
-    assert_eq!(detached[0].id, attachment_a.id);
-    assert_eq!(detached[0].state, "deleting");
+    assert!(detached.is_empty());
     assert_eq!(
         network
             .list_l3_gateway_attachments(project_id, &gateway_b.id)

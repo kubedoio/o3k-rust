@@ -298,7 +298,11 @@ impl LinuxL3GatewayProvider {
     }
 
     fn namespace(plan: &L3GatewayExecutionPlan) -> String {
-        let digest = Sha256::digest(plan.gateway_id.as_bytes());
+        Self::namespace_for_id(plan.gateway_id)
+    }
+
+    fn namespace_for_id(gateway_id: Uuid) -> String {
+        let digest = Sha256::digest(gateway_id.as_bytes());
         format!(
             "o3k-gw-{:02x}{:02x}{:02x}{:02x}",
             digest[0], digest[1], digest[2], digest[3]
@@ -894,10 +898,10 @@ impl LinuxL3GatewayProvider {
         let old_attachments = Self::execution_attachments(old)?;
         let next_attachments = Self::execution_attachments(next)?;
         for attachment in &old_attachments {
-            if next_attachments
-                .iter()
-                .any(|current| current.attachment_id == attachment.attachment_id)
-            {
+            if next_attachments.iter().any(|current| {
+                current.attachment_id == attachment.attachment_id
+                    && current.realm_prefix == attachment.realm_prefix
+            }) {
                 continue;
             }
             let (_, realm_if) = link_names(old, attachment);
@@ -937,10 +941,10 @@ impl LinuxL3GatewayProvider {
             enable_snat: false,
         };
         for destination in &old_attachments {
-            if next_attachments
-                .iter()
-                .any(|item| item.attachment_id == destination.attachment_id)
-            {
+            if next_attachments.iter().any(|item| {
+                item.attachment_id == destination.attachment_id
+                    && item.realm_prefix == destination.realm_prefix
+            }) {
                 continue;
             }
             let (gateway_if, _) = link_names(&link_plan, destination);
@@ -964,6 +968,15 @@ impl LinuxL3GatewayProvider {
                 )
                 .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
             let route_exists = route_ok && !route_output.trim().is_empty();
+            if route_exists
+                && (!route_output.contains(
+                    &provider_link_addresses(old.gateway_id, destination.attachment_id)
+                        .0
+                        .to_string(),
+                ) || !route_output.contains(&gateway_if))
+            {
+                return Err(L3GatewayError::Backend("foreign gateway route".to_owned()));
+            }
             if route_exists
                 && !self
                     .command
@@ -1026,6 +1039,16 @@ impl LinuxL3GatewayProvider {
                     .map_err(|error| L3GatewayError::Backend(error.to_string()))?;
                 if !route_ok || route_output.trim().is_empty() {
                     continue;
+                }
+                if !route_output.contains(
+                    &provider_link_addresses(old.gateway_id, source.attachment_id)
+                        .1
+                        .to_string(),
+                ) || !route_output.contains(&context.realm_interface)
+                {
+                    return Err(L3GatewayError::Backend(
+                        "foreign Realm gateway route".to_owned(),
+                    ));
                 }
                 if !self
                     .command
@@ -1095,7 +1118,9 @@ impl LinuxL3GatewayProvider {
         all.remove(&gateway_id);
         if all.is_empty() {
             match fs::remove_file(self.root.join("gateway.pending.json")) {
-                Ok(()) => Ok(()),
+                Ok(()) => File::open(&self.root)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|error| L3GatewayError::Backend(error.to_string())),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
                 Err(error) => Err(L3GatewayError::Backend(error.to_string())),
             }
@@ -1344,9 +1369,7 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
                 "gateway ownership conflict".to_owned(),
             ));
         }
-        let old = if let Some(current) = self.state.get(&gateway_id).cloned() {
-            Some(current)
-        } else if let Some(LinuxGatewayPendingMutation::Remove {
+        let old = if let Some(LinuxGatewayPendingMutation::Remove {
             plan: Some(plan), ..
         }) = &pending
         {
@@ -1354,6 +1377,12 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
                 plan: plan.clone(),
                 aggregate_fingerprint: gateway_plan_fingerprint(plan)?,
             })
+        } else if let Some(current) = self.state.get(&gateway_id).cloned() {
+            Some(current)
+        } else if pending.is_some() {
+            return Err(L3GatewayError::Backend(
+                "pending gateway removal has no exact target".to_owned(),
+            ));
         } else {
             None
         };
@@ -1480,7 +1509,7 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
                 }
                 return Ok(None);
             }
-            let namespace = format!("o3k-gw-{gateway_id}");
+            let namespace = Self::namespace_for_id(gateway_id);
             let (namespace_exists, _) = self
                 .command
                 .output("ip", &["netns", "exec", &namespace, "true"])
