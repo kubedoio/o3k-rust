@@ -4087,6 +4087,28 @@ pub fn compile_attachment_plan_with_defaults(
     Ok(plan)
 }
 
+/// Adds routing derived from the canonical L3Gateway graph to a complete
+/// endpoint plan. The mutation is applied to the derived plan only; gateway
+/// records remain the source of truth and the existing attachment-plan API
+/// remains compatible for callers that have no gateway.
+pub fn add_l3_gateway_routing(
+    mut plan: NodeNetworkPlan,
+    routes: Vec<o3k_domain::GatewayIntent>,
+    egress: Vec<o3k_domain::EgressIntent>,
+) -> Result<NodeNetworkPlan, NetworkPlanError> {
+    if routes.is_empty() && egress.is_empty() {
+        return Ok(plan);
+    }
+    plan.intents
+        .extend(routes.into_iter().map(NetworkPlanIntent::Gateway));
+    plan.intents
+        .extend(egress.into_iter().map(NetworkPlanIntent::Egress));
+    plan.intents
+        .sort_by_key(|value| serde_json::to_string(value).unwrap_or_default());
+    plan.fingerprint_sha256 = canonical_plan_fingerprint(&plan)?;
+    Ok(plan)
+}
+
 /// Compiles one canonical intent into a stable semantic node plan. The
 /// `realms` slice represents existing routed realms in the selected profile;
 /// P9 rejects overlap before any provider mutation.

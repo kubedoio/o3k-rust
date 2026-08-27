@@ -1452,6 +1452,35 @@ async fn dispatch_policy_network(
         .policy_defaults_for_endpoint(project_id, port.id)
         .await
         .map_err(network_error)?;
+    let realms = network
+        .list_canonical_realms_for_project(project_id, network_id)
+        .await
+        .map_err(network_error)?;
+    let realm = realms
+        .iter()
+        .find(|realm| realm.prefix == subnet.cidr)
+        .or_else(|| realms.first())
+        .ok_or_else(|| network_error(NetworkError::NotFound))?;
+    let mut gateway_routes = Vec::new();
+    let mut gateway_egress = Vec::new();
+    for (gateway, attachments) in &network
+        .reconstruct_canonical_network(project_id, network_id)
+        .await
+        .map_err(network_error)?
+        .l3_gateways
+    {
+        if let Ok(compiled) = o3k_network::compile_l3_gateway_intents(
+            gateway,
+            attachments,
+            &realms,
+            &std::collections::BTreeMap::new(),
+        ) {
+            if let Some((routes, egress)) = compiled.get(&realm.id) {
+                gateway_routes.extend(routes.iter().cloned());
+                gateway_egress.extend(egress.iter().cloned());
+            }
+        }
+    }
     let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
     let operation_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
@@ -1462,7 +1491,7 @@ async fn dispatch_policy_network(
     let plan = o3k_network::compile_attachment_plan_with_defaults(
         o3k_network::AttachmentPlanInput {
             endpoint_id: port.id,
-            realm_id: port.network_id,
+            realm_id: realm.id,
             project_id,
             mac: &port.mac_address,
             fixed_ip: port.fixed_ip,
@@ -1477,6 +1506,9 @@ async fn dispatch_policy_network(
         policy_defaults,
     )
     .map_err(|error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()))?;
+    let plan = o3k_network::add_l3_gateway_routing(plan, gateway_routes, gateway_egress).map_err(
+        |error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()),
+    )?;
     let status = dispatcher
         .dispatch(o3k_network::NetworkPlanCommand {
             command_id: Uuid::new_v5(
