@@ -229,6 +229,12 @@ enum LinuxGatewayPendingMutation {
     Remove {
         gateway_id: Uuid,
         project_id: String,
+        /// The exact realized target being withdrawn.  Keeping this
+        /// snapshot makes a restart independent of a partially updated
+        /// gateway.json; the legacy identity fields remain for decoding
+        /// pending records written by older providers.
+        #[serde(default)]
+        plan: Option<L3GatewayExecutionPlan>,
     },
 }
 
@@ -1204,6 +1210,7 @@ impl L3GatewayBackend for LinuxL3GatewayProvider {
                 &LinuxGatewayPendingMutation::Remove {
                     gateway_id,
                     project_id: project_id.to_owned(),
+                    plan: Some(old.plan.clone()),
                 },
             )?;
             let empty = L3GatewayExecutionPlan {
