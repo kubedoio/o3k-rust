@@ -5605,6 +5605,21 @@ impl NetworkService {
         result
     }
 
+    /// Owner-scoped lookup used by compatibility projections after the
+    /// request has already been authorized at the API boundary.
+    pub async fn get_canonical_realm_for_project(
+        &self,
+        project_id: &str,
+        realm_id: Uuid,
+    ) -> Result<o3k_store::CanonicalAddressRealmRecord, NetworkError> {
+        self.inner
+            .repository
+            .get_canonical_realm(project_id, &realm_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)
+    }
+
     pub async fn delete_canonical_realm_for_project(
         &self,
         project_id: &str,

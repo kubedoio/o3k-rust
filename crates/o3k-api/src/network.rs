@@ -100,8 +100,21 @@ pub(crate) struct RouterInterfaceResponse {
     router_id: String,
     subnet_id: String,
 }
-fn router_response(g: o3k_store::CanonicalL3GatewayRecord) -> RouterResponse {
-    RouterResponse {
+async fn router_response(
+    service: &NetworkService,
+    project: &str,
+    g: o3k_store::CanonicalL3GatewayRecord,
+) -> Result<RouterResponse, NetworkError> {
+    let external_network_id = match g.external_realm_id {
+        Some(realm_id) => Some(
+            service
+                .get_canonical_realm_for_project(project, realm_id)
+                .await?
+                .network_id,
+        ),
+        None => None,
+    };
+    Ok(RouterResponse {
         id: g.id.to_string(),
         name: g.name,
         project_id: g.project_id.clone(),
@@ -109,11 +122,11 @@ fn router_response(g: o3k_store::CanonicalL3GatewayRecord) -> RouterResponse {
         status: g.state.to_ascii_uppercase(),
         admin_state_up: true,
         enable_snat: g.enable_snat,
-        external_gateway_info: g.external_realm_id.map(|id| ExternalGatewayInfoResponse {
+        external_gateway_info: external_network_id.map(|id| ExternalGatewayInfoResponse {
             network_id: id.to_string(),
             enable_snat: g.enable_snat,
         }),
-    }
+    })
 }
 
 async fn external_realm_for_router(
@@ -156,10 +169,17 @@ pub(crate) async fn list_routers(
         .list_l3_gateways_for_project(auth.effective_scope().id().as_str())
         .await
     {
-        Ok(gateways) => Json(RouterList {
-            routers: gateways.into_iter().map(router_response).collect(),
-        })
-        .into_response(),
+        Ok(gateways) => {
+            let mut routers = Vec::with_capacity(gateways.len());
+            for gateway in gateways {
+                match router_response(service, auth.effective_scope().id().as_str(), gateway).await
+                {
+                    Ok(router) => routers.push(router),
+                    Err(error) => return network_error(error),
+                }
+            }
+            Json(RouterList { routers }).into_response()
+        }
         Err(error) => network_error(error),
     }
 }
@@ -203,13 +223,10 @@ pub(crate) async fn create_router(
         )
         .await;
     match result {
-        Ok(gateway) => (
-            StatusCode::CREATED,
-            Json(RouterEnvelope {
-                router: router_response(gateway),
-            }),
-        )
-            .into_response(),
+        Ok(gateway) => match router_response(service, project, gateway).await {
+            Ok(router) => (StatusCode::CREATED, Json(RouterEnvelope { router })).into_response(),
+            Err(error) => network_error(error),
+        },
         Err(error) => network_error(error),
     }
 }
@@ -227,14 +244,15 @@ pub(crate) async fn show_router(
         Ok(v) => v,
         Err(r) => return r,
     };
+    let project = auth.effective_scope().id().as_str();
     match service
         .get_l3_gateway_for_project(auth.effective_scope().id().as_str(), &id)
         .await
     {
-        Ok(gateway) => Json(RouterEnvelope {
-            router: router_response(gateway),
-        })
-        .into_response(),
+        Ok(gateway) => match router_response(service, project, gateway).await {
+            Ok(router) => Json(RouterEnvelope { router }).into_response(),
+            Err(error) => network_error(error),
+        },
         Err(error) => network_error(error),
     }
 }
@@ -285,10 +303,10 @@ pub(crate) async fn update_router(
         )
         .await
     {
-        Ok(gateway) => Json(RouterEnvelope {
-            router: router_response(gateway),
-        })
-        .into_response(),
+        Ok(gateway) => match router_response(service, project, gateway).await {
+            Ok(router) => Json(RouterEnvelope { router }).into_response(),
+            Err(error) => network_error(error),
+        },
         Err(error) => network_error(error),
     }
 }

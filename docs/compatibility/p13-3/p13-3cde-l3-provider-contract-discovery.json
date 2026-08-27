@@ -71,14 +71,14 @@
     ]
   },
   "canonical_mapping": {
-    "router": "existing AddressRealm gateway/route and endpoint attachment model; no new Router authority is claimed",
-    "router_interface": "existing canonical realm/endpoint relationship, subject to an explicit bounded adapter",
+    "router": "canonical L3Gateway with independent project-owned identity; Neutron Router is a compatibility projection",
+    "router_interface": "canonical L3GatewayAttachment relating the gateway to an AddressRealm",
     "floating_ip": "existing canonical PublicAddress, PublicAddressPool, and PublicAddressBinding model",
     "provider_state": "observation only; never canonical desired-state authority"
   },
   "verification": {
-    "real_provider_lifecycle": "not executed: required O3K_P13_TOFU_PROJECT credentials are unavailable",
+    "real_provider_lifecycle": "executed against O3K with pinned OpenTofu/provider; bounded Router and Router Interface lifecycle evidence is committed separately",
     "provider_source_inspection": "completed",
-    "implementation_status": "discovery only"
+    "implementation_status": "canonical L3Gateway projection implemented; bounded provider lifecycle verified; L3 connectivity remains a separate gate"
   }
 }

@@ -46,5 +46,8 @@ decision is recorded.
 - `contracts/iac-openstack-profile-v1.yaml`
 - `docs/specs/SPEC-0032-openstack-terraform-opentofu-compatibility-profile-v1.md`
 
-The real provider lifecycle gate is also pending because the required
-`O3K_P13_TOFU_PROJECT` credentials are unavailable in this environment.
+The project requester accepted Option 1 on 2026-08-27. The canonical
+L3Gateway/L3GatewayAttachment implementation and bounded real-provider Router
+and Router Interface lifecycle gate are now recorded in the accepted ADR/SPEC
+and the companion lifecycle evidence artifact. Realm-to-Realm connectivity
+and external SNAT traffic remain separately bounded evidence gates.

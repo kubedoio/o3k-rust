@@ -48,6 +48,9 @@ resource "openstack_networking_subnet_v2" "subnet" {
 resource "openstack_networking_router_v2" "router" {
   name = "p13-router"
   admin_state_up = true
+  external_network_id = openstack_networking_network_v2.network.id
+  enable_snat = false
+  depends_on = [openstack_networking_subnet_v2.subnet]
 }
 resource "openstack_networking_router_interface_v2" "interface" {
   router_id = openstack_networking_router_v2.router.id
