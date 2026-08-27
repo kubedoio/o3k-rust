@@ -324,14 +324,13 @@ profiles:
       extends native-rust-testlab but does not alter its release gate.
     blockers:
       - P13.3B2 native policy traffic and recovery evidence closure
-      - P13.3C router authority decision and bounded provider lifecycle evidence
+      - P13.3C Router/L3Gateway provider lifecycle and connectivity evidence
       - P13.3-P13.7 implementation evidence as defined in SPEC-0032
     next_evidence_action: >-
-      Complete native policy traffic/recovery evidence, then resolve the
-      documented P13.3C router authority decision before implementing Router
-      compatibility. The bounded Security Group, Port attachment, and
-      Floating IP provider evidence is committed, but does not establish full
-      P13.3 completion.
+      Complete native policy traffic/recovery evidence and the accepted
+      L3Gateway/Router provider lifecycle and connectivity evidence. The
+      bounded Security Group, Port attachment, and Floating IP provider
+      evidence is committed, but does not establish full P13.3 completion.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)

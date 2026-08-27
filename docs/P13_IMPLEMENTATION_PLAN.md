@@ -116,8 +116,9 @@ policy persistence, endpoint-scoped policy compilation/realization, native
 Linux policy enforcement, and the bounded Security Group projection now exist
 on the implementation branch. Local real-provider evidence is committed for
 the bounded Security Group, Port attachment, and Floating IP paths. P13.3
-remains incomplete pending native policy traffic/recovery closure and the
-router authority decision documented in
+remains incomplete pending native policy traffic/recovery closure and
+accepted L3Gateway/Router provider lifecycle and connectivity evidence. The
+router authority decision is recorded in
 `docs/compatibility/p13-3/p13-3c-router-architecture-decision-request.md`.
 
 ### P13.4 — Native Volume Cinder projection and Terraform volume lifecycle
