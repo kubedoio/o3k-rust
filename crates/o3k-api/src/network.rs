@@ -438,16 +438,42 @@ pub(crate) async fn add_router_interface(
                 Ok(value) => value,
                 Err(error) => return network_error(error),
             };
+            let mut provider_dispatched = false;
             for port in ports
                 .into_iter()
                 .filter(|port| port.network_id == realm.network_id)
             {
-                if let Err(response) = dispatch_policy_network_with_gateway(
+                let dispatched = match dispatch_policy_network_with_gateway(
                     &state,
                     project,
                     realm.network_id,
                     port.id,
                     Some(a.gateway_id),
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+                provider_dispatched |= dispatched;
+            }
+            if !provider_dispatched
+                && state.network_dispatcher.is_some()
+                && state.network_controller.is_some()
+            {
+                let snapshot = match service
+                    .compile_l3_gateway_execution_plan_for_project(project, &a.gateway_id)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => return network_error(error),
+                };
+                if let Err(response) = dispatch_l3_gateway_snapshot(
+                    &state,
+                    project,
+                    snapshot,
+                    o3k_network::NetworkPlanAction::Apply,
+                    a.generation,
                 )
                 .await
                 {
@@ -1887,9 +1913,15 @@ async fn dispatch_policy_network_with_gateway(
     let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
     let operation_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
-        serde_json::to_string(&(&policies, &policy_defaults))
-            .unwrap_or_default()
-            .as_bytes(),
+        &serde_json::to_string(&(&policies, &policy_defaults))
+            .map_err(|_| {
+                keystone_error(
+                    StatusCode::BAD_REQUEST,
+                    "Bad Request",
+                    "policy identity serialization failed",
+                )
+            })?
+            .into_bytes(),
     );
     let plan = o3k_network::compile_attachment_plan_with_defaults(
         o3k_network::AttachmentPlanInput {
