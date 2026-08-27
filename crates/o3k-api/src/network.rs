@@ -1654,11 +1654,10 @@ async fn dispatch_policy_network(
             attachments,
             &all_realms,
             &std::collections::BTreeMap::new(),
-        ) {
-            if let Some((routes, egress)) = compiled.get(&realm.id) {
-                gateway_routes.extend(routes.iter().cloned());
-                gateway_egress.extend(egress.iter().cloned());
-            }
+        ) && let Some((routes, egress)) = compiled.get(&realm.id)
+        {
+            gateway_routes.extend(routes.iter().cloned());
+            gateway_egress.extend(egress.iter().cloned());
         }
     }
     let deadline_unix_ms = unix_time_millis().saturating_add(30_000);

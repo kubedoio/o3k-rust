@@ -4672,21 +4672,20 @@ pub struct CanonicalNetworkSnapshot {
 /// Compiles the canonical gateway graph into the existing provider-neutral
 /// routing intents. AddressRealm remains the unit of address interpretation;
 /// this function only derives connectivity from the gateway attachments.
+pub type GatewayIntentMap = BTreeMap<
+    Uuid,
+    (
+        Vec<o3k_domain::GatewayIntent>,
+        Vec<o3k_domain::EgressIntent>,
+    ),
+>;
+
 pub fn compile_l3_gateway_intents(
     gateway: &o3k_store::CanonicalL3GatewayRecord,
     attachments: &[o3k_store::CanonicalL3GatewayAttachmentRecord],
     realms: &[o3k_store::CanonicalAddressRealmRecord],
     pools: &BTreeMap<Uuid, Vec<o3k_store::CanonicalAddressPoolRecord>>,
-) -> Result<
-    BTreeMap<
-        Uuid,
-        (
-            Vec<o3k_domain::GatewayIntent>,
-            Vec<o3k_domain::EgressIntent>,
-        ),
-    >,
-    NetworkError,
-> {
+) -> Result<GatewayIntentMap, NetworkError> {
     if gateway.state != "active" || gateway.generation == 0 {
         return Err(NetworkError::InvalidRequest);
     }
@@ -4777,17 +4776,16 @@ impl NetworkService {
         if name.trim().is_empty() {
             return Err(NetworkError::InvalidRequest);
         }
-        if let Some(realm_id) = external_realm_id {
-            if self
+        if let Some(realm_id) = external_realm_id
+            && self
                 .inner
                 .repository
                 .get_canonical_realm(project_id, &realm_id)
                 .await
                 .map_err(map_store_error)?
                 .is_none()
-            {
-                return Err(NetworkError::NotFound);
-            }
+        {
+            return Err(NetworkError::NotFound);
         }
         let gateway = o3k_store::CanonicalL3GatewayRecord {
             id: Uuid::now_v7(),
@@ -4880,17 +4878,16 @@ impl NetworkService {
         if name.trim().is_empty() {
             return Err(NetworkError::InvalidRequest);
         }
-        if let Some(realm_id) = external_realm_id {
-            if self
+        if let Some(realm_id) = external_realm_id
+            && self
                 .inner
                 .repository
                 .get_canonical_realm(project_id, &realm_id)
                 .await
                 .map_err(map_store_error)?
                 .is_none()
-            {
-                return Err(NetworkError::NotFound);
-            }
+        {
+            return Err(NetworkError::NotFound);
         }
         self.inner
             .repository

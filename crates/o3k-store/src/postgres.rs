@@ -52,7 +52,7 @@ impl PostgresStore {
         id: &Uuid,
     ) -> Result<Option<CanonicalL3GatewayRecord>, StoreError> {
         let r=sqlx::query("SELECT id,project_id,name,external_realm_id,enable_snat,generation,state FROM canonical_l3_gateways WHERE id=$1 AND project_id=$2").bind(id).bind(p).fetch_optional(&self.pool).await.map_err(StoreError::Database)?;
-        Ok(r.map(|x| {
+        r.map(|x| {
             Ok(CanonicalL3GatewayRecord {
                 id: x.try_get("id").map_err(StoreError::Database)?,
                 project_id: x.try_get("project_id").map_err(StoreError::Database)?,
@@ -70,7 +70,7 @@ impl PostgresStore {
                 state: x.try_get("state").map_err(StoreError::Database)?,
             })
         })
-        .transpose()?)
+        .transpose()
     }
     pub async fn list_canonical_l3_gateways(
         &self,
@@ -151,7 +151,7 @@ impl PostgresStore {
         id: &Uuid,
     ) -> Result<Option<CanonicalL3GatewayAttachmentRecord>, StoreError> {
         let r=sqlx::query("SELECT id,gateway_id,realm_id,project_id,generation,state FROM canonical_l3_gateway_attachments WHERE id=$1 AND project_id=$2").bind(id).bind(p).fetch_optional(&self.pool).await.map_err(StoreError::Database)?;
-        Ok(r.map(|x| {
+        r.map(|x| {
             Ok(CanonicalL3GatewayAttachmentRecord {
                 id: x.try_get("id").map_err(StoreError::Database)?,
                 gateway_id: x.try_get("gateway_id").map_err(StoreError::Database)?,
@@ -168,7 +168,7 @@ impl PostgresStore {
                 state: x.try_get("state").map_err(StoreError::Database)?,
             })
         })
-        .transpose()?)
+        .transpose()
     }
     pub async fn list_canonical_l3_gateway_attachments(
         &self,

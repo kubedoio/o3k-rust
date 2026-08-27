@@ -64,13 +64,11 @@ async fn postgres_p13_b1_l3_gateway_attachment_reopens_and_fences() -> Result<()
         .await?;
     drop(store);
     let reopened = PostgresStore::connect(&url).await?;
-    assert_eq!(
-        reopened
-            .get_canonical_l3_gateway_attachment(project, &attachment.id)
-            .await?
-            .expect("attachment"),
-        attachment
-    );
+    let reopened_attachment = reopened
+        .get_canonical_l3_gateway_attachment(project, &attachment.id)
+        .await?
+        .ok_or(StoreError::Corrupt("attachment disappeared".into()))?;
+    assert_eq!(reopened_attachment, attachment);
     let deleting = reopened
         .begin_canonical_l3_gateway_attachment_deletion(project, &attachment.id, 1)
         .await?;

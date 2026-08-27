@@ -14434,7 +14434,7 @@ mod tests {
         let reopened = store
             .get_canonical_l3_gateway("project-a", &gateway.id)
             .await?
-            .expect("gateway");
+            .ok_or(StoreError::Corrupt("gateway disappeared".into()))?;
         assert_eq!(reopened.name, "edge-2");
         assert_eq!(reopened.generation, 2);
         Ok(())
@@ -14512,14 +14512,11 @@ mod tests {
             .await?;
         assert_eq!(deleting.generation, 2);
         let reopened = SqliteStore::connect_file(&path).await?;
-        assert_eq!(
-            reopened
-                .get_canonical_l3_gateway_attachment("project-a", &attachment.id)
-                .await?
-                .expect("attachment")
-                .state,
-            "deleting"
-        );
+        let reopened_attachment = reopened
+            .get_canonical_l3_gateway_attachment("project-a", &attachment.id)
+            .await?
+            .ok_or(StoreError::Corrupt("attachment disappeared".into()))?;
+        assert_eq!(reopened_attachment.state, "deleting");
         reopened
             .finalize_canonical_l3_gateway_attachment_deletion("project-a", &attachment.id, 2)
             .await?;
