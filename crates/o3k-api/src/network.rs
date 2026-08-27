@@ -10,6 +10,7 @@ use axum::{
     response::IntoResponse,
 };
 use o3k_domain::{NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange};
+use o3k_kernel::AuthContext;
 use o3k_network::{
     NetworkError, NetworkRecord, NetworkService, PortRecord, PublicAddressAllocator,
     PublicAddressBinding, PublicAddressError, SubnetRecord,
@@ -64,7 +65,14 @@ pub(crate) struct ExternalGatewayInfoResponse {
 }
 #[derive(serde::Deserialize)]
 pub(crate) struct RouterInterfaceRequestBody {
-    router_interface: RouterInterfaceRequest,
+    #[serde(default)]
+    router_interface: Option<RouterInterfaceRequest>,
+    #[serde(default)]
+    realm_id: Option<Uuid>,
+    #[serde(default)]
+    subnet_id: Option<Uuid>,
+    #[serde(default)]
+    port_id: Option<Uuid>,
 }
 #[derive(serde::Deserialize)]
 pub(crate) struct RouterInterfaceRequest {
@@ -72,12 +80,25 @@ pub(crate) struct RouterInterfaceRequest {
     realm_id: Option<Uuid>,
     #[serde(default)]
     subnet_id: Option<Uuid>,
+    #[serde(default)]
+    port_id: Option<Uuid>,
+}
+impl RouterInterfaceRequestBody {
+    fn into_request(self) -> RouterInterfaceRequest {
+        self.router_interface.unwrap_or(RouterInterfaceRequest {
+            realm_id: self.realm_id,
+            subnet_id: self.subnet_id,
+            port_id: self.port_id,
+        })
+    }
 }
 #[derive(serde::Serialize)]
 pub(crate) struct RouterInterfaceResponse {
-    id: String,
-    gateway_id: String,
-    realm_id: String,
+    #[serde(rename = "port_id")]
+    port_id: String,
+    #[serde(rename = "router_id")]
+    router_id: String,
+    subnet_id: String,
 }
 fn router_response(g: o3k_store::CanonicalL3GatewayRecord) -> RouterResponse {
     RouterResponse {
@@ -316,14 +337,15 @@ pub(crate) async fn add_router_interface(
             "invalid router interface request",
         );
     };
+    let body = body.into_request();
     let service = match network_service(&state) {
         Ok(v) => v,
         Err(r) => return r,
     };
     let project = auth.effective_scope().id().as_str();
-    let realm_id = if let Some(realm_id) = body.router_interface.realm_id {
+    let realm_id = if let Some(realm_id) = body.realm_id {
         realm_id
-    } else if let Some(subnet_id) = body.router_interface.subnet_id {
+    } else if let Some(subnet_id) = body.subnet_id {
         let subnet = match service
             .get_subnet_for_project(auth.effective_scope().id().as_str(), subnet_id)
             .await
@@ -348,6 +370,7 @@ pub(crate) async fn add_router_interface(
     } else {
         return network_error(NetworkError::InvalidRequest);
     };
+    let response_subnet_id = body.subnet_id.unwrap_or(realm_id);
     match service
         .attach_l3_gateway_realm(auth.effective_scope().id().as_str(), &id, &realm_id)
         .await
@@ -374,7 +397,15 @@ pub(crate) async fn add_router_interface(
                     return response;
                 }
             }
-            (StatusCode::CREATED, Json(serde_json::json!({"router_interface_info": RouterInterfaceResponse { id:a.id.to_string(), gateway_id:a.gateway_id.to_string(), realm_id:a.realm_id.to_string() }}))).into_response()
+            (
+                StatusCode::OK,
+                Json(RouterInterfaceResponse {
+                    port_id: a.id.to_string(),
+                    router_id: a.gateway_id.to_string(),
+                    subnet_id: response_subnet_id.to_string(),
+                }),
+            )
+                .into_response()
         }
         Err(error) => network_error(error),
     }
@@ -397,6 +428,7 @@ pub(crate) async fn remove_router_interface(
             "invalid router interface request",
         );
     };
+    let body = body.into_request();
     let service = match network_service(&state) {
         Ok(v) => v,
         Err(r) => return r,
@@ -406,10 +438,31 @@ pub(crate) async fn remove_router_interface(
         Ok(v) => v,
         Err(e) => return network_error(e),
     };
-    let Some(realm_id) = body.router_interface.realm_id else {
-        return network_error(NetworkError::InvalidRequest);
+    let realm_id = if let Some(realm_id) = body.realm_id {
+        realm_id
+    } else if let Some(subnet_id) = body.subnet_id {
+        let subnet = match service.get_subnet_for_project(project, subnet_id).await {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let realms = match service
+            .list_canonical_realms_for_project(project, subnet.network_id)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        let Some(realm) = realms.into_iter().find(|realm| realm.prefix == subnet.cidr) else {
+            return network_error(NetworkError::NotFound);
+        };
+        realm.id
+    } else {
+        Uuid::nil()
     };
-    let Some(a) = attachments.into_iter().find(|a| a.realm_id == realm_id) else {
+    let Some(a) = attachments
+        .into_iter()
+        .find(|a| a.realm_id == realm_id || body.port_id == Some(a.id))
+    else {
         return network_error(NetworkError::NotFound);
     };
     let realm = match service.get_canonical_realm(&auth, a.realm_id).await {
@@ -435,7 +488,12 @@ pub(crate) async fn remove_router_interface(
                     return response;
                 }
             }
-            Json(serde_json::json!({"router_interface_info": {"id": a.id.to_string(), "gateway_id": a.gateway_id.to_string(), "realm_id": a.realm_id.to_string()}})).into_response()
+            Json(RouterInterfaceResponse {
+                port_id: a.id.to_string(),
+                router_id: a.gateway_id.to_string(),
+                subnet_id: a.realm_id.to_string(),
+            })
+            .into_response()
         }
         Err(error) => network_error(error),
     }
@@ -1696,6 +1754,64 @@ pub(crate) fn port_response(value: PortRecord, security_groups: Vec<Uuid>) -> Po
     }
 }
 
+async fn router_interface_port(
+    service: &NetworkService,
+    auth: &AuthContext,
+    port_id: Uuid,
+) -> Result<Option<PortResponse>, NetworkError> {
+    let project = auth.effective_scope().id().as_str();
+    for gateway in service.list_l3_gateways_for_project(project).await? {
+        for attachment in service
+            .list_l3_gateway_attachments(project, &gateway.id)
+            .await?
+        {
+            if attachment.id != port_id || attachment.state != "active" {
+                continue;
+            }
+            let realm = service
+                .get_canonical_realm(auth, attachment.realm_id)
+                .await?;
+            let subnet_id = service
+                .list_subnets_for_project(project)
+                .await?
+                .into_iter()
+                .find(|subnet| subnet.network_id == realm.network_id && subnet.cidr == realm.prefix)
+                .map(|subnet| subnet.id)
+                .unwrap_or(realm.id);
+            let network = realm
+                .prefix
+                .split_once('/')
+                .and_then(|(address, _)| address.parse::<Ipv4Addr>().ok())
+                .and_then(|address| u32::from(address).checked_add(1).map(Ipv4Addr::from))
+                .ok_or(NetworkError::InvalidRequest)?;
+            let bytes = port_id.as_bytes();
+            let mac_address = format!(
+                "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                bytes[0], bytes[1], bytes[2], bytes[14], bytes[15]
+            );
+            return Ok(Some(PortResponse {
+                id: port_id.to_string(),
+                network_id: realm.network_id.to_string(),
+                project_id: project.to_owned(),
+                name: format!("router-interface-{}", attachment.id),
+                mac_address,
+                fixed_ips: vec![FixedIpResponse {
+                    subnet_id: subnet_id.to_string(),
+                    ip_address: network,
+                }],
+                status: "ACTIVE".to_owned(),
+                security_groups: Vec::new(),
+                tenant_id: project.to_owned(),
+                admin_state_up: true,
+                device_id: gateway.id.to_string(),
+                device_owner: "network:router_interface".to_owned(),
+                port_security_enabled: false,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn network_error(error: NetworkError) -> axum::response::Response {
     match error {
         NetworkError::Unauthorized => keystone_error(
@@ -2655,6 +2771,11 @@ pub(crate) async fn show_port(
             })
             .into_response()
         }
+        Err(NetworkError::NotFound) => match router_interface_port(service, &auth, id).await {
+            Ok(Some(port)) => Json(PortEnvelope { port }).into_response(),
+            Ok(None) => network_error(NetworkError::NotFound),
+            Err(error) => network_error(error),
+        },
         Err(error) => network_error(error),
     }
 }
