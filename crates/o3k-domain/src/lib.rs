@@ -4,14 +4,15 @@ mod storage;
 pub use network::{
     AddressPool, AddressRealm, EgressIntent, EndpointDirectoryError, EndpointIntent,
     EndpointLocation, FabricEndpointRoute, FabricHostIdentity, FabricPeer, FabricProviderKind,
-    GatewayIntent, GenevePacketMetadata, GenevePacketValidationError, Ipv4Prefix,
-    NamespacedRoutedFabricPlan, NeighborResolution, Network, NetworkCapability, NetworkIntent,
-    NetworkIntentState, NetworkPlanIntent, NetworkPolicy, NetworkPolicyRule, NetworkProtocol,
-    NetworkState, PolicyAction, PolicyAddressFamily, PolicyAttachment, PolicyDefaultIntent,
-    PolicyDirection, PolicyIntent, PolicyLifecycleState, PolicyStatefulMode, PortRange,
-    PublicAddressBindingIntent, RealmBindingError, RealmEncapsulationBinding,
-    RealmEncapsulationRegistry, RealmEndpointDirectory, RouteIntent, SecurityGroupBinding,
-    SecurityGroupIntent, SecurityGroupRuleIntent, SecurityGroupState, realm_proxy_mac,
+    GatewayIntent, GenevePacketMetadata, GenevePacketValidationError, Ipv4Prefix, L3Gateway,
+    L3GatewayAttachment, L3GatewayAttachmentState, L3GatewayState, NamespacedRoutedFabricPlan,
+    NeighborResolution, Network, NetworkCapability, NetworkIntent, NetworkIntentState,
+    NetworkPlanIntent, NetworkPolicy, NetworkPolicyRule, NetworkProtocol, NetworkState,
+    PolicyAction, PolicyAddressFamily, PolicyAttachment, PolicyDefaultIntent, PolicyDirection,
+    PolicyIntent, PolicyLifecycleState, PolicyStatefulMode, PortRange, PublicAddressBindingIntent,
+    RealmBindingError, RealmEncapsulationBinding, RealmEncapsulationRegistry,
+    RealmEndpointDirectory, RouteIntent, SecurityGroupBinding, SecurityGroupIntent,
+    SecurityGroupRuleIntent, SecurityGroupState, realm_proxy_mac,
 };
 pub use storage::{
     AttachmentAccessMode, ProviderReference as StorageProviderReference, Snapshot,

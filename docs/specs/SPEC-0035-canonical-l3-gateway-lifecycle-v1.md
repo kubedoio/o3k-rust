@@ -1,6 +1,7 @@
 # SPEC-0035 — Canonical L3 gateway lifecycle v1
 
-Status: Proposed
+Status: Accepted
+Accepted-by: project-requester on 2026-08-27; runtime implementation and compatibility verification remain separate gates
 Decision: [ADR-0178](../adr/ADR-0178-canonical-l3-gateway-and-realm-connectivity.md)
 Applies-to: canonical L3 gateway domain, store, network execution, Neutron Router projection
 

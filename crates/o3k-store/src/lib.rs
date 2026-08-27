@@ -170,6 +170,27 @@ pub struct CanonicalAddressPoolRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalL3GatewayRecord {
+    pub id: Uuid,
+    pub project_id: String,
+    pub name: String,
+    pub external_realm_id: Option<Uuid>,
+    pub enable_snat: bool,
+    pub generation: u64,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalL3GatewayAttachmentRecord {
+    pub id: Uuid,
+    pub gateway_id: Uuid,
+    pub realm_id: Uuid,
+    pub project_id: String,
+    pub generation: u64,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalEndpointRecord {
     pub id: Uuid,
     pub realm_id: Uuid,
@@ -1921,6 +1942,71 @@ pub trait NetworkRepository:
         name: &str,
         admin_state_up: bool,
     ) -> Result<CanonicalNetworkRecord, StoreError>;
+    async fn insert_canonical_l3_gateway(
+        &self,
+        gateway: &CanonicalL3GatewayRecord,
+    ) -> Result<(), StoreError>;
+    async fn get_canonical_l3_gateway(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalL3GatewayRecord>, StoreError>;
+    async fn list_canonical_l3_gateways(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<CanonicalL3GatewayRecord>, StoreError>;
+    async fn update_canonical_l3_gateway(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        name: &str,
+        external_realm_id: Option<Uuid>,
+        enable_snat: bool,
+    ) -> Result<CanonicalL3GatewayRecord, StoreError>;
+    async fn begin_canonical_l3_gateway_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalL3GatewayRecord, StoreError>;
+    async fn finalize_canonical_l3_gateway_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), StoreError>;
+    async fn insert_canonical_l3_gateway_attachment(
+        &self,
+        attachment: &CanonicalL3GatewayAttachmentRecord,
+    ) -> Result<(), StoreError>;
+    async fn get_canonical_l3_gateway_attachment(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalL3GatewayAttachmentRecord>, StoreError>;
+    async fn list_canonical_l3_gateway_attachments(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError>;
+    async fn list_canonical_realm_l3_gateway_attachments(
+        &self,
+        project_id: &str,
+        realm_id: &Uuid,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError>;
+    async fn begin_canonical_l3_gateway_attachment_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<CanonicalL3GatewayAttachmentRecord, StoreError>;
+    async fn finalize_canonical_l3_gateway_attachment_deletion(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), StoreError>;
     async fn insert_canonical_realm(
         &self,
         realm: &CanonicalAddressRealmRecord,
@@ -8750,6 +8836,242 @@ impl ImageRepository for SqliteStore {
     }
 }
 
+impl SqliteStore {
+    pub async fn insert_canonical_l3_gateway(
+        &self,
+        g: &CanonicalL3GatewayRecord,
+    ) -> Result<(), StoreError> {
+        validate_canonical_state(&g.state)?;
+        checked_generation(g.generation)?;
+        sqlx::query("INSERT INTO canonical_l3_gateways (id,project_id,name,external_realm_id,enable_snat,generation,state) VALUES (?,?,?,?,?,?,?)")
+            .bind(g.id.to_string()).bind(&g.project_id).bind(&g.name)
+            .bind(g.external_realm_id.map(|v| v.to_string())).bind(g.enable_snat)
+            .bind(g.generation as i64).bind(&g.state).execute(&self.pool).await
+            .map_err(map_canonical_insert_error).map(|_| ())
+    }
+    pub async fn get_canonical_l3_gateway(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalL3GatewayRecord>, StoreError> {
+        let row = sqlx::query("SELECT id,project_id,name,external_realm_id,enable_snat,generation,state FROM canonical_l3_gateways WHERE id=? AND project_id=?").bind(id.to_string()).bind(project_id).fetch_optional(&self.pool).await.map_err(StoreError::Database)?;
+        row.as_ref()
+            .map(|r| {
+                Ok(CanonicalL3GatewayRecord {
+                    id: r
+                        .try_get::<String, _>("id")
+                        .map_err(StoreError::Database)?
+                        .parse()
+                        .map_err(StoreError::InvalidUuid)?,
+                    project_id: r.try_get("project_id").map_err(StoreError::Database)?,
+                    name: r.try_get("name").map_err(StoreError::Database)?,
+                    external_realm_id: r
+                        .try_get::<Option<String>, _>("external_realm_id")
+                        .map_err(StoreError::Database)?
+                        .map(|v| v.parse().map_err(StoreError::InvalidUuid))
+                        .transpose()?,
+                    enable_snat: r.try_get("enable_snat").map_err(StoreError::Database)?,
+                    generation: checked_generation(
+                        r.try_get::<i64, _>("generation")
+                            .map_err(StoreError::Database)? as u64,
+                    )? as u64,
+                    state: r.try_get("state").map_err(StoreError::Database)?,
+                })
+            })
+            .transpose()
+    }
+    pub async fn list_canonical_l3_gateways(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<CanonicalL3GatewayRecord>, StoreError> {
+        let rows =
+            sqlx::query("SELECT id FROM canonical_l3_gateways WHERE project_id=? ORDER BY id")
+                .bind(project_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+        let mut out = Vec::new();
+        for r in rows {
+            let id: Uuid = r
+                .try_get::<String, _>("id")
+                .map_err(StoreError::Database)?
+                .parse()
+                .map_err(StoreError::InvalidUuid)?;
+            out.push(
+                self.get_canonical_l3_gateway(project_id, &id)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("gateway disappeared".into()))?,
+            );
+        }
+        Ok(out)
+    }
+    pub async fn update_canonical_l3_gateway(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected: u64,
+        name: &str,
+        external: Option<Uuid>,
+        snat: bool,
+    ) -> Result<CanonicalL3GatewayRecord, StoreError> {
+        let n=sqlx::query("UPDATE canonical_l3_gateways SET name=?,external_realm_id=?,enable_snat=?,generation=generation+1 WHERE id=? AND project_id=? AND generation=? AND state='active'").bind(name).bind(external.map(|v|v.to_string())).bind(snat).bind(id.to_string()).bind(project_id).bind(expected as i64).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if n.rows_affected() == 0 {
+            return Err(
+                if self
+                    .get_canonical_l3_gateway(project_id, id)
+                    .await?
+                    .is_some()
+                {
+                    StoreError::StaleGeneration
+                } else {
+                    StoreError::ResourceNotFound
+                },
+            );
+        }
+        self.get_canonical_l3_gateway(project_id, id)
+            .await?
+            .ok_or_else(|| StoreError::Corrupt("gateway disappeared".into()))
+    }
+    pub async fn begin_canonical_l3_gateway_deletion(
+        &self,
+        p: &str,
+        id: &Uuid,
+        expected: u64,
+    ) -> Result<CanonicalL3GatewayRecord, StoreError> {
+        let n=sqlx::query("UPDATE canonical_l3_gateways SET state='deleting',generation=generation+1 WHERE id=? AND project_id=? AND generation=? AND state='active' AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE gateway_id=? AND state IN ('active','deleting'))").bind(id.to_string()).bind(p).bind(expected as i64).bind(id.to_string()).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if n.rows_affected() == 0 {
+            return Err(StoreError::OwnershipConflict);
+        }
+        self.get_canonical_l3_gateway(p, id)
+            .await?
+            .ok_or_else(|| StoreError::Corrupt("gateway disappeared".into()))
+    }
+    pub async fn finalize_canonical_l3_gateway_deletion(
+        &self,
+        p: &str,
+        id: &Uuid,
+        expected: u64,
+    ) -> Result<(), StoreError> {
+        let n=sqlx::query("DELETE FROM canonical_l3_gateways WHERE id=? AND project_id=? AND generation=? AND state='deleting' AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE gateway_id=? AND state IN ('active','deleting'))").bind(id.to_string()).bind(p).bind(expected as i64).bind(id.to_string()).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if n.rows_affected() == 0 {
+            Err(StoreError::OwnershipConflict)
+        } else {
+            Ok(())
+        }
+    }
+    pub async fn insert_canonical_l3_gateway_attachment(
+        &self,
+        a: &CanonicalL3GatewayAttachmentRecord,
+    ) -> Result<(), StoreError> {
+        validate_canonical_state(&a.state)?;
+        checked_generation(a.generation)?;
+        sqlx::query("INSERT INTO canonical_l3_gateway_attachments (id,gateway_id,realm_id,project_id,generation,state) VALUES (?,?,?,?,?,?)").bind(a.id.to_string()).bind(a.gateway_id.to_string()).bind(a.realm_id.to_string()).bind(&a.project_id).bind(a.generation as i64).bind(&a.state).execute(&self.pool).await.map_err(map_canonical_insert_error).map(|_|())
+    }
+    pub async fn get_canonical_l3_gateway_attachment(
+        &self,
+        p: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        let row=sqlx::query("SELECT id,gateway_id,realm_id,project_id,generation,state FROM canonical_l3_gateway_attachments WHERE id=? AND project_id=?").bind(id.to_string()).bind(p).fetch_optional(&self.pool).await.map_err(StoreError::Database)?;
+        row.as_ref()
+            .map(|r| {
+                Ok(CanonicalL3GatewayAttachmentRecord {
+                    id: r
+                        .try_get::<String, _>("id")
+                        .map_err(StoreError::Database)?
+                        .parse()
+                        .map_err(StoreError::InvalidUuid)?,
+                    gateway_id: r
+                        .try_get::<String, _>("gateway_id")
+                        .map_err(StoreError::Database)?
+                        .parse()
+                        .map_err(StoreError::InvalidUuid)?,
+                    realm_id: r
+                        .try_get::<String, _>("realm_id")
+                        .map_err(StoreError::Database)?
+                        .parse()
+                        .map_err(StoreError::InvalidUuid)?,
+                    project_id: r.try_get("project_id").map_err(StoreError::Database)?,
+                    generation: checked_generation(
+                        r.try_get::<i64, _>("generation")
+                            .map_err(StoreError::Database)? as u64,
+                    )? as u64,
+                    state: r.try_get("state").map_err(StoreError::Database)?,
+                })
+            })
+            .transpose()
+    }
+    pub async fn list_canonical_l3_gateway_attachments(
+        &self,
+        p: &str,
+        g: &Uuid,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        let rows=sqlx::query("SELECT id FROM canonical_l3_gateway_attachments WHERE project_id=? AND gateway_id=? ORDER BY id").bind(p).bind(g.to_string()).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        let mut out = Vec::new();
+        for r in rows {
+            let id: Uuid = r
+                .try_get::<String, _>("id")
+                .map_err(StoreError::Database)?
+                .parse()
+                .map_err(StoreError::InvalidUuid)?;
+            out.push(
+                self.get_canonical_l3_gateway_attachment(p, &id)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("attachment disappeared".into()))?,
+            )
+        }
+        Ok(out)
+    }
+    pub async fn list_canonical_realm_l3_gateway_attachments(
+        &self,
+        p: &str,
+        r: &Uuid,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        let rows=sqlx::query("SELECT id FROM canonical_l3_gateway_attachments WHERE project_id=? AND realm_id=? ORDER BY id").bind(p).bind(r.to_string()).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let id: Uuid = row
+                .try_get::<String, _>("id")
+                .map_err(StoreError::Database)?
+                .parse()
+                .map_err(StoreError::InvalidUuid)?;
+            out.push(
+                self.get_canonical_l3_gateway_attachment(p, &id)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("attachment disappeared".into()))?,
+            )
+        }
+        Ok(out)
+    }
+    pub async fn begin_canonical_l3_gateway_attachment_deletion(
+        &self,
+        p: &str,
+        id: &Uuid,
+        expected: u64,
+    ) -> Result<CanonicalL3GatewayAttachmentRecord, StoreError> {
+        let n=sqlx::query("UPDATE canonical_l3_gateway_attachments SET state='deleting',generation=generation+1 WHERE id=? AND project_id=? AND generation=? AND state='active'").bind(id.to_string()).bind(p).bind(expected as i64).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if n.rows_affected() == 0 {
+            return Err(StoreError::StaleGeneration);
+        }
+        self.get_canonical_l3_gateway_attachment(p, id)
+            .await?
+            .ok_or_else(|| StoreError::Corrupt("attachment disappeared".into()))
+    }
+    pub async fn finalize_canonical_l3_gateway_attachment_deletion(
+        &self,
+        p: &str,
+        id: &Uuid,
+        expected: u64,
+    ) -> Result<(), StoreError> {
+        let n=sqlx::query("DELETE FROM canonical_l3_gateway_attachments WHERE id=? AND project_id=? AND generation=? AND state='deleting'").bind(id.to_string()).bind(p).bind(expected as i64).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if n.rows_affected() == 0 {
+            Err(StoreError::StaleGeneration)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[async_trait]
 impl NetworkRepository for SqliteStore {
     async fn get_canonical_owner(
@@ -8762,6 +9084,8 @@ impl NetworkRepository for SqliteStore {
             "address_realm" => "canonical_address_realms",
             "address_pool" => "canonical_address_pools",
             "endpoint" => "canonical_endpoints",
+            "l3_gateway" => "canonical_l3_gateways",
+            "l3_gateway_attachment" => "canonical_l3_gateway_attachments",
             _ => {
                 return Err(StoreError::Corrupt(
                     "unknown canonical resource type".into(),
@@ -8803,6 +9127,97 @@ impl NetworkRepository for SqliteStore {
         admin_state_up: bool,
     ) -> Result<CanonicalNetworkRecord, StoreError> {
         self.update_canonical_network(project_id, id, expected_generation, name, admin_state_up)
+            .await
+    }
+    async fn insert_canonical_l3_gateway(
+        &self,
+        g: &CanonicalL3GatewayRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_canonical_l3_gateway(g).await
+    }
+    async fn get_canonical_l3_gateway(
+        &self,
+        p: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalL3GatewayRecord>, StoreError> {
+        self.get_canonical_l3_gateway(p, id).await
+    }
+    async fn list_canonical_l3_gateways(
+        &self,
+        p: &str,
+    ) -> Result<Vec<CanonicalL3GatewayRecord>, StoreError> {
+        self.list_canonical_l3_gateways(p).await
+    }
+    async fn update_canonical_l3_gateway(
+        &self,
+        p: &str,
+        id: &Uuid,
+        e: u64,
+        n: &str,
+        x: Option<Uuid>,
+        s: bool,
+    ) -> Result<CanonicalL3GatewayRecord, StoreError> {
+        self.update_canonical_l3_gateway(p, id, e, n, x, s).await
+    }
+    async fn begin_canonical_l3_gateway_deletion(
+        &self,
+        p: &str,
+        id: &Uuid,
+        e: u64,
+    ) -> Result<CanonicalL3GatewayRecord, StoreError> {
+        self.begin_canonical_l3_gateway_deletion(p, id, e).await
+    }
+    async fn finalize_canonical_l3_gateway_deletion(
+        &self,
+        p: &str,
+        id: &Uuid,
+        e: u64,
+    ) -> Result<(), StoreError> {
+        self.finalize_canonical_l3_gateway_deletion(p, id, e).await
+    }
+    async fn insert_canonical_l3_gateway_attachment(
+        &self,
+        a: &CanonicalL3GatewayAttachmentRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_canonical_l3_gateway_attachment(a).await
+    }
+    async fn get_canonical_l3_gateway_attachment(
+        &self,
+        p: &str,
+        id: &Uuid,
+    ) -> Result<Option<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        self.get_canonical_l3_gateway_attachment(p, id).await
+    }
+    async fn list_canonical_l3_gateway_attachments(
+        &self,
+        p: &str,
+        g: &Uuid,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        self.list_canonical_l3_gateway_attachments(p, g).await
+    }
+    async fn list_canonical_realm_l3_gateway_attachments(
+        &self,
+        p: &str,
+        r: &Uuid,
+    ) -> Result<Vec<CanonicalL3GatewayAttachmentRecord>, StoreError> {
+        self.list_canonical_realm_l3_gateway_attachments(p, r).await
+    }
+    async fn begin_canonical_l3_gateway_attachment_deletion(
+        &self,
+        p: &str,
+        id: &Uuid,
+        e: u64,
+    ) -> Result<CanonicalL3GatewayAttachmentRecord, StoreError> {
+        self.begin_canonical_l3_gateway_attachment_deletion(p, id, e)
+            .await
+    }
+    async fn finalize_canonical_l3_gateway_attachment_deletion(
+        &self,
+        p: &str,
+        id: &Uuid,
+        e: u64,
+    ) -> Result<(), StoreError> {
+        self.finalize_canonical_l3_gateway_attachment_deletion(p, id, e)
             .await
     }
     async fn insert_canonical_realm(
@@ -13987,5 +14402,133 @@ mod tests {
     async fn empty_database_path_returns_error() {
         let result = SqliteStore::connect_file(Path::new("")).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn canonical_l3_gateway_is_detached_and_generation_fenced() -> Result<(), StoreError> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let gateway = CanonicalL3GatewayRecord {
+            id: Uuid::now_v7(),
+            project_id: "project-a".into(),
+            name: "edge".into(),
+            external_realm_id: None,
+            enable_snat: true,
+            generation: 1,
+            state: "active".into(),
+        };
+        store.insert_canonical_l3_gateway(&gateway).await?;
+        assert_eq!(
+            store.list_canonical_l3_gateways("project-a").await?,
+            vec![gateway.clone()]
+        );
+        let updated = store
+            .update_canonical_l3_gateway("project-a", &gateway.id, 1, "edge-2", None, false)
+            .await?;
+        assert_eq!(updated.generation, 2);
+        assert!(matches!(
+            store
+                .update_canonical_l3_gateway("project-a", &gateway.id, 1, "stale", None, true)
+                .await,
+            Err(StoreError::StaleGeneration)
+        ));
+        let reopened = store
+            .get_canonical_l3_gateway("project-a", &gateway.id)
+            .await?
+            .expect("gateway");
+        assert_eq!(reopened.name, "edge-2");
+        assert_eq!(reopened.generation, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_l3_gateway_attachments_are_project_scoped_and_restartable()
+    -> Result<(), StoreError> {
+        let path = std::env::temp_dir().join(format!("o3k-l3-gateway-{}.sqlite", Uuid::now_v7()));
+        let store = SqliteStore::connect_file(&path).await?;
+        let network = Uuid::now_v7();
+        let realm = Uuid::now_v7();
+        store
+            .insert_canonical_network(&CanonicalNetworkRecord {
+                id: network,
+                project_id: "project-a".into(),
+                name: "net".into(),
+                admin_state_up: true,
+                generation: 1,
+                state: "active".into(),
+            })
+            .await?;
+        store
+            .insert_canonical_realm(&CanonicalAddressRealmRecord {
+                id: realm,
+                network_id: network,
+                project_id: "project-a".into(),
+                prefix: "10.0.0.0/24".into(),
+                overlapping_prefixes: false,
+                generation: 1,
+                state: "active".into(),
+            })
+            .await?;
+        let gateway = CanonicalL3GatewayRecord {
+            id: Uuid::now_v7(),
+            project_id: "project-a".into(),
+            name: "gw".into(),
+            external_realm_id: None,
+            enable_snat: true,
+            generation: 1,
+            state: "active".into(),
+        };
+        store.insert_canonical_l3_gateway(&gateway).await?;
+        let attachment = CanonicalL3GatewayAttachmentRecord {
+            id: Uuid::now_v7(),
+            gateway_id: gateway.id,
+            realm_id: realm,
+            project_id: "project-a".into(),
+            generation: 1,
+            state: "active".into(),
+        };
+        store
+            .insert_canonical_l3_gateway_attachment(&attachment)
+            .await?;
+        assert_eq!(
+            store
+                .list_canonical_l3_gateway_attachments("project-a", &gateway.id)
+                .await?,
+            vec![attachment.clone()]
+        );
+        assert_eq!(
+            store
+                .list_canonical_realm_l3_gateway_attachments("project-a", &realm)
+                .await?,
+            vec![attachment.clone()]
+        );
+        assert!(matches!(
+            store
+                .get_canonical_l3_gateway_attachment("project-b", &attachment.id)
+                .await,
+            Ok(None)
+        ));
+        let deleting = store
+            .begin_canonical_l3_gateway_attachment_deletion("project-a", &attachment.id, 1)
+            .await?;
+        assert_eq!(deleting.generation, 2);
+        let reopened = SqliteStore::connect_file(&path).await?;
+        assert_eq!(
+            reopened
+                .get_canonical_l3_gateway_attachment("project-a", &attachment.id)
+                .await?
+                .expect("attachment")
+                .state,
+            "deleting"
+        );
+        reopened
+            .finalize_canonical_l3_gateway_attachment_deletion("project-a", &attachment.id, 2)
+            .await?;
+        assert!(
+            reopened
+                .list_canonical_l3_gateway_attachments("project-a", &gateway.id)
+                .await?
+                .is_empty()
+        );
+        Ok(())
     }
 }

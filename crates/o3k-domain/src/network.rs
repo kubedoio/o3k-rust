@@ -102,6 +102,50 @@ pub struct AddressPool {
     pub last_usable: Ipv4Addr,
 }
 
+/// Provider-independent L3 connectivity identity. AddressRealm remains the
+/// address interpretation and isolation identity; a gateway connects realms.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct L3Gateway {
+    pub id: Uuid,
+    pub project_id: String,
+    pub name: String,
+    pub external_realm_id: Option<Uuid>,
+    pub enable_snat: bool,
+    pub generation: u64,
+    pub state: L3GatewayState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum L3GatewayState {
+    Requested,
+    Active,
+    Deleting,
+    Deleted,
+    Error,
+}
+
+/// Durable relation between an L3Gateway and an AddressRealm.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct L3GatewayAttachment {
+    pub id: Uuid,
+    pub gateway_id: Uuid,
+    pub realm_id: Uuid,
+    pub project_id: String,
+    pub generation: u64,
+    pub state: L3GatewayAttachmentState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum L3GatewayAttachmentState {
+    Requested,
+    Active,
+    Deleting,
+    Deleted,
+    Error,
+}
+
 /// Canonical desired network state owned by the control plane.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkIntent {

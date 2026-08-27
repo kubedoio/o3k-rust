@@ -19,6 +19,291 @@ use uuid::Uuid;
 use crate::{AppState, auth::require_auth_context, error::keystone_error};
 
 #[derive(serde::Deserialize)]
+pub(crate) struct RouterRequestBody {
+    router: RouterRequest,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct RouterRequest {
+    name: String,
+    #[serde(default)]
+    enable_snat: Option<bool>,
+    #[serde(default)]
+    external_realm_id: Option<Uuid>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct RouterEnvelope {
+    router: RouterResponse,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct RouterList {
+    routers: Vec<RouterResponse>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct RouterResponse {
+    id: String,
+    name: String,
+    project_id: String,
+    tenant_id: String,
+    status: String,
+    admin_state_up: bool,
+    enable_snat: bool,
+    external_realm_id: Option<String>,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct RouterInterfaceRequestBody {
+    router_interface: RouterInterfaceRequest,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct RouterInterfaceRequest {
+    realm_id: Uuid,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct RouterInterfaceResponse {
+    id: String,
+    gateway_id: String,
+    realm_id: String,
+}
+fn router_response(g: o3k_store::CanonicalL3GatewayRecord) -> RouterResponse {
+    RouterResponse {
+        id: g.id.to_string(),
+        name: g.name,
+        project_id: g.project_id.clone(),
+        tenant_id: g.project_id,
+        status: g.state.to_ascii_uppercase(),
+        admin_state_up: true,
+        enable_snat: g.enable_snat,
+        external_realm_id: g.external_realm_id.map(|id| id.to_string()),
+    }
+}
+
+pub(crate) async fn list_routers(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match service
+        .list_l3_gateways_for_project(auth.effective_scope().id().as_str())
+        .await
+    {
+        Ok(gateways) => Json(RouterList {
+            routers: gateways.into_iter().map(router_response).collect(),
+        })
+        .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn create_router(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    request: Result<Json<RouterRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid router request",
+        );
+    };
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let result = service
+        .create_l3_gateway_for_project(
+            project,
+            body.router.name,
+            body.router.external_realm_id,
+            body.router.enable_snat.unwrap_or(true),
+        )
+        .await;
+    match result {
+        Ok(gateway) => (
+            StatusCode::CREATED,
+            Json(RouterEnvelope {
+                router: router_response(gateway),
+            }),
+        )
+            .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn show_router(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match service
+        .get_l3_gateway_for_project(auth.effective_scope().id().as_str(), &id)
+        .await
+    {
+        Ok(gateway) => Json(RouterEnvelope {
+            router: router_response(gateway),
+        })
+        .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn update_router(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+    request: Result<Json<RouterRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid router request",
+        );
+    };
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let current = match service.get_l3_gateway_for_project(project, &id).await {
+        Ok(v) => v,
+        Err(e) => return network_error(e),
+    };
+    match service
+        .update_l3_gateway_for_project(
+            project,
+            &id,
+            current.generation,
+            body.router.name,
+            body.router.external_realm_id.or(current.external_realm_id),
+            body.router.enable_snat.unwrap_or(current.enable_snat),
+        )
+        .await
+    {
+        Ok(gateway) => Json(RouterEnvelope {
+            router: router_response(gateway),
+        })
+        .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn delete_router(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let current = match service.get_l3_gateway_for_project(project, &id).await {
+        Ok(v) => v,
+        Err(e) => return network_error(e),
+    };
+    match service
+        .delete_l3_gateway_for_project(project, &id, current.generation)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn add_router_interface(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+    request: Result<Json<RouterInterfaceRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid router interface request",
+        );
+    };
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match service.attach_l3_gateway_realm(auth.effective_scope().id().as_str(), &id, &body.router_interface.realm_id).await {
+        Ok(a) => (StatusCode::CREATED, Json(serde_json::json!({"router_interface_info": RouterInterfaceResponse { id:a.id.to_string(), gateway_id:a.gateway_id.to_string(), realm_id:a.realm_id.to_string() }}))).into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn remove_router_interface(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+    request: Result<Json<RouterInterfaceRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid router interface request",
+        );
+    };
+    let service = match network_service(&state) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let attachments = match service.list_l3_gateway_attachments(project, &id).await {
+        Ok(v) => v,
+        Err(e) => return network_error(e),
+    };
+    let Some(a) = attachments
+        .into_iter()
+        .find(|a| a.realm_id == body.router_interface.realm_id)
+    else {
+        return network_error(NetworkError::NotFound);
+    };
+    let result = service
+        .detach_l3_gateway_realm(project, &a.id, a.generation)
+        .await;
+    match result { Ok(()) => Json(serde_json::json!({"router_interface_info": {"id": a.id.to_string(), "gateway_id": a.gateway_id.to_string(), "realm_id": a.realm_id.to_string()}})).into_response(), Err(e) => network_error(e) }
+}
+
+#[derive(serde::Deserialize)]
 pub(crate) struct NetworkRequestBody {
     network: CreateNetworkRequest,
 }

@@ -1,6 +1,6 @@
 # P13.3C — Router authority decision request
 
-Status: Human decision required
+Status: Resolved — Option 1 accepted by project requester on 2026-08-27
 Provider baseline: terraform-provider-openstack/openstack 3.4.0
 Provider source tag commit: 4fd8eba1f85edfdc7aed2d17bae3f3c814abad41
 

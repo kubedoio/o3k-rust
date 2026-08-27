@@ -1,8 +1,8 @@
 # ADR-0178 — Canonical L3 gateway and Realm connectivity
 
-Status: Proposed
+Status: Accepted
 Date: 2026-08-27
-Human-approval: project-requester (independent canonical L3 gateway choice recorded 2026-08-27; final document acceptance follows repository governance)
+Human-approval: project-requester (independent canonical L3 gateway choice and document acceptance recorded 2026-08-27)
 Reviewed-proposal-baseline: c8d64e4b87762825a1b3d353cc0b447b32bd09dc
 Supersedes: none
 Superseded-by: none

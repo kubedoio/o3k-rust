@@ -4575,6 +4575,13 @@ pub struct CanonicalNetworkSnapshot {
     pub realms: Vec<o3k_store::CanonicalAddressRealmRecord>,
     pub pools: BTreeMap<Uuid, Vec<o3k_store::CanonicalAddressPoolRecord>>,
     pub endpoints: BTreeMap<Uuid, Vec<o3k_store::CanonicalEndpointRecord>>,
+    /// Canonical L3 gateway authority relevant to this network's realms.
+    /// Provider plans are derived from this graph; it is not compatibility
+    /// state and does not redefine AddressRealm identity.
+    pub l3_gateways: Vec<(
+        o3k_store::CanonicalL3GatewayRecord,
+        Vec<o3k_store::CanonicalL3GatewayAttachmentRecord>,
+    )>,
 }
 
 /// Result of observing one provider-owned Realm cleanup identity.  A Realm
@@ -4597,6 +4604,206 @@ pub enum RealmCleanupProgress {
 }
 
 impl NetworkService {
+    /// Creates the provider-independent L3 gateway authority. This is
+    /// intentionally persistence-only; Neutron projection and provider
+    /// realization are layered above the canonical graph.
+    pub async fn create_l3_gateway_for_project(
+        &self,
+        project_id: &str,
+        name: String,
+        external_realm_id: Option<Uuid>,
+        enable_snat: bool,
+    ) -> Result<o3k_store::CanonicalL3GatewayRecord, NetworkError> {
+        if name.trim().is_empty() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        if let Some(realm_id) = external_realm_id {
+            if self
+                .inner
+                .repository
+                .get_canonical_realm(project_id, &realm_id)
+                .await
+                .map_err(map_store_error)?
+                .is_none()
+            {
+                return Err(NetworkError::NotFound);
+            }
+        }
+        let gateway = o3k_store::CanonicalL3GatewayRecord {
+            id: Uuid::now_v7(),
+            project_id: project_id.to_owned(),
+            name,
+            external_realm_id,
+            enable_snat,
+            generation: 1,
+            state: "active".to_owned(),
+        };
+        self.inner
+            .repository
+            .insert_canonical_l3_gateway(&gateway)
+            .await
+            .map_err(map_store_error)?;
+        Ok(gateway)
+    }
+
+    pub async fn list_l3_gateways_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<o3k_store::CanonicalL3GatewayRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_canonical_l3_gateways(project_id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn get_l3_gateway_for_project(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+    ) -> Result<o3k_store::CanonicalL3GatewayRecord, NetworkError> {
+        self.inner
+            .repository
+            .get_canonical_l3_gateway(project_id, gateway_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)
+    }
+
+    pub async fn attach_l3_gateway_realm(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+        realm_id: &Uuid,
+    ) -> Result<o3k_store::CanonicalL3GatewayAttachmentRecord, NetworkError> {
+        let gateway = self
+            .get_l3_gateway_for_project(project_id, gateway_id)
+            .await?;
+        if gateway.state != "active" {
+            return Err(NetworkError::Conflict);
+        }
+        if self
+            .inner
+            .repository
+            .get_canonical_realm(project_id, realm_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
+        {
+            return Err(NetworkError::NotFound);
+        }
+        let attachment = o3k_store::CanonicalL3GatewayAttachmentRecord {
+            id: Uuid::now_v7(),
+            gateway_id: *gateway_id,
+            realm_id: *realm_id,
+            project_id: project_id.to_owned(),
+            generation: 1,
+            state: "active".to_owned(),
+        };
+        self.inner
+            .repository
+            .insert_canonical_l3_gateway_attachment(&attachment)
+            .await
+            .map_err(map_store_error)?;
+        Ok(attachment)
+    }
+
+    pub async fn update_l3_gateway_for_project(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+        expected_generation: u64,
+        name: String,
+        external_realm_id: Option<Uuid>,
+        enable_snat: bool,
+    ) -> Result<o3k_store::CanonicalL3GatewayRecord, NetworkError> {
+        if name.trim().is_empty() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        if let Some(realm_id) = external_realm_id {
+            if self
+                .inner
+                .repository
+                .get_canonical_realm(project_id, &realm_id)
+                .await
+                .map_err(map_store_error)?
+                .is_none()
+            {
+                return Err(NetworkError::NotFound);
+            }
+        }
+        self.inner
+            .repository
+            .update_canonical_l3_gateway(
+                project_id,
+                gateway_id,
+                expected_generation,
+                &name,
+                external_realm_id,
+                enable_snat,
+            )
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn delete_l3_gateway_for_project(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), NetworkError> {
+        let deleting = self
+            .inner
+            .repository
+            .begin_canonical_l3_gateway_deletion(project_id, gateway_id, expected_generation)
+            .await
+            .map_err(map_store_error)?;
+        self.inner
+            .repository
+            .finalize_canonical_l3_gateway_deletion(project_id, gateway_id, deleting.generation)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn detach_l3_gateway_realm(
+        &self,
+        project_id: &str,
+        attachment_id: &Uuid,
+        expected_generation: u64,
+    ) -> Result<(), NetworkError> {
+        let deleting = self
+            .inner
+            .repository
+            .begin_canonical_l3_gateway_attachment_deletion(
+                project_id,
+                attachment_id,
+                expected_generation,
+            )
+            .await
+            .map_err(map_store_error)?;
+        self.inner
+            .repository
+            .finalize_canonical_l3_gateway_attachment_deletion(
+                project_id,
+                attachment_id,
+                deleting.generation,
+            )
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_l3_gateway_attachments(
+        &self,
+        project_id: &str,
+        gateway_id: &Uuid,
+    ) -> Result<Vec<o3k_store::CanonicalL3GatewayAttachmentRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_canonical_l3_gateway_attachments(project_id, gateway_id)
+            .await
+            .map_err(map_store_error)
+    }
+
     pub async fn open(
         root: impl Into<PathBuf>,
         repository: Arc<dyn o3k_store::NetworkRepository>,
@@ -5918,11 +6125,26 @@ impl NetworkService {
                     .map_err(map_store_error)?,
             );
         }
+        let realm_ids: BTreeSet<Uuid> = realms.iter().map(|realm| realm.id).collect();
+        let mut l3_gateways = Vec::new();
+        for gateway in self.inner.repository.list_canonical_l3_gateways(project_id).await
+            .map_err(map_store_error)? {
+            let attachments = self.inner.repository
+                .list_canonical_l3_gateway_attachments(project_id, &gateway.id)
+                .await.map_err(map_store_error)?;
+            let relevant: Vec<_> = attachments.into_iter()
+                .filter(|attachment| realm_ids.contains(&attachment.realm_id))
+                .collect();
+            if !relevant.is_empty() {
+                l3_gateways.push((gateway, relevant));
+            }
+        }
         Ok(CanonicalNetworkSnapshot {
             network,
             realms,
             pools,
             endpoints,
+            l3_gateways,
         })
     }
 
