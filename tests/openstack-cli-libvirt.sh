@@ -574,11 +574,33 @@ except Exception:
     print("unknown")
 PY
                 )
+                # The service owns this redacted result and may protect it
+                # from unprivileged readers.  A visible-but-unreadable file
+                # is not a pending result: use the same non-interactive,
+                # bounded sudo read as the process-boundary harness.  Never
+                # fall back to emitting the file contents or treating a read
+                # failure as success.
+                if [[ "${probe_status}" == "unknown" ]] && command -v sudo >/dev/null 2>&1 \
+                    && sudo -n test -r "${probe_output}" 2>/dev/null; then
+                    probe_status=$(sudo -n python3 - "${probe_output}" 2>/dev/null <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        d = json.load(f)
+    print(d.get("status", "unknown"))
+except Exception:
+    print("unknown")
+PY
+                    )
+                fi
                 if [[ "${probe_status}" == "passed" ]]; then
                     echo "agent inspect probe passed"
                     if [[ -n "${O3K_REAL_HOST_ARTIFACT_DIR:-}" ]]; then
                         mkdir -p "${O3K_REAL_HOST_ARTIFACT_DIR}"
-                        cp -f "${probe_output}" "${O3K_REAL_HOST_ARTIFACT_DIR}/agent-inspect-probe.json" 2>/dev/null || true
+                        if ! cp -f "${probe_output}" "${O3K_REAL_HOST_ARTIFACT_DIR}/agent-inspect-probe.json" 2>/dev/null; then
+                            sudo -n cat "${probe_output}" >"${O3K_REAL_HOST_ARTIFACT_DIR}/agent-inspect-probe.json" 2>/dev/null || true
+                            chmod 0600 "${O3K_REAL_HOST_ARTIFACT_DIR}/agent-inspect-probe.json" 2>/dev/null || true
+                        fi
                     fi
                     break
                 elif [[ "${probe_status}" == "failed" ]]; then
