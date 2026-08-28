@@ -47,7 +47,19 @@ if [[ "$*" == flavor\ list\ * ]]; then
     exit 0
 fi
 if [[ "$*" == *" list "* && "${O3K_FAKE_OPENSTACK_LEAK:-false}" == true ]]; then
-    echo leaked-openstack-resource
+    case "$*" in
+        server\ list\ *) name=o3k-testlab-server ;;
+        image\ list\ *) name=o3k-testlab-image ;;
+        network\ list\ *) name=o3k-testlab-network ;;
+        subnet\ list\ *) name=o3k-testlab-subnet ;;
+        *) name=o3k-testlab-flavor ;;
+    esac
+    printf '[{"ID":"leaked-openstack-resource","Name":"%s"}]\n' "$name"
+    exit 0
+fi
+if [[ "$*" == *" list "* ]]; then
+    echo '[]'
+    exit 0
 fi
 SH
 chmod +x "${FAKE_BIN}/openstack"

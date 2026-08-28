@@ -235,11 +235,18 @@ MAX_MANAGED_ENTRIES = 20_000
 MAX_MANAGED_TOTAL_BYTES = 512 * 1024 * 1024
 MAX_CANARY_FILE_BYTES = 64 * 1024 * 1024
 RESOURCE_COMMANDS = {
-    "server": ("server", "list", "--name", "o3k-testlab-server", "-f", "value", "-c", "ID"),
-    "image": ("image", "list", "--name", "o3k-testlab-image", "-f", "value", "-c", "ID"),
-    "network": ("network", "list", "--name", "o3k-testlab-network", "-f", "value", "-c", "ID"),
-    "subnet": ("subnet", "list", "--name", "o3k-testlab-subnet", "-f", "value", "-c", "ID"),
+    "server": ("server", "list", "-f", "json"),
+    "image": ("image", "list", "-f", "json"),
+    "network": ("network", "list", "-f", "json"),
+    "subnet": ("subnet", "list", "-f", "json"),
     "flavor": ("flavor", "list", "-f", "json"),
+}
+RESOURCE_NAMES = {
+    "server": "o3k-testlab-server",
+    "image": "o3k-testlab-image",
+    "network": "o3k-testlab-network",
+    "subnet": "o3k-testlab-subnet",
+    "flavor": "o3k-testlab-flavor",
 }
 DAEMON_BINARIES = ("o3kd", "o3k-compute")
 EXTENDED_ENVS = (
@@ -321,6 +328,38 @@ def command(args: tuple[str, ...], *, scrub_provider_config: bool = False) -> st
         LAST_FAILURE_REASON = "command_error:" + ":".join(args[:3])
         return None
     return result.stdout
+
+
+def named_resource_ids(resource: str, output: str) -> list[str] | None:
+    """Parse JSON resource output and retain only the exact owned name.
+
+    Server-side name filters are not part of the bounded compatibility surface;
+    filtering locally also keeps the baseline collector independent of CLI
+    query syntax while preserving fail-closed parsing and ownership checks.
+    """
+    try:
+        records = json.loads(output)
+    except json.JSONDecodeError:
+        global LAST_FAILURE_REASON
+        LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":json"
+        return None
+    if not isinstance(records, list):
+        LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":list"
+        return None
+    expected_name = RESOURCE_NAMES[resource]
+    values: list[str] = []
+    for record in records:
+        if not isinstance(record, dict):
+            LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":record"
+            return None
+        name = record.get("Name", record.get("name"))
+        identifier = record.get("ID", record.get("id"))
+        if name == expected_name:
+            if not isinstance(identifier, str) or SAFE_ID.fullmatch(identifier) is None:
+                LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":identity"
+                return None
+            values.append(identifier)
+    return sorted(set(values))
 
 
 def digest(values: list[str]) -> str:
@@ -1706,22 +1745,10 @@ def snapshot() -> dict[str, object] | None:
             output = command(("openstack", *RESOURCE_COMMANDS[resource]), scrub_provider_config=True)
             if output is None:
                 return None
-            if resource == "flavor" and output.strip():
-                try:
-                    flavor_records = json.loads(output)
-                except json.JSONDecodeError:
-                    return None
-                values = [
-                    record["ID"]
-                    for record in flavor_records
-                    if record.get("Name") == "o3k-testlab-flavor"
-                    and isinstance(record.get("ID"), str)
-                ]
-            else:
-                values = [line.strip() for line in output.splitlines() if line.strip()]
-            if any(SAFE_ID.fullmatch(value) is None for value in values):
+            values = named_resource_ids(resource, output)
+            if values is None:
                 return None
-            resources[resource] = sorted(set(values))
+            resources[resource] = values
     else:
         resources = {resource: [] for resource in RESOURCES}
 

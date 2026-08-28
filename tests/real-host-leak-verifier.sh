@@ -97,6 +97,10 @@ if [[ "$*" == flavor\ list\ * ]]; then
     echo '[]'
     exit 0
 fi
+if [[ "$*" == *" list "* ]]; then
+    echo '[]'
+    exit 0
+fi
 exit 0
 SH
 cat >"${FAKE_BIN}/sqlite3" <<SH
