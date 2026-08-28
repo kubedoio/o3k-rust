@@ -235,7 +235,9 @@ MAX_MANAGED_ENTRIES = 20_000
 MAX_MANAGED_TOTAL_BYTES = 512 * 1024 * 1024
 MAX_CANARY_FILE_BYTES = 64 * 1024 * 1024
 RESOURCE_COMMANDS = {
-    "server": ("server", "list", "-f", "json"),
+    # Name lookups make server inventory depend on optional flavor/image
+    # collection compatibility.  The guard needs only server IDs and names.
+    "server": ("server", "list", "-n", "-f", "json"),
     "image": ("image", "list", "-f", "json"),
     "network": ("network", "list", "-f", "json"),
     "subnet": ("subnet", "list", "-f", "json"),
