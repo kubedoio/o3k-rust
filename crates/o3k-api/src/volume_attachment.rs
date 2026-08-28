@@ -186,6 +186,17 @@ async fn create_native_attachment(
         .insert_volume_attachment_v1(&record)
         .await
         .map_err(|_| StatusCode::CONFLICT)?;
+    if let Some(workflow) = state.native_attachment_workflow.as_ref() {
+        workflow
+            .attach(record.attachment.id.as_uuid())
+            .await
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        return store
+            .get_volume_attachment_v1(record.attachment.id.as_uuid())
+            .await
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE);
+    }
     if let Some(provider) = state.storage_provider.as_ref() {
         let request = StorageAttachmentRequest {
             attachment_id: record.attachment.id,
@@ -500,6 +511,30 @@ pub(crate) async fn delete_volume_attachment(
         if record.attachment.project_id != project_id || record.attachment.server_id != server_uuid
         {
             return compute_error(ComputeError::NotFound).into_response();
+        }
+        if let Some(workflow) = state.native_attachment_workflow.as_ref() {
+            if workflow
+                .detach(record.attachment.id.as_uuid())
+                .await
+                .is_err()
+            {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+            if let Ok(Some(mut volume)) = store
+                .get_volume(record.attachment.volume_id.as_uuid())
+                .await
+            {
+                volume.volume.state = VolumeState::Available;
+                volume.volume.generation += 1;
+                if store
+                    .update_volume(volume.volume.generation - 1, &volume)
+                    .await
+                    .is_err()
+                {
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+            }
+            return StatusCode::NO_CONTENT.into_response();
         }
         let mut deleting = record.clone();
         deleting.attachment.state = VolumeAttachmentState::Detaching;

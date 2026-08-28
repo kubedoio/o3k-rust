@@ -1501,6 +1501,7 @@ dependencies = [
  "o3k-placement",
  "o3k-provider",
  "o3k-provider-contract",
+ "o3k-reconciler",
  "o3k-scheduler",
  "o3k-storage",
  "o3k-store",

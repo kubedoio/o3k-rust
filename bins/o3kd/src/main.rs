@@ -1,14 +1,14 @@
 use async_trait::async_trait;
 use o3kd::native_adapters;
 
-use o3k_domain::ServerId;
+use o3k_domain::{ServerId, VolumeState};
 use o3k_kernel::Controller;
 use o3k_provider::{
-    AgentNodeSnapshot, ArtifactKind, ComputeProvider, ConfigDriveRequest, CreateArtifactResolver,
-    CreateInstanceRequest, OperationState, ProviderError, ResolvedCreateArtifact,
-    ResolvedCreateInputs, ResolvedCreateResolver,
+    AgentNodeSnapshot, ArtifactKind, BlockDeviceAttachment, ComputeProvider, ConfigDriveRequest,
+    CreateArtifactResolver, CreateInstanceRequest, OperationState, ProviderError,
+    ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
 };
-use o3k_store::ComputeRepository;
+use o3k_store::{ComputeRepository, DurableStore, StorageRepository};
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tracing::info;
@@ -37,6 +37,237 @@ struct ExternalControllerConfig {
     delegation_key_id: Option<String>,
     #[serde(default)]
     delegation_signing_key_file: Option<PathBuf>,
+}
+
+struct LocalStorageFence;
+
+#[async_trait]
+impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFence {
+    async fn assert_current(
+        &self,
+        controller_epoch: u64,
+    ) -> Result<(), o3k_reconciler::storage_workflow::StorageWorkflowError> {
+        if controller_epoch == 0 {
+            Err(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct LocalComputeAttachmentExecutor {
+    compute: Arc<o3k_compute::ComputeService>,
+}
+
+#[async_trait]
+impl o3k_reconciler::storage_workflow::ComputeAttachmentExecutor
+    for LocalComputeAttachmentExecutor
+{
+    async fn attach(
+        &self,
+        attachment: &o3k_domain::VolumeAttachment,
+        prepared: &o3k_storage::PreparedAttachment,
+    ) -> Result<(), o3k_reconciler::storage_workflow::ComputeAttachmentError> {
+        let device = BlockDeviceAttachment {
+            volume_id: attachment.volume_id.to_string(),
+            attachment_id: attachment.id.to_string(),
+            driver_volume_type: "local".to_owned(),
+            target_iqn: None,
+            target_portal: None,
+            target_lun: None,
+            local_path: Some(prepared.device_path().to_owned()),
+            device_path: None,
+            multipath: false,
+            initiator: None,
+            auth_method: None,
+            auth_username: None,
+            auth_password: None,
+        };
+        self.compute
+            .provider()
+            .attach_block_device(attachment.server_id, &device)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                if error.is_unknown_outcome() {
+                    o3k_reconciler::storage_workflow::ComputeAttachmentError::UnknownOutcome
+                } else {
+                    o3k_reconciler::storage_workflow::ComputeAttachmentError::Failed
+                }
+            })
+    }
+
+    async fn inspect(
+        &self,
+        attachment: &o3k_domain::VolumeAttachment,
+    ) -> Result<bool, o3k_reconciler::storage_workflow::ComputeAttachmentError> {
+        self.compute
+            .provider()
+            .observe_block_device(attachment.server_id, &attachment.volume_id.to_string())
+            .await
+            .map(|observation| observation.is_some_and(|value| value.attached))
+            .map_err(|error| {
+                if error.is_unknown_outcome() {
+                    o3k_reconciler::storage_workflow::ComputeAttachmentError::UnknownOutcome
+                } else {
+                    o3k_reconciler::storage_workflow::ComputeAttachmentError::Failed
+                }
+            })
+    }
+
+    async fn detach(
+        &self,
+        attachment: &o3k_domain::VolumeAttachment,
+    ) -> Result<(), o3k_reconciler::storage_workflow::ComputeAttachmentError> {
+        let device = BlockDeviceAttachment {
+            volume_id: attachment.volume_id.to_string(),
+            attachment_id: attachment.id.to_string(),
+            driver_volume_type: "local".to_owned(),
+            target_iqn: None,
+            target_portal: None,
+            target_lun: None,
+            local_path: None,
+            device_path: None,
+            multipath: false,
+            initiator: None,
+            auth_method: None,
+            auth_username: None,
+            auth_password: None,
+        };
+        self.compute
+            .provider()
+            .detach_block_device(attachment.server_id, &device)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                if error.is_unknown_outcome() {
+                    o3k_reconciler::storage_workflow::ComputeAttachmentError::UnknownOutcome
+                } else {
+                    o3k_reconciler::storage_workflow::ComputeAttachmentError::Failed
+                }
+            })
+    }
+}
+
+struct NativeStorageAttachmentWorkflow {
+    store: Arc<o3k_store::O3kStore>,
+    workflow: o3k_reconciler::storage_workflow::StorageAttachmentWorkflow<
+        o3k_store::O3kStore,
+        o3k_storage::LvmStorageProvider,
+        LocalComputeAttachmentExecutor,
+        LocalStorageFence,
+    >,
+}
+
+#[async_trait]
+impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
+    async fn attach(&self, attachment_id: Uuid) -> Result<(), String> {
+        let record = self
+            .store
+            .get_volume_attachment_v1(attachment_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "native attachment disappeared".to_owned())?;
+        let attachment = record.attachment;
+        let intent = native_storage_intent(&attachment, "attach");
+        self.workflow
+            .attach(intent)
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(mut volume) = self
+            .store
+            .get_volume(attachment.volume_id.as_uuid())
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Err("native volume disappeared".to_owned());
+        };
+        volume.volume.state = VolumeState::InUse;
+        volume.volume.generation += 1;
+        self.store
+            .update_volume(volume.volume.generation - 1, &volume)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    async fn detach(&self, attachment_id: Uuid) -> Result<(), String> {
+        let record = self
+            .store
+            .get_volume_attachment_v1(attachment_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "native attachment disappeared".to_owned())?;
+        let attachment = record.attachment;
+        self.workflow
+            .detach(native_storage_intent(&attachment, "detach"))
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(mut volume) = self
+            .store
+            .get_volume(attachment.volume_id.as_uuid())
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Err("native volume disappeared".to_owned());
+        };
+        volume.volume.state = VolumeState::Available;
+        volume.volume.generation += 1;
+        self.store
+            .update_volume(volume.volume.generation - 1, &volume)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    async fn recover(&self) -> Result<(), String> {
+        for command in self
+            .store
+            .list_recoverable_agent_commands()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            let Ok(envelope) =
+                serde_json::from_slice::<o3k_domain::StorageCommandEnvelope>(&command.payload)
+            else {
+                continue;
+            };
+            if self
+                .store
+                .get_volume_attachment_v1(command.resource_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .is_none()
+            {
+                continue;
+            }
+            self.workflow
+                .reconcile(&command.command_id, envelope.controller_epoch)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+fn native_storage_intent(
+    attachment: &o3k_domain::VolumeAttachment,
+    operation: &str,
+) -> o3k_reconciler::storage_workflow::StorageAttachmentIntent {
+    o3k_reconciler::storage_workflow::StorageAttachmentIntent {
+        attachment_id: attachment.id,
+        volume_id: attachment.volume_id,
+        server_id: attachment.server_id,
+        project_id: attachment.project_id.clone(),
+        access_mode: attachment.access_mode,
+        delete_on_termination: attachment.delete_on_termination,
+        controller_epoch: 1,
+        target_agent_id: "local".to_owned(),
+        target_agent_epoch: 1,
+        idempotency_key: format!("native-{operation}:{}", attachment.id),
+        trace_id: format!("native-{operation}:{}", attachment.id),
+        deadline: "2099-01-01T00:00:00.000".to_owned(),
+    }
 }
 
 async fn external_controllers_from_config() -> Result<
@@ -1338,7 +1569,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let inspect_compute_service = compute_service.clone();
-    let native_storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>> = match (
+    let native_lvm_provider = match (
         std::env::var("O3K_LVM_VOLUME_GROUP").ok(),
         std::env::var("O3K_LVM_THIN_POOL").ok(),
         std::env::var("O3K_LVM_PROVIDER_NAMESPACE").ok(),
@@ -1352,6 +1583,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )),
         _ => None,
     };
+    let native_storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>> =
+        native_lvm_provider.clone().map(|provider| provider as _);
+    let native_attachment_workflow: Option<Arc<dyn o3k_api::NativeAttachmentWorkflow>> =
+        native_lvm_provider.as_ref().map(|provider| {
+            let workflow = o3k_reconciler::storage_workflow::StorageAttachmentWorkflow::new(
+                store.clone(),
+                provider.clone(),
+                Arc::new(LocalComputeAttachmentExecutor {
+                    compute: Arc::new(compute_service.clone()),
+                }),
+                Arc::new(LocalStorageFence),
+            );
+            Arc::new(NativeStorageAttachmentWorkflow {
+                store: store.clone(),
+                workflow,
+            }) as Arc<dyn o3k_api::NativeAttachmentWorkflow>
+        });
     // Native storage is always wired in this composition root; the adapter
     // selects the canonical native path when external Cinder is absent.
     let volume_attachments_enabled = true;
@@ -1398,6 +1646,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     state = state.with_storage_store(store.clone());
     if let Some(provider) = native_storage_provider {
         state = state.with_storage_provider(provider);
+    }
+    if let Some(workflow) = native_attachment_workflow {
+        state = state.with_native_attachment_workflow(workflow.clone());
+        if let Err(error) = workflow.recover().await {
+            tracing::warn!(%error, "native storage attachment recovery is incomplete");
+        }
     }
     if let Some(allocator) = public_allocator {
         state = state.with_public_allocator(allocator);

@@ -21,6 +21,7 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{FromRef, State},
@@ -116,7 +117,18 @@ pub struct AppState {
     volume_attachments_enabled: bool,
     storage_store: Option<Arc<dyn o3k_store::StorageRepository>>,
     storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>>,
+    native_attachment_workflow: Option<Arc<dyn NativeAttachmentWorkflow>>,
     native_api: Option<NativeApiState>,
+}
+
+/// Durable native VolumeAttachment orchestration supplied by the composition
+/// root. The protocol adapter owns authorization and wire responses; this
+/// boundary owns replayable storage/compute execution and restart recovery.
+#[async_trait]
+pub trait NativeAttachmentWorkflow: Send + Sync {
+    async fn attach(&self, attachment_id: uuid::Uuid) -> Result<(), String>;
+    async fn detach(&self, attachment_id: uuid::Uuid) -> Result<(), String>;
+    async fn recover(&self) -> Result<(), String>;
 }
 
 impl FromRef<AppState> for NativeApiState {
@@ -241,6 +253,15 @@ impl AppState {
         provider: Arc<dyn o3k_storage::StorageProvider>,
     ) -> Self {
         self.storage_provider = Some(provider);
+        self
+    }
+
+    #[must_use]
+    pub fn with_native_attachment_workflow(
+        mut self,
+        workflow: Arc<dyn NativeAttachmentWorkflow>,
+    ) -> Self {
+        self.native_attachment_workflow = Some(workflow);
         self
     }
 
