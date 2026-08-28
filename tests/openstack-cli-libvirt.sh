@@ -556,7 +556,11 @@ if [[ -n "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE:-}" ]]; then
     # boundary while the server is still ACTIVE.
     if [[ -n "${O3K_AGENT_INSPECT_PROBE_OUTPUT:-}" ]]; then
         probe_output="${O3K_AGENT_INSPECT_PROBE_OUTPUT}"
-        probe_deadline="${O3K_AGENT_INSPECT_PROBE_DEADLINE_SECONDS:-60}"
+        # The service-side probe has a bounded five-minute deadline because a
+        # real libvirt create/observation can exceed one minute on a cold
+        # protected host.  Wait for the same deadline before performing any
+        # destructive lifecycle action or reporting a false lifecycle failure.
+        probe_deadline="${O3K_AGENT_INSPECT_PROBE_DEADLINE_SECONDS:-300}"
         probe_waited=0
         while [[ "${probe_waited}" -lt "${probe_deadline}" ]]; do
             if [[ -f "${probe_output}" ]]; then
