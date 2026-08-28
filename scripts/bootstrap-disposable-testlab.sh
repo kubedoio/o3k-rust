@@ -644,7 +644,8 @@ export OS_AUTH_URL="http://127.0.0.1:${AUTH_PORT}/v3" OS_USERNAME=admin OS_PASSW
   OS_PROJECT_DOMAIN_NAME=Default OS_INTERFACE=public OS_IDENTITY_API_VERSION=3
 OPENSTACK_CLOUD_CONFIG="$STATE_ROOT/openstack-clouds.yaml"
 umask 077
-cat >"$OPENSTACK_CLOUD_CONFIG" <<EOF
+OPENSTACK_CLOUD_CONFIG_TMP="$(mktemp "${RUNNER_TEMP%/}/openstack-clouds.yaml.XXXXXX")"
+cat >"$OPENSTACK_CLOUD_CONFIG_TMP" <<EOF
 clouds:
   o3k-testlab:
     auth:
@@ -659,6 +660,9 @@ clouds:
     image_api_version: "2"
     image_endpoint_override: http://127.0.0.1:${AUTH_PORT}/v2
 EOF
+sudo -n install -o "$(id -u)" -g "$(id -g)" -m 0600 \
+  "$OPENSTACK_CLOUD_CONFIG_TMP" "$OPENSTACK_CLOUD_CONFIG"
+rm -f -- "$OPENSTACK_CLOUD_CONFIG_TMP"
 export OS_CLOUD=o3k-testlab OS_CLIENT_CONFIG_FILE="$OPENSTACK_CLOUD_CONFIG"
 openstack token issue >/dev/null 2>&1 || fail "generated password failed OpenStack authentication"
 
