@@ -642,6 +642,24 @@ printf '%s\n' "$OPENSTACK_VENV/bin" >>"${GITHUB_PATH:-/dev/null}"
 export OS_AUTH_URL="http://127.0.0.1:${AUTH_PORT}/v3" OS_USERNAME=admin OS_PASSWORD="$PASSWORD" \
   OS_PROJECT_NAME=admin OS_REGION_NAME=RegionOne OS_USER_DOMAIN_NAME=Default \
   OS_PROJECT_DOMAIN_NAME=Default OS_INTERFACE=public OS_IDENTITY_API_VERSION=3
+OPENSTACK_CLOUD_CONFIG="$STATE_ROOT/openstack-clouds.yaml"
+umask 077
+cat >"$OPENSTACK_CLOUD_CONFIG" <<EOF
+clouds:
+  o3k-testlab:
+    auth:
+      auth_url: $OS_AUTH_URL
+      username: $OS_USERNAME
+      password: $OS_PASSWORD
+      project_name: $OS_PROJECT_NAME
+      user_domain_name: $OS_USER_DOMAIN_NAME
+      project_domain_name: $OS_PROJECT_DOMAIN_NAME
+    region_name: $OS_REGION_NAME
+    interface: $OS_INTERFACE
+    image_api_version: "2"
+    image_endpoint_override: http://127.0.0.1:${AUTH_PORT}/v2
+EOF
+export OS_CLOUD=o3k-testlab OS_CLIENT_CONFIG_FILE="$OPENSTACK_CLOUD_CONFIG"
 openstack token issue >/dev/null 2>&1 || fail "generated password failed OpenStack authentication"
 
 printf 'O3K_TESTLAB_STATE_ROOT=%s\nO3K_REAL_HOST_SERVICE_ACCOUNT=%s\n' "$STATE_ROOT" "$(id -un)" >>"${GITHUB_ENV:-/dev/null}"
@@ -658,6 +676,7 @@ printf 'O3K_REAL_HOST_PROTECTED_PATHS=%s\nO3K_REAL_HOST_INVENTORY_ROOT=%s\nO3K_O
   "$INVENTORY_ROOT" "$INVENTORY_ROOT" "$OPENSTACK_VENV" >>"${GITHUB_ENV:-/dev/null}"
 printf 'OS_AUTH_URL=%s\nOS_USERNAME=admin\nOS_PROJECT_NAME=admin\nOS_REGION_NAME=RegionOne\nOS_PASSWORD=%s\nOS_USER_DOMAIN_NAME=Default\nOS_PROJECT_DOMAIN_NAME=Default\nOS_INTERFACE=public\nOS_IDENTITY_API_VERSION=3\n' \
   "$OS_AUTH_URL" "$PASSWORD" >>"${GITHUB_ENV:-/dev/null}"
+printf 'OS_CLOUD=%s\nOS_CLIENT_CONFIG_FILE=%s\n' "$OS_CLOUD" "$OPENSTACK_CLOUD_CONFIG" >>"${GITHUB_ENV:-/dev/null}"
 write_result passed authenticated
 trap - EXIT
 echo "disposable TestLab bootstrap completed"

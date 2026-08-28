@@ -471,7 +471,14 @@ fi
 # Use the OpenStack client's environment configuration directly. This avoids
 # interpolating credentials and endpoint values into hand-written YAML, where
 # colons, quotes, or newlines could change the parsed configuration.
-unset OS_CLOUD OS_CLIENT_CONFIG_FILE
+# Preserve an explicitly configured disposable cloud profile.  The protected
+# bootstrap supplies an Image v2 endpoint override because the native O3K
+# catalog root does not advertise Cinder-style image API versions.  Standalone
+# runs without a cloud profile continue to use the environment-variable
+# defaults below.
+if [[ -z "${OS_CLOUD:-}" && -z "${OS_CLIENT_CONFIG_FILE:-}" ]]; then
+    unset OS_CLOUD OS_CLIENT_CONFIG_FILE
+fi
 export OS_AUTH_URL="${OS_AUTH_URL:-http://127.0.0.1:8080/v3}"
 export OS_USERNAME="${OS_USERNAME:-admin}"
 export OS_PROJECT_NAME="${OS_PROJECT_NAME:-eba29e2d-53de-461d-ae91-ede7402713cb}"
