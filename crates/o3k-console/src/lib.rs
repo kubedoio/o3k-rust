@@ -8,38 +8,15 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
-use thiserror::Error;
 use uuid::Uuid;
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+pub mod types;
+pub use types::*;
+
 pub const MAX_CONSOLE_BYTES: usize = 64 * 1024;
-
-#[derive(Debug, Error)]
-pub enum ConsoleError {
-    #[error("console output was not found")]
-    NotFound,
-    #[error("console output storage failed")]
-    Storage(#[source] io::Error),
-    #[error("console output is invalid")]
-    InvalidInput,
-}
-
-#[derive(Clone)]
-pub struct ConsoleService {
-    root: PathBuf,
-    max_bytes: usize,
-    locks: Arc<Mutex<HashMap<Uuid, Arc<Mutex<()>>>>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConsoleChunk {
-    pub bytes: Vec<u8>,
-    pub offset: u64,
-    pub next_offset: u64,
-    pub truncated: bool,
-}
 
 impl ConsoleService {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, ConsoleError> {

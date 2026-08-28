@@ -1,5 +1,7 @@
 //! Durable, isolated dnsmasq configuration for O3K-managed flat networks.
 
+pub mod types;
+
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -9,7 +11,8 @@ use std::{
     process::{Child, Command},
     time::{Duration, Instant},
 };
-use thiserror::Error;
+
+pub use types::{Binding, DhcpConfig, DhcpError};
 
 /// Bounded window for the `dnsmasq --test` config preflight. A real dnsmasq
 /// parses the config and exits in milliseconds; test stubs may never exit, so
@@ -21,36 +24,6 @@ const CONFIG_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 const LIVENESS_GRACE: Duration = Duration::from_millis(500);
 /// Poll interval for the bounded waits above.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DhcpConfig {
-    pub subnet: String,
-    pub gateway: Ipv4Addr,
-    pub dns: Vec<Ipv4Addr>,
-    pub interface: String,
-    pub lease_seconds: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Binding {
-    pub port_id: String,
-    pub mac: String,
-    pub address: Ipv4Addr,
-}
-
-#[derive(Debug, Error)]
-pub enum DhcpError {
-    #[error("DHCP configuration is invalid")]
-    InvalidConfig,
-    #[error("DHCP binding conflicts with an existing address or MAC")]
-    Conflict,
-    #[error("DHCP storage failed")]
-    Storage(#[source] io::Error),
-    #[error("DHCP state is corrupt")]
-    CorruptState(#[source] serde_json::Error),
-    #[error("dnsmasq command failed")]
-    CommandFailed,
-}
 
 /// Kernel-maintained start time (clock ticks since boot, `/proc/<pid>/stat`
 /// field 22) of the process with the given pid. The value is set by the
