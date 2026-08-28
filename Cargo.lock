@@ -1985,6 +1985,7 @@ dependencies = [
  "o3k-service-sdk",
  "o3k-storage",
  "o3k-store",
+ "rustix 0.38.44",
  "serde",
  "serde_json",
  "tokio",

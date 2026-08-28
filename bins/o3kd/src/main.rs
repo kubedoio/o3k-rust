@@ -9,7 +9,17 @@ use o3k_provider::{
     ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
 };
 use o3k_store::{ComputeRepository, DurableStore, StorageRepository};
-use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
+use rustix::fs::{FlockOperation, flock};
+use std::{
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -44,12 +54,15 @@ struct LocalStorageFence {
     controller_id: o3k_store::ControllerId,
     controller_epoch: o3k_store::ControllerEpoch,
     intent_epoch: u64,
+    execution_lock_path: PathBuf,
     attempt: Arc<tokio::sync::Mutex<Option<StorageLeaseAttempt>>>,
 }
 
 struct StorageLeaseAttempt {
     fencing_token: o3k_store::FencingToken,
     stop: tokio::sync::oneshot::Sender<()>,
+    valid: Arc<AtomicBool>,
+    _execution_lock: File,
 }
 
 #[async_trait]
@@ -89,11 +102,50 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                 );
             }
         };
+        let execution_lock = match OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&self.execution_lock_path)
+        {
+            Ok(file) => file,
+            Err(_) => {
+                let _ = self
+                    .coordination
+                    .release_work_lease(
+                        "o3k-native-storage-controller",
+                        &self.controller_id,
+                        &self.controller_epoch,
+                        lease.fencing_token,
+                    )
+                    .await;
+                return Err(
+                    o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+                );
+            }
+        };
+        if flock(&execution_lock, FlockOperation::NonBlockingLockExclusive).is_err() {
+            let _ = self
+                .coordination
+                .release_work_lease(
+                    "o3k-native-storage-controller",
+                    &self.controller_id,
+                    &self.controller_epoch,
+                    lease.fencing_token,
+                )
+                .await;
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
         let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let valid = Arc::new(AtomicBool::new(true));
         let coordination = self.coordination.clone();
         let controller_id = self.controller_id.clone();
         let controller_epoch_value = self.controller_epoch.clone();
         let fencing_token = lease.fencing_token;
+        let renewal_valid = valid.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             interval.tick().await;
@@ -109,7 +161,10 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                             Duration::from_secs(15),
                         ).await {
                             Ok(true) => {}
-                            Ok(false) | Err(_) => break,
+                            Ok(false) | Err(_) => {
+                                renewal_valid.store(false, Ordering::Release);
+                                break;
+                            }
                         }
                     }
                 }
@@ -118,6 +173,8 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
         *attempt = Some(StorageLeaseAttempt {
             fencing_token,
             stop,
+            valid,
+            _execution_lock: execution_lock,
         });
         Ok(())
     }
@@ -136,6 +193,7 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
             .lock()
             .await
             .as_ref()
+            .filter(|attempt| attempt.valid.load(Ordering::Acquire))
             .map(|attempt| attempt.fencing_token)
             .ok_or(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)?;
         let renewed = self
@@ -1746,6 +1804,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     controller_id: controller_id.clone(),
                     controller_epoch: controller_epoch.clone(),
                     intent_epoch: storage_intent_epoch,
+                    execution_lock_path: config.data_dir.join("storage.execution.lock"),
                     attempt: Arc::new(tokio::sync::Mutex::new(None)),
                 }),
             );
