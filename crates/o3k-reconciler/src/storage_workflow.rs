@@ -650,7 +650,10 @@ where
         command: AgentCommandRecord,
         record: VolumeAttachmentRecordV1,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
-        let record = if record.attachment.state == VolumeAttachmentState::Detached {
+        let record = if matches!(
+            record.attachment.state,
+            VolumeAttachmentState::Detached | VolumeAttachmentState::Deleted
+        ) {
             record
         } else {
             let detached = transition_attachment(&record, VolumeAttachmentState::Detached)?;
@@ -660,6 +663,20 @@ where
         };
         self.project_volume_state(&record, VolumeState::Available)
             .await?;
+        let record = if record.attachment.state == VolumeAttachmentState::Deleted {
+            record
+        } else {
+            let mut deleted = record.clone();
+            deleted.attachment.state = VolumeAttachmentState::Deleted;
+            deleted.attachment.generation = deleted
+                .attachment
+                .generation
+                .checked_add(1)
+                .ok_or(StorageWorkflowError::StaleGeneration)?;
+            self.store
+                .update_volume_attachment_v1(record.attachment.generation, &deleted)
+                .await?
+        };
         let command = self
             .store
             .update_agent_command(
@@ -1207,7 +1224,7 @@ mod tests {
         detach_request.idempotency_key = "detach-once".to_owned();
         let detached = workflow.detach(detach_request).await.unwrap();
         assert_eq!(detached.command_state, AgentCommandState::Succeeded);
-        assert_eq!(detached.attachment_state, VolumeAttachmentState::Detached);
+        assert_eq!(detached.attachment_state, VolumeAttachmentState::Deleted);
         assert_eq!(compute.attach_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             store

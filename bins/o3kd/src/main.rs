@@ -39,7 +39,12 @@ struct ExternalControllerConfig {
     delegation_signing_key_file: Option<PathBuf>,
 }
 
-struct LocalStorageFence;
+struct LocalStorageFence {
+    coordination: Arc<dyn o3k_store::CoordinationRepository>,
+    controller_id: o3k_store::ControllerId,
+    controller_epoch: o3k_store::ControllerEpoch,
+    intent_epoch: u64,
+}
 
 #[async_trait]
 impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFence {
@@ -47,10 +52,28 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
         &self,
         controller_epoch: u64,
     ) -> Result<(), o3k_reconciler::storage_workflow::StorageWorkflowError> {
-        if controller_epoch == 0 {
-            Err(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)
-        } else {
-            Ok(())
+        if controller_epoch == 0 || controller_epoch != self.intent_epoch {
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
+        match self
+            .coordination
+            .acquire_work_lease(
+                "o3k-native-storage-controller",
+                "storage-attachment",
+                &self.controller_id,
+                &self.controller_epoch,
+                Duration::from_secs(15),
+            )
+            .await
+            .map_err(|_| {
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence
+            })? {
+            o3k_store::LeaseAcquireOutcome::Acquired { .. } => Ok(()),
+            o3k_store::LeaseAcquireOutcome::Busy { .. } => {
+                Err(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)
+            }
         }
     }
 }
@@ -151,6 +174,7 @@ impl o3k_reconciler::storage_workflow::ComputeAttachmentExecutor
 
 struct NativeStorageAttachmentWorkflow {
     store: Arc<o3k_store::O3kStore>,
+    controller_epoch: u64,
     workflow: o3k_reconciler::storage_workflow::StorageAttachmentWorkflow<
         o3k_store::O3kStore,
         o3k_storage::LvmStorageProvider,
@@ -169,7 +193,7 @@ impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "native attachment disappeared".to_owned())?;
         let attachment = record.attachment;
-        let intent = native_storage_intent(&attachment, "attach");
+        let intent = native_storage_intent(&attachment, "attach", self.controller_epoch);
         self.workflow
             .attach(intent)
             .await
@@ -186,26 +210,13 @@ impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
             .ok_or_else(|| "native attachment disappeared".to_owned())?;
         let attachment = record.attachment;
         self.workflow
-            .detach(native_storage_intent(&attachment, "detach"))
+            .detach(native_storage_intent(
+                &attachment,
+                "detach",
+                self.controller_epoch,
+            ))
             .await
             .map_err(|error| format!("{error:?}"))?;
-        // The workflow has observed the provider-side detach and leaves the
-        // durable record Detached.  Finalize the canonical child here before
-        // releasing the volume, so a subsequent volume delete cannot mistake
-        // a completed detach for an active attachment.
-        if let Some(mut current) = self
-            .store
-            .get_volume_attachment_v1(attachment_id)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            current.attachment.state = o3k_domain::VolumeAttachmentState::Deleted;
-            current.attachment.generation += 1;
-            self.store
-                .update_volume_attachment_v1(current.attachment.generation - 1, &current)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
         Ok(())
     }
 
@@ -242,6 +253,7 @@ impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
 fn native_storage_intent(
     attachment: &o3k_domain::VolumeAttachment,
     operation: &str,
+    controller_epoch: u64,
 ) -> o3k_reconciler::storage_workflow::StorageAttachmentIntent {
     o3k_reconciler::storage_workflow::StorageAttachmentIntent {
         attachment_id: attachment.id,
@@ -250,13 +262,20 @@ fn native_storage_intent(
         project_id: attachment.project_id.clone(),
         access_mode: attachment.access_mode,
         delete_on_termination: attachment.delete_on_termination,
-        controller_epoch: 1,
+        controller_epoch,
         target_agent_id: "local".to_owned(),
         target_agent_epoch: 1,
         idempotency_key: format!("native-{operation}:{}", attachment.id),
         trace_id: format!("native-{operation}:{}", attachment.id),
         deadline: "2099-01-01T00:00:00.000".to_owned(),
     }
+}
+
+fn storage_intent_epoch(epoch: &o3k_store::ControllerEpoch) -> u64 {
+    epoch.0.bytes().fold(0xcbf29ce484222325, |hash, byte| {
+        hash.wrapping_mul(0x100000001b3)
+            .wrapping_add(u64::from(byte))
+    })
 }
 
 async fn external_controllers_from_config() -> Result<
@@ -1575,6 +1594,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let inspect_compute_service = compute_service.clone();
+    let storage_intent_epoch = storage_intent_epoch(&controller_epoch);
     let native_attachment_workflow: Option<Arc<dyn o3k_api::NativeAttachmentWorkflow>> =
         native_lvm_provider.as_ref().map(|provider| {
             let workflow = o3k_reconciler::storage_workflow::StorageAttachmentWorkflow::new(
@@ -1583,10 +1603,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::new(LocalComputeAttachmentExecutor {
                     compute: Arc::new(compute_service.clone()),
                 }),
-                Arc::new(LocalStorageFence),
+                Arc::new(LocalStorageFence {
+                    coordination: coordination_store.clone(),
+                    controller_id: controller_id.clone(),
+                    controller_epoch: controller_epoch.clone(),
+                    intent_epoch: storage_intent_epoch,
+                }),
             );
             Arc::new(NativeStorageAttachmentWorkflow {
                 store: store.clone(),
+                controller_epoch: storage_intent_epoch,
                 workflow,
             }) as Arc<dyn o3k_api::NativeAttachmentWorkflow>
         });
