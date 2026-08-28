@@ -384,8 +384,8 @@ cargo build --locked --release --bin o3kd
 # make the runtime link explicit after the host preflight proves libvirt exists.
 RUSTFLAGS="${RUSTFLAGS:-} -l dylib=virt" \
   cargo build --locked --release --features libvirt --bin o3k-compute-bin
-install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
-install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
+sudo -n install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
+sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
 sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
   --server-name o3k-control-plane --agent-id compute-agent
 sudo -n chmod 0755 "$STATE_ROOT"
