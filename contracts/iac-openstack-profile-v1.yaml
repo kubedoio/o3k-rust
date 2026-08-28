@@ -440,10 +440,10 @@ resources:
     known_deviations:
       - Mapped onto canonical O3K VolumeAttachment semantics.
     route_evidence:
-      create: crates/o3k-api/tests/health.rs
-      list: crates/o3k-api/tests/health.rs
-      show: crates/o3k-api/tests/health.rs
-      delete: crates/o3k-api/tests/health.rs
+      create: crates/o3k-api/tests/native_storage.rs
+      list: crates/o3k-api/tests/native_storage.rs
+      show: crates/o3k-api/tests/native_storage.rs
+      delete: crates/o3k-api/tests/native_storage.rs
     provider_evidence: provider-unverified
     p13_phase: p13.4
 

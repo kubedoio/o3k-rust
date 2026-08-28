@@ -12,7 +12,6 @@ use o3k_domain::{
     AttachmentAccessMode, ServerId, StorageExecutionScope, VolumeAttachment, VolumeAttachmentId,
     VolumeAttachmentState, VolumeState,
 };
-use o3k_store::StorageRepository;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

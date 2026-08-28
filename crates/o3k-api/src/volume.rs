@@ -12,7 +12,7 @@ use axum::{
 };
 use o3k_domain::{StorageExecutionScope, Volume, VolumeId, VolumeState};
 use o3k_storage::StorageVolumeRequest;
-use o3k_store::{StorageRepository, VolumeRecord};
+use o3k_store::VolumeRecord;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -144,7 +144,13 @@ async fn scoped_store(
     state: &AppState,
     headers: &HeaderMap,
     project_id: &str,
-) -> Result<(o3k_kernel::AuthContext, std::sync::Arc<o3k_store::O3kStore>), Response> {
+) -> Result<
+    (
+        o3k_kernel::AuthContext,
+        std::sync::Arc<dyn o3k_store::StorageRepository>,
+    ),
+    Response,
+> {
     let auth = project_auth_context(state, headers, project_id)?;
     state
         .storage_store

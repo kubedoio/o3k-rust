@@ -114,7 +114,7 @@ pub struct AppState {
     console: Option<Arc<ConsoleService>>,
     agent_registry: Option<NodeRegistry>,
     volume_attachments_enabled: bool,
-    storage_store: Option<Arc<o3k_store::O3kStore>>,
+    storage_store: Option<Arc<dyn o3k_store::StorageRepository>>,
     storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>>,
     native_api: Option<NativeApiState>,
 }
@@ -225,7 +225,10 @@ impl AppState {
     /// bounded Cinder projection.  The compatibility adapter never stores a
     /// second volume authority.
     #[must_use]
-    pub fn with_storage_store(mut self, store: Arc<o3k_store::O3kStore>) -> Self {
+    pub fn with_storage_store<S>(mut self, store: Arc<S>) -> Self
+    where
+        S: o3k_store::StorageRepository + 'static,
+    {
         self.storage_store = Some(store);
         self
     }
