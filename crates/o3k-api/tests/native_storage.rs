@@ -17,7 +17,6 @@ use o3k_storage::{
     StorageVolumeObservation, StorageVolumeRequest,
 };
 use o3k_store::{DurableStore, StorageRepository, VolumeRecord, testkit::TestStore};
-use serde_json::Value;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -189,7 +188,7 @@ async fn store() -> Result<Arc<TestStore>, Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn native_volume_and_attachment_projection_uses_canonical_storage()
+async fn native_volume_projection_requires_durable_attachment_workflow()
 -> Result<(), Box<dyn std::error::Error>> {
     let store = store().await?;
     let server_id = Uuid::now_v7();
@@ -275,43 +274,9 @@ async fn native_volume_and_attachment_projection_uses_canonical_storage()
                 .body(Body::from(request.to_string()))?,
         )
         .await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: Value =
-        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 8192).await?)?;
-    let attachment_id = body["volumeAttachment"]["id"]
-        .as_str()
-        .ok_or("missing attachment")?
-        .to_owned();
-    assert_eq!(
-        store
-            .get_volume(volume_id.as_uuid())
-            .await?
-            .ok_or("missing volume")?
-            .volume
-            .state,
-        VolumeState::InUse
-    );
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::DELETE)
-                .uri(format!(
-                    "/v2.1/{PROJECT}/servers/{server_id}/os-volume_attachments/{attachment_id}"
-                ))
-                .header("x-auth-token", &auth)
-                .body(Body::empty())?,
-        )
-        .await?;
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert_eq!(
-        store
-            .get_volume(volume_id.as_uuid())
-            .await?
-            .ok_or("missing volume")?
-            .volume
-            .state,
-        VolumeState::Available
-    );
+    // Native attachment mutations require the durable workflow supplied by
+    // the composition root; the API must fail closed rather than bypass it.
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     Ok(())
 }
 
