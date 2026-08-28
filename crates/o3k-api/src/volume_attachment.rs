@@ -12,8 +12,6 @@ use o3k_domain::{
     AttachmentAccessMode, ServerId, StorageExecutionScope, VolumeAttachment, VolumeAttachmentId,
     VolumeAttachmentState, VolumeState,
 };
-use o3k_provider::BlockDeviceAttachment;
-use o3k_storage::StorageAttachmentRequest;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -147,9 +145,13 @@ async fn create_native_attachment(
     auth: &o3k_kernel::AuthContext,
     server_id: Uuid,
     volume_id: Uuid,
-    device: Option<String>,
+    _device: Option<String>,
     delete_on_termination: bool,
 ) -> Result<o3k_store::VolumeAttachmentRecordV1, StatusCode> {
+    if state.native_attachment_workflow.is_none() {
+        // Native attachment mutations must never bypass the durable workflow.
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let store = state
         .storage_store
         .as_ref()
@@ -231,88 +233,7 @@ async fn create_native_attachment(
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
             .ok_or(StatusCode::SERVICE_UNAVAILABLE);
     }
-    if let Some(provider) = state.storage_provider.as_ref() {
-        let request = StorageAttachmentRequest {
-            attachment_id: record.attachment.id,
-            volume_id: record.attachment.volume_id,
-            project_id: record.attachment.project_id.clone(),
-            volume_generation: volume.volume.generation,
-            host_id: "local".to_owned(),
-            access_mode: record.attachment.access_mode,
-        };
-        let prepared = match provider.prepare_attachment(&request).await {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                let mut failed = record.clone();
-                failed.attachment.state = if error.is_unknown_outcome() {
-                    VolumeAttachmentState::Unknown
-                } else {
-                    VolumeAttachmentState::Error
-                };
-                failed.attachment.generation += 1;
-                let _ = store
-                    .update_volume_attachment_v1(record.attachment.generation, &failed)
-                    .await;
-                return Err(if error.is_unknown_outcome() {
-                    StatusCode::SERVICE_UNAVAILABLE
-                } else {
-                    StatusCode::CONFLICT
-                });
-            }
-        };
-        let block_device = BlockDeviceAttachment {
-            volume_id: record.attachment.volume_id.to_string(),
-            attachment_id: record.attachment.id.to_string(),
-            driver_volume_type: "local".to_owned(),
-            target_iqn: None,
-            target_portal: None,
-            target_lun: None,
-            local_path: Some(prepared.device_path().to_owned()),
-            device_path: device.clone(),
-            multipath: false,
-            initiator: None,
-            auth_method: None,
-            auth_username: None,
-            auth_password: None,
-        };
-        if let Err(error) = compute
-            .provider()
-            .attach_block_device(server_id, &block_device)
-            .await
-        {
-            let _ = provider.terminate_attachment(&request).await;
-            let mut failed = record.clone();
-            failed.attachment.state = if error.is_unknown_outcome() {
-                VolumeAttachmentState::Unknown
-            } else {
-                VolumeAttachmentState::Error
-            };
-            failed.attachment.generation += 1;
-            let _ = store
-                .update_volume_attachment_v1(record.attachment.generation, &failed)
-                .await;
-            return Err(if error.is_unknown_outcome() {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::CONFLICT
-            });
-        }
-    }
-    let mut attached = record.clone();
-    attached.attachment.state = VolumeAttachmentState::Attached;
-    attached.attachment.generation += 1;
-    let attached = store
-        .update_volume_attachment_v1(record.attachment.generation, &attached)
-        .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    let mut in_use = volume.clone();
-    in_use.volume.state = VolumeState::InUse;
-    in_use.volume.generation += 1;
-    store
-        .update_volume(volume.volume.generation, &in_use)
-        .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    Ok(attached)
+    Err(StatusCode::SERVICE_UNAVAILABLE)
 }
 
 pub(crate) async fn attach_volume(
@@ -556,86 +477,7 @@ pub(crate) async fn delete_volume_attachment(
             }
             return StatusCode::NO_CONTENT.into_response();
         }
-        let mut deleting = record.clone();
-        deleting.attachment.state = VolumeAttachmentState::Detaching;
-        deleting.attachment.generation += 1;
-        if store
-            .update_volume_attachment_v1(record.attachment.generation, &deleting)
-            .await
-            .is_err()
-        {
-            return StatusCode::SERVICE_UNAVAILABLE.into_response();
-        }
-        if let Some(provider) = state.storage_provider.as_ref() {
-            let Some(compute) = state.compute.as_ref() else {
-                return StatusCode::SERVICE_UNAVAILABLE.into_response();
-            };
-            let Ok(Some(volume)) = store
-                .get_volume(record.attachment.volume_id.as_uuid())
-                .await
-            else {
-                return StatusCode::NOT_FOUND.into_response();
-            };
-            let request = StorageAttachmentRequest {
-                attachment_id: record.attachment.id,
-                volume_id: record.attachment.volume_id,
-                project_id: record.attachment.project_id.clone(),
-                volume_generation: volume.volume.generation,
-                host_id: "local".to_owned(),
-                access_mode: record.attachment.access_mode,
-            };
-            let block_device = BlockDeviceAttachment {
-                volume_id: record.attachment.volume_id.to_string(),
-                attachment_id: record.attachment.id.to_string(),
-                driver_volume_type: "local".to_owned(),
-                target_iqn: None,
-                target_portal: None,
-                target_lun: None,
-                local_path: None,
-                device_path: None,
-                multipath: false,
-                initiator: None,
-                auth_method: None,
-                auth_username: None,
-                auth_password: None,
-            };
-            if compute
-                .provider()
-                .detach_block_device(server_uuid, &block_device)
-                .await
-                .is_err()
-            {
-                return StatusCode::SERVICE_UNAVAILABLE.into_response();
-            }
-            if let Err(error) = provider.terminate_attachment(&request).await {
-                return if error.is_unknown_outcome() {
-                    StatusCode::SERVICE_UNAVAILABLE.into_response()
-                } else {
-                    StatusCode::CONFLICT.into_response()
-                };
-            }
-        }
-        let volume_id = record.attachment.volume_id.as_uuid();
-        if let Ok(Some(mut volume)) = store.get_volume(volume_id).await {
-            volume.volume.state = VolumeState::Available;
-            volume.volume.generation += 1;
-            if store
-                .update_volume(volume.volume.generation - 1, &volume)
-                .await
-                .is_err()
-            {
-                return StatusCode::SERVICE_UNAVAILABLE.into_response();
-            }
-        }
-        deleting.attachment.state = VolumeAttachmentState::Deleted;
-        deleting.attachment.generation += 1;
-        return match store
-            .update_volume_attachment_v1(deleting.attachment.generation - 1, &deleting)
-            .await
-        {
-            Ok(_) => StatusCode::NO_CONTENT.into_response(),
-            Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-        };
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     let Some(compute) = state.compute else {
         return keystone_error(
