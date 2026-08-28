@@ -4,7 +4,8 @@ This artifact describes the bounded native Cinder projection. It is generated
 from the implementation commit recorded at release time by the P13.4 gate.
 
 Implementation commit exercised by the current provider and lifecycle gates:
-`60fa4a133442a193affc2e06dbc9a7cd68c1e948`.
+`13967bfca9ec38819a3bd1047cf670ff8e8e20d5` plus the final native attachment
+workflow correction (the final commit SHA is recorded by the release gate).
 
 ## Authority and profile
 

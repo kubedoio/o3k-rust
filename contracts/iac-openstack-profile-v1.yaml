@@ -440,11 +440,11 @@ resources:
     known_deviations:
       - Mapped onto canonical O3K VolumeAttachment semantics.
     route_evidence:
-      create: crates/o3k-api/tests/native_storage.rs
-      list: crates/o3k-api/tests/native_storage.rs
-      show: crates/o3k-api/tests/native_storage.rs
-      delete: crates/o3k-api/tests/native_storage.rs
-    provider_evidence: provider-unverified
+      create: tests/p13_4_provider_volume_attachment_smoke.sh
+      list: tests/p13_4_provider_volume_attachment_smoke.sh
+      show: tests/p13_4_provider_volume_attachment_smoke.sh
+      delete: tests/p13_4_provider_volume_attachment_smoke.sh
+    provider_evidence: bounded-provider-lifecycle-verified
     p13_phase: p13.4
 
 identity_projection:

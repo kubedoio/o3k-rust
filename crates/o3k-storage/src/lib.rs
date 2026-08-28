@@ -354,6 +354,26 @@ impl<R: LvmCommandRunner> LvmStorageProvider<R> {
         format!("o3k_owner_{hex}")
     }
 
+    /// Volume ownership is stable across canonical lifecycle revisions. The
+    /// generation is a durable fencing value for the control plane, not part
+    /// of the provider object's ownership identity; otherwise an Available
+    /// volume could no longer be inspected or deleted after its canonical
+    /// generation advanced from the create revision.
+    fn volume_marker(&self, volume_id: VolumeId, project_id: &str) -> String {
+        let mut digest = Sha256::new();
+        digest.update(self.config.provider_namespace.as_bytes());
+        digest.update([0]);
+        digest.update(volume_id.as_uuid().as_bytes());
+        digest.update([0]);
+        digest.update(project_id.as_bytes());
+        let hex = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("o3k_volume_owner_{hex}")
+    }
+
     fn scope_marker(&self, kind: &str) -> String {
         let mut digest = Sha256::new();
         digest.update(self.config.provider_namespace.as_bytes());
@@ -424,7 +444,7 @@ impl<R: LvmCommandRunner> LvmStorageProvider<R> {
         &self,
         volume_id: VolumeId,
         project_id: &str,
-        generation: u64,
+        _generation: u64,
     ) -> Result<String, StorageProviderError>
     where
         R: LvmCommandRunner + Sync,
@@ -446,7 +466,7 @@ impl<R: LvmCommandRunner> LvmStorageProvider<R> {
                 ]),
             )
             .await?;
-        let marker = self.marker(volume_id, project_id, generation);
+        let marker = self.volume_marker(volume_id, project_id);
         let entries = parse_lvs(&output.stdout)?;
         let expected_name = self.lv_name(volume_id);
         let matches = entries
@@ -507,7 +527,7 @@ where
             Err(StorageProviderError::NotFound) => {}
             Err(error) => return Err(error),
         }
-        let marker = self.marker(request.volume_id, &request.project_id, request.generation);
+        let marker = self.volume_marker(request.volume_id, &request.project_id);
         let name = self.lv_name(request.volume_id);
         let size = format!("{}B", request.size_bytes);
         self.checked_command(
@@ -876,16 +896,20 @@ mod tests {
     }
 
     #[test]
-    fn marker_binds_namespace_volume_project_and_generation() {
+    fn provider_markers_bind_the_right_identity() {
         let provider =
             LvmStorageProvider::with_runner(config(), FakeRunner::default()).expect("valid config");
         assert_ne!(
-            provider.marker(volume().volume_id, "project-a", 1),
-            provider.marker(volume().volume_id, "project-b", 1)
+            provider.volume_marker(volume().volume_id, "project-a"),
+            provider.volume_marker(volume().volume_id, "project-b")
         );
         assert_ne!(
             provider.marker(volume().volume_id, "project-a", 1),
             provider.marker(volume().volume_id, "project-a", 2)
+        );
+        assert_eq!(
+            provider.volume_marker(volume().volume_id, "project-a"),
+            provider.volume_marker(volume().volume_id, "project-a")
         );
     }
 

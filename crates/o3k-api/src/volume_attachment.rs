@@ -117,7 +117,11 @@ fn native_attachment_view(
         bdm_uuid: record.attachment.id.to_string(),
         server_id: record.attachment.server_id.to_string(),
         volume_id: record.attachment.volume_id.to_string(),
-        device: "/dev/o3k/native".to_owned(),
+        // The native execution provider deliberately keeps the host device
+        // path out of canonical state.  Nova's bounded compatibility profile
+        // nevertheless requires a stable device value on refresh; use the
+        // provider-neutral default expected by the pinned provider.
+        device: "/dev/vdb".to_owned(),
         tag: None,
         delete_on_termination: record.attachment.delete_on_termination,
     }
@@ -186,11 +190,28 @@ async fn create_native_attachment(
         .insert_volume_attachment_v1(&record)
         .await
         .map_err(|_| StatusCode::CONFLICT)?;
+    // The durable V1 attachment is the canonical storage record.  The
+    // generic resource row is only the existing operation-journal projection;
+    // the workflow uses it as its foreign-key anchor before crossing either
+    // provider boundary.
+    store
+        .insert_resource(&o3k_store::ResourceRecord {
+            id: record.attachment.id.as_uuid(),
+            kind: "native_volume_attachment".to_owned(),
+            project_id: record.attachment.project_id.clone(),
+            generation: record.attachment.generation as i64,
+            observed_generation: record.attachment.generation as i64,
+            desired_state: "attached".to_owned(),
+            observed_state: "reserved".to_owned(),
+            provider_id: None,
+        })
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     if let Some(workflow) = state.native_attachment_workflow.as_ref() {
-        workflow
-            .attach(record.attachment.id.as_uuid())
-            .await
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        if let Err(error) = workflow.attach(record.attachment.id.as_uuid()).await {
+            tracing::warn!(attachment_id = %record.attachment.id, error = ?error, "native attachment workflow failed");
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
         return store
             .get_volume_attachment_v1(record.attachment.id.as_uuid())
             .await

@@ -88,8 +88,9 @@ profiles:
       postgres_support: supported-production-backend
     execution_boundaries:
       - o3k-compute
+      - o3k-storage
       - embedded-network-provider
-    native_volume_profile: planned
+    native_volume_profile: implemented-partial
     release_blocking_for_first_alpha: true
     footprint_claim: unmeasured-target-approximately-50mb
     evidence_state: implemented

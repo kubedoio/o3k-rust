@@ -173,7 +173,7 @@ impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
         self.workflow
             .attach(intent)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:?}"))?;
         let Some(mut volume) = self
             .store
             .get_volume(attachment.volume_id.as_uuid())
@@ -202,7 +202,24 @@ impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
         self.workflow
             .detach(native_storage_intent(&attachment, "detach"))
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:?}"))?;
+        // The workflow has observed the provider-side detach and leaves the
+        // durable record Detached.  Finalize the canonical child here before
+        // releasing the volume, so a subsequent volume delete cannot mistake
+        // a completed detach for an active attachment.
+        if let Some(mut current) = self
+            .store
+            .get_volume_attachment_v1(attachment_id)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            current.attachment.state = o3k_domain::VolumeAttachmentState::Deleted;
+            current.attachment.generation += 1;
+            self.store
+                .update_volume_attachment_v1(current.attachment.generation - 1, &current)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         let Some(mut volume) = self
             .store
             .get_volume(attachment.volume_id.as_uuid())

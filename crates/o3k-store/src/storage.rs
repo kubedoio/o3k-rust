@@ -34,7 +34,7 @@ pub struct SnapshotRecord {
 }
 
 #[async_trait]
-pub trait StorageRepository: Send + Sync {
+pub trait StorageRepository: super::DurableStore + Send + Sync {
     async fn insert_storage_backend(&self, record: &StorageBackendRecord)
     -> Result<(), StoreError>;
     async fn get_storage_backend(
