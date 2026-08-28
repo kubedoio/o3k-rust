@@ -227,7 +227,7 @@ impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
             .await
             .map_err(|error| error.to_string())?
         {
-            let Ok(envelope) =
+            let Ok(_envelope) =
                 serde_json::from_slice::<o3k_domain::StorageCommandEnvelope>(&command.payload)
             else {
                 continue;
@@ -241,8 +241,11 @@ impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
             {
                 continue;
             }
+            // The envelope epoch is immutable request provenance.  Recovery
+            // is executed by the current controller session after the
+            // storage work lease has authorized a takeover.
             self.workflow
-                .reconcile(&command.command_id, envelope.controller_epoch)
+                .reconcile(&command.command_id, self.controller_epoch)
                 .await
                 .map_err(|error| error.to_string())?;
         }
@@ -1664,12 +1667,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         state = state.with_storage_provider(provider);
     }
     o3k_api::recover_native_volumes(&state).await;
-    if let Some(workflow) = native_attachment_workflow {
+    let native_storage_recovery_task = if let Some(workflow) = native_attachment_workflow.clone() {
         state = state.with_native_attachment_workflow(workflow.clone());
         if let Err(error) = workflow.recover().await {
             tracing::warn!(%error, "native storage attachment recovery is incomplete");
         }
-    }
+        // Startup can race the previous controller's lease expiry.  Keep the
+        // existing recovery boundary live so a Busy takeover is retried
+        // automatically without requiring the original client request.
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(error) = workflow.recover().await {
+                    tracing::debug!(%error, "native storage recovery pass deferred");
+                }
+            }
+        }))
+    } else {
+        None
+    };
     if let Some(allocator) = public_allocator {
         state = state.with_public_allocator(allocator);
     }
@@ -1755,6 +1773,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     create_convergence_reconciler.abort();
     let _ = create_convergence_reconciler.await;
     lifecycle_convergence_reconciler.abort();
+    if let Some(task) = native_storage_recovery_task {
+        task.abort();
+        let _ = task.await;
+    }
     let _ = lifecycle_convergence_reconciler.await;
     if let Some(task) = inventory_task {
         task.abort();
