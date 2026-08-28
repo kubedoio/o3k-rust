@@ -998,6 +998,33 @@ mod tests {
                 .len(),
             1
         );
+        // Terminal attachment history must not prevent a later attach of the
+        // same volume with a new canonical identity, while two live
+        // attachments remain database-rejected.
+        let mut historical = attachment.clone();
+        historical.attachment.id = o3k_domain::VolumeAttachmentId::from_uuid(Uuid::from_u128(15));
+        historical.attachment.state = o3k_domain::VolumeAttachmentState::Deleted;
+        store
+            .delete_volume_attachment_v1("project-a", attachment.attachment.id.as_uuid())
+            .await
+            .expect("remove setup attachment");
+        store
+            .insert_volume_attachment_v1(&historical)
+            .await
+            .expect("insert terminal attachment");
+        let mut reattached = historical.clone();
+        reattached.attachment.id = o3k_domain::VolumeAttachmentId::from_uuid(Uuid::from_u128(16));
+        reattached.attachment.state = o3k_domain::VolumeAttachmentState::Reserved;
+        store
+            .insert_volume_attachment_v1(&reattached)
+            .await
+            .expect("reattach after terminal history");
+        let mut duplicate = reattached.clone();
+        duplicate.attachment.id = o3k_domain::VolumeAttachmentId::from_uuid(Uuid::from_u128(17));
+        assert!(matches!(
+            store.insert_volume_attachment_v1(&duplicate).await,
+            Err(StoreError::ResourceAlreadyExists)
+        ));
         let snapshot = SnapshotRecord {
             snapshot: Snapshot {
                 id: SnapshotId::from_uuid(Uuid::from_u128(14)),

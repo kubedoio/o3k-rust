@@ -50,7 +50,7 @@ mod placement;
 mod volume;
 mod volume_attachment;
 
-pub use volume::recover_native_volumes;
+pub use volume::{realize_native_volume_create, recover_native_volumes, remove_native_volume};
 
 pub use network::recover_l3_gateway_operations;
 

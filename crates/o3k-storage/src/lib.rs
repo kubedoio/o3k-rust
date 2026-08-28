@@ -180,6 +180,131 @@ pub trait StorageProvider: Send + Sync {
     ) -> Result<(), StorageProviderError>;
 }
 
+/// Minimal stateful provider for composition/recovery tests.  It models the
+/// same observe-after-mutation contract as a real provider without touching
+/// host storage.
+pub mod testkit {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    #[derive(Default)]
+    pub struct InMemoryStorageProvider {
+        volumes: Mutex<BTreeMap<Uuid, StorageVolumeObservation>>,
+    }
+
+    #[async_trait]
+    impl StorageProvider for InMemoryStorageProvider {
+        async fn capabilities(&self) -> Result<StorageCapabilities, StorageProviderError> {
+            Ok(StorageCapabilities {
+                create_volume: true,
+                snapshots: false,
+                attachment: false,
+                capacity_bytes: u64::MAX,
+                allocated_bytes: 0,
+                allocation_unit_bytes: 1,
+            })
+        }
+
+        async fn create_volume(
+            &self,
+            request: &StorageVolumeRequest,
+        ) -> Result<StorageVolumeObservation, StorageProviderError> {
+            let observation = StorageVolumeObservation {
+                provider_reference: StorageProviderReference {
+                    provider: "test".to_owned(),
+                    resource_id: request.volume_id.to_string(),
+                },
+                size_bytes: request.size_bytes,
+                owned: true,
+                available: true,
+            };
+            self.volumes
+                .lock()
+                .map_err(|_| StorageProviderError::CommandFailed)?
+                .insert(request.volume_id.as_uuid(), observation.clone());
+            Ok(observation)
+        }
+
+        async fn inspect_volume(
+            &self,
+            request: &StorageVolumeRequest,
+        ) -> Result<StorageVolumeObservation, StorageProviderError> {
+            self.volumes
+                .lock()
+                .map_err(|_| StorageProviderError::CommandFailed)?
+                .get(&request.volume_id.as_uuid())
+                .cloned()
+                .ok_or(StorageProviderError::NotFound)
+        }
+
+        async fn delete_volume(
+            &self,
+            request: &StorageVolumeRequest,
+        ) -> Result<(), StorageProviderError> {
+            self.volumes
+                .lock()
+                .map_err(|_| StorageProviderError::CommandFailed)?
+                .remove(&request.volume_id.as_uuid())
+                .map(|_| ())
+                .ok_or(StorageProviderError::NotFound)
+        }
+
+        async fn prepare_attachment(
+            &self,
+            request: &StorageAttachmentRequest,
+        ) -> Result<PreparedAttachment, StorageProviderError> {
+            PreparedAttachment::from_provider(
+                StorageProviderReference {
+                    provider: "test".to_owned(),
+                    resource_id: request.volume_id.to_string(),
+                },
+                "/dev/test".to_owned(),
+                request.attachment_id,
+                request.volume_id,
+            )
+        }
+
+        async fn inspect_attachment(
+            &self,
+            request: &StorageAttachmentRequest,
+        ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+            Ok(StorageAttachmentObservation {
+                attachment_id: request.attachment_id,
+                volume_id: request.volume_id,
+                host_id: request.host_id.clone(),
+                attached: false,
+                provider_reference: StorageProviderReference {
+                    provider: "test".to_owned(),
+                    resource_id: request.volume_id.to_string(),
+                },
+            })
+        }
+
+        async fn terminate_attachment(
+            &self,
+            request: &StorageAttachmentRequest,
+        ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+            self.inspect_attachment(request).await
+        }
+
+        async fn create_snapshot(
+            &self,
+            _request: &StorageSnapshotRequest,
+        ) -> Result<StorageSnapshotObservation, StorageProviderError> {
+            Err(StorageProviderError::InvalidRequest)
+        }
+
+        async fn delete_snapshot(
+            &self,
+            _request: &StorageSnapshotRequest,
+        ) -> Result<(), StorageProviderError> {
+            Err(StorageProviderError::InvalidRequest)
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LvmConfig {
     pub volume_group: String,

@@ -14,6 +14,7 @@ use o3k_domain::{StorageExecutionScope, Volume, VolumeId, VolumeState};
 use o3k_storage::StorageVolumeRequest;
 use o3k_store::VolumeRecord;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{AppState, compute::project_auth_context, error::keystone_error};
@@ -140,6 +141,134 @@ fn volume_not_found() -> Response {
     keystone_error(StatusCode::NOT_FOUND, "Not Found", "volume not found").into_response()
 }
 
+/// Shared provider-backed native Volume lifecycle used by both the Cinder
+/// projection and the native `volume:volume` adapter.  Compatibility wire
+/// formats remain outside this function; canonical persistence and provider
+/// observation are deliberately single-sourced here.
+pub async fn realize_native_volume_create(
+    store: Arc<dyn o3k_store::StorageRepository>,
+    provider: Arc<dyn o3k_storage::StorageProvider>,
+    record: VolumeRecord,
+) -> Result<VolumeRecord, String> {
+    let mut creating = record.clone();
+    creating.volume.state = VolumeState::Creating;
+    creating.volume.generation = record
+        .volume
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| "volume generation overflow".to_owned())?;
+    let creating = store
+        .update_volume(record.volume.generation, &creating)
+        .await
+        .map_err(|error| error.to_string())?;
+    let request = StorageVolumeRequest {
+        volume_id: creating.volume.id,
+        project_id: creating.volume.project_id.clone(),
+        size_bytes: creating.volume.size_bytes,
+        generation: creating.volume.generation,
+    };
+    match provider.create_volume(&request).await {
+        Ok(_) => {}
+        Err(error) => {
+            let mut failed = creating.clone();
+            failed.volume.state = if error.is_unknown_outcome() {
+                VolumeState::Unknown
+            } else {
+                VolumeState::Error
+            };
+            failed.volume.generation = failed.volume.generation.saturating_add(1);
+            let _ = store
+                .update_volume(creating.volume.generation, &failed)
+                .await;
+            return Err(error.to_string());
+        }
+    }
+    let observed = provider
+        .inspect_volume(&request)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !observed.owned || !observed.available || observed.size_bytes != creating.volume.size_bytes {
+        return Err("provider volume observation did not match the requested volume".to_owned());
+    }
+    let mut realized = creating;
+    realized.volume.state = VolumeState::Available;
+    realized.volume.generation = realized
+        .volume
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| "volume generation overflow".to_owned())?;
+    realized.volume.provider_reference = Some(o3k_domain::StorageProviderReference {
+        provider: observed.provider_reference.provider,
+        resource_id: observed.provider_reference.resource_id,
+    });
+    store
+        .update_volume(realized.volume.generation - 1, &realized)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Shared provider-backed native Volume deletion.  Canonical state is kept in
+/// `Deleting` until an explicit provider absence observation succeeds.
+pub async fn remove_native_volume(
+    store: Arc<dyn o3k_store::StorageRepository>,
+    provider: Arc<dyn o3k_storage::StorageProvider>,
+    project_id: &str,
+    id: Uuid,
+) -> Result<(), String> {
+    let record = store
+        .get_volume(id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "volume not found".to_owned())?;
+    if record.volume.project_id != project_id {
+        return Err("volume not found".to_owned());
+    }
+    if store
+        .list_volume_attachments_v1(project_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .any(|attachment| {
+            attachment.attachment.volume_id.as_uuid() == id
+                && !matches!(
+                    attachment.attachment.state,
+                    o3k_domain::VolumeAttachmentState::Deleted
+                )
+        })
+    {
+        return Err("volume has an active attachment".to_owned());
+    }
+    let mut deleting = record.clone();
+    deleting.volume.state = VolumeState::Deleting;
+    deleting.volume.generation = record
+        .volume
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| "volume generation overflow".to_owned())?;
+    store
+        .update_volume(record.volume.generation, &deleting)
+        .await
+        .map_err(|error| error.to_string())?;
+    let request = StorageVolumeRequest {
+        volume_id: id.into(),
+        project_id: project_id.to_owned(),
+        size_bytes: record.volume.size_bytes,
+        generation: record.volume.generation,
+    };
+    match provider.delete_volume(&request).await {
+        Ok(()) | Err(o3k_storage::StorageProviderError::NotFound) => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    match provider.inspect_volume(&request).await {
+        Err(o3k_storage::StorageProviderError::NotFound) => store
+            .delete_volume(project_id, id)
+            .await
+            .map_err(|error| error.to_string()),
+        Ok(_) => Err("provider volume is still present".to_owned()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 async fn scoped_store(
     state: &AppState,
     headers: &HeaderMap,
@@ -263,72 +392,14 @@ pub(crate) async fn create(
         volume,
         created_at: now_rfc3339(),
     };
+    let Some(provider) = state.storage_provider.clone() else {
+        return unavailable();
+    };
     match store.insert_volume(&record).await {
         Ok(()) => {
-            let Some(provider) = state.storage_provider.as_ref() else {
-                return unavailable();
-            };
-            let mut creating = record.clone();
-            creating.volume.state = VolumeState::Creating;
-            creating.volume.generation = record.volume.generation + 1;
-            let creating = match store
-                .update_volume(record.volume.generation, &creating)
-                .await
-            {
-                Ok(creating) => creating,
+            let record = match realize_native_volume_create(store.clone(), provider, record).await {
+                Ok(record) => record,
                 Err(_) => return unavailable(),
-            };
-            let request = StorageVolumeRequest {
-                volume_id: creating.volume.id,
-                project_id: creating.volume.project_id.clone(),
-                size_bytes: creating.volume.size_bytes,
-                generation: creating.volume.generation,
-            };
-            let record = {
-                match provider.create_volume(&request).await {
-                    Ok(observation) => {
-                        let mut realized = creating.clone();
-                        realized.volume.state = VolumeState::Available;
-                        realized.volume.generation = creating.volume.generation + 1;
-                        realized.volume.provider_reference =
-                            Some(o3k_domain::StorageProviderReference {
-                                provider: observation.provider_reference.provider,
-                                resource_id: observation.provider_reference.resource_id,
-                            });
-                        match store
-                            .update_volume(creating.volume.generation, &realized)
-                            .await
-                        {
-                            Ok(updated) => updated,
-                            Err(_) => {
-                                return keystone_error(
-                                    StatusCode::SERVICE_UNAVAILABLE,
-                                    "Service Unavailable",
-                                    "native volume realization state could not be committed",
-                                )
-                                .into_response();
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        let mut failed = creating.clone();
-                        failed.volume.state = if error.is_unknown_outcome() {
-                            VolumeState::Unknown
-                        } else {
-                            VolumeState::Error
-                        };
-                        failed.volume.generation = failed.volume.generation.saturating_add(1);
-                        let _ = store
-                            .update_volume(creating.volume.generation, &failed)
-                            .await;
-                        return keystone_error(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "Service Unavailable",
-                            "native storage provider did not create the volume",
-                        )
-                        .into_response();
-                    }
-                }
             };
             (
                 StatusCode::ACCEPTED,
@@ -449,49 +520,23 @@ pub(crate) async fn delete(
         )
         .into_response();
     }
-    if state.storage_provider.is_none() {
+    let Some(provider) = state.storage_provider.clone() else {
         // Do not remove canonical state while a provider is unavailable: the
         // durable row is the recovery inventory for an owned provider volume.
         return unavailable();
-    }
-    if let Some(provider) = state.storage_provider.as_ref() {
-        let mut deleting = record.clone();
-        deleting.volume.state = VolumeState::Deleting;
-        deleting.volume.generation = record.volume.generation.saturating_add(1);
-        if store
-            .update_volume(record.volume.generation, &deleting)
-            .await
-            .is_err()
-        {
-            return unavailable();
-        }
-        let request = StorageVolumeRequest {
-            volume_id: id.into(),
-            project_id: project_id.clone(),
-            size_bytes: record.volume.size_bytes,
-            generation: record.volume.generation,
-        };
-        match provider.delete_volume(&request).await {
-            Ok(()) | Err(o3k_storage::StorageProviderError::NotFound) => {
-                match provider.inspect_volume(&request).await {
-                    Err(o3k_storage::StorageProviderError::NotFound) => {}
-                    Ok(_) | Err(_) => return unavailable(),
-                }
-            }
-            Err(_) => {
-                return (
-                    StatusCode::ACCEPTED,
-                    Json(VolumeResponse {
-                        volume: view(&deleting),
-                    }),
-                )
-                    .into_response();
-            }
-        }
-    }
-    match store.delete_volume(&project_id, id).await {
+    };
+    match remove_native_volume(store.clone(), provider, &project_id, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => unavailable(),
+        Err(_) => match store.get_volume(id).await {
+            Ok(Some(deleting)) if deleting.volume.state == VolumeState::Deleting => (
+                StatusCode::ACCEPTED,
+                Json(VolumeResponse {
+                    volume: view(&deleting),
+                }),
+            )
+                .into_response(),
+            _ => unavailable(),
+        },
     }
 }
 

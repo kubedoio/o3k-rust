@@ -1477,11 +1477,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let health = controller.health().await;
         native_manifest_registry.update_controller_health(service_id, health)?;
     }
+    let native_lvm_provider = match (
+        std::env::var("O3K_LVM_VOLUME_GROUP").ok(),
+        std::env::var("O3K_LVM_THIN_POOL").ok(),
+        std::env::var("O3K_LVM_PROVIDER_NAMESPACE").ok(),
+    ) {
+        (Some(volume_group), Some(thin_pool), Some(provider_namespace)) => Some(Arc::new(
+            o3k_storage::LvmStorageProvider::new(o3k_storage::LvmConfig {
+                volume_group,
+                thin_pool,
+                provider_namespace,
+            })?,
+        )),
+        _ => None,
+    };
+    let native_storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>> =
+        native_lvm_provider.clone().map(|provider| provider as _);
     let generic_application: std::sync::Arc<dyn o3k_native_api::resource::ResourceApplication> =
         std::sync::Arc::new(native_adapters::GenericResourceApplication {
             compute: std::sync::Arc::new(compute_service.clone()),
             network_service: std::sync::Arc::new(network_service.clone()),
             store: native_api_store.clone(),
+            storage_provider: native_storage_provider.clone(),
             server: server_reader
                 .clone()
                 .ok_or("generic native application requires compute reader")?,
@@ -1558,22 +1575,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let inspect_compute_service = compute_service.clone();
-    let native_lvm_provider = match (
-        std::env::var("O3K_LVM_VOLUME_GROUP").ok(),
-        std::env::var("O3K_LVM_THIN_POOL").ok(),
-        std::env::var("O3K_LVM_PROVIDER_NAMESPACE").ok(),
-    ) {
-        (Some(volume_group), Some(thin_pool), Some(provider_namespace)) => Some(Arc::new(
-            o3k_storage::LvmStorageProvider::new(o3k_storage::LvmConfig {
-                volume_group,
-                thin_pool,
-                provider_namespace,
-            })?,
-        )),
-        _ => None,
-    };
-    let native_storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>> =
-        native_lvm_provider.clone().map(|provider| provider as _);
     let native_attachment_workflow: Option<Arc<dyn o3k_api::NativeAttachmentWorkflow>> =
         native_lvm_provider.as_ref().map(|provider| {
             let workflow = o3k_reconciler::storage_workflow::StorageAttachmentWorkflow::new(

@@ -400,6 +400,7 @@ pub struct GenericResourceApplication {
     pub compute: Arc<o3k_compute::ComputeService>,
     pub network_service: Arc<o3k_network::NetworkService>,
     pub store: Arc<o3k_store::unified::O3kStore>,
+    pub storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>>,
     pub server: Arc<dyn o3k_native_api::compute::ServerReader>,
     pub network: Arc<dyn o3k_native_api::network::NetworkReader>,
     pub external_controllers: Arc<BTreeMap<String, Arc<o3k_service_sdk::GrpcControllerAdapter>>>,
@@ -843,7 +844,7 @@ impl ResourceApplication for GenericResourceApplication {
                 volume_type: spec.volume_type,
                 backend_id: "local".to_owned(),
                 execution_scope: StorageExecutionScope::Host("local".to_owned()),
-                state: VolumeState::Available,
+                state: VolumeState::Requested,
                 generation: 1,
                 operation_id: Some(operation_id),
                 provider_reference: None,
@@ -852,10 +853,30 @@ impl ResourceApplication for GenericResourceApplication {
                 volume,
                 created_at: chrono::Utc::now().to_rfc3339(),
             };
+            let Some(provider) = self.storage_provider.clone() else {
+                return Err(ResourceApplicationError::NotReady);
+            };
             match self.store.insert_volume(&record).await {
-                Ok(()) | Err(o3k_store::StoreError::ResourceAlreadyExists) => {}
+                Ok(()) => {}
+                Err(o3k_store::StoreError::ResourceAlreadyExists) => {
+                    let existing = self
+                        .store
+                        .get_volume(resource_id)
+                        .await
+                        .map_err(|_| ResourceApplicationError::Internal)?
+                        .ok_or(ResourceApplicationError::Internal)?;
+                    return Ok(MutationResult {
+                        operation_id: operation_id.to_string(),
+                        resource_id: Some(resource_id.to_string()),
+                        complete: existing.volume.state == VolumeState::Available,
+                        resource: Some(native_volume_json(&existing)),
+                    });
+                }
                 Err(_) => return Err(ResourceApplicationError::Internal),
             }
+            o3k_api::realize_native_volume_create(self.store.clone(), provider, record)
+                .await
+                .map_err(|_| ResourceApplicationError::Retryable)?;
             // The legacy generic-resource index is a compatibility projection
             // used by relationship tests and older native callers.  The
             // canonical volume above remains the sole authority.
@@ -1192,30 +1213,21 @@ impl ResourceApplication for GenericResourceApplication {
                 {
                     return Err(ResourceApplicationError::PreconditionConflict);
                 }
-                if self
-                    .store
-                    .list_volume_attachments_v1(auth.effective_scope().id().as_str())
-                    .await
-                    .map_err(|_| ResourceApplicationError::Internal)?
-                    .into_iter()
-                    .any(|attachment| {
-                        attachment.attachment.volume_id.as_uuid() == resource_id
-                            && !matches!(
-                                attachment.attachment.state,
-                                o3k_domain::VolumeAttachmentState::Deleted
-                            )
-                    })
-                {
-                    return Err(ResourceApplicationError::Conflict);
-                }
                 let operation_id = Uuid::new_v5(
                     &Uuid::NAMESPACE_URL,
                     format!("volume:delete:{resource_id}").as_bytes(),
                 );
-                self.store
-                    .delete_volume(auth.effective_scope().id().as_str(), resource_id)
-                    .await
-                    .map_err(|_| ResourceApplicationError::Internal)?;
+                let Some(provider) = self.storage_provider.clone() else {
+                    return Err(ResourceApplicationError::NotReady);
+                };
+                o3k_api::remove_native_volume(
+                    self.store.clone(),
+                    provider,
+                    auth.effective_scope().id().as_str(),
+                    resource_id,
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Retryable)?;
                 let _ = self
                     .store
                     .update_resource(resource_id, 1, "DELETED", "DELETED", 2, None)
@@ -2569,6 +2581,7 @@ mod native_compute_tests {
             compute: compute.clone(),
             network_service,
             store: store.clone(),
+            storage_provider: None,
             server: Arc::new(ServerReaderAdapter {
                 service: compute.clone(),
             }),

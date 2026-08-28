@@ -92,4 +92,17 @@ async fn postgres_p13_4_native_volume_and_attachment_reopen() {
             .len(),
         1
     );
+
+    reopened
+        .delete_volume_attachment_v1(&project, attachment.attachment.id.as_uuid())
+        .await
+        .expect("detach finalization");
+    let mut reattached = attachment.clone();
+    reattached.attachment.id = VolumeAttachmentId::new();
+    reattached.attachment.state = VolumeAttachmentState::Attached;
+    reopened
+        .insert_volume_attachment_v1(&reattached)
+        .await
+        .expect("reattach same volume with new identity");
+    assert_ne!(reattached.attachment.id, attachment.attachment.id);
 }
