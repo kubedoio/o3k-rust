@@ -543,6 +543,13 @@ if [[ -n "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE:-}" ]]; then
         || { echo "agent inspect probe resource file is invalid" >&2; exit 1; }
     printf '%s\n' "${SERVER_ID}" >"${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE}"
     chmod 0644 "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE}"
+    if [[ -n "${O3K_AGENT_INSPECT_SERVICE_RESOURCE_FILE:-}" ]]; then
+        [[ "${O3K_AGENT_INSPECT_SERVICE_RESOURCE_FILE}" == /* \
+            && "${O3K_AGENT_INSPECT_SERVICE_RESOURCE_FILE}" != *..* ]] \
+            || { echo "agent inspect service resource file is invalid" >&2; exit 1; }
+        printf '%s\n' "${SERVER_ID}" >"${O3K_AGENT_INSPECT_SERVICE_RESOURCE_FILE}"
+        chmod 0644 "${O3K_AGENT_INSPECT_SERVICE_RESOURCE_FILE}"
+    fi
     # Synchronize with the live process-boundary probe: wait for it to
     # reach a terminal result before any destructive lifecycle action.
     # The probe dispatches inspect through the real compute-service

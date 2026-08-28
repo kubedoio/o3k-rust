@@ -445,7 +445,11 @@ if [[ "${O3K_AGENT_INSPECT_PROBE_ENABLED:-false}" == true ]]; then
     touch "$probe_resource_file"
     chmod 0644 "$probe_resource_file"
     printf 'O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE=%s\n' \
-      "$(printf '%q' "$probe_resource_file")" >>"$o3kd_env_tmp"
+      "$(printf '%q' "$STATE_ROOT/agent-inspect-resource-id")" >>"$o3kd_env_tmp"
+    sudo -n install -m 0644 -o "$(id -u)" -g "$(id -g)" /dev/null \
+      "$STATE_ROOT/agent-inspect-resource-id"
+    printf 'O3K_AGENT_INSPECT_SERVICE_RESOURCE_FILE=%s\n' \
+      "$STATE_ROOT/agent-inspect-resource-id" >>"${GITHUB_ENV:-/dev/null}"
   else
     [[ "${O3K_AGENT_INSPECT_PROBE_RESOURCE_ID:-}" =~ ^[0-9a-fA-F-]{36}$ ]] \
       || fail "agent inspect probe resource id is invalid"
