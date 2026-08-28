@@ -38,6 +38,10 @@ SH
 chmod +x "${FAKE_BIN}/ip"
 cat >"${FAKE_BIN}/openstack" <<'SH'
 #!/usr/bin/env bash
+if [[ "${O3K_FAKE_OPENSTACK_FAILURE:-false}" == true ]]; then
+    echo 'Authorization: Bearer password=should-not-appear' >&2
+    exit 1
+fi
 if [[ "$*" == flavor\ list\ * ]]; then
     if [[ "${O3K_FAKE_OPENSTACK_LEAK:-false}" == true ]]; then
         echo '[{"ID":"leaked-openstack-resource","Name":"o3k-testlab-flavor"}]'
@@ -137,6 +141,21 @@ if bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${WORK_DIR}/missing-
     exit 1
 fi
 export O3K_REAL_HOST_PROTECTED_PATHS="${WORK_DIR}/protected-state.txt"
+
+export O3K_FAKE_OPENSTACK_FAILURE=true
+if bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${WORK_DIR}/failed-openstack.json"; then
+    echo "failed OpenStack inventory was accepted" >&2
+    exit 1
+fi
+python3 - "${WORK_DIR}/failed-openstack.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "unavailable"
+assert value["reason"] == "command_failed:openstack:server:list:unknown"
+assert "should-not-appear" not in json.dumps(value)
+assert "Authorization" not in json.dumps(value)
+PY
+unset O3K_FAKE_OPENSTACK_FAILURE
 
 unset OS_PASSWORD
 if bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"; then

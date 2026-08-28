@@ -291,6 +291,22 @@ TEMP_NAME_PATTERNS = (
 LAST_FAILURE_REASON = "inventory_collection_failed"
 
 
+def failure_class(stderr: str) -> str:
+    """Classify CLI failure without publishing provider diagnostics."""
+    value = stderr.lower()
+    if any(marker in value for marker in ("401", "403", "unauthorized", "forbidden", "authentication")):
+        return "auth"
+    if any(marker in value for marker in ("404", "not found", "no route", "endpoint")):
+        return "route"
+    if any(marker in value for marker in ("timed out", "timeout", "timedout")):
+        return "timeout"
+    if any(marker in value for marker in ("unrecognized arguments", "no such command", "invalid choice")):
+        return "client"
+    if any(marker in value for marker in ("json", "parse", "decode", "schema")):
+        return "response_schema"
+    return "unknown"
+
+
 def command(args: tuple[str, ...], *, scrub_provider_config: bool = False) -> str | None:
     global LAST_FAILURE_REASON
     environment = os.environ.copy()
@@ -316,13 +332,9 @@ def command(args: tuple[str, ...], *, scrub_provider_config: bool = False) -> st
         return None
     except subprocess.CalledProcessError as error:
         stderr = error.stderr if isinstance(error.stderr, str) else ""
-        status = next(
-            (code for code in (401, 403, 404, 409, 500, 502, 503, 504)
-             if str(code) in stderr),
-            None,
+        LAST_FAILURE_REASON = (
+            "command_failed:" + ":".join(args[:3]) + ":" + failure_class(stderr)
         )
-        suffix = f":http{status}" if status is not None else f":exit{error.returncode}"
-        LAST_FAILURE_REASON = "command_failed:" + ":".join(args[:3]) + suffix
         return None
     except (OSError, UnicodeError, subprocess.SubprocessError):
         LAST_FAILURE_REASON = "command_error:" + ":".join(args[:3])
