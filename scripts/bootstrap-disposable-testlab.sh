@@ -656,7 +656,7 @@ printf 'O3K_COMPUTE_BRIDGE_NAME=%s\n' "$BRIDGE_NAME" >>"${GITHUB_ENV:-/dev/null}
 printf 'O3K_TESTLAB_PID_ROOT=%s\n' "$PID_ROOT" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_REAL_HOST_PROTECTED_PATHS=%s\nO3K_REAL_HOST_INVENTORY_ROOT=%s\nO3K_OPENSTACK_VENV=%s\n' \
   "$INVENTORY_ROOT" "$INVENTORY_ROOT" "$OPENSTACK_VENV" >>"${GITHUB_ENV:-/dev/null}"
-printf 'OS_AUTH_URL=%s\nOS_USERNAME=admin\nOS_PROJECT_NAME=admin\nOS_REGION_NAME=RegionOne\nOS_PASSWORD=%s\n' \
+printf 'OS_AUTH_URL=%s\nOS_USERNAME=admin\nOS_PROJECT_NAME=admin\nOS_REGION_NAME=RegionOne\nOS_PASSWORD=%s\nOS_USER_DOMAIN_NAME=Default\nOS_PROJECT_DOMAIN_NAME=Default\nOS_INTERFACE=public\nOS_IDENTITY_API_VERSION=3\n' \
   "$OS_AUTH_URL" "$PASSWORD" >>"${GITHUB_ENV:-/dev/null}"
 write_result passed authenticated
 trap - EXIT
