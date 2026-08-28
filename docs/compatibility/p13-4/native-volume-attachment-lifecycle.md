@@ -1,7 +1,7 @@
 # P13.4 native VolumeAttachment lifecycle evidence
 
 Implementation exercised by the current provider gate:
-`f8934b82aca48bba9e9c4c36230951905b70c527`.
+`1ec36e2157f5e1eff818e48417faaa3d5ef58ef6`.
 
 The Nova-compatible attachment projection uses the canonical
 `o3k_domain::VolumeAttachment` persisted by `StorageRepository`.  The native
