@@ -466,7 +466,11 @@ for needle in ("workflow_dispatch:",
                "Run P13.4 real LVM/libvirt guest gate",
                "scripts/real-lvm-guest-gate.sh",
                "p13-4-storage-evidence.json",
-               "lvm-real-guest-result.json"):
+               "lvm-real-guest-result.json",
+               "Stop storage-phase disposable TestLab",
+               "Bootstrap fresh generic TestLab",
+               "Fresh generic TestLab pre-run guard",
+               "steps.generic_guard.outputs.ready == 'true'"):
     assert needle in text, needle
 assert "Repair prior protected artifact ownership" in text
 assert 'sudo -n chown -R "$(id -u):$(id -g)"' in text

@@ -363,9 +363,56 @@ jobs:
             "${RUNNER_TEMP}/o3k-p13-4-guest-${slug}.key" \
             "${RUNNER_TEMP}/o3k-p13-4-guest-${slug}.key.pub"
 
+      - name: Stop storage-phase disposable TestLab
+        if: always() && steps.guard.outputs.ready == 'true'
+        run: bash scripts/cleanup-disposable-testlab.sh
+
+      - name: Bootstrap fresh generic TestLab
+        id: generic_bootstrap
+        if: steps.guard.outputs.ready == 'true'
+        continue-on-error: true
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_PROVIDER: agent
+          O3K_LOG_FILTER: debug
+          O3K_COMPUTE_LOG_FILTER: debug
+          O3K_AGENT_INSPECT_PROBE_ENABLED: true
+          O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE: ${{ github.workspace }}/target/real-host-workflow-artifacts/agent-inspect-resource-id
+        run: bash scripts/bootstrap-disposable-testlab.sh
+
+      - name: Verify fresh generic TestLab capabilities
+        id: generic_capabilities
+        if: steps.generic_bootstrap.outcome == 'success'
+        continue-on-error: true
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_REAL_HOST_RUNNER_LABELS: self-hosted,linux,x64,kvm,libvirt,o3k-testlab
+          O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          O3K_REAL_HOST_RUNNER_NAME: ${{ runner.name }}
+          GITHUB_SHA: ${{ inputs.target_sha || github.sha }}
+        run: bash scripts/real-host-capability-probe.sh
+
+      - name: Fresh generic TestLab pre-run guard
+        id: generic_guard
+        if: always()
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_REAL_HOST_OPENSTACK_INVENTORY: true
+          O3K_REAL_HOST_CAPABILITY_OUTPUT: target/real-host-workflow-artifacts/runner-capabilities.json
+          O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_SHA: ${{ inputs.target_sha || github.sha }}
+          O3K_REAL_HOST_TARGET_SHA: ${{ inputs.target_sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/real-host-pre-run-guard.sh
+
       - name: Run public real-host lifecycle
         id: lifecycle
-        if: steps.guard.outputs.ready == 'true'
+        if: steps.generic_guard.outputs.ready == 'true'
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
@@ -383,7 +430,7 @@ jobs:
 
       - name: Run compute-agent mTLS command evidence
         id: agent_mtls
-        if: steps.guard.outputs.ready == 'true'
+        if: steps.generic_guard.outputs.ready == 'true'
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
@@ -391,7 +438,7 @@ jobs:
 
       - name: Run compute-agent process-boundary evidence
         id: agent_process
-        if: steps.guard.outputs.ready == 'true'
+        if: steps.generic_guard.outputs.ready == 'true'
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
