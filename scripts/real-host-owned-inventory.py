@@ -222,6 +222,8 @@ import stat as stat_module
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 import uuid as uuid_module
 from pathlib import Path
 
@@ -249,6 +251,10 @@ RESOURCE_NAMES = {
     "network": "o3k-testlab-network",
     "subnet": "o3k-testlab-subnet",
     "flavor": "o3k-testlab-flavor",
+}
+DIRECT_COLLECTIONS = {
+    "server": ("compute", "servers", "servers"),
+    "image": ("image", "v2/images", "images"),
 }
 DAEMON_BINARIES = ("o3kd", "o3k-compute")
 EXTENDED_ENVS = (
@@ -401,6 +407,59 @@ def named_resource_ids(resource: str, output: str) -> list[str] | None:
                 return None
             values.append(identifier)
     return sorted(set(values))
+
+
+def direct_collection(resource: str) -> str | None:
+    """Read a bounded collection when CLI service discovery is incompatible."""
+    global LAST_FAILURE_REASON
+    service, suffix, collection_key = DIRECT_COLLECTIONS[resource]
+    token_output = command(("openstack", "token", "issue", "-f", "json"), scrub_provider_config=True)
+    catalog_output = command(("openstack", "catalog", "show", service, "-f", "json"), scrub_provider_config=True)
+    if token_output is None or catalog_output is None:
+        return None
+    try:
+        token = json.loads(token_output)
+        catalog = json.loads(catalog_output)
+        token_id = token["id"]
+        project_id = token["project_id"]
+        endpoints = catalog["endpoints"]
+        endpoint = next(
+            item["url"] for item in endpoints
+            if item.get("interface") == os.environ.get("OS_INTERFACE", "public")
+            and item.get("region") == os.environ.get("OS_REGION_NAME", "RegionOne")
+        )
+        if not isinstance(token_id, str) or not isinstance(project_id, str) or not isinstance(endpoint, str):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":catalog"
+        return None
+    url = endpoint.rstrip("/") + "/" + suffix
+    if resource == "server" and project_id not in url:
+        url += "/" + project_id
+    request = urllib.request.Request(
+        url,
+        headers={"X-Auth-Token": token_id, "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as error:
+        status = error.code
+        LAST_FAILURE_REASON = f"command_failed:openstack:{resource}:route" if status in (404, 405) else f"command_failed:openstack:{resource}:http{status}"
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        LAST_FAILURE_REASON = "command_error:openstack:" + resource + ":direct"
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get(collection_key), list):
+        LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":collection"
+        return None
+    records = []
+    for item in payload[collection_key]:
+        if not isinstance(item, dict):
+            LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":record"
+            return None
+        records.append({"ID": item.get("id"), "Name": item.get("name")})
+    return json.dumps(records)
 
 
 def digest(values: list[str]) -> str:
@@ -1784,6 +1843,11 @@ def snapshot() -> dict[str, object] | None:
         openstack_status = "available"
         for resource in RESOURCES:
             output = command(("openstack", *RESOURCE_COMMANDS[resource]), scrub_provider_config=True)
+            if output is None and resource in DIRECT_COLLECTIONS:
+                primary_failure = LAST_FAILURE_REASON
+                output = direct_collection(resource)
+                if output is None:
+                    LAST_FAILURE_REASON = primary_failure
             if output is None:
                 return None
             values = named_resource_ids(resource, output)
