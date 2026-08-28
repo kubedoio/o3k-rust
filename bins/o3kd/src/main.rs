@@ -44,11 +44,17 @@ struct LocalStorageFence {
     controller_id: o3k_store::ControllerId,
     controller_epoch: o3k_store::ControllerEpoch,
     intent_epoch: u64,
+    attempt: Arc<tokio::sync::Mutex<Option<StorageLeaseAttempt>>>,
+}
+
+struct StorageLeaseAttempt {
+    fencing_token: o3k_store::FencingToken,
+    stop: tokio::sync::oneshot::Sender<()>,
 }
 
 #[async_trait]
 impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFence {
-    async fn assert_current(
+    async fn begin(
         &self,
         controller_epoch: u64,
     ) -> Result<(), o3k_reconciler::storage_workflow::StorageWorkflowError> {
@@ -57,7 +63,13 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
                 o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
             );
         }
-        match self
+        let mut attempt = self.attempt.lock().await;
+        if attempt.is_some() {
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
+        let lease = match self
             .coordination
             .acquire_work_lease(
                 "o3k-native-storage-controller",
@@ -70,10 +82,111 @@ impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFe
             .map_err(|_| {
                 o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence
             })? {
-            o3k_store::LeaseAcquireOutcome::Acquired { .. } => Ok(()),
+            o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
             o3k_store::LeaseAcquireOutcome::Busy { .. } => {
-                Err(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)
+                return Err(
+                    o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+                );
             }
+        };
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let coordination = self.coordination.clone();
+        let controller_id = self.controller_id.clone();
+        let controller_epoch_value = self.controller_epoch.clone();
+        let fencing_token = lease.fencing_token;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    _ = interval.tick() => {
+                        match coordination.renew_work_lease(
+                            "o3k-native-storage-controller",
+                            &controller_id,
+                            &controller_epoch_value,
+                            fencing_token,
+                            Duration::from_secs(15),
+                        ).await {
+                            Ok(true) => {}
+                            Ok(false) | Err(_) => break,
+                        }
+                    }
+                }
+            }
+        });
+        *attempt = Some(StorageLeaseAttempt {
+            fencing_token,
+            stop,
+        });
+        Ok(())
+    }
+
+    async fn assert_current(
+        &self,
+        controller_epoch: u64,
+    ) -> Result<(), o3k_reconciler::storage_workflow::StorageWorkflowError> {
+        if controller_epoch == 0 || controller_epoch != self.intent_epoch {
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
+        let fencing_token = self
+            .attempt
+            .lock()
+            .await
+            .as_ref()
+            .map(|attempt| attempt.fencing_token)
+            .ok_or(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)?;
+        let renewed = self
+            .coordination
+            .renew_work_lease(
+                "o3k-native-storage-controller",
+                &self.controller_id,
+                &self.controller_epoch,
+                fencing_token,
+                Duration::from_secs(15),
+            )
+            .await
+            .map_err(|_| {
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence
+            })?;
+        if renewed {
+            Ok(())
+        } else {
+            Err(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)
+        }
+    }
+
+    async fn end(
+        &self,
+        controller_epoch: u64,
+    ) -> Result<(), o3k_reconciler::storage_workflow::StorageWorkflowError> {
+        if controller_epoch != self.intent_epoch {
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
+        let Some(attempt) = self.attempt.lock().await.take() else {
+            return Ok(());
+        };
+        let _ = attempt.stop.send(());
+        let released = self
+            .coordination
+            .release_work_lease(
+                "o3k-native-storage-controller",
+                &self.controller_id,
+                &self.controller_epoch,
+                attempt.fencing_token,
+            )
+            .await
+            .map_err(|_| {
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence
+            })?;
+        if released {
+            Ok(())
+        } else {
+            Err(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)
         }
     }
 }
@@ -228,6 +341,7 @@ impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
     }
 
     async fn recover(&self) -> Result<(), String> {
+        let mut first_error = None;
         for command in self
             .store
             .list_recoverable_agent_commands()
@@ -251,12 +365,26 @@ impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
             // The envelope epoch is immutable request provenance.  Recovery
             // is executed by the current controller session after the
             // storage work lease has authorized a takeover.
-            self.workflow
+            if let Err(error) = self
+                .workflow
                 .reconcile(&command.command_id, self.controller_epoch)
                 .await
-                .map_err(|error| error.to_string())?;
+            {
+                // Recovery is per command.  A busy/unknown/provider-failed
+                // attachment must not head-of-line block unrelated durable
+                // commands in the same startup pass; the next scheduled pass
+                // retries the unresolved command automatically.
+                tracing::warn!(
+                    command_id = %command.command_id,
+                    %error,
+                    "native storage command recovery deferred"
+                );
+                if first_error.is_none() {
+                    first_error = Some(error.to_string());
+                }
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -1618,6 +1746,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     controller_id: controller_id.clone(),
                     controller_epoch: controller_epoch.clone(),
                     intent_epoch: storage_intent_epoch,
+                    attempt: Arc::new(tokio::sync::Mutex::new(None)),
                 }),
             );
             Arc::new(NativeStorageAttachmentWorkflow {

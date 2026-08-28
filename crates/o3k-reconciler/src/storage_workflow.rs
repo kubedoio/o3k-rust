@@ -122,7 +122,20 @@ pub trait ComputeAttachmentExecutor: Send + Sync {
 
 #[async_trait]
 pub trait StorageControllerFence: Send + Sync {
+    /// Start one execution attempt. Recovery takeover must call this once and
+    /// retain the returned implementation's durable fencing identity for the
+    /// whole operation; it must not reacquire ownership from an old attempt.
+    async fn begin(&self, controller_epoch: u64) -> Result<(), StorageWorkflowError> {
+        self.assert_current(controller_epoch).await
+    }
+
     async fn assert_current(&self, controller_epoch: u64) -> Result<(), StorageWorkflowError>;
+
+    /// End the current execution attempt. Implementations release the exact
+    /// fencing token they acquired, never an arbitrary current lease.
+    async fn end(&self, _controller_epoch: u64) -> Result<(), StorageWorkflowError> {
+        Ok(())
+    }
 }
 
 pub struct StorageAttachmentWorkflow<S, P, C, F> {
@@ -152,6 +165,21 @@ where
     /// effect occurs only after both the operation and the replayable command
     /// have been durably recorded.
     pub async fn attach(
+        &self,
+        intent: StorageAttachmentIntent,
+    ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
+        self.fence.begin(intent.controller_epoch).await?;
+        let controller_epoch = intent.controller_epoch;
+        let result = self.attach_inner(intent).await;
+        let end = self.fence.end(controller_epoch).await;
+        match (result, end) {
+            (Err(error), _) => Err(error),
+            (Ok(_value), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+
+    async fn attach_inner(
         &self,
         intent: StorageAttachmentIntent,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
@@ -255,6 +283,21 @@ where
         &self,
         intent: StorageAttachmentIntent,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
+        self.fence.begin(intent.controller_epoch).await?;
+        let controller_epoch = intent.controller_epoch;
+        let result = self.detach_inner(intent).await;
+        let end = self.fence.end(controller_epoch).await;
+        match (result, end) {
+            (Err(error), _) => Err(error),
+            (Ok(_value), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+
+    async fn detach_inner(
+        &self,
+        intent: StorageAttachmentIntent,
+    ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
         intent.validate()?;
         self.fence.assert_current(intent.controller_epoch).await?;
         let fingerprint = intent.fingerprint()?;
@@ -335,6 +378,21 @@ where
     /// restart. The supplied epoch is the current durable controller owner;
     /// the epoch in the immutable envelope remains request provenance.
     pub async fn reconcile(
+        &self,
+        command_id: &str,
+        controller_epoch: u64,
+    ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
+        self.fence.begin(controller_epoch).await?;
+        let result = self.reconcile_inner(command_id, controller_epoch).await;
+        let end = self.fence.end(controller_epoch).await;
+        match (result, end) {
+            (Err(error), _) => Err(error),
+            (Ok(_value), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+
+    async fn reconcile_inner(
         &self,
         command_id: &str,
         controller_epoch: u64,
