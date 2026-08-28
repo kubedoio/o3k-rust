@@ -322,6 +322,9 @@ def failure_detail(stderr: str) -> str:
     for name, markers in categories:
         if any(marker in value for marker in markers):
             return name
+    exception = re.search(r"\b([a-z][a-z0-9_]*(?:error|exception))\b", value)
+    if exception:
+        return "exception_" + re.sub(r"[^a-z0-9_]+", "_", exception.group(1))[:48]
     return "unspecified"
 
 
