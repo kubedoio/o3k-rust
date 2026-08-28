@@ -121,7 +121,10 @@ jobs:
           tool_dir="${RUNNER_TEMP}/o3k-p13-provider-tools-${GITHUB_RUN_ID}"
           mkdir -p "${tool_dir}"
           bash scripts/p13_2_provider_tools.sh "${tool_dir}" >"${tool_dir}/env"
-          cat "${tool_dir}/env" >>"${GITHUB_ENV}"
+          # The bootstrap emits shell-compatible `export NAME=value` lines
+          # for local eval. GitHub's environment file accepts only the
+          # assignment form, so strip the shell keyword at this boundary.
+          sed 's/^export //' "${tool_dir}/env" >>"${GITHUB_ENV}"
           # The bootstrap script verifies the pinned release archives before
           # exposing either executable. Keep this explicit at the protected
           # boundary so the evidence cannot be produced by an unpinned tool.
