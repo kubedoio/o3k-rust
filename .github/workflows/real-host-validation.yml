@@ -29,6 +29,17 @@ jobs:
     environment: o3k-real-host-validation
     runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
     steps:
+      - name: Repair prior protected artifact ownership
+        run: |
+          set -euo pipefail
+          for artifact_dir in \
+            "${GITHUB_WORKSPACE}/target/real-host-workflow-artifacts" \
+            "${GITHUB_WORKSPACE}/target/lvm-real-guest-artifacts"; do
+            if test -e "${artifact_dir}"; then
+              sudo -n chown -R "$(id -u):$(id -g)" "${artifact_dir}"
+            fi
+          done
+
       - name: Check out the canonical repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
