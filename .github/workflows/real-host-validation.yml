@@ -367,9 +367,31 @@ jobs:
         if: always() && steps.guard.outputs.ready == 'true'
         run: bash scripts/cleanup-disposable-testlab.sh
 
+      - name: Prepare fresh generic TestLab image
+        id: generic_image
+        if: steps.guard.outputs.ready == 'true'
+        continue-on-error: true
+        env:
+          CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
+          CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
+        run: |
+          set -euo pipefail
+          image_path="$(mktemp "${RUNNER_TEMP}/cirros-0.6.3-x86_64-disk.img.generic.XXXXXX")"
+          printf 'o3k-disposable-image-v1\nrun=%s\nphase=generic\n' "${GITHUB_RUN_ID}" > "${image_path}.o3k-owned"
+          chmod 0600 "${image_path}.o3k-owned"
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 300 \
+            --proto '=https' --tlsv1.2 \
+            --output "${image_path}" "${CIRROS_IMAGE_URL}"
+          printf '%s  %s\n' "${CIRROS_IMAGE_SHA256}" "${image_path}" \
+            | sha256sum --check --strict --status
+          chmod 0644 "${image_path}"
+          printf 'O3K_TESTLAB_IMAGE_PATH=%s\n' "${image_path}" >> "${GITHUB_ENV}"
+          printf 'O3K_REAL_HOST_PROTECTED_PATHS<<O3K_PATHS_EOF\n%s\n%s\nO3K_PATHS_EOF\n' \
+            "${O3K_REAL_HOST_PROTECTED_PATHS}" "${image_path}" >> "${GITHUB_ENV}"
+
       - name: Bootstrap fresh generic TestLab
         id: generic_bootstrap
-        if: steps.guard.outputs.ready == 'true'
+        if: steps.guard.outputs.ready == 'true' && steps.generic_image.outcome == 'success'
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
