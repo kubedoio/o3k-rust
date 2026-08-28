@@ -440,14 +440,32 @@ for needle in ("workflow_dispatch:",
                "CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b",
                "sha256sum --check --strict --status",
                "O3K_TESTLAB_IMAGE_PATH=",
-               "continue-on-error: true", "timeout-minutes: 60",
+               "continue-on-error: true", "timeout-minutes: 120",
                "contents: read",
                "if: always()", "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
                "retention-days: 14",
                "target/real-host-workflow-artifacts/console-result.json",
                "Run compute-agent process-boundary evidence",
                "tests/real-compute-agent-process-mtls.sh",
-               "compute-agent-process-mtls-result.json"):
+               "compute-agent-process-mtls-result.json",
+               "Install pinned P13.4 provider tools and build runtime",
+               "scripts/p13_2_provider_tools.sh",
+               "OpenTofu v1.12.6",
+               "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+               "Provision disposable tagged P13.4 LVM profile",
+               "scripts/lvm-testlab-profile.sh provision",
+               "Run P13.4 native Volume provider gate",
+               "tests/p13_4_provider_volume_smoke.sh",
+               "O3K_LVM_VOLUME_GROUP",
+               "Run P13.4 VolumeAttachment provider gate",
+               "tests/p13_4_provider_volume_attachment_smoke.sh",
+               "Run P13.4 storage recovery and fencing tests",
+               "Start disposable P13.4 PostgreSQL",
+               "-p o3k-store --test postgres_p13_4_storage",
+               "Run P13.4 real LVM/libvirt guest gate",
+               "scripts/real-lvm-guest-gate.sh",
+               "p13-4-storage-evidence.json",
+               "lvm-real-guest-result.json"):
     assert needle in text, needle
 assert "github.repository == 'kubedoio/o3k-rust'" in text
 assert "github.event_name == 'workflow_dispatch'" in text
@@ -457,6 +475,8 @@ assert "persist-credentials: false" in text
 assert "Verify immutable source checkout" in text
 assert "target/real-host-workflow-artifacts/console.log" not in text
 assert "target/real-host-workflow-artifacts/server-show.json" not in text
+assert "if: steps.guard.outputs.ready == 'true'" in text
+assert "test \"${outcome}\" = success" in text
 assert pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-owned-inventory.sh").exists()
 post_guard = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-post-run-guard.sh").read_text(encoding="utf-8")
 assert "compute-agent-process-mtls-result.json" in post_guard

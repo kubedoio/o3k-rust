@@ -545,6 +545,9 @@ impl<R: LvmCommandRunner> LvmStorageProvider<R> {
                 &self.run_args(&[
                     "--reportformat",
                     "json",
+                    "--units",
+                    "b",
+                    "--nosuffix",
                     "--options",
                     "lv_name,lv_size,lv_tags,lv_attr,vg_name",
                 ]),
@@ -824,6 +827,9 @@ where
                 &self.run_args(&[
                     "--reportformat",
                     "json",
+                    "--units",
+                    "b",
+                    "--nosuffix",
                     "--options",
                     "lv_name,lv_size,lv_tags,lv_attr,vg_name",
                     "--select",

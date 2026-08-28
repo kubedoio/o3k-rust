@@ -24,7 +24,7 @@ jobs:
       (github.ref == 'refs/heads/main' || inputs.target_sha != '')
     env:
       TARGET_SHA: ${{ inputs.target_sha || github.sha }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     # Configure this environment to require maintainer approval.
     environment: o3k-real-host-validation
     runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
@@ -35,6 +35,8 @@ jobs:
           ref: ${{ inputs.target_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned; reads rust-toolchain.toml
 
       - name: Verify immutable source checkout
         env:
@@ -95,6 +97,24 @@ jobs:
           GITHUB_SHA: ${{ inputs.target_sha || github.sha }}
         run: bash scripts/real-host-capability-probe.sh
 
+      - name: Install pinned P13.4 provider tools and build runtime
+        id: storage_tools
+        if: steps.bootstrap.outcome == 'success' && steps.image.outcome == 'success' && steps.capabilities.outcome == 'success'
+        run: |
+          set -euo pipefail
+          tool_dir="${RUNNER_TEMP}/o3k-p13-provider-tools-${GITHUB_RUN_ID}"
+          mkdir -p "${tool_dir}"
+          bash scripts/p13_2_provider_tools.sh "${tool_dir}" >"${tool_dir}/env"
+          cat "${tool_dir}/env" >>"${GITHUB_ENV}"
+          # The bootstrap script verifies the pinned release archives before
+          # exposing either executable. Keep this explicit at the protected
+          # boundary so the evidence cannot be produced by an unpinned tool.
+          eval "$(cat "${tool_dir}/env")"
+          test "$("${O3K_P13_TOFU}" version | head -n 1)" = "OpenTofu v1.12.6"
+          test "$(sha256sum "${O3K_P13_PROVIDER_BINARY}" | awk '{print $1}')" = \
+            "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc"
+          cargo build --locked --bin o3kd
+
       - name: Pre-run host and trust guard
         id: guard
         if: always()
@@ -111,6 +131,217 @@ jobs:
           GITHUB_HEAD_REF: ${{ github.head_ref }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
         run: bash scripts/real-host-pre-run-guard.sh
+
+      - name: Provision disposable tagged P13.4 LVM profile
+        id: storage_lvm
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          O3K_LVM_RUN_ID: ${{ github.run_id }}
+          O3K_LVM_STATE_BASE: /var/lib/o3k-lvm-testlab
+          O3K_LVM_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
+          O3K_LVM_VG_NAME: o3k-lvm-${{ github.run_id }}
+          O3K_LVM_THIN_POOL: o3k-thin-${{ github.run_id }}
+        run: >-
+          sudo -n
+          --preserve-env=O3K_LVM_RUN_ID,O3K_LVM_STATE_BASE,O3K_LVM_PROVIDER_NAMESPACE,O3K_LVM_VG_NAME,O3K_LVM_THIN_POOL
+          env O3K_LVM_VG_NAME="${O3K_LVM_VG_NAME}"
+          O3K_LVM_THIN_POOL="${O3K_LVM_THIN_POOL}"
+          bash scripts/lvm-testlab-profile.sh provision
+
+      - name: Run P13.4 native Volume provider gate
+        id: storage_volume
+        if: steps.storage_lvm.outcome == 'success'
+        env:
+          O3K_P13_4_DISCOVERY_TRACE: target/real-host-workflow-artifacts/p13-4-volume-trace.jsonl
+          O3K_LVM_VOLUME_GROUP: o3k-lvm-${{ github.run_id }}
+          O3K_LVM_THIN_POOL: o3k-thin-${{ github.run_id }}
+          O3K_LVM_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
+        run: >-
+          sudo -n
+          --preserve-env=PATH,CARGO_HOME,GITHUB_WORKSPACE,O3K_P13_TOFU,O3K_P13_PROVIDER_BINARY,O3K_P13_PASSWORD,O3K_P13_4_DISCOVERY_TRACE,O3K_LVM_VOLUME_GROUP,O3K_LVM_THIN_POOL,O3K_LVM_PROVIDER_NAMESPACE
+          env O3K_LVM_VOLUME_GROUP="${O3K_LVM_VOLUME_GROUP}"
+          O3K_LVM_THIN_POOL="${O3K_LVM_THIN_POOL}"
+          O3K_LVM_PROVIDER_NAMESPACE="${O3K_LVM_PROVIDER_NAMESPACE}"
+          bash tests/p13_4_provider_volume_smoke.sh
+
+      - name: Run P13.4 VolumeAttachment provider gate
+        id: storage_attachment
+        if: steps.storage_lvm.outcome == 'success'
+        env:
+          O3K_LVM_VOLUME_GROUP: o3k-lvm-${{ github.run_id }}
+          O3K_LVM_THIN_POOL: o3k-thin-${{ github.run_id }}
+          O3K_LVM_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
+        run: >-
+          sudo -n
+          --preserve-env=PATH,CARGO_HOME,GITHUB_WORKSPACE,O3K_P13_TOFU,O3K_P13_PROVIDER_BINARY,O3K_P13_PASSWORD,O3K_LVM_VOLUME_GROUP,O3K_LVM_THIN_POOL,O3K_LVM_PROVIDER_NAMESPACE
+          env O3K_LVM_VOLUME_GROUP="${O3K_LVM_VOLUME_GROUP}"
+          O3K_LVM_THIN_POOL="${O3K_LVM_THIN_POOL}"
+          O3K_LVM_PROVIDER_NAMESPACE="${O3K_LVM_PROVIDER_NAMESPACE}"
+          bash tests/p13_4_provider_volume_attachment_smoke.sh
+
+      - name: Run P13.4 storage recovery and fencing tests
+        id: storage_recovery
+        if: steps.storage_lvm.outcome == 'success'
+        run: cargo test --locked -p o3k-reconciler --all-features -- storage --test-threads=1
+
+      - name: Start disposable P13.4 PostgreSQL
+        id: storage_postgres_bootstrap
+        if: steps.storage_lvm.outcome == 'success'
+        run: |
+          set -euo pipefail
+          container="o3k-p13-4-postgres-${GITHUB_RUN_ID}"
+          port=15432
+          if sudo -n docker inspect "${container}" >/dev/null 2>&1; then
+            echo "refusing to reuse pre-existing PostgreSQL container ${container}" >&2
+            exit 1
+          fi
+          sudo -n docker run --detach --rm --name "${container}" \
+            --publish "127.0.0.1:${port}:5432" \
+            --env POSTGRES_USER=o3k \
+            --env POSTGRES_PASSWORD=p13-4-disposable-postgres \
+            --env POSTGRES_DB=o3k_test \
+            postgres:16.4 >/dev/null
+          for _ in $(seq 1 60); do
+            if sudo -n docker exec "${container}" pg_isready -U o3k -d o3k_test >/dev/null 2>&1; then
+              printf 'O3K_DATABASE_URL=postgres://o3k:p13-4-disposable-postgres@127.0.0.1:%s/o3k_test\n' "${port}" >>"${GITHUB_ENV}"
+              printf 'O3K_P13_4_PG_CONTAINER=%s\n' "${container}" >>"${GITHUB_ENV}"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "disposable PostgreSQL did not become ready" >&2
+          exit 1
+
+      - name: Run P13.4 PostgreSQL storage conformance
+        id: storage_postgres
+        if: steps.storage_postgres_bootstrap.outcome == 'success'
+        env:
+          O3K_DATABASE_BACKEND: postgres
+        run: cargo test --locked -p o3k-store --test postgres_p13_4_storage --all-features -- --ignored --nocapture
+
+      - name: Prepare P13.4 disposable guest inputs
+        id: storage_guest_inputs
+        if: steps.storage_lvm.outcome == 'success'
+        env:
+          CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
+          CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
+        run: |
+          set -euo pipefail
+          slug="$(printf '%s' "${GITHUB_RUN_ID}" | tr -cd '[:alnum:]' | head -c 16)"
+          image="${RUNNER_TEMP}/o3k-p13-4-cirros-${slug}.img"
+          key="${RUNNER_TEMP}/o3k-p13-4-guest-${slug}.key"
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 300 \
+            --proto '=https' --tlsv1.2 --output "${image}" "${CIRROS_IMAGE_URL}"
+          printf '%s  %s\n' "${CIRROS_IMAGE_SHA256}" "${image}" \
+            | sha256sum --check --strict --status
+          ssh-keygen -q -t ed25519 -N '' -f "${key}"
+          chmod 0644 "${image}"
+          chmod 0600 "${key}"
+          {
+            printf 'O3K_LVM_GUEST_IMAGE_PATH=%s\n' "${image}"
+            printf 'O3K_LVM_GUEST_SSH_PRIVATE_KEY=%s\n' "${key}"
+            printf 'O3K_LVM_GUEST_SSH_USER=cirros\n'
+          } >>"${GITHUB_ENV}"
+
+      - name: Run P13.4 real LVM/libvirt guest gate
+        id: storage_guest
+        if: steps.storage_guest_inputs.outcome == 'success'
+        env:
+          O3K_LVM_RUN_ID: ${{ github.run_id }}
+          O3K_LVM_STATE_BASE: /var/lib/o3k-lvm-testlab
+          O3K_LVM_VOLUME_GROUP: o3k-lvm-${{ github.run_id }}
+          O3K_LVM_THIN_POOL: o3k-thin-${{ github.run_id }}
+          O3K_LVM_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
+        run: >-
+          sudo -n
+          --preserve-env=PATH,CARGO_HOME,GITHUB_WORKSPACE,GITHUB_RUN_ID,O3K_LVM_RUN_ID,O3K_LVM_STATE_BASE,O3K_LVM_VOLUME_GROUP,O3K_LVM_THIN_POOL,O3K_LVM_PROVIDER_NAMESPACE,O3K_LVM_GUEST_IMAGE_PATH,O3K_LVM_GUEST_SSH_PRIVATE_KEY,O3K_LVM_GUEST_SSH_USER
+          bash scripts/real-lvm-guest-gate.sh
+
+      - name: Verify all P13.4 protected storage gates ran
+        if: always()
+        env:
+          GUARD_OUTCOME: ${{ steps.guard.outcome }}
+          TOOLS_OUTCOME: ${{ steps.storage_tools.outcome }}
+          LVM_OUTCOME: ${{ steps.storage_lvm.outcome }}
+          VOLUME_OUTCOME: ${{ steps.storage_volume.outcome }}
+          ATTACHMENT_OUTCOME: ${{ steps.storage_attachment.outcome }}
+          RECOVERY_OUTCOME: ${{ steps.storage_recovery.outcome }}
+          POSTGRES_OUTCOME: ${{ steps.storage_postgres.outcome }}
+          GUEST_OUTCOME: ${{ steps.storage_guest.outcome }}
+        run: |
+          set -euo pipefail
+          test "${GUARD_OUTCOME}" = success
+          for outcome in "${TOOLS_OUTCOME}" "${LVM_OUTCOME}" "${VOLUME_OUTCOME}" \
+            "${ATTACHMENT_OUTCOME}" "${RECOVERY_OUTCOME}" "${POSTGRES_OUTCOME}" \
+            "${GUEST_OUTCOME}"; do
+            test "${outcome}" = success
+          done
+
+      - name: Write redacted P13.4 protected storage evidence
+        if: always()
+        env:
+          SOURCE_SHA: ${{ inputs.target_sha || github.sha }}
+          VOLUME_OUTCOME: ${{ steps.storage_volume.outcome || 'skipped' }}
+          ATTACHMENT_OUTCOME: ${{ steps.storage_attachment.outcome || 'skipped' }}
+          RECOVERY_OUTCOME: ${{ steps.storage_recovery.outcome || 'skipped' }}
+          POSTGRES_OUTCOME: ${{ steps.storage_postgres.outcome || 'skipped' }}
+          GUEST_OUTCOME: ${{ steps.storage_guest.outcome || 'skipped' }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/real-host-workflow-artifacts
+          python3 - target/real-host-workflow-artifacts/p13-4-storage-evidence.json <<'PY'
+          import json, os, pathlib, sys
+          value = {
+              "artifact_type": "p13-4-protected-storage-evidence",
+              "schema_version": 1,
+              "redacted": True,
+              "tested_source_sha": os.environ["SOURCE_SHA"],
+              "opentofu": "1.12.6",
+              "provider": "terraform-provider-openstack/openstack 3.4.0",
+              "provider_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+              "provider_modified": False,
+              "volume_gate": os.environ["VOLUME_OUTCOME"],
+              "volume_attachment_gate": os.environ["ATTACHMENT_OUTCOME"],
+              "storage_recovery_fencing": os.environ["RECOVERY_OUTCOME"],
+              "postgresql": os.environ["POSTGRES_OUTCOME"],
+              "real_lvm_libvirt_guest": os.environ["GUEST_OUTCOME"],
+              "leak_check": "covered-by-real-host-post-run-guard",
+          }
+          pathlib.Path(sys.argv[1]).write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+
+      - name: Stop disposable P13.4 PostgreSQL
+        if: always()
+        run: |
+          set -euo pipefail
+          container="o3k-p13-4-postgres-${GITHUB_RUN_ID}"
+          if sudo -n docker inspect "${container}" >/dev/null 2>&1; then
+            sudo -n docker rm --force "${container}" >/dev/null
+          fi
+
+      - name: Clean up P13.4 real guest resources
+        if: always()
+        env:
+          O3K_LVM_RUN_ID: ${{ github.run_id }}
+          O3K_LVM_STATE_BASE: /var/lib/o3k-lvm-testlab
+        run: sudo -n --preserve-env=GITHUB_WORKSPACE,GITHUB_RUN_ID,O3K_LVM_RUN_ID,O3K_LVM_STATE_BASE bash scripts/real-lvm-guest-gate.sh cleanup
+
+      - name: Tear down disposable P13.4 LVM profile
+        if: always()
+        env:
+          O3K_LVM_RUN_ID: ${{ github.run_id }}
+          O3K_LVM_STATE_BASE: /var/lib/o3k-lvm-testlab
+          O3K_LVM_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
+        run: sudo -n --preserve-env=O3K_LVM_RUN_ID,O3K_LVM_STATE_BASE,O3K_LVM_PROVIDER_NAMESPACE bash scripts/lvm-testlab-profile.sh cleanup
+
+      - name: Remove P13.4 disposable guest inputs
+        if: always()
+        run: |
+          set -euo pipefail
+          slug="$(printf '%s' "${GITHUB_RUN_ID}" | tr -cd '[:alnum:]' | head -c 16)"
+          rm -f -- "${RUNNER_TEMP}/o3k-p13-4-cirros-${slug}.img" \
+            "${RUNNER_TEMP}/o3k-p13-4-guest-${slug}.key" \
+            "${RUNNER_TEMP}/o3k-p13-4-guest-${slug}.key.pub"
 
       - name: Run public real-host lifecycle
         id: lifecycle
@@ -242,6 +473,9 @@ jobs:
             target/real-host-workflow-artifacts/server-list-evidence.json
             target/real-host-workflow-artifacts/compute-agent-mtls-result.json
             target/real-host-workflow-artifacts/compute-agent-process-mtls-result.json
+            target/real-host-workflow-artifacts/p13-4-volume-trace.jsonl
+            target/real-host-workflow-artifacts/p13-4-storage-evidence.json
+            target/lvm-real-guest-artifacts/lvm-real-guest-result.json
             target/real-host-workflow-artifacts/agent-inspect-resource-id
             target/real-host-workflow-artifacts/create-diagnostics.log
             target/real-host-workflow-artifacts/console-boundary-diagnostics.log
