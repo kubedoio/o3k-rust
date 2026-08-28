@@ -113,6 +113,11 @@ jobs:
         if: steps.bootstrap.outcome == 'success' && steps.image.outcome == 'success' && steps.capabilities.outcome == 'success'
         run: |
           set -euo pipefail
+          if ! command -v unzip >/dev/null 2>&1; then
+            sudo -n apt-get update
+            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y unzip
+          fi
+          command -v unzip >/dev/null 2>&1
           tool_dir="${RUNNER_TEMP}/o3k-p13-provider-tools-${GITHUB_RUN_ID}"
           mkdir -p "${tool_dir}"
           bash scripts/p13_2_provider_tools.sh "${tool_dir}" >"${tool_dir}/env"
