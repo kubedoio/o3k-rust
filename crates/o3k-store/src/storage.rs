@@ -34,7 +34,7 @@ pub struct SnapshotRecord {
 }
 
 #[async_trait]
-pub trait StorageRepository: Send + Sync {
+pub trait StorageRepository: super::DurableStore + Send + Sync {
     async fn insert_storage_backend(&self, record: &StorageBackendRecord)
     -> Result<(), StoreError>;
     async fn get_storage_backend(
@@ -46,6 +46,7 @@ pub trait StorageRepository: Send + Sync {
     async fn insert_volume(&self, record: &VolumeRecord) -> Result<(), StoreError>;
     async fn get_volume(&self, id: Uuid) -> Result<Option<VolumeRecord>, StoreError>;
     async fn list_volumes(&self, project_id: &str) -> Result<Vec<VolumeRecord>, StoreError>;
+    async fn list_all_volumes(&self) -> Result<Vec<VolumeRecord>, StoreError>;
     async fn update_volume(
         &self,
         expected_generation: u64,
@@ -420,6 +421,14 @@ impl StorageRepository for SqliteStore {
         rows.iter().map(volume_from_row).collect()
     }
 
+    async fn list_all_volumes(&self) -> Result<Vec<VolumeRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volumes ORDER BY project_id, id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        rows.iter().map(volume_from_row).collect()
+    }
+
     async fn update_volume(
         &self,
         expected_generation: u64,
@@ -721,6 +730,11 @@ impl StorageRepository for crate::PostgresStore {
             .bind(project_id).fetch_all(&self.pool).await.map_err(StoreError::Database)?.iter().map(volume_from_pg_row).collect()
     }
 
+    async fn list_all_volumes(&self) -> Result<Vec<VolumeRecord>, StoreError> {
+        sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volumes ORDER BY project_id, id")
+            .fetch_all(&self.pool).await.map_err(StoreError::Database)?.iter().map(volume_from_pg_row).collect()
+    }
+
     async fn update_volume(
         &self,
         expected_generation: u64,
@@ -913,6 +927,10 @@ mod tests {
             volume: Volume {
                 id: VolumeId::from_uuid(Uuid::from_u128(11)),
                 project_id: "project-a".to_owned(),
+                name: "volume-a".to_owned(),
+                description: String::new(),
+                metadata: std::collections::BTreeMap::new(),
+                availability_zone: None,
                 size_bytes: 4096,
                 volume_type: "lvm-thin".to_owned(),
                 backend_id: "backend-a".to_owned(),
@@ -980,6 +998,33 @@ mod tests {
                 .len(),
             1
         );
+        // Terminal attachment history must not prevent a later attach of the
+        // same volume with a new canonical identity, while two live
+        // attachments remain database-rejected.
+        let mut historical = attachment.clone();
+        historical.attachment.id = o3k_domain::VolumeAttachmentId::from_uuid(Uuid::from_u128(15));
+        historical.attachment.state = o3k_domain::VolumeAttachmentState::Deleted;
+        store
+            .delete_volume_attachment_v1("project-a", attachment.attachment.id.as_uuid())
+            .await
+            .expect("remove setup attachment");
+        store
+            .insert_volume_attachment_v1(&historical)
+            .await
+            .expect("insert terminal attachment");
+        let mut reattached = historical.clone();
+        reattached.attachment.id = o3k_domain::VolumeAttachmentId::from_uuid(Uuid::from_u128(16));
+        reattached.attachment.state = o3k_domain::VolumeAttachmentState::Reserved;
+        store
+            .insert_volume_attachment_v1(&reattached)
+            .await
+            .expect("reattach after terminal history");
+        let mut duplicate = reattached.clone();
+        duplicate.attachment.id = o3k_domain::VolumeAttachmentId::from_uuid(Uuid::from_u128(17));
+        assert!(matches!(
+            store.insert_volume_attachment_v1(&duplicate).await,
+            Err(StoreError::ResourceAlreadyExists)
+        ));
         let snapshot = SnapshotRecord {
             snapshot: Snapshot {
                 id: SnapshotId::from_uuid(Uuid::from_u128(14)),

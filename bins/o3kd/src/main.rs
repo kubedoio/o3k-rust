@@ -4,12 +4,22 @@ use o3kd::native_adapters;
 use o3k_domain::ServerId;
 use o3k_kernel::Controller;
 use o3k_provider::{
-    AgentNodeSnapshot, ArtifactKind, ComputeProvider, ConfigDriveRequest, CreateArtifactResolver,
-    CreateInstanceRequest, OperationState, ProviderError, ResolvedCreateArtifact,
-    ResolvedCreateInputs, ResolvedCreateResolver,
+    AgentNodeSnapshot, ArtifactKind, BlockDeviceAttachment, ComputeProvider, ConfigDriveRequest,
+    CreateArtifactResolver, CreateInstanceRequest, OperationState, ProviderError,
+    ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
 };
-use o3k_store::ComputeRepository;
-use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
+use o3k_store::{ComputeRepository, DurableStore, StorageRepository};
+use rustix::fs::{FlockOperation, flock};
+use std::{
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -37,6 +47,431 @@ struct ExternalControllerConfig {
     delegation_key_id: Option<String>,
     #[serde(default)]
     delegation_signing_key_file: Option<PathBuf>,
+}
+
+struct LocalStorageFence {
+    coordination: Arc<dyn o3k_store::CoordinationRepository>,
+    controller_id: o3k_store::ControllerId,
+    controller_epoch: o3k_store::ControllerEpoch,
+    intent_epoch: u64,
+    execution_lock_path: PathBuf,
+    attempt: Arc<tokio::sync::Mutex<Option<StorageLeaseAttempt>>>,
+}
+
+struct StorageLeaseAttempt {
+    fencing_token: o3k_store::FencingToken,
+    stop: tokio::sync::oneshot::Sender<()>,
+    valid: Arc<AtomicBool>,
+    _execution_lock: File,
+}
+
+#[async_trait]
+impl o3k_reconciler::storage_workflow::StorageControllerFence for LocalStorageFence {
+    async fn begin(
+        &self,
+        controller_epoch: u64,
+    ) -> Result<(), o3k_reconciler::storage_workflow::StorageWorkflowError> {
+        if controller_epoch == 0 || controller_epoch != self.intent_epoch {
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
+        let mut attempt = self.attempt.lock().await;
+        if attempt.is_some() {
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
+        let lease = match self
+            .coordination
+            .acquire_work_lease(
+                "o3k-native-storage-controller",
+                "storage-attachment",
+                &self.controller_id,
+                &self.controller_epoch,
+                Duration::from_secs(15),
+            )
+            .await
+            .map_err(|_| {
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence
+            })? {
+            o3k_store::LeaseAcquireOutcome::Acquired { lease } => lease,
+            o3k_store::LeaseAcquireOutcome::Busy { .. } => {
+                return Err(
+                    o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+                );
+            }
+        };
+        let execution_lock = match OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&self.execution_lock_path)
+        {
+            Ok(file) => file,
+            Err(_) => {
+                let _ = self
+                    .coordination
+                    .release_work_lease(
+                        "o3k-native-storage-controller",
+                        &self.controller_id,
+                        &self.controller_epoch,
+                        lease.fencing_token,
+                    )
+                    .await;
+                return Err(
+                    o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+                );
+            }
+        };
+        if flock(&execution_lock, FlockOperation::NonBlockingLockExclusive).is_err() {
+            let _ = self
+                .coordination
+                .release_work_lease(
+                    "o3k-native-storage-controller",
+                    &self.controller_id,
+                    &self.controller_epoch,
+                    lease.fencing_token,
+                )
+                .await;
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let valid = Arc::new(AtomicBool::new(true));
+        let coordination = self.coordination.clone();
+        let controller_id = self.controller_id.clone();
+        let controller_epoch_value = self.controller_epoch.clone();
+        let fencing_token = lease.fencing_token;
+        let renewal_valid = valid.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    _ = interval.tick() => {
+                        match coordination.renew_work_lease(
+                            "o3k-native-storage-controller",
+                            &controller_id,
+                            &controller_epoch_value,
+                            fencing_token,
+                            Duration::from_secs(15),
+                        ).await {
+                            Ok(true) => {}
+                            Ok(false) | Err(_) => {
+                                renewal_valid.store(false, Ordering::Release);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        *attempt = Some(StorageLeaseAttempt {
+            fencing_token,
+            stop,
+            valid,
+            _execution_lock: execution_lock,
+        });
+        Ok(())
+    }
+
+    async fn assert_current(
+        &self,
+        controller_epoch: u64,
+    ) -> Result<(), o3k_reconciler::storage_workflow::StorageWorkflowError> {
+        if controller_epoch == 0 || controller_epoch != self.intent_epoch {
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
+        let fencing_token = self
+            .attempt
+            .lock()
+            .await
+            .as_ref()
+            .filter(|attempt| attempt.valid.load(Ordering::Acquire))
+            .map(|attempt| attempt.fencing_token)
+            .ok_or(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)?;
+        let renewed = self
+            .coordination
+            .renew_work_lease(
+                "o3k-native-storage-controller",
+                &self.controller_id,
+                &self.controller_epoch,
+                fencing_token,
+                Duration::from_secs(15),
+            )
+            .await
+            .map_err(|_| {
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence
+            })?;
+        if renewed {
+            Ok(())
+        } else {
+            Err(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)
+        }
+    }
+
+    async fn end(
+        &self,
+        controller_epoch: u64,
+    ) -> Result<(), o3k_reconciler::storage_workflow::StorageWorkflowError> {
+        if controller_epoch != self.intent_epoch {
+            return Err(
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence,
+            );
+        }
+        let Some(attempt) = self.attempt.lock().await.take() else {
+            return Ok(());
+        };
+        let _ = attempt.stop.send(());
+        let released = self
+            .coordination
+            .release_work_lease(
+                "o3k-native-storage-controller",
+                &self.controller_id,
+                &self.controller_epoch,
+                attempt.fencing_token,
+            )
+            .await
+            .map_err(|_| {
+                o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence
+            })?;
+        if released {
+            Ok(())
+        } else {
+            Err(o3k_reconciler::storage_workflow::StorageWorkflowError::StaleControllerFence)
+        }
+    }
+}
+
+struct LocalComputeAttachmentExecutor {
+    compute: Arc<o3k_compute::ComputeService>,
+}
+
+#[async_trait]
+impl o3k_reconciler::storage_workflow::ComputeAttachmentExecutor
+    for LocalComputeAttachmentExecutor
+{
+    async fn attach(
+        &self,
+        attachment: &o3k_domain::VolumeAttachment,
+        prepared: &o3k_storage::PreparedAttachment,
+    ) -> Result<(), o3k_reconciler::storage_workflow::ComputeAttachmentError> {
+        let device = BlockDeviceAttachment {
+            volume_id: attachment.volume_id.to_string(),
+            attachment_id: attachment.id.to_string(),
+            driver_volume_type: "local".to_owned(),
+            target_iqn: None,
+            target_portal: None,
+            target_lun: None,
+            local_path: Some(prepared.device_path().to_owned()),
+            device_path: None,
+            multipath: false,
+            initiator: None,
+            auth_method: None,
+            auth_username: None,
+            auth_password: None,
+        };
+        self.compute
+            .provider()
+            .attach_block_device(attachment.server_id, &device)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                if error.is_unknown_outcome() {
+                    o3k_reconciler::storage_workflow::ComputeAttachmentError::UnknownOutcome
+                } else {
+                    o3k_reconciler::storage_workflow::ComputeAttachmentError::Failed
+                }
+            })
+    }
+
+    async fn inspect(
+        &self,
+        attachment: &o3k_domain::VolumeAttachment,
+    ) -> Result<bool, o3k_reconciler::storage_workflow::ComputeAttachmentError> {
+        self.compute
+            .provider()
+            .observe_block_device(attachment.server_id, &attachment.volume_id.to_string())
+            .await
+            .map(|observation| observation.is_some_and(|value| value.attached))
+            .map_err(|error| {
+                if error.is_unknown_outcome() {
+                    o3k_reconciler::storage_workflow::ComputeAttachmentError::UnknownOutcome
+                } else {
+                    o3k_reconciler::storage_workflow::ComputeAttachmentError::Failed
+                }
+            })
+    }
+
+    async fn detach(
+        &self,
+        attachment: &o3k_domain::VolumeAttachment,
+    ) -> Result<(), o3k_reconciler::storage_workflow::ComputeAttachmentError> {
+        let device = BlockDeviceAttachment {
+            volume_id: attachment.volume_id.to_string(),
+            attachment_id: attachment.id.to_string(),
+            driver_volume_type: "local".to_owned(),
+            target_iqn: None,
+            target_portal: None,
+            target_lun: None,
+            local_path: None,
+            device_path: None,
+            multipath: false,
+            initiator: None,
+            auth_method: None,
+            auth_username: None,
+            auth_password: None,
+        };
+        self.compute
+            .provider()
+            .detach_block_device(attachment.server_id, &device)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                if error.is_unknown_outcome() {
+                    o3k_reconciler::storage_workflow::ComputeAttachmentError::UnknownOutcome
+                } else {
+                    o3k_reconciler::storage_workflow::ComputeAttachmentError::Failed
+                }
+            })
+    }
+}
+
+struct NativeStorageAttachmentWorkflow {
+    store: Arc<o3k_store::O3kStore>,
+    controller_epoch: u64,
+    workflow: o3k_reconciler::storage_workflow::StorageAttachmentWorkflow<
+        o3k_store::O3kStore,
+        o3k_storage::LvmStorageProvider,
+        LocalComputeAttachmentExecutor,
+        LocalStorageFence,
+    >,
+}
+
+// Native LVM execution is intentionally in-process in this bounded profile;
+// there is no independently restartable storage-agent session to register.
+// The durable controller work lease above is the real storage mutation fence.
+// This protocol value is therefore only the required target-agent field and
+// must never be treated as storage-agent ownership or restart identity.
+const LOCAL_STORAGE_TARGET_AGENT_EPOCH: u64 = 1;
+
+#[async_trait]
+impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
+    async fn attach(&self, attachment_id: Uuid) -> Result<(), String> {
+        let record = self
+            .store
+            .get_volume_attachment_v1(attachment_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "native attachment disappeared".to_owned())?;
+        let attachment = record.attachment;
+        let intent = native_storage_intent(&attachment, "attach", self.controller_epoch);
+        self.workflow
+            .attach(intent)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(())
+    }
+
+    async fn detach(&self, attachment_id: Uuid) -> Result<(), String> {
+        let record = self
+            .store
+            .get_volume_attachment_v1(attachment_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "native attachment disappeared".to_owned())?;
+        let attachment = record.attachment;
+        self.workflow
+            .detach(native_storage_intent(
+                &attachment,
+                "detach",
+                self.controller_epoch,
+            ))
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(())
+    }
+
+    async fn recover(&self) -> Result<(), String> {
+        let mut first_error = None;
+        for command in self
+            .store
+            .list_recoverable_agent_commands()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            let Ok(_envelope) =
+                serde_json::from_slice::<o3k_domain::StorageCommandEnvelope>(&command.payload)
+            else {
+                continue;
+            };
+            if self
+                .store
+                .get_volume_attachment_v1(command.resource_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .is_none()
+            {
+                continue;
+            }
+            // The envelope epoch is immutable request provenance.  Recovery
+            // is executed by the current controller session after the
+            // storage work lease has authorized a takeover.
+            if let Err(error) = self
+                .workflow
+                .reconcile(&command.command_id, self.controller_epoch)
+                .await
+            {
+                // Recovery is per command.  A busy/unknown/provider-failed
+                // attachment must not head-of-line block unrelated durable
+                // commands in the same startup pass; the next scheduled pass
+                // retries the unresolved command automatically.
+                tracing::warn!(
+                    command_id = %command.command_id,
+                    %error,
+                    "native storage command recovery deferred"
+                );
+                if first_error.is_none() {
+                    first_error = Some(error.to_string());
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
+fn native_storage_intent(
+    attachment: &o3k_domain::VolumeAttachment,
+    operation: &str,
+    controller_epoch: u64,
+) -> o3k_reconciler::storage_workflow::StorageAttachmentIntent {
+    o3k_reconciler::storage_workflow::StorageAttachmentIntent {
+        attachment_id: attachment.id,
+        volume_id: attachment.volume_id,
+        server_id: attachment.server_id,
+        project_id: attachment.project_id.clone(),
+        access_mode: attachment.access_mode,
+        delete_on_termination: attachment.delete_on_termination,
+        controller_epoch,
+        target_agent_id: "local".to_owned(),
+        target_agent_epoch: LOCAL_STORAGE_TARGET_AGENT_EPOCH,
+        idempotency_key: format!("native-{operation}:{}", attachment.id),
+        trace_id: format!("native-{operation}:{}", attachment.id),
+        deadline: "2099-01-01T00:00:00.000".to_owned(),
+    }
+}
+
+fn storage_intent_epoch(epoch: &o3k_store::ControllerEpoch) -> u64 {
+    epoch.0.bytes().fold(0xcbf29ce484222325, |hash, byte| {
+        hash.wrapping_mul(0x100000001b3)
+            .wrapping_add(u64::from(byte))
+    })
 }
 
 async fn external_controllers_from_config() -> Result<
@@ -1033,7 +1468,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(o3k_config::ConfigError::DirectLibvirtProviderUnavailable.into());
             }
             o3k_config::Provider::Fake => o3k_compute::ComputeService::new(
-                store,
+                store.clone(),
                 Arc::new(o3k_provider::FakeComputeProvider::new()),
             )
             .with_binding_projector(binding_projector.clone()),
@@ -1052,7 +1487,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     client_key: config.cellhv_client_key.clone(),
                 })
                 .await?;
-                o3k_compute::ComputeService::new(store, Arc::new(provider))
+                o3k_compute::ComputeService::new(store.clone(), Arc::new(provider))
                     .with_binding_projector(binding_projector.clone())
             }
             o3k_config::Provider::Agent => unreachable!("agent provider handled above"),
@@ -1257,11 +1692,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let health = controller.health().await;
         native_manifest_registry.update_controller_health(service_id, health)?;
     }
+    let native_lvm_provider = match (
+        std::env::var("O3K_LVM_VOLUME_GROUP").ok(),
+        std::env::var("O3K_LVM_THIN_POOL").ok(),
+        std::env::var("O3K_LVM_PROVIDER_NAMESPACE").ok(),
+    ) {
+        (Some(volume_group), Some(thin_pool), Some(provider_namespace)) => Some(Arc::new(
+            o3k_storage::LvmStorageProvider::new(o3k_storage::LvmConfig {
+                volume_group,
+                thin_pool,
+                provider_namespace,
+            })?,
+        )),
+        _ => None,
+    };
+    let native_storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>> =
+        native_lvm_provider.clone().map(|provider| provider as _);
     let generic_application: std::sync::Arc<dyn o3k_native_api::resource::ResourceApplication> =
         std::sync::Arc::new(native_adapters::GenericResourceApplication {
             compute: std::sync::Arc::new(compute_service.clone()),
             network_service: std::sync::Arc::new(network_service.clone()),
             store: native_api_store.clone(),
+            storage_provider: native_storage_provider.clone(),
             server: server_reader
                 .clone()
                 .ok_or("generic native application requires compute reader")?,
@@ -1338,7 +1790,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let inspect_compute_service = compute_service.clone();
-    let volume_attachments_enabled = compute_service.cinder_configured();
+    let storage_intent_epoch = storage_intent_epoch(&controller_epoch);
+    let native_attachment_workflow: Option<Arc<dyn o3k_api::NativeAttachmentWorkflow>> =
+        native_lvm_provider.as_ref().map(|provider| {
+            let workflow = o3k_reconciler::storage_workflow::StorageAttachmentWorkflow::new(
+                store.clone(),
+                provider.clone(),
+                Arc::new(LocalComputeAttachmentExecutor {
+                    compute: Arc::new(compute_service.clone()),
+                }),
+                Arc::new(LocalStorageFence {
+                    coordination: coordination_store.clone(),
+                    controller_id: controller_id.clone(),
+                    controller_epoch: controller_epoch.clone(),
+                    intent_epoch: storage_intent_epoch,
+                    execution_lock_path: config.data_dir.join("storage.execution.lock"),
+                    attempt: Arc::new(tokio::sync::Mutex::new(None)),
+                }),
+            );
+            Arc::new(NativeStorageAttachmentWorkflow {
+                store: store.clone(),
+                controller_epoch: storage_intent_epoch,
+                workflow,
+            }) as Arc<dyn o3k_api::NativeAttachmentWorkflow>
+        });
+    // Native storage is always wired in this composition root; the adapter
+    // selects the canonical native path when external Cinder is absent.
+    let volume_attachments_enabled = true;
     let mut state = if let Some(identity) = identity {
         o3k_api::AppState::new()
             .with_identity(identity)
@@ -1379,6 +1857,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_resource_application(generic_application)
         .with_authorizer(std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard())),
     );
+    state = state.with_storage_store(store.clone());
+    if let Some(provider) = native_storage_provider {
+        state = state.with_storage_provider(provider);
+    }
+    o3k_api::recover_native_volumes(&state).await;
+    let native_storage_recovery_task = if let Some(workflow) = native_attachment_workflow.clone() {
+        state = state.with_native_attachment_workflow(workflow.clone());
+        if let Err(error) = workflow.recover().await {
+            tracing::warn!(%error, "native storage attachment recovery is incomplete");
+        }
+        // Startup can race the previous controller's lease expiry.  Keep the
+        // existing recovery boundary live so a Busy takeover is retried
+        // automatically without requiring the original client request.
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(error) = workflow.recover().await {
+                    tracing::debug!(%error, "native storage recovery pass deferred");
+                }
+            }
+        }))
+    } else {
+        None
+    };
     if let Some(allocator) = public_allocator {
         state = state.with_public_allocator(allocator);
     }
@@ -1464,6 +1968,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     create_convergence_reconciler.abort();
     let _ = create_convergence_reconciler.await;
     lifecycle_convergence_reconciler.abort();
+    if let Some(task) = native_storage_recovery_task {
+        task.abort();
+        let _ = task.await;
+    }
     let _ = lifecycle_convergence_reconciler.await;
     if let Some(task) = inventory_task {
         task.abort();

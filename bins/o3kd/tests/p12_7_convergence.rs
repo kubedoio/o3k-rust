@@ -190,6 +190,9 @@ async fn build_http_runtime(
             compute: compute.clone(),
             network_service: network.clone(),
             store: store.clone(),
+            storage_provider: Some(Arc::new(
+                o3k_storage::testkit::InMemoryStorageProvider::default(),
+            )),
             server: server_reader.clone(),
             network: network_reader.clone(),
             external_controllers: Arc::new(Default::default()),
@@ -297,6 +300,9 @@ async fn run_native_openstack_http_conformance(
             compute: compute.clone(),
             network_service: network.clone(),
             store: store.clone(),
+            storage_provider: Some(Arc::new(
+                o3k_storage::testkit::InMemoryStorageProvider::default(),
+            )),
             server: server_reader.clone(),
             network: network_reader.clone(),
             external_controllers: Arc::new(Default::default()),

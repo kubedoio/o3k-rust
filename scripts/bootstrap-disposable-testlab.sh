@@ -384,8 +384,8 @@ cargo build --locked --release --bin o3kd
 # make the runtime link explicit after the host preflight proves libvirt exists.
 RUSTFLAGS="${RUSTFLAGS:-} -l dylib=virt" \
   cargo build --locked --release --features libvirt --bin o3k-compute-bin
-install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
-install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
+sudo -n install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
+sudo -n install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
 sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
   --server-name o3k-control-plane --agent-id compute-agent
 sudo -n chmod 0755 "$STATE_ROOT"
@@ -445,7 +445,11 @@ if [[ "${O3K_AGENT_INSPECT_PROBE_ENABLED:-false}" == true ]]; then
     touch "$probe_resource_file"
     chmod 0644 "$probe_resource_file"
     printf 'O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE=%s\n' \
-      "$(printf '%q' "$probe_resource_file")" >>"$o3kd_env_tmp"
+      "$(printf '%q' "$STATE_ROOT/agent-inspect-resource-id")" >>"$o3kd_env_tmp"
+    sudo -n install -m 0644 -o "$(id -u)" -g "$(id -g)" /dev/null \
+      "$STATE_ROOT/agent-inspect-resource-id"
+    printf 'O3K_AGENT_INSPECT_SERVICE_RESOURCE_FILE=%s\n' \
+      "$STATE_ROOT/agent-inspect-resource-id" >>"${GITHUB_ENV:-/dev/null}"
   else
     [[ "${O3K_AGENT_INSPECT_PROBE_RESOURCE_ID:-}" =~ ^[0-9a-fA-F-]{36}$ ]] \
       || fail "agent inspect probe resource id is invalid"
@@ -642,6 +646,28 @@ printf '%s\n' "$OPENSTACK_VENV/bin" >>"${GITHUB_PATH:-/dev/null}"
 export OS_AUTH_URL="http://127.0.0.1:${AUTH_PORT}/v3" OS_USERNAME=admin OS_PASSWORD="$PASSWORD" \
   OS_PROJECT_NAME=admin OS_REGION_NAME=RegionOne OS_USER_DOMAIN_NAME=Default \
   OS_PROJECT_DOMAIN_NAME=Default OS_INTERFACE=public OS_IDENTITY_API_VERSION=3
+OPENSTACK_CLOUD_CONFIG="$STATE_ROOT/openstack-clouds.yaml"
+umask 077
+OPENSTACK_CLOUD_CONFIG_TMP="$(mktemp "${RUNNER_TEMP%/}/openstack-clouds.yaml.XXXXXX")"
+cat >"$OPENSTACK_CLOUD_CONFIG_TMP" <<EOF
+clouds:
+  o3k-testlab:
+    auth:
+      auth_url: $OS_AUTH_URL
+      username: $OS_USERNAME
+      password: $OS_PASSWORD
+      project_name: $OS_PROJECT_NAME
+      user_domain_name: $OS_USER_DOMAIN_NAME
+      project_domain_name: $OS_PROJECT_DOMAIN_NAME
+    region_name: $OS_REGION_NAME
+    interface: $OS_INTERFACE
+    image_api_version: "2"
+    image_endpoint_override: http://127.0.0.1:${AUTH_PORT}/v2
+EOF
+sudo -n install -o "$(id -u)" -g "$(id -g)" -m 0600 \
+  "$OPENSTACK_CLOUD_CONFIG_TMP" "$OPENSTACK_CLOUD_CONFIG"
+rm -f -- "$OPENSTACK_CLOUD_CONFIG_TMP"
+export OS_CLOUD=o3k-testlab OS_CLIENT_CONFIG_FILE="$OPENSTACK_CLOUD_CONFIG"
 openstack token issue >/dev/null 2>&1 || fail "generated password failed OpenStack authentication"
 
 printf 'O3K_TESTLAB_STATE_ROOT=%s\nO3K_REAL_HOST_SERVICE_ACCOUNT=%s\n' "$STATE_ROOT" "$(id -un)" >>"${GITHUB_ENV:-/dev/null}"
@@ -656,8 +682,9 @@ printf 'O3K_COMPUTE_BRIDGE_NAME=%s\n' "$BRIDGE_NAME" >>"${GITHUB_ENV:-/dev/null}
 printf 'O3K_TESTLAB_PID_ROOT=%s\n' "$PID_ROOT" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_REAL_HOST_PROTECTED_PATHS=%s\nO3K_REAL_HOST_INVENTORY_ROOT=%s\nO3K_OPENSTACK_VENV=%s\n' \
   "$INVENTORY_ROOT" "$INVENTORY_ROOT" "$OPENSTACK_VENV" >>"${GITHUB_ENV:-/dev/null}"
-printf 'OS_AUTH_URL=%s\nOS_USERNAME=admin\nOS_PROJECT_NAME=admin\nOS_REGION_NAME=RegionOne\nOS_PASSWORD=%s\n' \
+printf 'OS_AUTH_URL=%s\nOS_USERNAME=admin\nOS_PROJECT_NAME=admin\nOS_REGION_NAME=RegionOne\nOS_PASSWORD=%s\nOS_USER_DOMAIN_NAME=Default\nOS_PROJECT_DOMAIN_NAME=Default\nOS_INTERFACE=public\nOS_IDENTITY_API_VERSION=3\n' \
   "$OS_AUTH_URL" "$PASSWORD" >>"${GITHUB_ENV:-/dev/null}"
+printf 'OS_CLOUD=%s\nOS_CLIENT_CONFIG_FILE=%s\n' "$OS_CLOUD" "$OPENSTACK_CLOUD_CONFIG" >>"${GITHUB_ENV:-/dev/null}"
 write_result passed authenticated
 trap - EXIT
 echo "disposable TestLab bootstrap completed"

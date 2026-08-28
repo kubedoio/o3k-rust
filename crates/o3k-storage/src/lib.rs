@@ -180,6 +180,131 @@ pub trait StorageProvider: Send + Sync {
     ) -> Result<(), StorageProviderError>;
 }
 
+/// Minimal stateful provider for composition/recovery tests.  It models the
+/// same observe-after-mutation contract as a real provider without touching
+/// host storage.
+pub mod testkit {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    #[derive(Default)]
+    pub struct InMemoryStorageProvider {
+        volumes: Mutex<BTreeMap<Uuid, StorageVolumeObservation>>,
+    }
+
+    #[async_trait]
+    impl StorageProvider for InMemoryStorageProvider {
+        async fn capabilities(&self) -> Result<StorageCapabilities, StorageProviderError> {
+            Ok(StorageCapabilities {
+                create_volume: true,
+                snapshots: false,
+                attachment: false,
+                capacity_bytes: u64::MAX,
+                allocated_bytes: 0,
+                allocation_unit_bytes: 1,
+            })
+        }
+
+        async fn create_volume(
+            &self,
+            request: &StorageVolumeRequest,
+        ) -> Result<StorageVolumeObservation, StorageProviderError> {
+            let observation = StorageVolumeObservation {
+                provider_reference: StorageProviderReference {
+                    provider: "test".to_owned(),
+                    resource_id: request.volume_id.to_string(),
+                },
+                size_bytes: request.size_bytes,
+                owned: true,
+                available: true,
+            };
+            self.volumes
+                .lock()
+                .map_err(|_| StorageProviderError::CommandFailed)?
+                .insert(request.volume_id.as_uuid(), observation.clone());
+            Ok(observation)
+        }
+
+        async fn inspect_volume(
+            &self,
+            request: &StorageVolumeRequest,
+        ) -> Result<StorageVolumeObservation, StorageProviderError> {
+            self.volumes
+                .lock()
+                .map_err(|_| StorageProviderError::CommandFailed)?
+                .get(&request.volume_id.as_uuid())
+                .cloned()
+                .ok_or(StorageProviderError::NotFound)
+        }
+
+        async fn delete_volume(
+            &self,
+            request: &StorageVolumeRequest,
+        ) -> Result<(), StorageProviderError> {
+            self.volumes
+                .lock()
+                .map_err(|_| StorageProviderError::CommandFailed)?
+                .remove(&request.volume_id.as_uuid())
+                .map(|_| ())
+                .ok_or(StorageProviderError::NotFound)
+        }
+
+        async fn prepare_attachment(
+            &self,
+            request: &StorageAttachmentRequest,
+        ) -> Result<PreparedAttachment, StorageProviderError> {
+            PreparedAttachment::from_provider(
+                StorageProviderReference {
+                    provider: "test".to_owned(),
+                    resource_id: request.volume_id.to_string(),
+                },
+                "/dev/test".to_owned(),
+                request.attachment_id,
+                request.volume_id,
+            )
+        }
+
+        async fn inspect_attachment(
+            &self,
+            request: &StorageAttachmentRequest,
+        ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+            Ok(StorageAttachmentObservation {
+                attachment_id: request.attachment_id,
+                volume_id: request.volume_id,
+                host_id: request.host_id.clone(),
+                attached: false,
+                provider_reference: StorageProviderReference {
+                    provider: "test".to_owned(),
+                    resource_id: request.volume_id.to_string(),
+                },
+            })
+        }
+
+        async fn terminate_attachment(
+            &self,
+            request: &StorageAttachmentRequest,
+        ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+            self.inspect_attachment(request).await
+        }
+
+        async fn create_snapshot(
+            &self,
+            _request: &StorageSnapshotRequest,
+        ) -> Result<StorageSnapshotObservation, StorageProviderError> {
+            Err(StorageProviderError::InvalidRequest)
+        }
+
+        async fn delete_snapshot(
+            &self,
+            _request: &StorageSnapshotRequest,
+        ) -> Result<(), StorageProviderError> {
+            Err(StorageProviderError::InvalidRequest)
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LvmConfig {
     pub volume_group: String,
@@ -354,6 +479,26 @@ impl<R: LvmCommandRunner> LvmStorageProvider<R> {
         format!("o3k_owner_{hex}")
     }
 
+    /// Volume ownership is stable across canonical lifecycle revisions. The
+    /// generation is a durable fencing value for the control plane, not part
+    /// of the provider object's ownership identity; otherwise an Available
+    /// volume could no longer be inspected or deleted after its canonical
+    /// generation advanced from the create revision.
+    fn volume_marker(&self, volume_id: VolumeId, project_id: &str) -> String {
+        let mut digest = Sha256::new();
+        digest.update(self.config.provider_namespace.as_bytes());
+        digest.update([0]);
+        digest.update(volume_id.as_uuid().as_bytes());
+        digest.update([0]);
+        digest.update(project_id.as_bytes());
+        let hex = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("o3k_volume_owner_{hex}")
+    }
+
     fn scope_marker(&self, kind: &str) -> String {
         let mut digest = Sha256::new();
         digest.update(self.config.provider_namespace.as_bytes());
@@ -400,8 +545,11 @@ impl<R: LvmCommandRunner> LvmStorageProvider<R> {
                 &self.run_args(&[
                     "--reportformat",
                     "json",
+                    "--units",
+                    "b",
+                    "--nosuffix",
                     "--options",
-                    "lv_name,lv_tags,lv_attr,vg_name",
+                    "lv_name,lv_size,lv_tags,lv_attr,vg_name",
                 ]),
             )
             .await?;
@@ -424,8 +572,8 @@ impl<R: LvmCommandRunner> LvmStorageProvider<R> {
         &self,
         volume_id: VolumeId,
         project_id: &str,
-        generation: u64,
-    ) -> Result<String, StorageProviderError>
+        _generation: u64,
+    ) -> Result<LvmLv, StorageProviderError>
     where
         R: LvmCommandRunner + Sync,
     {
@@ -440,13 +588,13 @@ impl<R: LvmCommandRunner> LvmStorageProvider<R> {
                     "b",
                     "--nosuffix",
                     "--options",
-                    "lv_name,lv_tags,lv_attr,vg_name",
+                    "lv_name,lv_size,lv_tags,lv_attr,vg_name",
                     "--select",
                     "lv_name!~^o3k-s-",
                 ]),
             )
             .await?;
-        let marker = self.marker(volume_id, project_id, generation);
+        let marker = self.volume_marker(volume_id, project_id);
         let entries = parse_lvs(&output.stdout)?;
         let expected_name = self.lv_name(volume_id);
         let matches = entries
@@ -465,7 +613,7 @@ impl<R: LvmCommandRunner> LvmStorageProvider<R> {
         if entry.lv_name != expected_name {
             return Err(StorageProviderError::ForeignResource);
         }
-        Ok(entry.lv_name)
+        Ok(entry)
     }
 
     fn validate_volume_request(request: &StorageVolumeRequest) -> Result<(), StorageProviderError> {
@@ -507,7 +655,7 @@ where
             Err(StorageProviderError::NotFound) => {}
             Err(error) => return Err(error),
         }
-        let marker = self.marker(request.volume_id, &request.project_id, request.generation);
+        let marker = self.volume_marker(request.volume_id, &request.project_id);
         let name = self.lv_name(request.volume_id);
         let size = format!("{}B", request.size_bytes);
         self.checked_command(
@@ -533,15 +681,15 @@ where
         request: &StorageVolumeRequest,
     ) -> Result<StorageVolumeObservation, StorageProviderError> {
         Self::validate_volume_request(request)?;
-        let name = self
+        let entry = self
             .owned_lv(request.volume_id, &request.project_id, request.generation)
             .await?;
         Ok(StorageVolumeObservation {
             provider_reference: StorageProviderReference {
                 provider: "lvm".to_owned(),
-                resource_id: name,
+                resource_id: entry.lv_name,
             },
-            size_bytes: request.size_bytes,
+            size_bytes: entry.lv_size,
             owned: true,
             available: true,
         })
@@ -554,7 +702,8 @@ where
         Self::validate_volume_request(request)?;
         let name = self
             .owned_lv(request.volume_id, &request.project_id, request.generation)
-            .await?;
+            .await?
+            .lv_name;
         self.checked_command(
             "lvremove",
             &self.run_args(&["--yes", &format!("{}/{}", self.config.volume_group, name)]),
@@ -579,7 +728,8 @@ where
                 &request.project_id,
                 request.volume_generation,
             )
-            .await?;
+            .await?
+            .lv_name;
         Ok(PreparedAttachment {
             provider_reference: StorageProviderReference {
                 provider: "lvm".to_owned(),
@@ -634,7 +784,8 @@ where
                 &request.project_id,
                 request.source_generation,
             )
-            .await?;
+            .await?
+            .lv_name;
         let name = self.snapshot_name(request.snapshot_id);
         let marker = self.marker(
             request.volume_id,
@@ -676,8 +827,11 @@ where
                 &self.run_args(&[
                     "--reportformat",
                     "json",
+                    "--units",
+                    "b",
+                    "--nosuffix",
                     "--options",
-                    "lv_name,lv_tags,lv_attr,vg_name",
+                    "lv_name,lv_size,lv_tags,lv_attr,vg_name",
                     "--select",
                     "lv_name!~^o3k-v-",
                 ]),
@@ -720,6 +874,7 @@ struct LvmRows<T> {
 #[derive(Debug, Clone)]
 struct LvmLv {
     lv_name: String,
+    lv_size: u64,
     tags: Vec<String>,
     vg_name: String,
     lv_attr: String,
@@ -736,22 +891,25 @@ struct LvmVg {
 fn parse_lvs(payload: &str) -> Result<Vec<LvmLv>, StorageProviderError> {
     let report: LvmReport<LvmRows<LvmLvJson>> =
         serde_json::from_str(payload).map_err(|_| StorageProviderError::CommandFailed)?;
-    Ok(report
+    report
         .report
         .into_iter()
         .flat_map(|row| row.lv.unwrap_or_default())
-        .map(|row| LvmLv {
-            lv_name: row.lv_name,
-            tags: row
-                .lv_tags
-                .split(',')
-                .filter(|tag| !tag.is_empty())
-                .map(ToOwned::to_owned)
-                .collect(),
-            vg_name: row.vg_name,
-            lv_attr: row.lv_attr,
+        .map(|row| {
+            Ok(LvmLv {
+                lv_name: row.lv_name,
+                lv_size: parse_bytes(&row.lv_size)?,
+                tags: row
+                    .lv_tags
+                    .split(',')
+                    .filter(|tag| !tag.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                vg_name: row.vg_name,
+                lv_attr: row.lv_attr,
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>, StorageProviderError>>()
 }
 
 fn parse_vgs(payload: &str) -> Result<Vec<LvmVg>, StorageProviderError> {
@@ -790,6 +948,7 @@ fn parse_bytes(value: &str) -> Result<u64, StorageProviderError> {
 #[derive(Debug, Deserialize)]
 struct LvmLvJson {
     lv_name: String,
+    lv_size: String,
     #[serde(default)]
     lv_tags: String,
     #[serde(default)]
@@ -876,22 +1035,26 @@ mod tests {
     }
 
     #[test]
-    fn marker_binds_namespace_volume_project_and_generation() {
+    fn provider_markers_bind_the_right_identity() {
         let provider =
             LvmStorageProvider::with_runner(config(), FakeRunner::default()).expect("valid config");
         assert_ne!(
-            provider.marker(volume().volume_id, "project-a", 1),
-            provider.marker(volume().volume_id, "project-b", 1)
+            provider.volume_marker(volume().volume_id, "project-a"),
+            provider.volume_marker(volume().volume_id, "project-b")
         );
         assert_ne!(
             provider.marker(volume().volume_id, "project-a", 1),
             provider.marker(volume().volume_id, "project-a", 2)
         );
+        assert_eq!(
+            provider.volume_marker(volume().volume_id, "project-a"),
+            provider.volume_marker(volume().volume_id, "project-a")
+        );
     }
 
     #[test]
     fn parsers_accept_bounded_lvm_json() {
-        let lvs = r#"{"report":[{"lv":[{"lv_name":"o3k-v-1","lv_tags":"o3k_owner_ab,o3k_other","vg_name":"o3k-test-vg"}]}]}"#;
+        let lvs = r#"{"report":[{"lv":[{"lv_name":"o3k-v-1","lv_size":"4096","lv_tags":"o3k_owner_ab,o3k_other","vg_name":"o3k-test-vg"}]}]}"#;
         assert_eq!(parse_lvs(lvs).expect("lvs")[0].tags.len(), 2);
         let vgs =
             r#"{"report":[{"vg":[{"vg_name":"o3k-test-vg","vg_size":"10000","vg_free":"4000"}]}]}"#;
@@ -900,7 +1063,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_command_uses_thin_pool_and_ownership_marker() {
-        let output = r#"{"report":[{"lv":[{"lv_name":"o3k-v-00000000000000000000000000000007","lv_tags":"o3k_owner_8a1d0b1c3ef2edc9a6c0f2da22d50ee1d3f4fb5b8f2f13b3b7d1e07a4a5b4c9d","vg_name":"o3k-test-vg"}]}]}"#;
+        let output = r#"{"report":[{"lv":[{"lv_name":"o3k-v-00000000000000000000000000000007","lv_size":"4096","lv_tags":"o3k_owner_8a1d0b1c3ef2edc9a6c0f2da22d50ee1d3f4fb5b8f2f13b3b7d1e07a4a5b4c9d","vg_name":"o3k-test-vg"}]}]}"#;
         let runner = FakeRunner {
             calls: Mutex::new(Vec::new()),
             output: Mutex::new(Some(LvmCommandOutput {

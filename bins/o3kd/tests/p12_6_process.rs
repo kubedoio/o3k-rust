@@ -143,6 +143,9 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             compute: compute.clone(),
             network_service: network_service.clone(),
             store: store.clone(),
+            storage_provider: Some(Arc::new(
+                o3k_storage::testkit::InMemoryStorageProvider::default(),
+            )),
             server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
                 service: compute.clone(),
             }),
@@ -235,6 +238,9 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             compute: compute.clone(),
             network_service: network_service.clone(),
             store: store.clone(),
+            storage_provider: Some(Arc::new(
+                o3k_storage::testkit::InMemoryStorageProvider::default(),
+            )),
             server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
                 service: compute.clone(),
             }),
@@ -744,6 +750,9 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             compute: independent_compute.clone(),
             network_service: independent_network,
             store: store.clone(),
+            storage_provider: Some(Arc::new(
+                o3k_storage::testkit::InMemoryStorageProvider::default(),
+            )),
             server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
                 service: independent_compute,
             }),
@@ -1244,6 +1253,9 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
                 compute: compute.clone(),
                 network_service: network.clone(),
                 store: store.clone(),
+                storage_provider: Some(Arc::new(
+                    o3k_storage::testkit::InMemoryStorageProvider::default(),
+                )),
                 server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
                     service: compute.clone(),
                 }),
@@ -1443,6 +1455,9 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
             compute: compute_b.clone(),
             network_service: network_b,
             store: store_b.clone(),
+            storage_provider: Some(Arc::new(
+                o3k_storage::testkit::InMemoryStorageProvider::default(),
+            )),
             server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
                 service: compute_b.clone(),
             }),
@@ -1696,6 +1711,9 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
             compute: left_compute.clone(),
             network_service: left_network,
             store: left_store.clone(),
+            storage_provider: Some(Arc::new(
+                o3k_storage::testkit::InMemoryStorageProvider::default(),
+            )),
             server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
                 service: left_compute,
             }),
@@ -1710,6 +1728,9 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
             compute: right_compute.clone(),
             network_service: right_network,
             store: right_store.clone(),
+            storage_provider: Some(Arc::new(
+                o3k_storage::testkit::InMemoryStorageProvider::default(),
+            )),
             server: Arc::new(o3kd::native_adapters::ServerReaderAdapter {
                 service: right_compute,
             }),

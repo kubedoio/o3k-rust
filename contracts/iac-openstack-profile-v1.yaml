@@ -418,12 +418,12 @@ resources:
       - Boot-from-volume and multi-attach are deferred.
       - Online resize not supported in initial profile.
     route_evidence:
-      create: missing
-      list: missing
-      show: missing
-      update: missing
-      delete: missing
-    provider_evidence: provider-unverified
+      create: tests/p13_4_storage_lifecycle.sh
+      list: tests/p13_4_storage_lifecycle.sh
+      show: tests/p13_4_storage_lifecycle.sh
+      update: tests/p13_4_storage_lifecycle.sh
+      delete: tests/p13_4_storage_lifecycle.sh
+    provider_evidence: bounded-provider-lifecycle-verified
     p13_phase: p13.4
 
   - resource: openstack_compute_volume_attach_v2
@@ -440,11 +440,11 @@ resources:
     known_deviations:
       - Mapped onto canonical O3K VolumeAttachment semantics.
     route_evidence:
-      create: missing
-      list: missing
-      show: missing
-      delete: missing
-    provider_evidence: provider-unverified
+      create: tests/p13_4_provider_volume_attachment_smoke.sh
+      list: tests/p13_4_provider_volume_attachment_smoke.sh
+      show: tests/p13_4_provider_volume_attachment_smoke.sh
+      delete: tests/p13_4_provider_volume_attachment_smoke.sh
+    provider_evidence: bounded-provider-lifecycle-verified
     p13_phase: p13.4
 
 identity_projection:

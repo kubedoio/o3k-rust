@@ -2750,7 +2750,7 @@ impl DurableStore for PostgresStore {
     async fn list_recoverable_agent_commands(&self) -> Result<Vec<AgentCommandRecord>, StoreError> {
         let rows = sqlx::query(
             "SELECT command_id FROM agent_commands
-             WHERE state IN ('pending', 'accepted', 'running')
+            WHERE state IN ('pending', 'accepted', 'running', 'retryable', 'unknown_outcome')
              ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)

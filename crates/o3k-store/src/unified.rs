@@ -563,6 +563,13 @@ impl StorageRepository for O3kStore {
         }
     }
 
+    async fn list_all_volumes(&self) -> Result<Vec<VolumeRecord>, StoreError> {
+        match self {
+            Self::Sqlite(store) => store.list_all_volumes().await,
+            Self::Postgres(store) => store.list_all_volumes().await,
+        }
+    }
+
     async fn update_volume(
         &self,
         expected_generation: u64,

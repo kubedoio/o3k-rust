@@ -21,6 +21,7 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{FromRef, State},
@@ -46,7 +47,10 @@ mod image;
 mod middleware;
 mod network;
 mod placement;
+mod volume;
 mod volume_attachment;
+
+pub use volume::{realize_native_volume_create, recover_native_volumes, remove_native_volume};
 
 pub use network::recover_l3_gateway_operations;
 
@@ -113,7 +117,20 @@ pub struct AppState {
     console: Option<Arc<ConsoleService>>,
     agent_registry: Option<NodeRegistry>,
     volume_attachments_enabled: bool,
+    storage_store: Option<Arc<dyn o3k_store::StorageRepository>>,
+    storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>>,
+    native_attachment_workflow: Option<Arc<dyn NativeAttachmentWorkflow>>,
     native_api: Option<NativeApiState>,
+}
+
+/// Durable native VolumeAttachment orchestration supplied by the composition
+/// root. The protocol adapter owns authorization and wire responses; this
+/// boundary owns replayable storage/compute execution and restart recovery.
+#[async_trait]
+pub trait NativeAttachmentWorkflow: Send + Sync {
+    async fn attach(&self, attachment_id: uuid::Uuid) -> Result<(), String>;
+    async fn detach(&self, attachment_id: uuid::Uuid) -> Result<(), String>;
+    async fn recover(&self) -> Result<(), String>;
 }
 
 impl FromRef<AppState> for NativeApiState {
@@ -218,6 +235,38 @@ impl AppState {
         self
     }
 
+    /// Configures the canonical native storage repository used by the
+    /// bounded Cinder projection.  The compatibility adapter never stores a
+    /// second volume authority.
+    #[must_use]
+    pub fn with_storage_store<S>(mut self, store: Arc<S>) -> Self
+    where
+        S: o3k_store::StorageRepository + 'static,
+    {
+        self.storage_store = Some(store);
+        self
+    }
+
+    /// Configures the optional native storage execution provider.  Provider
+    /// observations update canonical state; they never replace it.
+    #[must_use]
+    pub fn with_storage_provider(
+        mut self,
+        provider: Arc<dyn o3k_storage::StorageProvider>,
+    ) -> Self {
+        self.storage_provider = Some(provider);
+        self
+    }
+
+    #[must_use]
+    pub fn with_native_attachment_workflow(
+        mut self,
+        workflow: Arc<dyn NativeAttachmentWorkflow>,
+    ) -> Self {
+        self.native_attachment_workflow = Some(workflow);
+        self
+    }
+
     /// Configures the native O3K API (ADR-0173/SPEC-0030) discovery and
     /// resource endpoints under `/o3k/v1`.
     #[must_use]
@@ -243,6 +292,14 @@ pub fn router_with_state(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/", get(keystone_root))
         .route("/v3", get(keystone_v3))
+        .route(
+            "/v3/{project_id}/volumes",
+            get(volume::list).post(volume::create),
+        )
+        .route(
+            "/v3/{project_id}/volumes/{id}",
+            get(volume::show).put(volume::update).delete(volume::delete),
+        )
         .route("/v2.1", get(nova_v2_1_version))
         .route("/v2.1/", get(nova_v2_1_version))
         .route("/placement", get(placement_discovery))

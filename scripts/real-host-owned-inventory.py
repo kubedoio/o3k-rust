@@ -222,6 +222,8 @@ import stat as stat_module
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 import uuid as uuid_module
 from pathlib import Path
 
@@ -235,11 +237,24 @@ MAX_MANAGED_ENTRIES = 20_000
 MAX_MANAGED_TOTAL_BYTES = 512 * 1024 * 1024
 MAX_CANARY_FILE_BYTES = 64 * 1024 * 1024
 RESOURCE_COMMANDS = {
-    "server": ("server", "list", "--name", "o3k-testlab-server", "-f", "value", "-c", "ID"),
-    "image": ("image", "list", "--name", "o3k-testlab-image", "-f", "value", "-c", "ID"),
-    "network": ("network", "list", "--name", "o3k-testlab-network", "-f", "value", "-c", "ID"),
-    "subnet": ("subnet", "list", "--name", "o3k-testlab-subnet", "-f", "value", "-c", "ID"),
+    # Name lookups make server inventory depend on optional flavor/image
+    # collection compatibility.  The guard needs only server IDs and names.
+    "server": ("server", "list", "-n", "-f", "json"),
+    "image": ("image", "list", "-f", "json"),
+    "network": ("network", "list", "-f", "json"),
+    "subnet": ("subnet", "list", "-f", "json"),
     "flavor": ("flavor", "list", "-f", "json"),
+}
+RESOURCE_NAMES = {
+    "server": "o3k-testlab-server",
+    "image": "o3k-testlab-image",
+    "network": "o3k-testlab-network",
+    "subnet": "o3k-testlab-subnet",
+    "flavor": "o3k-testlab-flavor",
+}
+DIRECT_COLLECTIONS = {
+    "server": ("compute", "servers", "servers"),
+    "image": ("image", "v2/images", "images"),
 }
 DAEMON_BINARIES = ("o3kd", "o3k-compute")
 EXTENDED_ENVS = (
@@ -284,6 +299,43 @@ TEMP_NAME_PATTERNS = (
 LAST_FAILURE_REASON = "inventory_collection_failed"
 
 
+def failure_class(stderr: str) -> str:
+    """Classify CLI failure without publishing provider diagnostics."""
+    value = stderr.lower()
+    if any(marker in value for marker in ("401", "403", "unauthorized", "forbidden", "authentication")):
+        return "auth"
+    if any(marker in value for marker in ("404", "not found", "no route", "endpoint")):
+        return "route"
+    if any(marker in value for marker in ("timed out", "timeout", "timedout")):
+        return "timeout"
+    if any(marker in value for marker in ("unrecognized arguments", "no such command", "invalid choice")):
+        return "client"
+    if any(marker in value for marker in ("json", "parse", "decode", "schema")):
+        return "response_schema"
+    return "unknown"
+
+
+def failure_detail(stderr: str) -> str:
+    """Return a bounded diagnostic category, never provider-supplied text."""
+    value = stderr.lower()
+    categories = (
+        ("endpoint_not_found", ("endpointnotfound", "endpoint not found")),
+        ("bad_request", ("badrequest", "bad request")),
+        ("not_found", ("notfound", "not found")),
+        ("unauthorized", ("unauthorized", "unauthenticated")),
+        ("forbidden", ("forbidden",)),
+        ("missing_configuration", ("missing value", "required option")),
+        ("client_error", ("clientexception", "command error")),
+    )
+    for name, markers in categories:
+        if any(marker in value for marker in markers):
+            return name
+    exception = re.search(r"\b([a-z][a-z0-9_]*(?:error|exception))\b", value)
+    if exception:
+        return "exception_" + re.sub(r"[^a-z0-9_]+", "_", exception.group(1))[:48]
+    return "unspecified"
+
+
 def command(args: tuple[str, ...], *, scrub_provider_config: bool = False) -> str | None:
     global LAST_FAILURE_REASON
     environment = os.environ.copy()
@@ -309,18 +361,105 @@ def command(args: tuple[str, ...], *, scrub_provider_config: bool = False) -> st
         return None
     except subprocess.CalledProcessError as error:
         stderr = error.stderr if isinstance(error.stderr, str) else ""
-        status = next(
-            (code for code in (401, 403, 404, 409, 500, 502, 503, 504)
-             if str(code) in stderr),
-            None,
+        category = failure_class(stderr)
+        LAST_FAILURE_REASON = (
+            "command_failed:" + ":".join(args[:3]) + ":" + category
         )
-        suffix = f":http{status}" if status is not None else f":exit{error.returncode}"
-        LAST_FAILURE_REASON = "command_failed:" + ":".join(args[:3]) + suffix
+        print(
+            "real-host inventory command failed: "
+            f"family={':'.join(args[:3])} class={category} detail={failure_detail(stderr)}",
+            file=sys.stderr,
+        )
         return None
     except (OSError, UnicodeError, subprocess.SubprocessError):
         LAST_FAILURE_REASON = "command_error:" + ":".join(args[:3])
         return None
     return result.stdout
+
+
+def named_resource_ids(resource: str, output: str) -> list[str] | None:
+    """Parse JSON resource output and retain only the exact owned name.
+
+    Server-side name filters are not part of the bounded compatibility surface;
+    filtering locally also keeps the baseline collector independent of CLI
+    query syntax while preserving fail-closed parsing and ownership checks.
+    """
+    try:
+        records = json.loads(output)
+    except json.JSONDecodeError:
+        global LAST_FAILURE_REASON
+        LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":json"
+        return None
+    if not isinstance(records, list):
+        LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":list"
+        return None
+    expected_name = RESOURCE_NAMES[resource]
+    values: list[str] = []
+    for record in records:
+        if not isinstance(record, dict):
+            LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":record"
+            return None
+        name = record.get("Name", record.get("name"))
+        identifier = record.get("ID", record.get("id"))
+        if name == expected_name:
+            if not isinstance(identifier, str) or SAFE_ID.fullmatch(identifier) is None:
+                LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":identity"
+                return None
+            values.append(identifier)
+    return sorted(set(values))
+
+
+def direct_collection(resource: str) -> str | None:
+    """Read a bounded collection when CLI service discovery is incompatible."""
+    global LAST_FAILURE_REASON
+    service, suffix, collection_key = DIRECT_COLLECTIONS[resource]
+    token_output = command(("openstack", "token", "issue", "-f", "json"), scrub_provider_config=True)
+    catalog_output = command(("openstack", "catalog", "show", service, "-f", "json"), scrub_provider_config=True)
+    if token_output is None or catalog_output is None:
+        return None
+    try:
+        token = json.loads(token_output)
+        catalog = json.loads(catalog_output)
+        token_id = token["id"]
+        project_id = token["project_id"]
+        endpoints = catalog["endpoints"]
+        endpoint = next(
+            item["url"] for item in endpoints
+            if item.get("interface") == os.environ.get("OS_INTERFACE", "public")
+            and item.get("region") == os.environ.get("OS_REGION_NAME", "RegionOne")
+        )
+        if not isinstance(token_id, str) or not isinstance(project_id, str) or not isinstance(endpoint, str):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":catalog"
+        return None
+    url = endpoint.rstrip("/") + "/" + suffix
+    if resource == "server" and project_id not in url:
+        url += "/" + project_id
+    request = urllib.request.Request(
+        url,
+        headers={"X-Auth-Token": token_id, "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as error:
+        status = error.code
+        LAST_FAILURE_REASON = f"command_failed:openstack:{resource}:route" if status in (404, 405) else f"command_failed:openstack:{resource}:http{status}"
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        LAST_FAILURE_REASON = "command_error:openstack:" + resource + ":direct"
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get(collection_key), list):
+        LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":collection"
+        return None
+    records = []
+    for item in payload[collection_key]:
+        if not isinstance(item, dict):
+            LAST_FAILURE_REASON = "response_schema:openstack:" + resource + ":record"
+            return None
+        records.append({"ID": item.get("id"), "Name": item.get("name")})
+    return json.dumps(records)
 
 
 def digest(values: list[str]) -> str:
@@ -1704,24 +1843,17 @@ def snapshot() -> dict[str, object] | None:
         openstack_status = "available"
         for resource in RESOURCES:
             output = command(("openstack", *RESOURCE_COMMANDS[resource]), scrub_provider_config=True)
+            if output is None and resource in DIRECT_COLLECTIONS:
+                primary_failure = LAST_FAILURE_REASON
+                output = direct_collection(resource)
+                if output is None:
+                    LAST_FAILURE_REASON = primary_failure
             if output is None:
                 return None
-            if resource == "flavor" and output.strip():
-                try:
-                    flavor_records = json.loads(output)
-                except json.JSONDecodeError:
-                    return None
-                values = [
-                    record["ID"]
-                    for record in flavor_records
-                    if record.get("Name") == "o3k-testlab-flavor"
-                    and isinstance(record.get("ID"), str)
-                ]
-            else:
-                values = [line.strip() for line in output.splitlines() if line.strip()]
-            if any(SAFE_ID.fullmatch(value) is None for value in values):
+            values = named_resource_ids(resource, output)
+            if values is None:
                 return None
-            resources[resource] = sorted(set(values))
+            resources[resource] = values
     else:
         resources = {resource: [] for resource in RESOURCES}
 

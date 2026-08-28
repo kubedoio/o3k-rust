@@ -8,7 +8,10 @@ use axum::{
     response::IntoResponse,
 };
 use o3k_compute::ComputeError;
-use o3k_domain::ServerId;
+use o3k_domain::{
+    AttachmentAccessMode, ServerId, StorageExecutionScope, VolumeAttachment, VolumeAttachmentId,
+    VolumeAttachmentState, VolumeState,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -100,6 +103,139 @@ pub(crate) fn map_volume_attachment(
     }
 }
 
+fn native_attachment_view(
+    record: &o3k_store::VolumeAttachmentRecordV1,
+    at_289: bool,
+) -> VolumeAttachmentDetails {
+    let id = record.attachment.id.to_string();
+    VolumeAttachmentDetails {
+        id: (!at_289).then(|| id.clone()),
+        attachment_id: id.clone(),
+        attachment_id_camel: (!at_289).then_some(id),
+        bdm_uuid: record.attachment.id.to_string(),
+        server_id: record.attachment.server_id.to_string(),
+        volume_id: record.attachment.volume_id.to_string(),
+        // The native execution provider deliberately keeps the host device
+        // path out of canonical state.  Nova's bounded compatibility profile
+        // nevertheless requires a stable device value on refresh; use the
+        // provider-neutral default expected by the pinned provider.
+        device: "/dev/vdb".to_owned(),
+        tag: None,
+        delete_on_termination: record.attachment.delete_on_termination,
+    }
+}
+
+fn native_attachment_enabled(state: &AppState) -> bool {
+    state.storage_store.is_some()
+        && state.storage_provider.is_some()
+        && state
+            .compute
+            .as_ref()
+            .is_none_or(|compute| !compute.cinder_configured())
+}
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3f")
+        .to_string()
+}
+
+async fn create_native_attachment(
+    state: &AppState,
+    auth: &o3k_kernel::AuthContext,
+    server_id: Uuid,
+    volume_id: Uuid,
+    _device: Option<String>,
+    delete_on_termination: bool,
+) -> Result<o3k_store::VolumeAttachmentRecordV1, StatusCode> {
+    if state.native_attachment_workflow.is_none() {
+        // Native attachment mutations must never bypass the durable workflow.
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let store = state
+        .storage_store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let compute = state
+        .compute
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    compute
+        .show_server_for_auth(auth, ServerId::from_uuid(server_id))
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let volume = store
+        .get_volume(volume_id)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if volume.volume.project_id != auth.effective_scope().id().as_str()
+        || volume.volume.state != VolumeState::Available
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    let record = o3k_store::VolumeAttachmentRecordV1 {
+        attachment: VolumeAttachment {
+            id: VolumeAttachmentId::from_uuid(Uuid::new_v4()),
+            project_id: auth.effective_scope().id().as_str().to_owned(),
+            volume_id: volume.volume.id,
+            server_id,
+            execution_scope: StorageExecutionScope::Host("local".to_owned()),
+            access_mode: AttachmentAccessMode::ReadWrite,
+            delete_on_termination,
+            state: VolumeAttachmentState::Reserved,
+            generation: 1,
+            operation_id: None,
+        },
+        created_at: now_rfc3339(),
+    };
+    store
+        .insert_volume_attachment_v1(&record)
+        .await
+        .map_err(|_| StatusCode::CONFLICT)?;
+    // The durable V1 attachment is the canonical storage record.  The
+    // generic resource row is only the existing operation-journal projection;
+    // the workflow uses it as its foreign-key anchor before crossing either
+    // provider boundary.
+    if store
+        .insert_resource(&o3k_store::ResourceRecord {
+            id: record.attachment.id.as_uuid(),
+            kind: "native_volume_attachment".to_owned(),
+            project_id: record.attachment.project_id.clone(),
+            generation: record.attachment.generation as i64,
+            observed_generation: record.attachment.generation as i64,
+            desired_state: "attached".to_owned(),
+            observed_state: "reserved".to_owned(),
+            provider_id: None,
+        })
+        .await
+        .is_err()
+    {
+        // The canonical attachment was inserted before the operation-journal
+        // projection.  Without the projection no provider boundary has been
+        // crossed, so compensate rather than leaving an orphan attachment.
+        let _ = store
+            .delete_volume_attachment_v1(
+                &record.attachment.project_id,
+                record.attachment.id.as_uuid(),
+            )
+            .await;
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    if let Some(workflow) = state.native_attachment_workflow.as_ref() {
+        if let Err(error) = workflow.attach(record.attachment.id.as_uuid()).await {
+            tracing::warn!(attachment_id = %record.attachment.id, error = ?error, "native attachment workflow failed");
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        return store
+            .get_volume_attachment_v1(record.attachment.id.as_uuid())
+            .await
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    Err(StatusCode::SERVICE_UNAVAILABLE)
+}
+
 pub(crate) async fn attach_volume(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -116,6 +252,27 @@ pub(crate) async fn attach_volume(
     let Ok(volume_uuid) = Uuid::parse_str(&request.volume_attachment.volume_id) else {
         return compute_error(ComputeError::InvalidRequest).into_response();
     };
+    if native_attachment_enabled(&state) {
+        return match create_native_attachment(
+            &state,
+            &auth,
+            server_uuid,
+            volume_uuid,
+            request.volume_attachment.device,
+            request.volume_attachment.delete_on_termination,
+        )
+        .await
+        {
+            Ok(record) => (
+                StatusCode::OK,
+                Json(VolumeAttachmentResponse {
+                    volume_attachment: native_attachment_view(&record, false),
+                }),
+            )
+                .into_response(),
+            Err(status) => status.into_response(),
+        };
+    }
     let Some(compute) = state.compute else {
         return keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -159,6 +316,29 @@ pub(crate) async fn list_volume_attachments(
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
     };
+    if native_attachment_enabled(&state) {
+        let Some(store) = state.storage_store.as_ref() else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        let records = match store.list_volume_attachments_v1(&project_id).await {
+            Ok(records) => records
+                .into_iter()
+                .filter(|record| {
+                    record.attachment.server_id == server_uuid
+                        && record.attachment.state == VolumeAttachmentState::Attached
+                })
+                .map(|record| native_attachment_view(&record, requested_compute_289(&headers)))
+                .collect(),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+        return (
+            StatusCode::OK,
+            Json(VolumeAttachmentsResponse {
+                volume_attachments: records,
+            }),
+        )
+            .into_response();
+    }
     let Some(compute) = state.compute else {
         return keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -202,6 +382,31 @@ pub(crate) async fn show_volume_attachment(
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
     };
+    if native_attachment_enabled(&state) {
+        let Some(store) = state.storage_store.as_ref() else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        let Ok(attachment_uuid) = Uuid::parse_str(&attachment_id) else {
+            return compute_error(ComputeError::NotFound).into_response();
+        };
+        if let Ok(Some(record)) = store.get_volume_attachment_v1(attachment_uuid).await
+            && record.attachment.project_id == project_id
+            && record.attachment.server_id == server_uuid
+            && record.attachment.state == VolumeAttachmentState::Attached
+        {
+            return (
+                StatusCode::OK,
+                Json(VolumeAttachmentResponse {
+                    volume_attachment: native_attachment_view(
+                        &record,
+                        requested_compute_289(&headers),
+                    ),
+                }),
+            )
+                .into_response();
+        }
+        return compute_error(ComputeError::NotFound).into_response();
+    }
     let Some(compute) = state.compute else {
         return keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -248,6 +453,32 @@ pub(crate) async fn delete_volume_attachment(
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
     };
+    if native_attachment_enabled(&state) {
+        let Some(store) = state.storage_store.as_ref() else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        let Ok(attachment_uuid) = Uuid::parse_str(&attachment_id) else {
+            return compute_error(ComputeError::NotFound).into_response();
+        };
+        let Ok(Some(record)) = store.get_volume_attachment_v1(attachment_uuid).await else {
+            return compute_error(ComputeError::NotFound).into_response();
+        };
+        if record.attachment.project_id != project_id || record.attachment.server_id != server_uuid
+        {
+            return compute_error(ComputeError::NotFound).into_response();
+        }
+        if let Some(workflow) = state.native_attachment_workflow.as_ref() {
+            if workflow
+                .detach(record.attachment.id.as_uuid())
+                .await
+                .is_err()
+            {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     let Some(compute) = state.compute else {
         return keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,

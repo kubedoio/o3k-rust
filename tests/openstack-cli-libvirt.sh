@@ -471,7 +471,14 @@ fi
 # Use the OpenStack client's environment configuration directly. This avoids
 # interpolating credentials and endpoint values into hand-written YAML, where
 # colons, quotes, or newlines could change the parsed configuration.
-unset OS_CLOUD OS_CLIENT_CONFIG_FILE
+# Preserve an explicitly configured disposable cloud profile.  The protected
+# bootstrap supplies an Image v2 endpoint override because the native O3K
+# catalog root does not advertise Cinder-style image API versions.  Standalone
+# runs without a cloud profile continue to use the environment-variable
+# defaults below.
+if [[ -z "${OS_CLOUD:-}" && -z "${OS_CLIENT_CONFIG_FILE:-}" ]]; then
+    unset OS_CLOUD OS_CLIENT_CONFIG_FILE
+fi
 export OS_AUTH_URL="${OS_AUTH_URL:-http://127.0.0.1:8080/v3}"
 export OS_USERNAME="${OS_USERNAME:-admin}"
 export OS_PROJECT_NAME="${OS_PROJECT_NAME:-eba29e2d-53de-461d-ae91-ede7402713cb}"
@@ -536,13 +543,24 @@ if [[ -n "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE:-}" ]]; then
         || { echo "agent inspect probe resource file is invalid" >&2; exit 1; }
     printf '%s\n' "${SERVER_ID}" >"${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE}"
     chmod 0644 "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE}"
+    if [[ -n "${O3K_AGENT_INSPECT_SERVICE_RESOURCE_FILE:-}" ]]; then
+        [[ "${O3K_AGENT_INSPECT_SERVICE_RESOURCE_FILE}" == /* \
+            && "${O3K_AGENT_INSPECT_SERVICE_RESOURCE_FILE}" != *..* ]] \
+            || { echo "agent inspect service resource file is invalid" >&2; exit 1; }
+        printf '%s\n' "${SERVER_ID}" >"${O3K_AGENT_INSPECT_SERVICE_RESOURCE_FILE}"
+        chmod 0644 "${O3K_AGENT_INSPECT_SERVICE_RESOURCE_FILE}"
+    fi
     # Synchronize with the live process-boundary probe: wait for it to
     # reach a terminal result before any destructive lifecycle action.
     # The probe dispatches inspect through the real compute-service
     # boundary while the server is still ACTIVE.
     if [[ -n "${O3K_AGENT_INSPECT_PROBE_OUTPUT:-}" ]]; then
         probe_output="${O3K_AGENT_INSPECT_PROBE_OUTPUT}"
-        probe_deadline="${O3K_AGENT_INSPECT_PROBE_DEADLINE_SECONDS:-60}"
+        # The service-side probe has a bounded five-minute deadline because a
+        # real libvirt create/observation can exceed one minute on a cold
+        # protected host.  Wait for the same deadline before performing any
+        # destructive lifecycle action or reporting a false lifecycle failure.
+        probe_deadline="${O3K_AGENT_INSPECT_PROBE_DEADLINE_SECONDS:-300}"
         probe_waited=0
         while [[ "${probe_waited}" -lt "${probe_deadline}" ]]; do
             if [[ -f "${probe_output}" ]]; then
@@ -556,11 +574,33 @@ except Exception:
     print("unknown")
 PY
                 )
+                # The service owns this redacted result and may protect it
+                # from unprivileged readers.  A visible-but-unreadable file
+                # is not a pending result: use the same non-interactive,
+                # bounded sudo read as the process-boundary harness.  Never
+                # fall back to emitting the file contents or treating a read
+                # failure as success.
+                if [[ "${probe_status}" == "unknown" ]] && command -v sudo >/dev/null 2>&1 \
+                    && sudo -n test -r "${probe_output}" 2>/dev/null; then
+                    probe_status=$(sudo -n python3 - "${probe_output}" 2>/dev/null <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        d = json.load(f)
+    print(d.get("status", "unknown"))
+except Exception:
+    print("unknown")
+PY
+                    )
+                fi
                 if [[ "${probe_status}" == "passed" ]]; then
                     echo "agent inspect probe passed"
                     if [[ -n "${O3K_REAL_HOST_ARTIFACT_DIR:-}" ]]; then
                         mkdir -p "${O3K_REAL_HOST_ARTIFACT_DIR}"
-                        cp -f "${probe_output}" "${O3K_REAL_HOST_ARTIFACT_DIR}/agent-inspect-probe.json" 2>/dev/null || true
+                        if ! cp -f "${probe_output}" "${O3K_REAL_HOST_ARTIFACT_DIR}/agent-inspect-probe.json" 2>/dev/null; then
+                            sudo -n cat "${probe_output}" >"${O3K_REAL_HOST_ARTIFACT_DIR}/agent-inspect-probe.json" 2>/dev/null || true
+                            chmod 0600 "${O3K_REAL_HOST_ARTIFACT_DIR}/agent-inspect-probe.json" 2>/dev/null || true
+                        fi
                     fi
                     break
                 elif [[ "${probe_status}" == "failed" ]]; then

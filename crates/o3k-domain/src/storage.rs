@@ -344,6 +344,14 @@ impl StorageBackend {
 pub struct Volume {
     pub id: VolumeId,
     pub project_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub metadata: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub availability_zone: Option<String>,
     pub size_bytes: u64,
     pub volume_type: String,
     pub backend_id: String,
@@ -359,7 +367,17 @@ impl Volume {
         if self.project_id.is_empty() || self.project_id.len() > 256 {
             return Err(StorageValidationError::InvalidProject);
         }
-        if self.size_bytes == 0 || self.volume_type.is_empty() || self.volume_type.len() > 128 {
+        if self.size_bytes == 0
+            || self.volume_type.is_empty()
+            || self.volume_type.len() > 128
+            || self.name.len() > 255
+            || self.description.len() > 4096
+            || self.metadata.len() > 128
+            || self
+                .availability_zone
+                .as_ref()
+                .is_some_and(|zone| zone.is_empty() || zone.len() > 255)
+        {
             return Err(StorageValidationError::InvalidVolume);
         }
         if self.backend_id.is_empty() || self.backend_id.len() > 128 {
@@ -618,6 +636,10 @@ mod tests {
         Volume {
             id: VolumeId::from_uuid(Uuid::from_u128(1)),
             project_id: "project-a".to_owned(),
+            name: "volume-a".to_owned(),
+            description: String::new(),
+            metadata: std::collections::BTreeMap::new(),
+            availability_zone: None,
             size_bytes: 4096,
             volume_type: "lvm-thin".to_owned(),
             backend_id: "backend-a".to_owned(),

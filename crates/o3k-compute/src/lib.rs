@@ -387,6 +387,32 @@ impl ComputeProvider for ProviderBackend {
     }
 }
 
+impl ProviderBackend {
+    pub async fn attach_block_device(
+        &self,
+        resource_id: Uuid,
+        device: &BlockDeviceAttachment,
+    ) -> Result<BlockDeviceObservation, ProviderError> {
+        self.0.attach_block_device(resource_id, device).await
+    }
+
+    pub async fn detach_block_device(
+        &self,
+        resource_id: Uuid,
+        device: &BlockDeviceAttachment,
+    ) -> Result<BlockDeviceObservation, ProviderError> {
+        self.0.detach_block_device(resource_id, device).await
+    }
+
+    pub async fn observe_block_device(
+        &self,
+        resource_id: Uuid,
+        volume_id: &str,
+    ) -> Result<Option<BlockDeviceObservation>, ProviderError> {
+        self.0.observe_block_device(resource_id, volume_id).await
+    }
+}
+
 fn requests_match_with_keypair_migration(
     existing: &CreateInstanceRequest,
     requested: &CreateInstanceRequest,

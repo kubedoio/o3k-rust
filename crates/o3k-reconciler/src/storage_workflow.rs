@@ -122,7 +122,20 @@ pub trait ComputeAttachmentExecutor: Send + Sync {
 
 #[async_trait]
 pub trait StorageControllerFence: Send + Sync {
+    /// Start one execution attempt. Recovery takeover must call this once and
+    /// retain the returned implementation's durable fencing identity for the
+    /// whole operation; it must not reacquire ownership from an old attempt.
+    async fn begin(&self, controller_epoch: u64) -> Result<(), StorageWorkflowError> {
+        self.assert_current(controller_epoch).await
+    }
+
     async fn assert_current(&self, controller_epoch: u64) -> Result<(), StorageWorkflowError>;
+
+    /// End the current execution attempt. Implementations release the exact
+    /// fencing token they acquired, never an arbitrary current lease.
+    async fn end(&self, _controller_epoch: u64) -> Result<(), StorageWorkflowError> {
+        Ok(())
+    }
 }
 
 pub struct StorageAttachmentWorkflow<S, P, C, F> {
@@ -152,6 +165,21 @@ where
     /// effect occurs only after both the operation and the replayable command
     /// have been durably recorded.
     pub async fn attach(
+        &self,
+        intent: StorageAttachmentIntent,
+    ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
+        self.fence.begin(intent.controller_epoch).await?;
+        let controller_epoch = intent.controller_epoch;
+        let result = self.attach_inner(intent).await;
+        let end = self.fence.end(controller_epoch).await;
+        match (result, end) {
+            (Err(error), _) => Err(error),
+            (Ok(_value), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+
+    async fn attach_inner(
         &self,
         intent: StorageAttachmentIntent,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
@@ -237,14 +265,36 @@ where
             .store
             .update_volume_attachment_v1(record.attachment.generation, &preparing)
             .await?;
-        self.execute_attach(intent, command, record, volume.volume.generation)
-            .await
+        let controller_epoch = intent.controller_epoch;
+        self.execute_attach(
+            intent,
+            command,
+            record,
+            volume.volume.generation,
+            controller_epoch,
+        )
+        .await
     }
 
     /// Persist and execute the detach half of the same durable attachment
     /// workflow. Compute detachment happens before the storage-side terminal
     /// observation, so a timeout never permits a blind retry.
     pub async fn detach(
+        &self,
+        intent: StorageAttachmentIntent,
+    ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
+        self.fence.begin(intent.controller_epoch).await?;
+        let controller_epoch = intent.controller_epoch;
+        let result = self.detach_inner(intent).await;
+        let end = self.fence.end(controller_epoch).await;
+        match (result, end) {
+            (Err(error), _) => Err(error),
+            (Ok(_value), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+
+    async fn detach_inner(
         &self,
         intent: StorageAttachmentIntent,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
@@ -320,13 +370,29 @@ where
             .store
             .update_volume_attachment_v1(record.attachment.generation, &detaching)
             .await?;
-        self.execute_detach(command, record, envelope).await
+        self.execute_detach(command, record, envelope, intent.controller_epoch)
+            .await
     }
 
     /// Reconcile a running/unknown command after a controller or process
-    /// restart. Both compute and storage are observed before a duplicate
-    /// attach mutation is permitted.
+    /// restart. The supplied epoch is the current durable controller owner;
+    /// the epoch in the immutable envelope remains request provenance.
     pub async fn reconcile(
+        &self,
+        command_id: &str,
+        controller_epoch: u64,
+    ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
+        self.fence.begin(controller_epoch).await?;
+        let result = self.reconcile_inner(command_id, controller_epoch).await;
+        let end = self.fence.end(controller_epoch).await;
+        match (result, end) {
+            (Err(error), _) => Err(error),
+            (Ok(_value), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+
+    async fn reconcile_inner(
         &self,
         command_id: &str,
         controller_epoch: u64,
@@ -341,9 +407,6 @@ where
         envelope
             .validate()
             .map_err(|_| StorageWorkflowError::InvalidIntent)?;
-        if envelope.controller_epoch != controller_epoch {
-            return Err(StorageWorkflowError::StaleControllerFence);
-        }
         if command.agent_epoch != envelope.target_agent_epoch.to_string() {
             return Err(StorageWorkflowError::StaleAgentFence);
         }
@@ -369,7 +432,9 @@ where
             });
         }
         if envelope.action == StorageAction::TerminateAttachment {
-            return self.reconcile_detach(command, record).await;
+            return self
+                .reconcile_detach(command, record, controller_epoch)
+                .await;
         }
         let volume = self
             .store
@@ -381,16 +446,18 @@ where
         let compute_observation = self.compute.inspect(&record.attachment).await;
         match (storage_observation, compute_observation) {
             (Err(error), _) if error.is_unknown_outcome() => {
+                self.fence.assert_current(controller_epoch).await?;
                 self.mark_unknown(&command, &record).await?;
                 Err(StorageWorkflowError::UnknownOutcome)
             }
             (_, Err(ComputeAttachmentError::UnknownOutcome)) => {
+                self.fence.assert_current(controller_epoch).await?;
                 self.mark_unknown(&command, &record).await?;
                 Err(StorageWorkflowError::ComputeUnknownOutcome)
             }
             (Err(error), _) => Err(StorageWorkflowError::Provider(error)),
             (_, Err(ComputeAttachmentError::Failed)) => Err(StorageWorkflowError::ComputeFailed),
-            (Ok(_), Ok(true)) => self.finish_success(command, record).await,
+            (Ok(_), Ok(true)) => self.finish_success(command, record, controller_epoch).await,
             (Ok(observation), Ok(false)) if !observation.attached => {
                 let preparing = if record.attachment.state == VolumeAttachmentState::Unknown {
                     transition_attachment(&record, VolumeAttachmentState::Preparing)?
@@ -415,8 +482,13 @@ where
                         None,
                     )
                     .await?;
-                self.execute_attach_from_command(command, record, volume.volume.generation)
-                    .await
+                self.execute_attach_from_command(
+                    command,
+                    record,
+                    volume.volume.generation,
+                    controller_epoch,
+                )
+                .await
             }
             (Ok(_), Ok(false)) => Err(StorageWorkflowError::UnknownOutcome),
         }
@@ -428,6 +500,7 @@ where
         command: AgentCommandRecord,
         record: VolumeAttachmentRecordV1,
         volume_generation: u64,
+        controller_epoch: u64,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
         let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.payload)
             .map_err(|_| StorageWorkflowError::InvalidIntent)?;
@@ -437,6 +510,7 @@ where
             command,
             record,
             volume_generation,
+            controller_epoch,
         )
         .await
     }
@@ -445,6 +519,7 @@ where
         &self,
         command: AgentCommandRecord,
         record: VolumeAttachmentRecordV1,
+        controller_epoch: u64,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
         let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.payload)
             .map_err(|_| StorageWorkflowError::InvalidIntent)?;
@@ -458,17 +533,20 @@ where
         let compute = self.compute.inspect(&record.attachment).await;
         match (storage, compute) {
             (Err(error), _) if error.is_unknown_outcome() => {
+                self.fence.assert_current(controller_epoch).await?;
                 self.mark_unknown(&command, &record).await?;
                 Err(StorageWorkflowError::UnknownOutcome)
             }
             (_, Err(ComputeAttachmentError::UnknownOutcome)) => {
+                self.fence.assert_current(controller_epoch).await?;
                 self.mark_unknown(&command, &record).await?;
                 Err(StorageWorkflowError::ComputeUnknownOutcome)
             }
             (Err(error), _) => Err(StorageWorkflowError::Provider(error)),
             (_, Err(ComputeAttachmentError::Failed)) => Err(StorageWorkflowError::ComputeFailed),
             (Ok(observation), Ok(false)) if !observation.attached => {
-                self.finish_detached(command, record).await
+                self.finish_detached(command, record, controller_epoch)
+                    .await
             }
             (Ok(_), Ok(true)) | (Ok(_), Ok(false)) => {
                 let detaching = if record.attachment.state == VolumeAttachmentState::Unknown {
@@ -476,7 +554,8 @@ where
                 } else {
                     record
                 };
-                self.execute_detach(command, detaching, envelope).await
+                self.execute_detach(command, detaching, envelope, controller_epoch)
+                    .await
             }
         }
     }
@@ -486,8 +565,9 @@ where
         command: AgentCommandRecord,
         record: VolumeAttachmentRecordV1,
         envelope: StorageCommandEnvelope,
+        controller_epoch: u64,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
-        self.fence.assert_current(envelope.controller_epoch).await?;
+        self.fence.assert_current(controller_epoch).await?;
         let command = self
             .store
             .update_agent_command(
@@ -501,15 +581,21 @@ where
             .await?;
         match self.compute.detach(&record.attachment).await {
             Err(ComputeAttachmentError::UnknownOutcome) => {
+                self.fence.assert_current(controller_epoch).await?;
                 self.mark_unknown(&command, &record).await?;
                 return Err(StorageWorkflowError::ComputeUnknownOutcome);
             }
             Err(ComputeAttachmentError::Failed) => {
+                self.fence.assert_current(controller_epoch).await?;
                 self.mark_failed(&command, &record).await?;
                 return Err(StorageWorkflowError::ComputeFailed);
             }
             Ok(()) => {}
         }
+        // A takeover may happen while the compute boundary is in flight.
+        // Re-check ownership before crossing into the storage mutation so a
+        // superseded controller cannot continue the old attempt.
+        self.fence.assert_current(controller_epoch).await?;
         let volume = self
             .store
             .get_volume(record.attachment.volume_id.as_uuid())
@@ -518,18 +604,24 @@ where
         let request = attachment_request(&record.attachment, volume.volume.generation, &envelope);
         match self.provider.terminate_attachment(&request).await {
             Err(error) if error.is_unknown_outcome() => {
+                self.fence.assert_current(controller_epoch).await?;
                 self.mark_unknown(&command, &record).await?;
                 Err(StorageWorkflowError::UnknownOutcome)
             }
             Err(error) => {
+                self.fence.assert_current(controller_epoch).await?;
                 self.mark_failed(&command, &record).await?;
                 Err(StorageWorkflowError::Provider(error))
             }
             Ok(observation) if observation.attached => {
+                self.fence.assert_current(controller_epoch).await?;
                 self.mark_unknown(&command, &record).await?;
                 Err(StorageWorkflowError::UnknownOutcome)
             }
-            Ok(_) => self.finish_detached(command, record).await,
+            Ok(_) => {
+                self.finish_detached(command, record, controller_epoch)
+                    .await
+            }
         }
     }
 
@@ -538,6 +630,7 @@ where
         command: AgentCommandRecord,
         record: VolumeAttachmentRecordV1,
         volume_generation: u64,
+        controller_epoch: u64,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
         let envelope: StorageCommandEnvelope = serde_json::from_slice(&command.payload)
             .map_err(|_| StorageWorkflowError::InvalidIntent)?;
@@ -548,6 +641,7 @@ where
             command,
             record,
             volume_generation,
+            controller_epoch,
         )
         .await
     }
@@ -559,8 +653,9 @@ where
         command: AgentCommandRecord,
         record: VolumeAttachmentRecordV1,
         volume_generation: u64,
+        controller_epoch: u64,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
-        self.fence.assert_current(envelope.controller_epoch).await?;
+        self.fence.assert_current(controller_epoch).await?;
         let command = self
             .store
             .update_agent_command(
@@ -576,26 +671,34 @@ where
         let prepared = match self.provider.prepare_attachment(&request).await {
             Ok(value) => value,
             Err(error) if error.is_unknown_outcome() => {
+                self.fence.assert_current(controller_epoch).await?;
                 self.mark_unknown(&command, &record).await?;
                 return Err(StorageWorkflowError::UnknownOutcome);
             }
             Err(error) => {
+                self.fence.assert_current(controller_epoch).await?;
                 self.mark_failed(&command, &record).await?;
                 return Err(StorageWorkflowError::Provider(error));
             }
         };
+        // Preparing a device can cross an external boundary.  Do not allow a
+        // worker that lost its durable lease during that call to proceed with
+        // the compute-side mutation or canonical finalization.
+        self.fence.assert_current(controller_epoch).await?;
         let attaching = transition_attachment(&record, VolumeAttachmentState::Attaching)?;
         let record = self
             .store
             .update_volume_attachment_v1(record.attachment.generation, &attaching)
             .await?;
         match self.compute.attach(&record.attachment, &prepared).await {
-            Ok(()) => self.finish_success(command, record).await,
+            Ok(()) => self.finish_success(command, record, controller_epoch).await,
             Err(ComputeAttachmentError::UnknownOutcome) => {
+                self.fence.assert_current(controller_epoch).await?;
                 self.mark_unknown(&command, &record).await?;
                 Err(StorageWorkflowError::ComputeUnknownOutcome)
             }
             Err(ComputeAttachmentError::Failed) => {
+                self.fence.assert_current(controller_epoch).await?;
                 self.mark_failed(&command, &record).await?;
                 Err(StorageWorkflowError::ComputeFailed)
             }
@@ -606,7 +709,9 @@ where
         &self,
         command: AgentCommandRecord,
         record: VolumeAttachmentRecordV1,
+        controller_epoch: u64,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
+        self.fence.assert_current(controller_epoch).await?;
         let record = if record.attachment.state == VolumeAttachmentState::Attached {
             record
         } else {
@@ -615,6 +720,8 @@ where
                 .update_volume_attachment_v1(record.attachment.generation, &attached)
                 .await?
         };
+        self.project_volume_state(&record, VolumeState::InUse)
+            .await?;
         let command = self
             .store
             .update_agent_command(
@@ -647,13 +754,34 @@ where
         &self,
         command: AgentCommandRecord,
         record: VolumeAttachmentRecordV1,
+        controller_epoch: u64,
     ) -> Result<StorageWorkflowResult, StorageWorkflowError> {
-        let record = if record.attachment.state == VolumeAttachmentState::Detached {
+        self.fence.assert_current(controller_epoch).await?;
+        let record = if matches!(
+            record.attachment.state,
+            VolumeAttachmentState::Detached | VolumeAttachmentState::Deleted
+        ) {
             record
         } else {
             let detached = transition_attachment(&record, VolumeAttachmentState::Detached)?;
             self.store
                 .update_volume_attachment_v1(record.attachment.generation, &detached)
+                .await?
+        };
+        self.project_volume_state(&record, VolumeState::Available)
+            .await?;
+        let record = if record.attachment.state == VolumeAttachmentState::Deleted {
+            record
+        } else {
+            let mut deleted = record.clone();
+            deleted.attachment.state = VolumeAttachmentState::Deleted;
+            deleted.attachment.generation = deleted
+                .attachment
+                .generation
+                .checked_add(1)
+                .ok_or(StorageWorkflowError::StaleGeneration)?;
+            self.store
+                .update_volume_attachment_v1(record.attachment.generation, &deleted)
                 .await?
         };
         let command = self
@@ -682,6 +810,33 @@ where
             command_state: command.state,
             attachment_state: record.attachment.state,
         })
+    }
+
+    async fn project_volume_state(
+        &self,
+        record: &VolumeAttachmentRecordV1,
+        target: VolumeState,
+    ) -> Result<(), StorageWorkflowError> {
+        let Some(mut volume) = self
+            .store
+            .get_volume(record.attachment.volume_id.as_uuid())
+            .await?
+        else {
+            return Err(StoreError::ResourceNotFound.into());
+        };
+        if volume.volume.state == target {
+            return Ok(());
+        }
+        volume.volume.state = target;
+        volume.volume.generation = volume
+            .volume
+            .generation
+            .checked_add(1)
+            .ok_or(StorageWorkflowError::StaleGeneration)?;
+        self.store
+            .update_volume(volume.volume.generation - 1, &volume)
+            .await?;
+        Ok(())
     }
 
     async fn mark_unknown(
@@ -1011,6 +1166,17 @@ mod tests {
         }
     }
 
+    struct EpochFence(u64);
+
+    #[async_trait]
+    impl StorageControllerFence for EpochFence {
+        async fn assert_current(&self, controller_epoch: u64) -> Result<(), StorageWorkflowError> {
+            (controller_epoch == self.0)
+                .then_some(())
+                .ok_or(StorageWorkflowError::StaleControllerFence)
+        }
+    }
+
     #[async_trait]
     impl ComputeAttachmentExecutor for FakeCompute {
         async fn attach(
@@ -1068,6 +1234,10 @@ mod tests {
         let volume = Volume {
             id: VolumeId::from_uuid(Uuid::from_u128(10)),
             project_id: "project-a".to_owned(),
+            name: "volume-a".to_owned(),
+            description: String::new(),
+            metadata: std::collections::BTreeMap::new(),
+            availability_zone: None,
             size_bytes: 4096,
             volume_type: "lvm-thin".to_owned(),
             backend_id: "backend-a".to_owned(),
@@ -1145,6 +1315,16 @@ mod tests {
         assert_eq!(first.attachment_state, VolumeAttachmentState::Attached);
         assert_eq!(provider.prepare_calls.load(Ordering::SeqCst), 1);
         assert_eq!(compute.attach_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .get_volume(attachment.volume_id.as_uuid())
+                .await
+                .unwrap()
+                .unwrap()
+                .volume
+                .state,
+            VolumeState::InUse
+        );
 
         let replay = workflow.attach(request).await.unwrap();
         assert_eq!(replay.command_id, first.command_id);
@@ -1162,8 +1342,18 @@ mod tests {
         detach_request.idempotency_key = "detach-once".to_owned();
         let detached = workflow.detach(detach_request).await.unwrap();
         assert_eq!(detached.command_state, AgentCommandState::Succeeded);
-        assert_eq!(detached.attachment_state, VolumeAttachmentState::Detached);
+        assert_eq!(detached.attachment_state, VolumeAttachmentState::Deleted);
         assert_eq!(compute.attach_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .get_volume(attachment.volume_id.as_uuid())
+                .await
+                .unwrap()
+                .unwrap()
+                .volume
+                .state,
+            VolumeState::Available
+        );
     }
 
     #[tokio::test]
@@ -1198,5 +1388,41 @@ mod tests {
         assert_eq!(result.attachment_state, VolumeAttachmentState::Attached);
         assert_eq!(provider.prepare_calls.load(Ordering::SeqCst), 2);
         assert_eq!(compute.attach_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_takes_over_original_command_epoch_under_current_fence() {
+        let (store, provider, compute, attachment) = fixture(true).await;
+        let original = StorageAttachmentWorkflow::new(
+            store.clone(),
+            provider.clone(),
+            compute.clone(),
+            Arc::new(AcceptFence),
+        );
+        assert!(matches!(
+            original.attach(intent(&attachment)).await,
+            Err(StorageWorkflowError::UnknownOutcome)
+        ));
+        let command = store
+            .get_agent_command_by_idempotency_key("attach-once")
+            .await
+            .unwrap();
+
+        // The immutable request envelope remains owned by controller 7, but
+        // controller 8 has acquired the durable recovery lease.  It must be
+        // able to recover the operation without impersonating controller 7.
+        let takeover = StorageAttachmentWorkflow::new(
+            store.clone(),
+            provider.clone(),
+            compute.clone(),
+            Arc::new(EpochFence(8)),
+        );
+        let result = takeover.reconcile(&command.command_id, 8).await.unwrap();
+        assert_eq!(result.command_state, AgentCommandState::Succeeded);
+        assert_eq!(result.attachment_state, VolumeAttachmentState::Attached);
+        assert_eq!(provider.prepare_calls.load(Ordering::SeqCst), 2);
+        let recovered = store.get_agent_command(&command.command_id).await.unwrap();
+        let envelope: StorageCommandEnvelope = serde_json::from_slice(&recovered.payload).unwrap();
+        assert_eq!(envelope.controller_epoch, 7);
     }
 }

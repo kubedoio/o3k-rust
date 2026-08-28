@@ -10,7 +10,9 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
+chrono.workspace = true
 o3k-console = { path = "../o3k-console" }
 o3k-identity = { path = "../o3k-identity" }
 o3k-compute = { path = "../o3k-compute" }
@@ -22,7 +24,9 @@ o3k-kernel = { path = "../o3k-kernel" }
 o3k-native-api = { path = "../o3k-native-api" }
 o3k-network = { path = "../o3k-network" }
 o3k-provider = { path = "../o3k-provider" }
+o3k-reconciler = { path = "../o3k-reconciler" }
 o3k-store = { path = "../o3k-store" }
+o3k-storage = { path = "../o3k-storage" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

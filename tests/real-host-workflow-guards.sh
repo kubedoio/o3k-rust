@@ -38,6 +38,10 @@ SH
 chmod +x "${FAKE_BIN}/ip"
 cat >"${FAKE_BIN}/openstack" <<'SH'
 #!/usr/bin/env bash
+if [[ "${O3K_FAKE_OPENSTACK_FAILURE:-false}" == true ]]; then
+    echo 'Authorization: Bearer password=should-not-appear' >&2
+    exit 1
+fi
 if [[ "$*" == flavor\ list\ * ]]; then
     if [[ "${O3K_FAKE_OPENSTACK_LEAK:-false}" == true ]]; then
         echo '[{"ID":"leaked-openstack-resource","Name":"o3k-testlab-flavor"}]'
@@ -47,7 +51,19 @@ if [[ "$*" == flavor\ list\ * ]]; then
     exit 0
 fi
 if [[ "$*" == *" list "* && "${O3K_FAKE_OPENSTACK_LEAK:-false}" == true ]]; then
-    echo leaked-openstack-resource
+    case "$*" in
+        server\ list\ *) name=o3k-testlab-server ;;
+        image\ list\ *) name=o3k-testlab-image ;;
+        network\ list\ *) name=o3k-testlab-network ;;
+        subnet\ list\ *) name=o3k-testlab-subnet ;;
+        *) name=o3k-testlab-flavor ;;
+    esac
+    printf '[{"ID":"leaked-openstack-resource","Name":"%s"}]\n' "$name"
+    exit 0
+fi
+if [[ "$*" == *" list "* ]]; then
+    echo '[]'
+    exit 0
 fi
 SH
 chmod +x "${FAKE_BIN}/openstack"
@@ -125,6 +141,21 @@ if bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${WORK_DIR}/missing-
     exit 1
 fi
 export O3K_REAL_HOST_PROTECTED_PATHS="${WORK_DIR}/protected-state.txt"
+
+export O3K_FAKE_OPENSTACK_FAILURE=true
+if bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${WORK_DIR}/failed-openstack.json"; then
+    echo "failed OpenStack inventory was accepted" >&2
+    exit 1
+fi
+python3 - "${WORK_DIR}/failed-openstack.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "unavailable"
+assert value["reason"] == "command_failed:openstack:server:list:unknown"
+assert "should-not-appear" not in json.dumps(value)
+assert "Authorization" not in json.dumps(value)
+PY
+unset O3K_FAKE_OPENSTACK_FAILURE
 
 unset OS_PASSWORD
 if bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"; then
@@ -409,21 +440,54 @@ for needle in ("workflow_dispatch:",
                "CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b",
                "sha256sum --check --strict --status",
                "O3K_TESTLAB_IMAGE_PATH=",
-               "continue-on-error: true", "timeout-minutes: 60",
+               "continue-on-error: true", "timeout-minutes: 120",
                "contents: read",
                "if: always()", "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
                "retention-days: 14",
                "target/real-host-workflow-artifacts/console-result.json",
                "Run compute-agent process-boundary evidence",
                "tests/real-compute-agent-process-mtls.sh",
-               "compute-agent-process-mtls-result.json"):
+               "compute-agent-process-mtls-result.json",
+               "Install pinned P13.4 provider tools and build runtime",
+               "apt-get install --no-install-recommends -y unzip",
+               "scripts/p13_2_provider_tools.sh",
+               "OpenTofu v1.12.6",
+               "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+               "Provision disposable tagged P13.4 LVM profile",
+               "scripts/lvm-testlab-profile.sh provision",
+               "Run P13.4 native Volume provider gate",
+               "tests/p13_4_provider_volume_smoke.sh",
+               "O3K_LVM_VOLUME_GROUP",
+               "Run P13.4 VolumeAttachment provider gate",
+               "tests/p13_4_provider_volume_attachment_smoke.sh",
+               "Run P13.4 storage recovery and fencing tests",
+               "Start disposable P13.4 PostgreSQL",
+               "-p o3k-store --test postgres_p13_4_storage",
+               "Run P13.4 real LVM/libvirt guest gate",
+               "scripts/real-lvm-guest-gate.sh",
+               "p13-4-storage-evidence.json",
+               "lvm-real-guest-result.json",
+               "Stop storage-phase disposable TestLab",
+               "Prepare fresh generic TestLab image",
+               "phase=generic",
+               "steps.generic_image.outcome == 'success'",
+               "Bootstrap fresh generic TestLab",
+               "Fresh generic TestLab pre-run guard",
+               "steps.generic_guard.outputs.ready == 'true'"):
     assert needle in text, needle
-assert "if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/main'" in text
-assert "ref: ${{ github.sha }}" in text
+assert "Repair prior protected artifact ownership" in text
+assert 'sudo -n chown -R "$(id -u):$(id -g)"' in text
+assert '"${GITHUB_WORKSPACE}/target/debug"' in text
+assert "github.repository == 'kubedoio/o3k-rust'" in text
+assert "github.event_name == 'workflow_dispatch'" in text
+assert "github.ref == 'refs/heads/main' || inputs.target_sha != ''" in text
+assert "ref: ${{ inputs.target_sha || github.sha }}" in text
 assert "persist-credentials: false" in text
 assert "Verify immutable source checkout" in text
 assert "target/real-host-workflow-artifacts/console.log" not in text
 assert "target/real-host-workflow-artifacts/server-show.json" not in text
+assert "if: steps.guard.outputs.ready == 'true'" in text
+assert "test \"${outcome}\" = success" in text
 assert pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-owned-inventory.sh").exists()
 post_guard = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-post-run-guard.sh").read_text(encoding="utf-8")
 assert "compute-agent-process-mtls-result.json" in post_guard
