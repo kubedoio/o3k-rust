@@ -418,8 +418,10 @@ for needle in ("workflow_dispatch:",
                "tests/real-compute-agent-process-mtls.sh",
                "compute-agent-process-mtls-result.json"):
     assert needle in text, needle
-assert "if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/main'" in text
-assert "ref: ${{ github.sha }}" in text
+assert "github.repository == 'kubedoio/o3k-rust'" in text
+assert "github.event_name == 'workflow_dispatch'" in text
+assert "github.ref == 'refs/heads/main' || inputs.target_sha != ''" in text
+assert "ref: ${{ inputs.target_sha || github.sha }}" in text
 assert "persist-credentials: false" in text
 assert "Verify immutable source checkout" in text
 assert "target/real-host-workflow-artifacts/console.log" not in text

@@ -14,6 +14,7 @@ EXPECTED_RUN_ID="${O3K_REAL_HOST_WORKFLOW_RUN_ID:-}"
 EXPECTED_RUN_ATTEMPT="${O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT:-}"
 EXPECTED_SOURCE_COMMIT="${GITHUB_SHA:-}"
 EXPECTED_REF=refs/heads/main
+TARGET_SHA="${O3K_REAL_HOST_TARGET_SHA:-}"
 mkdir -p "${ARTIFACT_DIR}"
 rm -f -- "${RESULT_PATH}" "${INVENTORY_PATH}" \
     "${ARTIFACT_DIR}/real-host-owned-inventory-after.json" \
@@ -26,7 +27,7 @@ elif [[ "${GITHUB_EVENT_NAME:-}" != workflow_dispatch ]]; then
     blocked_reason=untrusted_event_context
 elif [[ -n "${GITHUB_HEAD_REF:-}" || -n "${GITHUB_BASE_REF:-}" ]]; then
     blocked_reason=untrusted_fork_context
-elif [[ "${GITHUB_REF:-}" != "${EXPECTED_REF}" ]]; then
+elif [[ "${GITHUB_REF:-}" != "${EXPECTED_REF}" && ! "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
     blocked_reason=untrusted_source_ref
 fi
 
