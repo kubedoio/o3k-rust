@@ -183,6 +183,13 @@ struct NativeStorageAttachmentWorkflow {
     >,
 }
 
+// Native LVM execution is intentionally in-process in this bounded profile;
+// there is no independently restartable storage-agent session to register.
+// The durable controller work lease above is the real storage mutation fence.
+// This protocol value is therefore only the required target-agent field and
+// must never be treated as storage-agent ownership or restart identity.
+const LOCAL_STORAGE_TARGET_AGENT_EPOCH: u64 = 1;
+
 #[async_trait]
 impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
     async fn attach(&self, attachment_id: Uuid) -> Result<(), String> {
@@ -267,7 +274,7 @@ fn native_storage_intent(
         delete_on_termination: attachment.delete_on_termination,
         controller_epoch,
         target_agent_id: "local".to_owned(),
-        target_agent_epoch: 1,
+        target_agent_epoch: LOCAL_STORAGE_TARGET_AGENT_EPOCH,
         idempotency_key: format!("native-{operation}:{}", attachment.id),
         trace_id: format!("native-{operation}:{}", attachment.id),
         deadline: "2099-01-01T00:00:00.000".to_owned(),
