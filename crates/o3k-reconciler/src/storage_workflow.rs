@@ -615,6 +615,8 @@ where
                 .update_volume_attachment_v1(record.attachment.generation, &attached)
                 .await?
         };
+        self.project_volume_state(&record, VolumeState::InUse)
+            .await?;
         let command = self
             .store
             .update_agent_command(
@@ -656,6 +658,8 @@ where
                 .update_volume_attachment_v1(record.attachment.generation, &detached)
                 .await?
         };
+        self.project_volume_state(&record, VolumeState::Available)
+            .await?;
         let command = self
             .store
             .update_agent_command(
@@ -682,6 +686,33 @@ where
             command_state: command.state,
             attachment_state: record.attachment.state,
         })
+    }
+
+    async fn project_volume_state(
+        &self,
+        record: &VolumeAttachmentRecordV1,
+        target: VolumeState,
+    ) -> Result<(), StorageWorkflowError> {
+        let Some(mut volume) = self
+            .store
+            .get_volume(record.attachment.volume_id.as_uuid())
+            .await?
+        else {
+            return Err(StoreError::ResourceNotFound.into());
+        };
+        if volume.volume.state == target {
+            return Ok(());
+        }
+        volume.volume.state = target;
+        volume.volume.generation = volume
+            .volume
+            .generation
+            .checked_add(1)
+            .ok_or(StorageWorkflowError::StaleGeneration)?;
+        self.store
+            .update_volume(volume.volume.generation - 1, &volume)
+            .await?;
+        Ok(())
     }
 
     async fn mark_unknown(
@@ -1149,6 +1180,16 @@ mod tests {
         assert_eq!(first.attachment_state, VolumeAttachmentState::Attached);
         assert_eq!(provider.prepare_calls.load(Ordering::SeqCst), 1);
         assert_eq!(compute.attach_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .get_volume(attachment.volume_id.as_uuid())
+                .await
+                .unwrap()
+                .unwrap()
+                .volume
+                .state,
+            VolumeState::InUse
+        );
 
         let replay = workflow.attach(request).await.unwrap();
         assert_eq!(replay.command_id, first.command_id);
@@ -1168,6 +1209,16 @@ mod tests {
         assert_eq!(detached.command_state, AgentCommandState::Succeeded);
         assert_eq!(detached.attachment_state, VolumeAttachmentState::Detached);
         assert_eq!(compute.attach_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .get_volume(attachment.volume_id.as_uuid())
+                .await
+                .unwrap()
+                .unwrap()
+                .volume
+                .state,
+            VolumeState::Available
+        );
     }
 
     #[tokio::test]

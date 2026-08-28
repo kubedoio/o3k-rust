@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use o3kd::native_adapters;
 
-use o3k_domain::{ServerId, VolumeState};
+use o3k_domain::ServerId;
 use o3k_kernel::Controller;
 use o3k_provider::{
     AgentNodeSnapshot, ArtifactKind, BlockDeviceAttachment, ComputeProvider, ConfigDriveRequest,
@@ -174,20 +174,6 @@ impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
             .attach(intent)
             .await
             .map_err(|error| format!("{error:?}"))?;
-        let Some(mut volume) = self
-            .store
-            .get_volume(attachment.volume_id.as_uuid())
-            .await
-            .map_err(|error| error.to_string())?
-        else {
-            return Err("native volume disappeared".to_owned());
-        };
-        volume.volume.state = VolumeState::InUse;
-        volume.volume.generation += 1;
-        self.store
-            .update_volume(volume.volume.generation - 1, &volume)
-            .await
-            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -220,20 +206,6 @@ impl o3k_api::NativeAttachmentWorkflow for NativeStorageAttachmentWorkflow {
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        let Some(mut volume) = self
-            .store
-            .get_volume(attachment.volume_id.as_uuid())
-            .await
-            .map_err(|error| error.to_string())?
-        else {
-            return Err("native volume disappeared".to_owned());
-        };
-        volume.volume.state = VolumeState::Available;
-        volume.volume.generation += 1;
-        self.store
-            .update_volume(volume.volume.generation - 1, &volume)
-            .await
-            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
