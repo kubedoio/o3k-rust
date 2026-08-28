@@ -42,6 +42,10 @@ pub trait VolumeReader: Send + Sync {
 pub struct VolumeItem {
     pub id: String,
     pub project_id: String,
+    pub name: String,
+    pub description: String,
+    pub metadata: serde_json::Value,
+    pub availability_zone: Option<String>,
     pub size_bytes: u64,
     pub volume_type: String,
     pub state: String,
@@ -77,6 +81,10 @@ fn volume_to_native_v1(vol: &VolumeItem) -> serde_json::Value {
             "created_at": vol.created_at,
         },
         "spec": {
+            "name": vol.name,
+            "description": vol.description,
+            "metadata": vol.metadata,
+            "availability_zone": vol.availability_zone,
             "size_bytes": vol.size_bytes,
             "volume_type": vol.volume_type,
         },
@@ -243,6 +251,10 @@ mod envelope_tests {
         let value = volume_to_native_v1(&VolumeItem {
             id: "volume-a".into(),
             project_id: "project-a".into(),
+            name: "volume-a".into(),
+            description: String::new(),
+            metadata: serde_json::json!({}),
+            availability_zone: None,
             size_bytes: 1024,
             volume_type: "lvm".into(),
             state: "available".into(),

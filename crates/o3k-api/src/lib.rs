@@ -46,6 +46,7 @@ mod image;
 mod middleware;
 mod network;
 mod placement;
+mod volume;
 mod volume_attachment;
 
 pub use network::recover_l3_gateway_operations;
@@ -113,6 +114,8 @@ pub struct AppState {
     console: Option<Arc<ConsoleService>>,
     agent_registry: Option<NodeRegistry>,
     volume_attachments_enabled: bool,
+    storage_store: Option<Arc<o3k_store::O3kStore>>,
+    storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>>,
     native_api: Option<NativeApiState>,
 }
 
@@ -218,6 +221,26 @@ impl AppState {
         self
     }
 
+    /// Configures the canonical native storage repository used by the
+    /// bounded Cinder projection.  The compatibility adapter never stores a
+    /// second volume authority.
+    #[must_use]
+    pub fn with_storage_store(mut self, store: Arc<o3k_store::O3kStore>) -> Self {
+        self.storage_store = Some(store);
+        self
+    }
+
+    /// Configures the optional native storage execution provider.  Provider
+    /// observations update canonical state; they never replace it.
+    #[must_use]
+    pub fn with_storage_provider(
+        mut self,
+        provider: Arc<dyn o3k_storage::StorageProvider>,
+    ) -> Self {
+        self.storage_provider = Some(provider);
+        self
+    }
+
     /// Configures the native O3K API (ADR-0173/SPEC-0030) discovery and
     /// resource endpoints under `/o3k/v1`.
     #[must_use]
@@ -243,6 +266,14 @@ pub fn router_with_state(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/", get(keystone_root))
         .route("/v3", get(keystone_v3))
+        .route(
+            "/v3/{project_id}/volumes",
+            get(volume::list).post(volume::create),
+        )
+        .route(
+            "/v3/{project_id}/volumes/{id}",
+            get(volume::show).put(volume::update).delete(volume::delete),
+        )
         .route("/v2.1", get(nova_v2_1_version))
         .route("/v2.1/", get(nova_v2_1_version))
         .route("/placement", get(placement_discovery))

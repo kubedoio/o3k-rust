@@ -1068,6 +1068,10 @@ mod tests {
         let volume = Volume {
             id: VolumeId::from_uuid(Uuid::from_u128(10)),
             project_id: "project-a".to_owned(),
+            name: "volume-a".to_owned(),
+            description: String::new(),
+            metadata: std::collections::BTreeMap::new(),
+            availability_zone: None,
             size_bytes: 4096,
             volume_type: "lvm-thin".to_owned(),
             backend_id: "backend-a".to_owned(),

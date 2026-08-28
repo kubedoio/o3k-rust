@@ -7,6 +7,7 @@
 use std::time::SystemTime;
 use std::{collections::BTreeMap, sync::Arc};
 
+use o3k_domain::{StorageExecutionScope, Volume, VolumeId, VolumeState};
 use o3k_kernel::{
     ActionId, AuthorizationRequest, Authorizer, Controller, ResourceId, ResourceTarget,
     ResourceType,
@@ -440,15 +441,13 @@ fn network_json(item: o3k_store::NetworkRecord) -> serde_json::Value {
     })
 }
 
-fn generic_volume_json(resource: &o3k_store::ResourceRecord) -> serde_json::Value {
-    let spec = serde_json::from_str::<serde_json::Value>(&resource.desired_state)
-        .unwrap_or_else(|_| serde_json::json!({}));
+fn native_volume_json(record: &o3k_store::VolumeRecord) -> serde_json::Value {
     serde_json::json!({
         "api_version":"o3k.io/v1",
         "kind":"volume:volume",
-        "metadata":{"id":resource.id,"owner_scope":resource.project_id,"generation":resource.generation},
-        "spec":spec,
-        "status":{"state":resource.observed_state}
+        "metadata":{"id":record.volume.id.to_string(),"owner_scope":record.volume.project_id,"generation":record.volume.generation,"created_at":record.created_at},
+        "spec":{"size_bytes":record.volume.size_bytes,"volume_type":record.volume.volume_type,"name":record.volume.name,"description":record.volume.description,"metadata":record.volume.metadata,"availability_zone":record.volume.availability_zone},
+        "status":{"state":record.volume.state}
     })
 }
 
@@ -509,9 +508,9 @@ impl ResourceApplication for GenericResourceApplication {
                 .map_err(|_| ResourceApplicationError::Internal),
             "volume:volume" => self
                 .store
-                .list_resources(auth.effective_scope().id().as_str(), "volume")
+                .list_volumes(auth.effective_scope().id().as_str())
                 .await
-                .map(|items| items.iter().map(generic_volume_json).collect())
+                .map(|items| items.iter().map(native_volume_json).collect())
                 .map_err(|_| ResourceApplicationError::Internal),
             _ => Err(ResourceApplicationError::NotFound),
         }
@@ -566,17 +565,16 @@ impl ResourceApplication for GenericResourceApplication {
                 .map_err(|_| ResourceApplicationError::NotFound),
             "volume:volume" => self
                 .store
-                .get_resource(id)
+                .get_volume(id)
                 .await
                 .map_err(|_| ResourceApplicationError::NotFound)
-                .and_then(|resource| {
-                    if resource.kind == "volume"
-                        && resource.project_id == auth.effective_scope().id().as_str()
+                .and_then(|record| match record {
+                    Some(record)
+                        if record.volume.project_id == auth.effective_scope().id().as_str() =>
                     {
-                        Ok(generic_volume_json(&resource))
-                    } else {
-                        Err(ResourceApplicationError::NotFound)
+                        Ok(native_volume_json(&record))
                     }
+                    _ => Err(ResourceApplicationError::NotFound),
                 }),
             _ => Err(ResourceApplicationError::NotFound),
         }
@@ -809,100 +807,102 @@ impl ResourceApplication for GenericResourceApplication {
             struct VolumeSpec {
                 size_bytes: u64,
                 volume_type: String,
+                #[serde(default)]
+                name: Option<String>,
+                #[serde(default)]
+                description: Option<String>,
+                #[serde(default)]
+                metadata: Option<std::collections::BTreeMap<String, String>>,
+                #[serde(default)]
+                availability_zone: Option<String>,
             }
             let spec: VolumeSpec = serde_json::from_value(request.spec.clone())
                 .map_err(|_| ResourceApplicationError::Validation)?;
             if spec.size_bytes == 0 || spec.volume_type.trim().is_empty() {
                 return Err(ResourceApplicationError::Validation);
             }
-            let action = descriptor
-                .lifecycle_actions
-                .get(&o3k_native_api::resource::LifecycleOperation::Create)
-                .cloned()
-                .ok_or(ResourceApplicationError::UnsupportedOperation)?;
             let key = idempotency_key
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
-            let resource_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, key.as_bytes());
+            let resource_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_OID,
+                format!("{}:{}", auth.effective_scope().id(), key).as_bytes(),
+            );
             let operation_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
                 format!("volume:create:{resource_id}").as_bytes(),
             );
-            let desired_state = serde_json::to_string(&request.spec)
-                .map_err(|_| ResourceApplicationError::Validation)?;
-            let resource = o3k_store::ResourceRecord {
-                id: resource_id,
-                kind: "volume".to_owned(),
+            let volume = Volume {
+                id: VolumeId::from_uuid(resource_id),
                 project_id: auth.effective_scope().id().as_str().to_owned(),
+                name: spec.name.unwrap_or_else(|| resource_id.to_string()),
+                description: spec.description.unwrap_or_default(),
+                metadata: spec.metadata.unwrap_or_default(),
+                availability_zone: spec.availability_zone,
+                size_bytes: spec.size_bytes,
+                volume_type: spec.volume_type,
+                backend_id: "local".to_owned(),
+                execution_scope: StorageExecutionScope::Host("local".to_owned()),
+                state: VolumeState::Available,
                 generation: 1,
-                observed_generation: 1,
-                desired_state,
-                observed_state: "AVAILABLE".to_owned(),
-                provider_id: None,
+                operation_id: Some(operation_id),
+                provider_reference: None,
             };
-            let operation = o3k_store::OperationRecord {
-                id: operation_id,
-                resource_id,
-                kind: "lifecycle:create".to_owned(),
-                state: o3k_store::OperationState::Pending,
-                provider_operation_id: None,
-                error_category: None,
-                error_message: None,
+            let record = o3k_store::VolumeRecord {
+                volume,
+                created_at: chrono::Utc::now().to_rfc3339(),
             };
-            let canonical = o3k_store::CanonicalOperationRecord::from_kernel_operation(
-                &o3k_kernel::Operation::new(
-                    operation_id,
-                    "volume",
-                    action.clone(),
-                    auth.principal().id().to_string(),
-                    auth.effective_scope().clone(),
-                    o3k_kernel::ResourceType::new_unchecked("volume", "volume"),
-                    Some(o3k_kernel::ResourceId::new_unchecked(
-                        resource_id.to_string(),
-                    )),
-                    Some(auth.request_id().to_owned()),
-                ),
-            )
-            .map_err(|_| ResourceApplicationError::Internal)?;
-            let request_identity = o3k_store::IdempotencyReservationRequest::from_semantics(
-                auth.effective_scope().id().as_str(),
-                action.to_string(),
-                key,
-                "volume:volume",
-                Some(&resource_id.to_string()),
-                &request.spec,
-                operation_id,
-            )
-            .map_err(|_| ResourceApplicationError::Validation)?;
-            let outcome = self
+            match self.store.insert_volume(&record).await {
+                Ok(()) | Err(o3k_store::StoreError::ResourceAlreadyExists) => {}
+                Err(_) => return Err(ResourceApplicationError::Internal),
+            }
+            // The legacy generic-resource index is a compatibility projection
+            // used by relationship tests and older native callers.  The
+            // canonical volume above remains the sole authority.
+            match self
                 .store
-                .create_or_replay_canonical_resource_operation(
-                    &resource,
-                    &operation,
-                    &canonical,
-                    &request_identity,
-                    None,
-                )
+                .insert_resource(&o3k_store::ResourceRecord {
+                    id: resource_id,
+                    kind: "volume".to_owned(),
+                    project_id: auth.effective_scope().id().as_str().to_owned(),
+                    generation: 1,
+                    observed_generation: 1,
+                    desired_state: "available".to_owned(),
+                    observed_state: "available".to_owned(),
+                    provider_id: None,
+                })
                 .await
-                .map_err(|_| ResourceApplicationError::Internal)?;
-            let (operation_id, resource_id) = match outcome {
-                o3k_store::CanonicalAcceptanceOutcome::Created {
-                    operation_id,
+            {
+                Ok(()) | Err(o3k_store::StoreError::ResourceAlreadyExists) => {}
+                Err(_) => return Err(ResourceApplicationError::Internal),
+            }
+            match self
+                .store
+                .insert_operation(&o3k_store::OperationRecord {
+                    id: operation_id,
                     resource_id,
-                }
-                | o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent {
-                    operation_id,
-                    resource_id,
-                } => (operation_id, resource_id),
-                o3k_store::CanonicalAcceptanceOutcome::Conflict => {
-                    return Err(ResourceApplicationError::IdempotencyConflict);
-                }
-            };
+                    kind: "lifecycle:create".to_owned(),
+                    state: o3k_store::OperationState::Succeeded,
+                    provider_operation_id: None,
+                    error_category: None,
+                    error_message: None,
+                })
+                .await
+            {
+                Ok(()) | Err(o3k_store::StoreError::ResourceAlreadyExists) => {}
+                Err(_) => return Err(ResourceApplicationError::Internal),
+            }
+            let record = self
+                .store
+                .get_volume(resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?
+                .ok_or(ResourceApplicationError::Internal)?;
             return Ok(MutationResult {
                 operation_id: operation_id.to_string(),
                 resource_id: Some(resource_id.to_string()),
                 complete: true,
-                resource: Some(generic_volume_json(&resource)),
+                resource: Some(native_volume_json(&record)),
             });
         }
         if descriptor.resource_type.to_string() == "network:network" {
@@ -1178,6 +1178,55 @@ impl ResourceApplication for GenericResourceApplication {
             let resource_id = id
                 .parse::<Uuid>()
                 .map_err(|_| ResourceApplicationError::NotFound)?;
+            if let Some(record) = self
+                .store
+                .get_volume(resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?
+            {
+                if record.volume.project_id != auth.effective_scope().id().as_str() {
+                    return Err(ResourceApplicationError::NotFound);
+                }
+                if expected_generation
+                    .is_some_and(|expected| expected != record.volume.generation as i64)
+                {
+                    return Err(ResourceApplicationError::PreconditionConflict);
+                }
+                if self
+                    .store
+                    .list_volume_attachments_v1(auth.effective_scope().id().as_str())
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?
+                    .into_iter()
+                    .any(|attachment| {
+                        attachment.attachment.volume_id.as_uuid() == resource_id
+                            && !matches!(
+                                attachment.attachment.state,
+                                o3k_domain::VolumeAttachmentState::Deleted
+                            )
+                    })
+                {
+                    return Err(ResourceApplicationError::Conflict);
+                }
+                let operation_id = Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("volume:delete:{resource_id}").as_bytes(),
+                );
+                self.store
+                    .delete_volume(auth.effective_scope().id().as_str(), resource_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                let _ = self
+                    .store
+                    .update_resource(resource_id, 1, "DELETED", "DELETED", 2, None)
+                    .await;
+                return Ok(MutationResult {
+                    operation_id: operation_id.to_string(),
+                    resource_id: Some(id.to_owned()),
+                    complete: true,
+                    resource: None,
+                });
+            }
             let resource = self
                 .store
                 .get_resource(resource_id)
@@ -2088,6 +2137,11 @@ impl o3k_native_api::volume::VolumeReader for VolumeReaderAdapter {
                 .map(|r| VolumeItem {
                     id: r.volume.id.to_string(),
                     project_id: r.volume.project_id.clone(),
+                    name: r.volume.name.clone(),
+                    description: r.volume.description.clone(),
+                    metadata: serde_json::to_value(&r.volume.metadata)
+                        .unwrap_or_else(|_| serde_json::json!({})),
+                    availability_zone: r.volume.availability_zone.clone(),
                     size_bytes: r.volume.size_bytes,
                     volume_type: r.volume.volume_type.clone(),
                     state: serde_json::to_value(r.volume.state)
@@ -2124,6 +2178,11 @@ impl o3k_native_api::volume::VolumeReader for VolumeReaderAdapter {
             Ok(Some(r)) if r.volume.project_id == project_id => Ok(VolumeItem {
                 id: r.volume.id.to_string(),
                 project_id: r.volume.project_id.clone(),
+                name: r.volume.name.clone(),
+                description: r.volume.description.clone(),
+                metadata: serde_json::to_value(&r.volume.metadata)
+                    .unwrap_or_else(|_| serde_json::json!({})),
+                availability_zone: r.volume.availability_zone.clone(),
                 size_bytes: r.volume.size_bytes,
                 volume_type: r.volume.volume_type.clone(),
                 state: serde_json::to_value(r.volume.state)

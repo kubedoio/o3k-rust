@@ -1033,7 +1033,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(o3k_config::ConfigError::DirectLibvirtProviderUnavailable.into());
             }
             o3k_config::Provider::Fake => o3k_compute::ComputeService::new(
-                store,
+                store.clone(),
                 Arc::new(o3k_provider::FakeComputeProvider::new()),
             )
             .with_binding_projector(binding_projector.clone()),
@@ -1052,7 +1052,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     client_key: config.cellhv_client_key.clone(),
                 })
                 .await?;
-                o3k_compute::ComputeService::new(store, Arc::new(provider))
+                o3k_compute::ComputeService::new(store.clone(), Arc::new(provider))
                     .with_binding_projector(binding_projector.clone())
             }
             o3k_config::Provider::Agent => unreachable!("agent provider handled above"),
@@ -1338,7 +1338,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let inspect_compute_service = compute_service.clone();
-    let volume_attachments_enabled = compute_service.cinder_configured();
+    let native_storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>> = match (
+        std::env::var("O3K_LVM_VOLUME_GROUP").ok(),
+        std::env::var("O3K_LVM_THIN_POOL").ok(),
+        std::env::var("O3K_LVM_PROVIDER_NAMESPACE").ok(),
+    ) {
+        (Some(volume_group), Some(thin_pool), Some(provider_namespace)) => Some(Arc::new(
+            o3k_storage::LvmStorageProvider::new(o3k_storage::LvmConfig {
+                volume_group,
+                thin_pool,
+                provider_namespace,
+            })?,
+        )),
+        _ => None,
+    };
+    // Native storage is always wired in this composition root; the adapter
+    // selects the canonical native path when external Cinder is absent.
+    let volume_attachments_enabled = true;
     let mut state = if let Some(identity) = identity {
         o3k_api::AppState::new()
             .with_identity(identity)
@@ -1379,6 +1395,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_resource_application(generic_application)
         .with_authorizer(std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard())),
     );
+    state = state.with_storage_store(store.clone());
+    if let Some(provider) = native_storage_provider {
+        state = state.with_storage_provider(provider);
+    }
     if let Some(allocator) = public_allocator {
         state = state.with_public_allocator(allocator);
     }
