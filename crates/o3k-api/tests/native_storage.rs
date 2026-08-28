@@ -28,9 +28,18 @@ use uuid::Uuid;
 
 const PROJECT: &str = "eba29e2d-53de-461d-ae91-ede7402713cb";
 
-#[derive(Default)]
 struct RecoveryProvider {
     volumes: Mutex<BTreeMap<Uuid, StorageVolumeObservation>>,
+    observations_owned: Mutex<bool>,
+}
+
+impl Default for RecoveryProvider {
+    fn default() -> Self {
+        Self {
+            volumes: Mutex::default(),
+            observations_owned: Mutex::new(true),
+        }
+    }
 }
 
 #[async_trait]
@@ -63,12 +72,18 @@ impl StorageProvider for RecoveryProvider {
         &self,
         request: &StorageVolumeRequest,
     ) -> Result<StorageVolumeObservation, StorageProviderError> {
-        self.volumes
+        let mut observation = self
+            .volumes
             .lock()
             .map_err(|_| StorageProviderError::CommandFailed)?
             .get(&request.volume_id.as_uuid())
             .cloned()
-            .ok_or(StorageProviderError::NotFound)
+            .ok_or(StorageProviderError::NotFound)?;
+        observation.owned = *self
+            .observations_owned
+            .lock()
+            .map_err(|_| StorageProviderError::CommandFailed)?;
+        Ok(observation)
     }
 
     async fn delete_volume(
@@ -360,5 +375,61 @@ async fn native_volume_transitional_states_recover_from_provider_observation()
     store.insert_volume(&deleting).await?;
     o3k_api::recover_native_volumes(&state).await;
     assert!(store.get_volume(deleting_id.as_uuid()).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_volume_recovery_rejects_foreign_provider_observation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = store().await?;
+    let volume_id = VolumeId::new();
+    store
+        .insert_volume(&VolumeRecord {
+            volume: Volume {
+                id: volume_id,
+                project_id: PROJECT.into(),
+                name: "foreign-observation".into(),
+                description: String::new(),
+                metadata: Default::default(),
+                availability_zone: None,
+                size_bytes: 1024 * 1024 * 1024,
+                volume_type: "lvm".into(),
+                backend_id: "local".into(),
+                execution_scope: StorageExecutionScope::Host("local".into()),
+                state: VolumeState::Creating,
+                generation: 2,
+                operation_id: None,
+                provider_reference: None,
+            },
+            created_at: "2026-08-28T00:00:00.000".into(),
+        })
+        .await?;
+    let provider = Arc::new(RecoveryProvider::default());
+    provider
+        .create_volume(&StorageVolumeRequest {
+            volume_id,
+            project_id: PROJECT.into(),
+            size_bytes: 1024 * 1024 * 1024,
+            generation: 2,
+        })
+        .await?;
+    if let Ok(mut owned) = provider.observations_owned.lock() {
+        *owned = false;
+    } else {
+        return Err("poisoned test mutex".into());
+    }
+    let state = AppState::new()
+        .with_storage_store(store.clone())
+        .with_storage_provider(provider);
+    o3k_api::recover_native_volumes(&state).await;
+    assert_eq!(
+        store
+            .get_volume(volume_id.as_uuid())
+            .await?
+            .ok_or("missing volume")?
+            .volume
+            .state,
+        VolumeState::Creating
+    );
     Ok(())
 }

@@ -207,6 +207,20 @@ pub async fn realize_native_volume_create(
         .map_err(|error| error.to_string())
 }
 
+fn volume_observation_matches(
+    record: &VolumeRecord,
+    observation: &o3k_storage::StorageVolumeObservation,
+) -> bool {
+    observation.owned && observation.size_bytes == record.volume.size_bytes
+}
+
+fn available_volume_observation_matches(
+    record: &VolumeRecord,
+    observation: &o3k_storage::StorageVolumeObservation,
+) -> bool {
+    volume_observation_matches(record, observation) && observation.available
+}
+
 /// Shared provider-backed native Volume deletion.  Canonical state is kept in
 /// `Deleting` until an explicit provider absence observation succeeds.
 pub async fn remove_native_volume(
@@ -570,7 +584,7 @@ pub async fn recover_native_volumes(state: &AppState) {
                 .inspect_volume(&request)
                 .await
             {
-                Ok(observation) => {
+                Ok(observation) if available_volume_observation_matches(&record, &observation) => {
                     let mut available = record.clone();
                     available.volume.state = VolumeState::Available;
                     available.volume.generation = match record.volume.generation.checked_add(1) {
@@ -592,6 +606,9 @@ pub async fn recover_native_volumes(state: &AppState) {
                         tracing::warn!(%error, volume_id = %record.volume.id, "native volume recovery state update was fenced");
                     }
                 }
+                Ok(_) => {
+                    tracing::warn!(volume_id = %record.volume.id, "native volume recovery rejected mismatched provider observation");
+                }
                 Err(o3k_storage::StorageProviderError::NotFound)
                     if matches!(
                         record.volume.state,
@@ -599,7 +616,9 @@ pub async fn recover_native_volumes(state: &AppState) {
                     ) =>
                 {
                     match provider.create_volume(&request).await {
-                        Ok(observation) => {
+                        Ok(observation)
+                            if available_volume_observation_matches(&record, &observation) =>
+                        {
                             let mut available = record.clone();
                             available.volume.state = VolumeState::Available;
                             available.volume.generation =
@@ -615,6 +634,9 @@ pub async fn recover_native_volumes(state: &AppState) {
                             let _ = store
                                 .update_volume(record.volume.generation, &available)
                                 .await;
+                        }
+                        Ok(_) => {
+                            tracing::warn!(volume_id = %record.volume.id, "native volume recovery rejected mismatched provider create observation");
                         }
                         Err(error) if error.is_unknown_outcome() => {
                             if record.volume.state != VolumeState::Requested {
@@ -657,22 +679,27 @@ pub async fn recover_native_volumes(state: &AppState) {
                         .delete_volume(&record.volume.project_id, record.volume.id.as_uuid())
                         .await;
                 }
-                Ok(_) => match provider.delete_volume(&request).await {
-                    Ok(()) | Err(o3k_storage::StorageProviderError::NotFound) => {
-                        if matches!(
-                            provider.inspect_volume(&request).await,
-                            Err(o3k_storage::StorageProviderError::NotFound)
-                        ) {
-                            let _ = store
-                                .delete_volume(
-                                    &record.volume.project_id,
-                                    record.volume.id.as_uuid(),
-                                )
-                                .await;
+                Ok(observation) if volume_observation_matches(&record, &observation) => {
+                    match provider.delete_volume(&request).await {
+                        Ok(()) | Err(o3k_storage::StorageProviderError::NotFound) => {
+                            if matches!(
+                                provider.inspect_volume(&request).await,
+                                Err(o3k_storage::StorageProviderError::NotFound)
+                            ) {
+                                let _ = store
+                                    .delete_volume(
+                                        &record.volume.project_id,
+                                        record.volume.id.as_uuid(),
+                                    )
+                                    .await;
+                            }
                         }
+                        Err(_) => {}
                     }
-                    Err(_) => {}
-                },
+                }
+                Ok(_) => {
+                    tracing::warn!(volume_id = %record.volume.id, "native volume deletion rejected mismatched provider observation");
+                }
                 Err(_) => {}
             },
             _ => {}
