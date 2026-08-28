@@ -307,6 +307,24 @@ def failure_class(stderr: str) -> str:
     return "unknown"
 
 
+def failure_detail(stderr: str) -> str:
+    """Return a bounded diagnostic category, never provider-supplied text."""
+    value = stderr.lower()
+    categories = (
+        ("endpoint_not_found", ("endpointnotfound", "endpoint not found")),
+        ("bad_request", ("badrequest", "bad request")),
+        ("not_found", ("notfound", "not found")),
+        ("unauthorized", ("unauthorized", "unauthenticated")),
+        ("forbidden", ("forbidden",)),
+        ("missing_configuration", ("missing value", "required option")),
+        ("client_error", ("clientexception", "command error")),
+    )
+    for name, markers in categories:
+        if any(marker in value for marker in markers):
+            return name
+    return "unspecified"
+
+
 def command(args: tuple[str, ...], *, scrub_provider_config: bool = False) -> str | None:
     global LAST_FAILURE_REASON
     environment = os.environ.copy()
@@ -332,8 +350,14 @@ def command(args: tuple[str, ...], *, scrub_provider_config: bool = False) -> st
         return None
     except subprocess.CalledProcessError as error:
         stderr = error.stderr if isinstance(error.stderr, str) else ""
+        category = failure_class(stderr)
         LAST_FAILURE_REASON = (
-            "command_failed:" + ":".join(args[:3]) + ":" + failure_class(stderr)
+            "command_failed:" + ":".join(args[:3]) + ":" + category
+        )
+        print(
+            "real-host inventory command failed: "
+            f"family={':'.join(args[:3])} class={category} detail={failure_detail(stderr)}",
+            file=sys.stderr,
         )
         return None
     except (OSError, UnicodeError, subprocess.SubprocessError):
