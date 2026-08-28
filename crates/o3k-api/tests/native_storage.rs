@@ -1,19 +1,140 @@
+use async_trait::async_trait;
 use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
 };
 use o3k_api::AppState;
 use o3k_compute::ComputeService;
-use o3k_domain::{StorageExecutionScope, Volume, VolumeId, VolumeState};
+use o3k_domain::{
+    StorageCapabilities, StorageExecutionScope, StorageProviderReference, Volume, VolumeId,
+    VolumeState,
+};
 use o3k_identity::{BootstrapConfig, Secret, TokenService};
 use o3k_provider::FakeComputeProvider;
+use o3k_storage::{
+    PreparedAttachment, StorageAttachmentObservation, StorageAttachmentRequest, StorageProvider,
+    StorageProviderError, StorageSnapshotObservation, StorageSnapshotRequest,
+    StorageVolumeObservation, StorageVolumeRequest,
+};
 use o3k_store::{DurableStore, StorageRepository, VolumeRecord, testkit::TestStore};
 use serde_json::Value;
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tower::ServiceExt;
 use uuid::Uuid;
 
 const PROJECT: &str = "eba29e2d-53de-461d-ae91-ede7402713cb";
+
+#[derive(Default)]
+struct RecoveryProvider {
+    volumes: Mutex<BTreeMap<Uuid, StorageVolumeObservation>>,
+}
+
+#[async_trait]
+impl StorageProvider for RecoveryProvider {
+    async fn capabilities(&self) -> Result<StorageCapabilities, StorageProviderError> {
+        Err(StorageProviderError::InvalidRequest)
+    }
+
+    async fn create_volume(
+        &self,
+        request: &StorageVolumeRequest,
+    ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        let observation = StorageVolumeObservation {
+            provider_reference: StorageProviderReference {
+                provider: "test".into(),
+                resource_id: format!("volume-{}", request.volume_id),
+            },
+            size_bytes: request.size_bytes,
+            owned: true,
+            available: true,
+        };
+        self.volumes
+            .lock()
+            .map_err(|_| StorageProviderError::CommandFailed)?
+            .insert(request.volume_id.as_uuid(), observation.clone());
+        Ok(observation)
+    }
+
+    async fn inspect_volume(
+        &self,
+        request: &StorageVolumeRequest,
+    ) -> Result<StorageVolumeObservation, StorageProviderError> {
+        self.volumes
+            .lock()
+            .map_err(|_| StorageProviderError::CommandFailed)?
+            .get(&request.volume_id.as_uuid())
+            .cloned()
+            .ok_or(StorageProviderError::NotFound)
+    }
+
+    async fn delete_volume(
+        &self,
+        request: &StorageVolumeRequest,
+    ) -> Result<(), StorageProviderError> {
+        self.volumes
+            .lock()
+            .map_err(|_| StorageProviderError::CommandFailed)?
+            .remove(&request.volume_id.as_uuid())
+            .map(|_| ())
+            .ok_or(StorageProviderError::NotFound)
+    }
+
+    async fn prepare_attachment(
+        &self,
+        request: &StorageAttachmentRequest,
+    ) -> Result<PreparedAttachment, StorageProviderError> {
+        PreparedAttachment::from_provider(
+            StorageProviderReference {
+                provider: "test".into(),
+                resource_id: format!("volume-{}", request.volume_id),
+            },
+            "/dev/test".into(),
+            request.attachment_id,
+            request.volume_id,
+        )
+    }
+
+    async fn inspect_attachment(
+        &self,
+        request: &StorageAttachmentRequest,
+    ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+        Ok(StorageAttachmentObservation {
+            attachment_id: request.attachment_id,
+            volume_id: request.volume_id,
+            host_id: "test".into(),
+            attached: false,
+            provider_reference: StorageProviderReference {
+                provider: "test".into(),
+                resource_id: format!("volume-{}", request.volume_id),
+            },
+        })
+    }
+
+    async fn terminate_attachment(
+        &self,
+        request: &StorageAttachmentRequest,
+    ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+        self.inspect_attachment(request).await
+    }
+
+    async fn create_snapshot(
+        &self,
+        _request: &StorageSnapshotRequest,
+    ) -> Result<StorageSnapshotObservation, StorageProviderError> {
+        Err(StorageProviderError::InvalidRequest)
+    }
+
+    async fn delete_snapshot(
+        &self,
+        _request: &StorageSnapshotRequest,
+    ) -> Result<(), StorageProviderError> {
+        Err(StorageProviderError::InvalidRequest)
+    }
+}
 
 async fn token(app: &axum::Router) -> Result<String, Box<dyn std::error::Error>> {
     let body = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
@@ -115,10 +236,12 @@ async fn native_volume_and_attachment_projection_uses_canonical_storage()
     )
     .await?;
     let compute = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()));
+    let storage_provider = Arc::new(RecoveryProvider::default());
     let state = AppState::new()
         .with_identity(identity)
         .with_compute(compute)
         .with_storage_store(store.clone())
+        .with_storage_provider(storage_provider)
         .with_volume_attachments_enabled(true);
     state.set_ready(true);
     let app = o3k_api::router_with_state(state);
@@ -174,5 +297,68 @@ async fn native_volume_and_attachment_projection_uses_canonical_storage()
             .state,
         VolumeState::Available
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_volume_transitional_states_recover_from_provider_observation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = store().await?;
+    let volume_id = VolumeId::new();
+    store
+        .insert_volume(&VolumeRecord {
+            volume: Volume {
+                id: volume_id,
+                project_id: PROJECT.into(),
+                name: "recovering".into(),
+                description: String::new(),
+                metadata: Default::default(),
+                availability_zone: None,
+                size_bytes: 1024 * 1024 * 1024,
+                volume_type: "lvm".into(),
+                backend_id: "local".into(),
+                execution_scope: StorageExecutionScope::Host("local".into()),
+                state: VolumeState::Creating,
+                generation: 2,
+                operation_id: None,
+                provider_reference: None,
+            },
+            created_at: "2026-08-28T00:00:00.000".into(),
+        })
+        .await?;
+    let provider = Arc::new(RecoveryProvider::default());
+    provider
+        .create_volume(&StorageVolumeRequest {
+            volume_id,
+            project_id: PROJECT.into(),
+            size_bytes: 1024 * 1024 * 1024,
+            generation: 2,
+        })
+        .await?;
+    let state = AppState::new()
+        .with_storage_store(store.clone())
+        .with_storage_provider(provider.clone());
+    o3k_api::recover_native_volumes(&state).await;
+    assert_eq!(
+        store
+            .get_volume(volume_id.as_uuid())
+            .await?
+            .ok_or("missing recovered volume")?
+            .volume
+            .state,
+        VolumeState::Available
+    );
+
+    let deleting_id = VolumeId::new();
+    let mut deleting = store
+        .get_volume(volume_id.as_uuid())
+        .await?
+        .ok_or("missing recovered volume")?;
+    deleting.volume.id = deleting_id;
+    deleting.volume.state = VolumeState::Deleting;
+    deleting.volume.generation += 1;
+    store.insert_volume(&deleting).await?;
+    o3k_api::recover_native_volumes(&state).await;
+    assert!(store.get_volume(deleting_id.as_uuid()).await?.is_none());
     Ok(())
 }

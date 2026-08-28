@@ -129,6 +129,7 @@ fn native_attachment_view(
 
 fn native_attachment_enabled(state: &AppState) -> bool {
     state.storage_store.is_some()
+        && state.storage_provider.is_some()
         && state
             .compute
             .as_ref()
@@ -194,7 +195,7 @@ async fn create_native_attachment(
     // generic resource row is only the existing operation-journal projection;
     // the workflow uses it as its foreign-key anchor before crossing either
     // provider boundary.
-    store
+    if store
         .insert_resource(&o3k_store::ResourceRecord {
             id: record.attachment.id.as_uuid(),
             kind: "native_volume_attachment".to_owned(),
@@ -206,7 +207,19 @@ async fn create_native_attachment(
             provider_id: None,
         })
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        .is_err()
+    {
+        // The canonical attachment was inserted before the operation-journal
+        // projection.  Without the projection no provider boundary has been
+        // crossed, so compensate rather than leaving an orphan attachment.
+        let _ = store
+            .delete_volume_attachment_v1(
+                &record.attachment.project_id,
+                record.attachment.id.as_uuid(),
+            )
+            .await;
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     if let Some(workflow) = state.native_attachment_workflow.as_ref() {
         if let Err(error) = workflow.attach(record.attachment.id.as_uuid()).await {
             tracing::warn!(attachment_id = %record.attachment.id, error = ?error, "native attachment workflow failed");

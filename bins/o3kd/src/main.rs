@@ -1636,6 +1636,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(provider) = native_storage_provider {
         state = state.with_storage_provider(provider);
     }
+    o3k_api::recover_native_volumes(&state).await;
     if let Some(workflow) = native_attachment_workflow {
         state = state.with_native_attachment_workflow(workflow.clone());
         if let Err(error) = workflow.recover().await {

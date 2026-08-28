@@ -46,6 +46,7 @@ pub trait StorageRepository: super::DurableStore + Send + Sync {
     async fn insert_volume(&self, record: &VolumeRecord) -> Result<(), StoreError>;
     async fn get_volume(&self, id: Uuid) -> Result<Option<VolumeRecord>, StoreError>;
     async fn list_volumes(&self, project_id: &str) -> Result<Vec<VolumeRecord>, StoreError>;
+    async fn list_all_volumes(&self) -> Result<Vec<VolumeRecord>, StoreError>;
     async fn update_volume(
         &self,
         expected_generation: u64,
@@ -420,6 +421,14 @@ impl StorageRepository for SqliteStore {
         rows.iter().map(volume_from_row).collect()
     }
 
+    async fn list_all_volumes(&self) -> Result<Vec<VolumeRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volumes ORDER BY project_id, id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        rows.iter().map(volume_from_row).collect()
+    }
+
     async fn update_volume(
         &self,
         expected_generation: u64,
@@ -719,6 +728,11 @@ impl StorageRepository for crate::PostgresStore {
     async fn list_volumes(&self, project_id: &str) -> Result<Vec<VolumeRecord>, StoreError> {
         sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volumes WHERE project_id = $1 ORDER BY id")
             .bind(project_id).fetch_all(&self.pool).await.map_err(StoreError::Database)?.iter().map(volume_from_pg_row).collect()
+    }
+
+    async fn list_all_volumes(&self) -> Result<Vec<VolumeRecord>, StoreError> {
+        sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volumes ORDER BY project_id, id")
+            .fetch_all(&self.pool).await.map_err(StoreError::Database)?.iter().map(volume_from_pg_row).collect()
     }
 
     async fn update_volume(

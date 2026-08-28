@@ -219,6 +219,13 @@ pub(crate) async fn create(
         )
         .into_response();
     }
+    let size_bytes = match request.volume.size.checked_mul(1024 * 1024 * 1024) {
+        Some(size_bytes) if size_bytes > 0 => size_bytes,
+        _ => {
+            return keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "size is too large")
+                .into_response();
+        }
+    };
     let id = VolumeId::from_uuid(Uuid::new_v4());
     let volume = Volume {
         id,
@@ -240,7 +247,7 @@ pub(crate) async fn create(
             None => Default::default(),
         },
         availability_zone: request.volume.availability_zone,
-        size_bytes: request.volume.size.saturating_mul(1024 * 1024 * 1024),
+        size_bytes,
         volume_type: request
             .volume
             .volume_type
@@ -258,25 +265,38 @@ pub(crate) async fn create(
     };
     match store.insert_volume(&record).await {
         Ok(()) => {
-            let record = if let Some(provider) = state.storage_provider.as_ref() {
-                let request = StorageVolumeRequest {
-                    volume_id: record.volume.id,
-                    project_id: record.volume.project_id.clone(),
-                    size_bytes: record.volume.size_bytes,
-                    generation: record.volume.generation,
-                };
+            let Some(provider) = state.storage_provider.as_ref() else {
+                return unavailable();
+            };
+            let mut creating = record.clone();
+            creating.volume.state = VolumeState::Creating;
+            creating.volume.generation = record.volume.generation + 1;
+            let creating = match store
+                .update_volume(record.volume.generation, &creating)
+                .await
+            {
+                Ok(creating) => creating,
+                Err(_) => return unavailable(),
+            };
+            let request = StorageVolumeRequest {
+                volume_id: creating.volume.id,
+                project_id: creating.volume.project_id.clone(),
+                size_bytes: creating.volume.size_bytes,
+                generation: creating.volume.generation,
+            };
+            let record = {
                 match provider.create_volume(&request).await {
                     Ok(observation) => {
-                        let mut realized = record.clone();
+                        let mut realized = creating.clone();
                         realized.volume.state = VolumeState::Available;
-                        realized.volume.generation = record.volume.generation + 1;
+                        realized.volume.generation = creating.volume.generation + 1;
                         realized.volume.provider_reference =
                             Some(o3k_domain::StorageProviderReference {
                                 provider: observation.provider_reference.provider,
                                 resource_id: observation.provider_reference.resource_id,
                             });
                         match store
-                            .update_volume(record.volume.generation, &realized)
+                            .update_volume(creating.volume.generation, &realized)
                             .await
                         {
                             Ok(updated) => updated,
@@ -290,11 +310,17 @@ pub(crate) async fn create(
                             }
                         }
                     }
-                    Err(_) => {
-                        let mut failed = record.clone();
-                        failed.volume.state = VolumeState::Error;
+                    Err(error) => {
+                        let mut failed = creating.clone();
+                        failed.volume.state = if error.is_unknown_outcome() {
+                            VolumeState::Unknown
+                        } else {
+                            VolumeState::Error
+                        };
                         failed.volume.generation = failed.volume.generation.saturating_add(1);
-                        let _ = store.update_volume(record.volume.generation, &failed).await;
+                        let _ = store
+                            .update_volume(creating.volume.generation, &failed)
+                            .await;
                         return keystone_error(
                             StatusCode::SERVICE_UNAVAILABLE,
                             "Service Unavailable",
@@ -302,17 +328,6 @@ pub(crate) async fn create(
                         )
                         .into_response();
                     }
-                }
-            } else {
-                let mut available = record.clone();
-                available.volume.state = VolumeState::Available;
-                available.volume.generation = record.volume.generation + 1;
-                match store
-                    .update_volume(record.volume.generation, &available)
-                    .await
-                {
-                    Ok(updated) => updated,
-                    Err(_) => return unavailable(),
                 }
             };
             (
@@ -434,6 +449,11 @@ pub(crate) async fn delete(
         )
         .into_response();
     }
+    if state.storage_provider.is_none() {
+        // Do not remove canonical state while a provider is unavailable: the
+        // durable row is the recovery inventory for an owned provider volume.
+        return unavailable();
+    }
     if let Some(provider) = state.storage_provider.as_ref() {
         let mut deleting = record.clone();
         deleting.volume.state = VolumeState::Deleting;
@@ -452,10 +472,12 @@ pub(crate) async fn delete(
             generation: record.volume.generation,
         };
         match provider.delete_volume(&request).await {
-            Ok(()) => match provider.inspect_volume(&request).await {
-                Err(o3k_storage::StorageProviderError::NotFound) => {}
-                Ok(_) | Err(_) => return unavailable(),
-            },
+            Ok(()) | Err(o3k_storage::StorageProviderError::NotFound) => {
+                match provider.inspect_volume(&request).await {
+                    Err(o3k_storage::StorageProviderError::NotFound) => {}
+                    Ok(_) | Err(_) => return unavailable(),
+                }
+            }
             Err(_) => {
                 return (
                     StatusCode::ACCEPTED,
@@ -470,5 +492,145 @@ pub(crate) async fn delete(
     match store.delete_volume(&project_id, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => unavailable(),
+    }
+}
+
+/// Reconciles native volumes left in a transitional state by a process
+/// restart.  Canonical volume rows are the recovery inventory; provider
+/// inspection is performed before any repeat mutation and provider state is
+/// never used to create a canonical volume.
+pub async fn recover_native_volumes(state: &AppState) {
+    let (Some(store), Some(provider)) = (
+        state.storage_store.as_ref(),
+        state.storage_provider.as_ref(),
+    ) else {
+        return;
+    };
+    let records = match store.list_all_volumes().await {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::error!(%error, "failed to enumerate native volumes during startup recovery");
+            return;
+        }
+    };
+    for record in records {
+        let request = StorageVolumeRequest {
+            volume_id: record.volume.id,
+            project_id: record.volume.project_id.clone(),
+            size_bytes: record.volume.size_bytes,
+            generation: record.volume.generation,
+        };
+        match record.volume.state {
+            VolumeState::Requested | VolumeState::Creating | VolumeState::Unknown => match provider
+                .inspect_volume(&request)
+                .await
+            {
+                Ok(observation) => {
+                    let mut available = record.clone();
+                    available.volume.state = VolumeState::Available;
+                    available.volume.generation = match record.volume.generation.checked_add(1) {
+                        Some(generation) => generation,
+                        None => {
+                            tracing::error!(volume_id = %record.volume.id, "native volume generation overflow during recovery");
+                            continue;
+                        }
+                    };
+                    available.volume.provider_reference =
+                        Some(o3k_domain::StorageProviderReference {
+                            provider: observation.provider_reference.provider,
+                            resource_id: observation.provider_reference.resource_id,
+                        });
+                    if let Err(error) = store
+                        .update_volume(record.volume.generation, &available)
+                        .await
+                    {
+                        tracing::warn!(%error, volume_id = %record.volume.id, "native volume recovery state update was fenced");
+                    }
+                }
+                Err(o3k_storage::StorageProviderError::NotFound)
+                    if matches!(
+                        record.volume.state,
+                        VolumeState::Requested | VolumeState::Creating | VolumeState::Unknown
+                    ) =>
+                {
+                    match provider.create_volume(&request).await {
+                        Ok(observation) => {
+                            let mut available = record.clone();
+                            available.volume.state = VolumeState::Available;
+                            available.volume.generation =
+                                match record.volume.generation.checked_add(1) {
+                                    Some(generation) => generation,
+                                    None => continue,
+                                };
+                            available.volume.provider_reference =
+                                Some(o3k_domain::StorageProviderReference {
+                                    provider: observation.provider_reference.provider,
+                                    resource_id: observation.provider_reference.resource_id,
+                                });
+                            let _ = store
+                                .update_volume(record.volume.generation, &available)
+                                .await;
+                        }
+                        Err(error) if error.is_unknown_outcome() => {
+                            if record.volume.state != VolumeState::Requested {
+                                let mut unknown = record.clone();
+                                unknown.volume.state = VolumeState::Unknown;
+                                unknown.volume.generation =
+                                    unknown.volume.generation.saturating_add(1);
+                                let _ = store
+                                    .update_volume(record.volume.generation, &unknown)
+                                    .await;
+                            }
+                        }
+                        Err(_) => {
+                            if record.volume.state != VolumeState::Requested {
+                                let mut failed = record.clone();
+                                failed.volume.state = VolumeState::Error;
+                                failed.volume.generation =
+                                    failed.volume.generation.saturating_add(1);
+                                let _ =
+                                    store.update_volume(record.volume.generation, &failed).await;
+                            }
+                        }
+                    }
+                }
+                Err(error) if error.is_unknown_outcome() => {
+                    if record.volume.state != VolumeState::Requested {
+                        let mut unknown = record.clone();
+                        unknown.volume.state = VolumeState::Unknown;
+                        unknown.volume.generation = unknown.volume.generation.saturating_add(1);
+                        let _ = store
+                            .update_volume(record.volume.generation, &unknown)
+                            .await;
+                    }
+                }
+                Err(_) => {}
+            },
+            VolumeState::Deleting => match provider.inspect_volume(&request).await {
+                Err(o3k_storage::StorageProviderError::NotFound) => {
+                    let _ = store
+                        .delete_volume(&record.volume.project_id, record.volume.id.as_uuid())
+                        .await;
+                }
+                Ok(_) => match provider.delete_volume(&request).await {
+                    Ok(()) | Err(o3k_storage::StorageProviderError::NotFound) => {
+                        if matches!(
+                            provider.inspect_volume(&request).await,
+                            Err(o3k_storage::StorageProviderError::NotFound)
+                        ) {
+                            let _ = store
+                                .delete_volume(
+                                    &record.volume.project_id,
+                                    record.volume.id.as_uuid(),
+                                )
+                                .await;
+                        }
+                    }
+                    Err(_) => {}
+                },
+                Err(_) => {}
+            },
+            _ => {}
+        }
     }
 }

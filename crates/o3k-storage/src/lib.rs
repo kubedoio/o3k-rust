@@ -421,7 +421,7 @@ impl<R: LvmCommandRunner> LvmStorageProvider<R> {
                     "--reportformat",
                     "json",
                     "--options",
-                    "lv_name,lv_tags,lv_attr,vg_name",
+                    "lv_name,lv_size,lv_tags,lv_attr,vg_name",
                 ]),
             )
             .await?;
@@ -445,7 +445,7 @@ impl<R: LvmCommandRunner> LvmStorageProvider<R> {
         volume_id: VolumeId,
         project_id: &str,
         _generation: u64,
-    ) -> Result<String, StorageProviderError>
+    ) -> Result<LvmLv, StorageProviderError>
     where
         R: LvmCommandRunner + Sync,
     {
@@ -460,7 +460,7 @@ impl<R: LvmCommandRunner> LvmStorageProvider<R> {
                     "b",
                     "--nosuffix",
                     "--options",
-                    "lv_name,lv_tags,lv_attr,vg_name",
+                    "lv_name,lv_size,lv_tags,lv_attr,vg_name",
                     "--select",
                     "lv_name!~^o3k-s-",
                 ]),
@@ -485,7 +485,7 @@ impl<R: LvmCommandRunner> LvmStorageProvider<R> {
         if entry.lv_name != expected_name {
             return Err(StorageProviderError::ForeignResource);
         }
-        Ok(entry.lv_name)
+        Ok(entry)
     }
 
     fn validate_volume_request(request: &StorageVolumeRequest) -> Result<(), StorageProviderError> {
@@ -553,15 +553,15 @@ where
         request: &StorageVolumeRequest,
     ) -> Result<StorageVolumeObservation, StorageProviderError> {
         Self::validate_volume_request(request)?;
-        let name = self
+        let entry = self
             .owned_lv(request.volume_id, &request.project_id, request.generation)
             .await?;
         Ok(StorageVolumeObservation {
             provider_reference: StorageProviderReference {
                 provider: "lvm".to_owned(),
-                resource_id: name,
+                resource_id: entry.lv_name,
             },
-            size_bytes: request.size_bytes,
+            size_bytes: entry.lv_size,
             owned: true,
             available: true,
         })
@@ -574,7 +574,8 @@ where
         Self::validate_volume_request(request)?;
         let name = self
             .owned_lv(request.volume_id, &request.project_id, request.generation)
-            .await?;
+            .await?
+            .lv_name;
         self.checked_command(
             "lvremove",
             &self.run_args(&["--yes", &format!("{}/{}", self.config.volume_group, name)]),
@@ -599,7 +600,8 @@ where
                 &request.project_id,
                 request.volume_generation,
             )
-            .await?;
+            .await?
+            .lv_name;
         Ok(PreparedAttachment {
             provider_reference: StorageProviderReference {
                 provider: "lvm".to_owned(),
@@ -654,7 +656,8 @@ where
                 &request.project_id,
                 request.source_generation,
             )
-            .await?;
+            .await?
+            .lv_name;
         let name = self.snapshot_name(request.snapshot_id);
         let marker = self.marker(
             request.volume_id,
@@ -697,7 +700,7 @@ where
                     "--reportformat",
                     "json",
                     "--options",
-                    "lv_name,lv_tags,lv_attr,vg_name",
+                    "lv_name,lv_size,lv_tags,lv_attr,vg_name",
                     "--select",
                     "lv_name!~^o3k-v-",
                 ]),
@@ -740,6 +743,7 @@ struct LvmRows<T> {
 #[derive(Debug, Clone)]
 struct LvmLv {
     lv_name: String,
+    lv_size: u64,
     tags: Vec<String>,
     vg_name: String,
     lv_attr: String,
@@ -756,22 +760,25 @@ struct LvmVg {
 fn parse_lvs(payload: &str) -> Result<Vec<LvmLv>, StorageProviderError> {
     let report: LvmReport<LvmRows<LvmLvJson>> =
         serde_json::from_str(payload).map_err(|_| StorageProviderError::CommandFailed)?;
-    Ok(report
+    report
         .report
         .into_iter()
         .flat_map(|row| row.lv.unwrap_or_default())
-        .map(|row| LvmLv {
-            lv_name: row.lv_name,
-            tags: row
-                .lv_tags
-                .split(',')
-                .filter(|tag| !tag.is_empty())
-                .map(ToOwned::to_owned)
-                .collect(),
-            vg_name: row.vg_name,
-            lv_attr: row.lv_attr,
+        .map(|row| {
+            Ok(LvmLv {
+                lv_name: row.lv_name,
+                lv_size: parse_bytes(&row.lv_size)?,
+                tags: row
+                    .lv_tags
+                    .split(',')
+                    .filter(|tag| !tag.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                vg_name: row.vg_name,
+                lv_attr: row.lv_attr,
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>, StorageProviderError>>()
 }
 
 fn parse_vgs(payload: &str) -> Result<Vec<LvmVg>, StorageProviderError> {
@@ -810,6 +817,7 @@ fn parse_bytes(value: &str) -> Result<u64, StorageProviderError> {
 #[derive(Debug, Deserialize)]
 struct LvmLvJson {
     lv_name: String,
+    lv_size: String,
     #[serde(default)]
     lv_tags: String,
     #[serde(default)]
@@ -915,7 +923,7 @@ mod tests {
 
     #[test]
     fn parsers_accept_bounded_lvm_json() {
-        let lvs = r#"{"report":[{"lv":[{"lv_name":"o3k-v-1","lv_tags":"o3k_owner_ab,o3k_other","vg_name":"o3k-test-vg"}]}]}"#;
+        let lvs = r#"{"report":[{"lv":[{"lv_name":"o3k-v-1","lv_size":"4096","lv_tags":"o3k_owner_ab,o3k_other","vg_name":"o3k-test-vg"}]}]}"#;
         assert_eq!(parse_lvs(lvs).expect("lvs")[0].tags.len(), 2);
         let vgs =
             r#"{"report":[{"vg":[{"vg_name":"o3k-test-vg","vg_size":"10000","vg_free":"4000"}]}]}"#;
@@ -924,7 +932,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_command_uses_thin_pool_and_ownership_marker() {
-        let output = r#"{"report":[{"lv":[{"lv_name":"o3k-v-00000000000000000000000000000007","lv_tags":"o3k_owner_8a1d0b1c3ef2edc9a6c0f2da22d50ee1d3f4fb5b8f2f13b3b7d1e07a4a5b4c9d","vg_name":"o3k-test-vg"}]}]}"#;
+        let output = r#"{"report":[{"lv":[{"lv_name":"o3k-v-00000000000000000000000000000007","lv_size":"4096","lv_tags":"o3k_owner_8a1d0b1c3ef2edc9a6c0f2da22d50ee1d3f4fb5b8f2f13b3b7d1e07a4a5b4c9d","vg_name":"o3k-test-vg"}]}]}"#;
         let runner = FakeRunner {
             calls: Mutex::new(Vec::new()),
             output: Mutex::new(Some(LvmCommandOutput {

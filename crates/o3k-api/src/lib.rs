@@ -50,6 +50,8 @@ mod placement;
 mod volume;
 mod volume_attachment;
 
+pub use volume::recover_native_volumes;
+
 pub use network::recover_l3_gateway_operations;
 
 use crate::{
