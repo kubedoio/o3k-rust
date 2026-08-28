@@ -470,6 +470,7 @@ for needle in ("workflow_dispatch:",
     assert needle in text, needle
 assert "Repair prior protected artifact ownership" in text
 assert 'sudo -n chown -R "$(id -u):$(id -g)"' in text
+assert '"${GITHUB_WORKSPACE}/target/debug"' in text
 assert "github.repository == 'kubedoio/o3k-rust'" in text
 assert "github.event_name == 'workflow_dispatch'" in text
 assert "github.ref == 'refs/heads/main' || inputs.target_sha != ''" in text
