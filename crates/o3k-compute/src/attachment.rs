@@ -1,8 +1,14 @@
-//! Durable Nova-to-Cinder volume attachment orchestration.
+//! Compute-side volume attachment orchestration.
 //!
-//! The orchestrator drives the frozen Cinder v3 attachment lifecycle through
-//! the compute execution boundary, persisting each phase before the matching
-//! external side effect:
+//! The `AttachmentOrchestrator` handles the compute-projection layer of
+//! Cinder volume attach/detach (Nova attachment metadata, multi-attach
+//! coordination).
+//!
+//! ## Boundary
+//!
+//! The cross-provider storage attachment workflow (durable journal
+//! integration, compute-agent + storage provider coordination) lives
+//! in `o3k-reconciler::storage_workflow`.
 //!
 //! ```text
 //! validated

@@ -1,8 +1,13 @@
-//! Durable native VolumeAttachment coordination.
+//! Cross-boundary storage attachment workflow.
 //!
-//! The workflow persists an operation and an authenticated storage command
-//! before crossing either execution boundary. The command row is the replay
-//! identity: an equivalent retry returns the durable outcome, while a
+//! This module coordinates volume attach/detach across compute-agent and
+//! storage providers. It belongs in the reconciler because it orchestrates
+//! a multi-provider operation with durable journal integration.
+//!
+//! ## Boundary
+//!
+//! Compute-side attachment orchestration (Cinder volume lifecycle, Nova
+//! attachment metadata) lives in `o3k-compute::attachment`.
 //! conflicting fingerprint, controller epoch, agent epoch, or generation is
 //! rejected. Provider-native device identity remains inside the execution
 //! call and is never copied into the canonical attachment.
