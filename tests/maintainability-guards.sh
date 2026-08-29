@@ -77,19 +77,17 @@ echo
 
 # --- Test 1: clean repository ---
 echo "Test 1: clean repository -> PASS"
-(
-    rc=0
-    output=$(python3 "$GUARD" 2>&1) || rc=$?
-    if [ "$rc" -eq 0 ]; then
-        echo "  PASS: clean repository"
-        PASS=$((PASS + 1))
-    else
-        echo "  FAIL: clean repository (expected exit 0, got $rc)"
-        echo "    guard output: $(echo "$output" | tail -5)"
-        FAIL=$((FAIL + 1))
-        ERRORS="$ERRORS  - clean repository: expected exit 0, got $rc\n"
-    fi
-)
+rc=0
+output=$(python3 "$GUARD" 2>&1) || rc=$?
+if [ "$rc" -eq 0 ]; then
+    echo "  PASS: clean repository"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: clean repository (expected exit 0, got $rc)"
+    echo "    guard output: $(echo "$output" | tail -5)"
+    FAIL=$((FAIL + 1))
+    ERRORS="$ERRORS  - clean repository: expected exit 0, got $rc\n"
+fi
 
 # --- Test 2: SQL in unapproved production source -> FAIL ---
 echo "Test 2: SQL in unapproved production source -> FAIL"
@@ -132,24 +130,22 @@ pub fn z_query() { sqlx::query("SELECT 1"); }'
 
 # --- Test 8: test-only file -> NOT a production violation ---
 echo "Test 8: test-only file -> passes"
-# Use a path that matches is_test_or_example: /tests/ in path
+# Use a path that matches is_test_or_example: under tests/ directory
 TEST_FIXTURE_DIR="$REPO_ROOT/tests/z_guard_fixtures"
 mkdir -p "$TEST_FIXTURE_DIR"
 echo 'pub fn z_query() { sqlx::query("SELECT 1"); }' > "$TEST_FIXTURE_DIR/test_guard_ok.rs"
 CLEANUP_FILES+=("$TEST_FIXTURE_DIR/test_guard_ok.rs")
-(
-    rc=0
-    output=$(python3 "$GUARD" 2>&1) || rc=$?
-    if [ "$rc" -eq 0 ]; then
-        echo "  PASS: test-only file ignored"
-        PASS=$((PASS + 1))
-    else
-        echo "  FAIL: test-only file caused violation (expected pass)"
-        echo "    guard output: $(echo "$output" | tail -5)"
-        FAIL=$((FAIL + 1))
-        ERRORS="$ERRORS  - test-only file: unexpected violation\n"
-    fi
-)
+rc=0
+output=$(python3 "$GUARD" 2>&1) || rc=$?
+if [ "$rc" -eq 0 ]; then
+    echo "  PASS: test-only file ignored"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: test-only file caused violation (expected pass)"
+    echo "    guard output: $(echo "$output" | tail -5)"
+    FAIL=$((FAIL + 1))
+    ERRORS="$ERRORS  - test-only file: unexpected violation\n"
+fi
 rm -f "$TEST_FIXTURE_DIR/test_guard_ok.rs"
 rmdir "$TEST_FIXTURE_DIR" 2>/dev/null || true
 CLEANUP_FILES=("${CLEANUP_FILES[@]/$TEST_FIXTURE_DIR\/test_guard_ok.rs}")
