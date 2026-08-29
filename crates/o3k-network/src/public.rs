@@ -73,8 +73,8 @@ pub enum PublicAddressError {
 }
 
 pub struct PublicAddressAllocator {
-    pub(crate) root: PathBuf,
-    pub(crate) pool: PublicAddressPool,
+    root: PathBuf,
+    pool: PublicAddressPool,
 }
 
 impl PublicAddressAllocator {

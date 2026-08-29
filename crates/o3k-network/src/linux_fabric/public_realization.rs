@@ -556,21 +556,23 @@ mod tests {
         }
     }
 
-    fn allocator() -> PublicAddressAllocator {
-        PublicAddressAllocator::open(
-            std::env::temp_dir().join(format!("o3k-public-{}", Uuid::now_v7())),
-            PublicAddressPool {
-                prefix: Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 29).expect("prefix"),
-                first_usable: Ipv4Addr::new(198, 51, 100, 2),
-                last_usable: Ipv4Addr::new(198, 51, 100, 6),
-            },
+    fn allocator() -> (PublicAddressAllocator, PathBuf, PublicAddressPool) {
+        let root = std::env::temp_dir().join(format!("o3k-public-{}", Uuid::now_v7()));
+        let pool = PublicAddressPool {
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 29).expect("prefix"),
+            first_usable: Ipv4Addr::new(198, 51, 100, 2),
+            last_usable: Ipv4Addr::new(198, 51, 100, 6),
+        };
+        (
+            PublicAddressAllocator::open(&root, pool.clone()).expect("allocator"),
+            root,
+            pool,
         )
-        .expect("allocator")
     }
 
     #[test]
     fn allocation_is_idempotent_and_restartable() {
-        let allocator = allocator();
+        let (allocator, root, pool) = allocator();
         let first = allocator
             .allocate("project-a", "operation-1")
             .expect("allocation");
@@ -578,8 +580,7 @@ mod tests {
             .allocate("project-a", "operation-1")
             .expect("replay");
         assert_eq!(first, replay);
-        let reopened =
-            PublicAddressAllocator::open(&allocator.root, allocator.pool.clone()).expect("reopen");
+        let reopened = PublicAddressAllocator::open(root, pool).expect("reopen");
         assert_eq!(
             reopened.get("project-a", first.allocation_id).expect("get"),
             first
@@ -588,7 +589,7 @@ mod tests {
 
     #[test]
     fn cross_project_association_and_release_are_concealed() {
-        let allocator = allocator();
+        let (allocator, _, _) = allocator();
         let binding = allocator
             .allocate("project-a", "operation-1")
             .expect("allocation");
@@ -604,7 +605,7 @@ mod tests {
 
     #[test]
     fn association_is_idempotent_and_release_requires_disassociation() {
-        let allocator = allocator();
+        let (allocator, _, _) = allocator();
         let endpoint = Uuid::now_v7();
         let binding = allocator
             .allocate("project-a", "operation-1")
