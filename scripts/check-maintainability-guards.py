@@ -174,7 +174,7 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
 #   Command::new("...")
 # as well as inline use.
 HOST_CMD_PATTERNS = [
-    (r"Command::new\(", "std::process::Command / tokio::process::Command"),
+    (r"(?<![A-Za-z0-9_])Command::new\(", "std::process::Command / tokio::process::Command"),
     (r'"sh"\s*,?\s*-c\s*"', "sh -c (dangerous)"),
     (r'"bash"\s*,?\s*-c\s*"', "bash -c (dangerous)"),
 ]
@@ -188,7 +188,7 @@ APPROVED_HOST_CMD_PREFIXES = {
     "crates/o3k-cellhv/src",
     "crates/o3k-config-drive/src",
     "crates/o3k-console/src",
-    "crates/o3k-network/src",
+    "crates/o3k-network/src/linux_fabric",
     "crates/o3k-image/src/qemu_img.rs",
     "crates/o3k-provider/src",
     "bins/o3k/src/sys.rs",
