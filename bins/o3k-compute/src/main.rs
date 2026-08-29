@@ -3027,6 +3027,5 @@ fn config_from_env() -> Result<AgentConfig, Box<dyn std::error::Error>> {
     })
 }
 
-
 #[cfg(test)]
 mod tests;

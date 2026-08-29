@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::*;
-use std::path::PathBuf;
+    use std::path::PathBuf;
 
     #[test]
     fn hostname_normalization_discards_nul_padding_and_bounds_identity() {
