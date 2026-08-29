@@ -4,6 +4,8 @@
 //! `xorriso` and falls back to the mkisofs-compatible `genisoimage` or
 //! `mkisofs` executables available on the host.
 
+pub mod types;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -14,11 +16,15 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use thiserror::Error;
 use uuid::Uuid;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+
+pub use types::{
+    ConfigDriveArtifact, ConfigDriveError, ConfigDriveInput, ConfigDriveIsoResult,
+    ConfigDriveResult,
+};
 
 pub const MAX_USER_DATA_BYTES: usize = 64 * 1024;
 pub const MAX_METADATA_BYTES: usize = 64 * 1024;
@@ -35,67 +41,6 @@ const ISO_VOLUME_ID: &str = "config-2";
 const ISO_DATE: &str = "2020010100000000";
 const ISO_PROGRAM: &str = "xorriso";
 const ISO_FALLBACK_PROGRAMS: &[&str] = &["genisoimage", "mkisofs"];
-
-#[derive(Debug, Error)]
-pub enum ConfigDriveError {
-    #[error("config-drive input is invalid")]
-    InvalidInput,
-    #[error("config-drive user-data is too large")]
-    UserDataTooLarge,
-    #[error("config-drive metadata is too large")]
-    MetadataTooLarge,
-    #[error("config-drive network data is too large")]
-    NetworkDataTooLarge,
-    #[error("config-drive vendor data is too large")]
-    VendorDataTooLarge,
-    #[error("config-drive storage failed")]
-    Storage(#[source] io::Error),
-    #[error("config-drive serialization failed")]
-    Serialization(#[source] serde_json::Error),
-    #[error("config-drive ownership manifest is corrupt")]
-    CorruptManifest(#[source] serde_json::Error),
-    #[error("config-drive path is not owned by o3k")]
-    UnownedPath,
-    #[error("config-drive ISO command failed")]
-    ToolFailed(#[source] io::Error),
-    #[error("config-drive ISO output is invalid or tampered")]
-    InvalidIsoOutput,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConfigDriveInput {
-    pub instance_id: String,
-    pub hostname: String,
-    pub ssh_public_key: String,
-    pub user_data: Vec<u8>,
-    pub metadata: BTreeMap<String, String>,
-    pub network_data: BTreeMap<String, String>,
-    pub vendor_data: Option<Vec<u8>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfigDriveResult {
-    pub directory: PathBuf,
-    pub fingerprint_sha256: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfigDriveIsoResult {
-    pub path: PathBuf,
-    pub fingerprint_sha256: String,
-    pub source_fingerprint_sha256: String,
-}
-
-/// Verified config-drive bytes suitable for an authenticated artifact offer.
-/// The path remains local to the config-drive store and is not part of this
-/// handoff value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfigDriveArtifact {
-    pub format: String,
-    pub sha256: String,
-    pub size: u64,
-    pub content: Vec<u8>,
-}
 
 /// Injectable boundary for the external ISO builder.
 pub trait IsoCommandRunner {
