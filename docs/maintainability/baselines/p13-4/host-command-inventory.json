@@ -1,0 +1,4247 @@
+{
+  "total_sites": 606,
+  "sites": [
+    {
+      "path": "bins/o3k/tests/cli.rs",
+      "line": 12,
+      "command": "Command::new",
+      "content": "match Command::new(env!(\"CARGO_BIN_EXE_o3k\")).args(args).output() {",
+      "classification": "test/conformance"
+    },
+    {
+      "path": "bins/o3k/src/sys.rs",
+      "line": 116,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"systemctl\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/sys.rs",
+      "line": 148,
+      "command": "virsh",
+      "content": "\"virsh\",",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/sys.rs",
+      "line": 178,
+      "command": "Command::new",
+      "content": "let mut run = Command::new(\"runuser\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/sys.rs",
+      "line": 182,
+      "command": "Command::new",
+      "content": "let mut run = Command::new(\"sudo\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/sys.rs",
+      "line": 183,
+      "command": "virsh",
+      "content": "run.args([\"-u\", user, \"--\", \"virsh\", \"-c\", \"qemu:///system\", \"uri\"]);",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/sys.rs",
+      "line": 206,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"virsh\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/sys.rs",
+      "line": 225,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"virsh\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/sys.rs",
+      "line": 248,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"ip\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/sys.rs",
+      "line": 279,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"df\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/sys.rs",
+      "line": 634,
+      "command": "virsh",
+      "content": "\"virsh\",",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/checks/libvirt.rs",
+      "line": 256,
+      "command": "sudo",
+      "content": "assert!(check.summary.contains(\"sudo\"));",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/upgrade/runner.rs",
+      "line": 159,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"curl\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/upgrade/runner.rs",
+      "line": 168,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"curl\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/upgrade/runner.rs",
+      "line": 202,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"tar\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/upgrade/runner.rs",
+      "line": 221,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"tar\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/upgrade/runner.rs",
+      "line": 460,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"systemctl\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/upgrade/runner.rs",
+      "line": 491,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"systemctl\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k/src/upgrade/runner.rs",
+      "line": 547,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"o3k\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k-compute/src/main.rs",
+      "line": 2067,
+      "command": "std::process::Command",
+      "content": "match std::process::Command::new(\"hostname\").arg(\"-I\").output() {",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k-compute/src/main.rs",
+      "line": 2104,
+      "command": "std::process::Command",
+      "content": "let mut command = std::process::Command::new(\"sudo\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k-compute/src/main.rs",
+      "line": 2108,
+      "command": "std::process::Command",
+      "content": "std::process::Command::new(\"iscsiadm\")",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k-compute/src/main.rs",
+      "line": 3528,
+      "command": "std::process::Command",
+      "content": "let child = std::process::Command::new(\"sh\")",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k-compute/src/main.rs",
+      "line": 3670,
+      "command": "std::process::Command",
+      "content": "let mut dead = std::process::Command::new(\"sh\")",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k-compute/src/main.rs",
+      "line": 3678,
+      "command": "std::process::Command",
+      "content": "let mut foreign = std::process::Command::new(\"sleep\").arg(\"300\").spawn()?;",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k-compute/src/main.rs",
+      "line": 3782,
+      "command": "std::process::Command",
+      "content": "let mut victim = std::process::Command::new(\"sleep\").arg(\"60\").spawn()?;",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k-compute/src/main.rs",
+      "line": 3809,
+      "command": "std::process::Command",
+      "content": "std::process::Command::new(\"sh\")",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3k-compute/src/main.rs",
+      "line": 3844,
+      "command": "std::process::Command",
+      "content": "let mut watcher = std::process::Command::new(\"sh\")",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "bins/o3kd/tests/shutdown.rs",
+      "line": 16,
+      "command": "Command::new",
+      "content": "let mut child = Command::new(env!(\"CARGO_BIN_EXE_o3kd\"))",
+      "classification": "test/conformance"
+    },
+    {
+      "path": "bins/o3kd/tests/shutdown.rs",
+      "line": 58,
+      "command": "Command::new",
+      "content": "let signal_status = Command::new(\"kill\")",
+      "classification": "test/conformance"
+    },
+    {
+      "path": "crates/o3k-config-drive/src/lib.rs",
+      "line": 117,
+      "command": "Command::new",
+      "content": "let status = Command::new(program).args(args).status()?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-image/src/lib.rs",
+      "line": 151,
+      "command": "qemu-img",
+      "content": "Self::open_with_qemu_img(root, max_bytes, Path::new(\"qemu-img\"))",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "crates/o3k-image/src/lib.rs",
+      "line": 1063,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(setpriv);",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "crates/o3k-image/src/lib.rs",
+      "line": 2323,
+      "command": "qemu-img",
+      "content": "let fake_qemu = fake_bin.join(\"qemu-img\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "crates/o3k-image/src/lib.rs",
+      "line": 2388,
+      "command": "qemu-img",
+      "content": "let fake_qemu = fake_bin.join(\"qemu-img\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "crates/o3k-image/src/lib.rs",
+      "line": 2415,
+      "command": "qemu-img",
+      "content": "let fake_qemu = fake_bin.join(\"qemu-img\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "crates/o3k-image/src/lib.rs",
+      "line": 2473,
+      "command": "qemu-img",
+      "content": "let fake_qemu = path.join(\"qemu-img\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "crates/o3k-image/src/lib.rs",
+      "line": 2509,
+      "command": "qemu-img",
+      "content": "let fake_qemu = fake_bin.join(\"qemu-img\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "crates/o3k-image/src/lib.rs",
+      "line": 2574,
+      "command": "qemu-img",
+      "content": "let fake_qemu = fake_bin.join(\"qemu-img\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "crates/o3k-image/src/lib.rs",
+      "line": 3052,
+      "command": "qemu-img",
+      "content": "let fake_qemu = fake_bin.join(\"qemu-img\");",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "crates/o3k-image/src/lib.rs",
+      "line": 3125,
+      "command": "std::process::Command",
+      "content": "let mut child = std::process::Command::new(std::env::current_exe()?)",
+      "classification": "candidate architectural leakage"
+    },
+    {
+      "path": "crates/o3k-provider/src/lib.rs",
+      "line": 1358,
+      "command": "rbd",
+      "content": "device.driver_volume_type = \"rbd\".to_owned();",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/lib.rs",
+      "line": 7421,
+      "command": "rbd",
+      "content": "device.driver_volume_type = \"rbd\".to_owned();",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 124,
+      "command": "Command::new",
+      "content": "Command::new(program).args(args).output(),",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 271,
+      "command": "rbd",
+      "content": "let info = self.run(\"rbd\", info_args).await?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 284,
+      "command": "rbd",
+      "content": "let metadata = self.run(\"rbd\", meta_args).await?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 312,
+      "command": "rbd",
+      "content": "let output = self.checked(\"rbd\", args).await?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 326,
+      "command": "df",
+      "content": "args.extend([\"df\".to_owned(), \"--format\".to_owned(), \"json\".to_owned()]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 327,
+      "command": "ceph",
+      "content": "let output = self.checked(\"ceph\", args).await?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 369,
+      "command": "rbd",
+      "content": "self.checked(\"rbd\", args).await?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 378,
+      "command": "rbd",
+      "content": "self.checked(\"rbd\", metadata).await?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 397,
+      "command": "rbd",
+      "content": "self.checked(\"rbd\", args).await?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 429,
+      "command": "rbd",
+      "content": "let output = self.checked(\"rbd\", args).await?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 464,
+      "command": "rbd",
+      "content": "let output = self.checked(\"rbd\", args).await?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 494,
+      "command": "rbd",
+      "content": "let output = self.run(\"rbd\", args).await?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 532,
+      "command": "rbd",
+      "content": "self.checked(\"rbd\", args).await?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 561,
+      "command": "rbd",
+      "content": "self.checked(\"rbd\", args).await?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 373,
+      "command": "Command::new",
+      "content": "let output = Command::new(program)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 519,
+      "command": "vgs",
+      "content": "\"vgs\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 544,
+      "command": "lvs",
+      "content": "\"lvs\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 583,
+      "command": "lvs",
+      "content": "\"lvs\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 662,
+      "command": "lvcreate",
+      "content": "\"lvcreate\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 708,
+      "command": "lvremove",
+      "content": "\"lvremove\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 796,
+      "command": "lvcreate",
+      "content": "\"lvcreate\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 826,
+      "command": "lvs",
+      "content": "\"lvs\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 855,
+      "command": "lvremove",
+      "content": "\"lvremove\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 1058,
+      "command": "lvs",
+      "content": "assert_eq!(parse_lvs(lvs).expect(\"lvs\")[0].tags.len(), 2);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 1061,
+      "command": "vgs",
+      "content": "assert_eq!(parse_vgs(vgs).expect(\"vgs\")[0].free_bytes, 4000);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-cinder/tests/gate_a_identity.rs",
+      "line": 261,
+      "command": "ip",
+      "content": ".body(Body::from(json!({\"attachment\": {\"connector\": {\"host\": \"c\", \"ip\": \"10.0.0.5\", \"platform\": \"x86_64\", \"os_type\": \"linux\", \"multipath\": false}}}).to_string()))?;",
+      "classification": "test/conformance"
+    },
+    {
+      "path": "crates/o3k-dhcp/src/lib.rs",
+      "line": 223,
+      "command": "Command::new",
+      "content": "Command::new(\"kill\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-dhcp/src/lib.rs",
+      "line": 232,
+      "command": "Command::new",
+      "content": "Command::new(\"kill\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-dhcp/src/lib.rs",
+      "line": 250,
+      "command": "Command::new",
+      "content": "let mut probe = Command::new(binary)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-dhcp/src/lib.rs",
+      "line": 280,
+      "command": "Command::new",
+      "content": "let mut child = Command::new(binary)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-smoke.rs",
+      "line": 88,
+      "command": "Command::new",
+      "content": "let geneve = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-smoke.rs",
+      "line": 93,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-smoke.rs",
+      "line": 109,
+      "command": "Command::new",
+      "content": "let transport = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-smoke.rs",
+      "line": 114,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-smoke.rs",
+      "line": 127,
+      "command": "Command::new",
+      "content": "let attachments = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-smoke.rs",
+      "line": 132,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-smoke.rs",
+      "line": 137,
+      "command": "bridge",
+      "content": "\"bridge\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-smoke.rs",
+      "line": 145,
+      "command": "Command::new",
+      "content": "let realm_attachment = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-smoke.rs",
+      "line": 146,
+      "command": "ip",
+      "content": ".args([\"netns\", \"exec\", \"o3k-r-00000000\", \"ip\", \"link\", \"show\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-smoke.rs",
+      "line": 153,
+      "command": "Command::new",
+      "content": "let local_tap = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-smoke.rs",
+      "line": 160,
+      "command": "Command::new",
+      "content": "let gateway = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-smoke.rs",
+      "line": 165,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 21,
+      "command": "Command::new",
+      "content": "let status = Command::new(program).args(args).status()?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 31,
+      "command": "ip",
+      "content": "run(\"ip\", &command)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 35,
+      "command": "Command::new",
+      "content": "let _ = Command::new(\"ip\").args([\"netns\", \"del\", GUEST_NS]).output();",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 36,
+      "command": "Command::new",
+      "content": "let _ = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 39,
+      "command": "Command::new",
+      "content": "let _ = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 42,
+      "command": "Command::new",
+      "content": "let _ = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 59,
+      "command": "Command::new",
+      "content": "let uid = Command::new(\"id\").args([\"-u\"]).output()?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 71,
+      "command": "Command::new",
+      "content": "if Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 132,
+      "command": "ip",
+      "content": "run(\"ip\", &[\"netns\", \"add\", GUEST_NS])?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 133,
+      "command": "ip",
+      "content": "run(\"ip\", &[\"netns\", \"add\", CLIENT_NS])?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 135,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 141,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 155,
+      "command": "ip",
+      "content": "run(\"ip\", &[\"link\", \"set\", GUEST_ROOT, \"up\"])?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 156,
+      "command": "ip",
+      "content": "run(\"ip\", &[\"link\", \"set\", CLIENT_ROOT, \"up\"])?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 157,
+      "command": "ip",
+      "content": "ns(GUEST_NS, &[\"ip\", \"link\", \"set\", \"lo\", \"up\"])?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 160,
+      "command": "ip",
+      "content": "&[\"ip\", \"link\", \"set\", \"eth0\", \"address\", guest_mac],",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 162,
+      "command": "ip",
+      "content": "ns(GUEST_NS, &[\"ip\", \"link\", \"set\", \"eth0\", \"up\"])?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 165,
+      "command": "ip",
+      "content": "&[\"ip\", \"addr\", \"add\", \"10.250.2.11/24\", \"dev\", \"eth0\"],",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 169,
+      "command": "ip",
+      "content": "&[\"ip\", \"route\", \"replace\", \"default\", \"via\", \"10.250.2.1\"],",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 171,
+      "command": "ip",
+      "content": "ns(CLIENT_NS, &[\"ip\", \"link\", \"set\", \"lo\", \"up\"])?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 172,
+      "command": "ip",
+      "content": "ns(CLIENT_NS, &[\"ip\", \"link\", \"set\", \"eth0\", \"up\"])?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 175,
+      "command": "ip",
+      "content": "&[\"ip\", \"addr\", \"add\", \"203.0.113.2/24\", \"dev\", \"eth0\"],",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 178,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 184,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 194,
+      "command": "ip",
+      "content": "run(\"ip\", &[\"addr\", \"add\", \"203.0.113.1/24\", \"dev\", CLIENT_ROOT])?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+      "line": 205,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1494,
+      "command": "std::process::Command",
+      "content": "let add = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1590,
+      "command": "std::process::Command",
+      "content": "let _ = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1601,
+      "command": "std::process::Command",
+      "content": "let add = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1722,
+      "command": "std::process::Command",
+      "content": "let listing = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1727,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1730,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1766,
+      "command": "std::process::Command",
+      "content": "let _ = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/execution.rs",
+      "line": 654,
+      "command": "ip",
+      "content": "|ip: &str, length| Ipv4Prefix::new(ip.parse().expect(\"ip\"), length).expect(\"prefix\");",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 179,
+      "command": "Command::new",
+      "content": "let output = Command::new(program).args(args).output()?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 187,
+      "command": "Command::new",
+      "content": "Ok(Command::new(program).args(args).status()?.success())",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 191,
+      "command": "Command::new",
+      "content": "let output = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 193,
+      "command": "ip",
+      "content": "\"netns\", \"exec\", namespace, \"nft\", \"list\", \"table\", \"ip\", table,",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 348,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 350,
+      "command": "ip",
+      "content": "\"netns\", \"exec\", namespace, \"nft\", \"delete\", \"table\", \"ip\", &table,",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 363,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 368,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 371,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 404,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"netns\", \"exec\", namespace, \"true\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 414,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"netns\", \"add\", namespace])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 424,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 474,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"link\", \"show\", \"dev\", &realm_if])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 494,
+      "command": "ip",
+      "content": ".run(\"ip\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 498,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"link\", \"set\", &gateway_if, \"netns\", namespace])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 502,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"link\", \"set\", &realm_if, \"master\", &context.bridge])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 506,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"link\", \"set\", &realm_if, \"up\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 522,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 527,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 539,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 544,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 560,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 565,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 576,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 581,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 629,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 634,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 668,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 673,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 716,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 719,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 737,
+      "command": "ip",
+      "content": ".run(\"ip\", &chain_args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 743,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 745,
+      "command": "ip",
+      "content": "\"netns\", \"exec\", namespace, \"nft\", \"list\", \"chain\", \"ip\", &table, chain,",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 767,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 769,
+      "command": "ip",
+      "content": "\"netns\", \"exec\", namespace, \"nft\", \"list\", \"chain\", \"ip\", &table, chain,",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 782,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 787,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 790,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 793,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 822,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 827,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 830,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 840,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 845,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 848,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 907,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"link\", \"show\", \"dev\", &realm_if])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 912,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"link\", \"del\", \"dev\", &realm_if])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 955,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 960,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 981,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 986,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1003,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1008,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1049,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1054,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1077,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1082,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1099,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1104,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1199,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1201,
+      "command": "ip",
+      "content": "\"netns\", \"exec\", &namespace, \"nft\", \"list\", \"table\", \"ip\", &table,",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1276,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"netns\", \"exec\", &namespace, \"true\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1297,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"link\", \"show\", \"dev\", &realm_if])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1433,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"link\", \"show\", \"dev\", &realm_if])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1438,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"link\", \"del\", \"dev\", &realm_if])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1451,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1453,
+      "command": "ip",
+      "content": "\"netns\", \"exec\", &namespace, \"nft\", \"list\", \"table\", \"ip\", &table,",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1461,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1463,
+      "command": "ip",
+      "content": "\"netns\", \"exec\", &namespace, \"nft\", \"delete\", \"table\", \"ip\", &table,",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1474,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"netns\", \"exec\", &namespace, \"true\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1479,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"netns\", \"delete\", &namespace])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1523,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"netns\", \"exec\", &namespace, \"true\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1535,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"netns\", \"exec\", &namespace, \"true\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1557,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"netns\", \"exec\", &namespace, \"true\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1568,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"link\", \"show\", \"dev\", &realm_if])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1602,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1603,
+      "command": "ip",
+      "content": "&[\"netns\", \"exec\", &namespace, \"ip\", \"route\", \"show\", &prefix],",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1637,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1642,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1672,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1675,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1681,
+      "command": "ip",
+      "content": ".output(\"ip\", &chain_args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2050,
+      "command": "Command::new",
+      "content": "Arc::new(FakeGatewayCommand::new(false, false)),",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2058,
+      "command": "Command::new",
+      "content": "Arc::new(FakeGatewayCommand::new(true, true)),",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2095,
+      "command": "Command::new",
+      "content": "let command = Arc::new(FakeGatewayCommand::new(false, false));",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2124,
+      "command": "Command::new",
+      "content": "Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2181,
+      "command": "bridge",
+      "content": "assert!(ip(&[\"link\", \"add\", &bridge_a, \"type\", \"bridge\"]));",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2182,
+      "command": "bridge",
+      "content": "assert!(ip(&[\"link\", \"add\", &bridge_b, \"type\", \"bridge\"]));",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2206,
+      "command": "ip",
+      "content": "\"netns\", \"exec\", realm_ns, \"ip\", \"link\", \"set\", interface, \"up\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2252,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2263,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2296,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2307,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2314,
+      "command": "Command::new",
+      "content": "let listener = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2326,
+      "command": "Command::new",
+      "content": "let connection = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2359,
+      "command": "Command::new",
+      "content": "let listener = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2371,
+      "command": "Command::new",
+      "content": "let blocked = Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 342,
+      "command": "std::process::Command",
+      "content": "let output = std::process::Command::new(program).args(args).output()?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 350,
+      "command": "std::process::Command",
+      "content": "Ok(std::process::Command::new(program)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 467,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"-4\", \"addr\", \"show\", \"dev\", &self.uplink])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 487,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 504,
+      "command": "ip",
+      "content": ".run(\"nft\", &[\"delete\", \"table\", \"ip\", PUBLIC_TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 521,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 531,
+      "command": "nft",
+      "content": ".run(\"nft\", &table_args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 539,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 558,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 579,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 589,
+      "command": "nft",
+      "content": ".run(\"nft\", &prerouting)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 593,
+      "command": "nft",
+      "content": ".run(\"nft\", &postrouting)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 609,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 613,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 618,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 632,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 636,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 639,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 706,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"-4\", \"addr\", \"show\", \"dev\", &self.uplink])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 734,
+      "command": "ip",
+      "content": ".run(\"nft\", &[\"delete\", \"table\", \"ip\", PUBLIC_TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 742,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 752,
+      "command": "nft",
+      "content": ".run(\"nft\", &table_args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 760,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 779,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 800,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 810,
+      "command": "nft",
+      "content": ".run(\"nft\", &prerouting)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 814,
+      "command": "nft",
+      "content": ".run(\"nft\", &postrouting)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 827,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 831,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 836,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 850,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 854,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 857,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 880,
+      "command": "ip",
+      "content": ".output(\"nft\", &[\"list\", \"table\", \"ip\", PUBLIC_TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 891,
+      "command": "ip",
+      "content": ".output(\"nft\", &[\"list\", \"table\", \"ip\", PUBLIC_TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 899,
+      "command": "ip",
+      "content": ".run(\"nft\", &[\"delete\", \"table\", \"ip\", PUBLIC_TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 906,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"-4\", \"addr\", \"show\", \"dev\", &self.uplink])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 917,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 938,
+      "command": "ip",
+      "content": ".output(\"nft\", &[\"list\", \"table\", \"ip\", PUBLIC_TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1044,
+      "command": "nft",
+      "content": "if program == \"nft\" {",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1272,
+      "command": "ip",
+      "content": ".any(|call| call == &[\"nft\", \"delete\", \"table\", \"ip\", PUBLIC_TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1276,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1279,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1290,
+      "command": "ip",
+      "content": ".any(|call| { call == &[\"ip\", \"addr\", \"add\", \"198.51.100.2/32\", \"dev\", \"eth0\"] })",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1525,
+      "command": "ip",
+      "content": ".any(|call| { call == &[\"ip\", \"addr\", \"del\", \"198.51.100.2/32\", \"dev\", \"eth0\"] })",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 49,
+      "command": "Command::new",
+      "content": "let output = Command::new(program).args(args).output()?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 57,
+      "command": "Command::new",
+      "content": "Ok(Command::new(program).args(args).status()?.success())",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 149,
+      "command": "ip",
+      "content": ".output(\"nft\", &[\"list\", \"table\", \"ip\", TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 195,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 217,
+      "command": "ip",
+      "content": ".output(\"nft\", &[\"list\", \"table\", \"ip\", TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 228,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 254,
+      "command": "ip",
+      "content": ".output(\"nft\", &[\"list\", \"table\", \"ip\", TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 263,
+      "command": "ip",
+      "content": ".run(\"nft\", &[\"delete\", \"table\", \"ip\", TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 272,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"route\", \"del\", &route, \"dev\", &ownership.bridge])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 294,
+      "command": "ip",
+      "content": ".output(\"nft\", &[\"list\", \"table\", \"ip\", TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 303,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 307,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 323,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 327,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 350,
+      "command": "ip",
+      "content": ".output(\"nft\", &[\"list\", \"chain\", \"ip\", TABLE, CHAIN])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 359,
+      "command": "ip",
+      "content": ".output(\"nft\", &[\"list\", \"chain\", \"ip\", TABLE, CHAIN])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 367,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 371,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 374,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 487,
+      "command": "ip",
+      "content": "if program == \"ip\"",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 523,
+      "command": "Command::new",
+      "content": "let command = Arc::new(FakeCommand::new((false, \"\")));",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 536,
+      "command": "Command::new",
+      "content": "let command = Arc::new(FakeCommand::new((false, \"\")));",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 554,
+      "command": "Command::new",
+      "content": "let command = Arc::new(FakeCommand::new((false, \"\")));",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 578,
+      "command": "Command::new",
+      "content": "let command = Arc::new(FakeCommand::new((",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 599,
+      "command": "Command::new",
+      "content": "let command = Arc::new(FakeCommand::new((false, \"\")));",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 621,
+      "command": "Command::new",
+      "content": "let command = Arc::new(FakeCommand::new((false, \"\")));",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 654,
+      "command": "Command::new",
+      "content": "let command = Arc::new(FakeCommand::new((false, \"\")));",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 73,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"ip\");",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 74,
+      "command": "nft",
+      "content": "command.args([\"netns\", \"exec\", namespace, \"nft\"]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 77,
+      "command": "Command::new",
+      "content": "Command::new(\"nft\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 88,
+      "command": "Command::new",
+      "content": "let mut command = Command::new(\"ip\");",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 89,
+      "command": "nft",
+      "content": "command.args([\"netns\", \"exec\", namespace, \"nft\"]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 92,
+      "command": "Command::new",
+      "content": "Command::new(\"nft\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 311,
+      "command": "ip",
+      "content": ".run(&[\"delete\", \"table\", \"ip\", TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 321,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 339,
+      "command": "ip",
+      "content": "\"add\", \"chain\", \"ip\", TABLE, CHAIN, \"{\", \"type\", \"filter\", \"hook\", \"forward\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 351,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 369,
+      "command": "ip",
+      "content": "let mut args = vec![\"add\", \"rule\", \"ip\", TABLE, CHAIN];",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 380,
+      "command": "ip",
+      "content": "args.extend([\"ip\", \"daddr\"]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 383,
+      "command": "ip",
+      "content": "args.extend([\"ip\", \"saddr\"]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 388,
+      "command": "ip",
+      "content": "args.extend([\"ip\", \"saddr\"]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 390,
+      "command": "ip",
+      "content": "args.extend([\"ip\", \"daddr\"]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 418,
+      "command": "ip",
+      "content": "let mut args = vec![\"add\", \"rule\", \"ip\", TABLE, CHAIN];",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 420,
+      "command": "ip",
+      "content": "args.extend([\"ip\", \"daddr\", &endpoint_value, \"drop\", \"comment\", MARKER]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 431,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 434,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 546,
+      "command": "ip",
+      "content": ".output(&[\"list\", \"table\", \"ip\", TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 588,
+      "command": "ip",
+      "content": ".output(&[\"list\", \"table\", \"ip\", TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 643,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 663,
+      "command": "ip",
+      "content": ".output(&[\"list\", \"table\", \"ip\", TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 672,
+      "command": "ip",
+      "content": ".run(&[\"delete\", \"table\", \"ip\", TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 715,
+      "command": "ip",
+      "content": ".output(&[\"list\", \"table\", \"ip\", TABLE])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 948,
+      "command": "std::process::Command",
+      "content": "let status = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 949,
+      "command": "ip",
+      "content": ".args([\"netns\", \"exec\", target, \"ip\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 956,
+      "command": "std::process::Command",
+      "content": "let add = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 964,
+      "command": "std::process::Command",
+      "content": "let _ = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1033,
+      "command": "std::process::Command",
+      "content": "let forwarding = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1115,
+      "command": "std::process::Command",
+      "content": "let mut server = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1129,
+      "command": "std::process::Command",
+      "content": "let client = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1160,
+      "command": "std::process::Command",
+      "content": "let mut server = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1174,
+      "command": "std::process::Command",
+      "content": "let client = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1237,
+      "command": "std::process::Command",
+      "content": "let mut server = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1251,
+      "command": "std::process::Command",
+      "content": "let client = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1290,
+      "command": "std::process::Command",
+      "content": "let mut established_server_process = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1304,
+      "command": "std::process::Command",
+      "content": "let mut established_client_process = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1341,
+      "command": "std::process::Command",
+      "content": "let mut new_flow_server = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1355,
+      "command": "std::process::Command",
+      "content": "let new_flow_client = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1406,
+      "command": "std::process::Command",
+      "content": "let mut listener = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1420,
+      "command": "std::process::Command",
+      "content": "let egress_client_result = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1444,
+      "command": "std::process::Command",
+      "content": "let mut server = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1458,
+      "command": "std::process::Command",
+      "content": "let client = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1482,
+      "command": "std::process::Command",
+      "content": "let mut server = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1496,
+      "command": "std::process::Command",
+      "content": "let client = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1520,
+      "command": "std::process::Command",
+      "content": "let mut server = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1534,
+      "command": "std::process::Command",
+      "content": "let client = std::process::Command::new(\"ip\")",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1772,
+      "command": "ip",
+      "content": ".any(|window| window == [\"ip\", \"daddr\", \"10.0.0.2\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1776,
+      "command": "ip",
+      "content": ".any(|window| window == [\"ip\", \"saddr\", \"10.0.0.2\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 913,
+      "command": "Command::new",
+      "content": "let output = Command::new(\"ip\").args(args).output()?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 921,
+      "command": "Command::new",
+      "content": "Ok(Command::new(\"ip\").args(args).status()?.success())",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1029,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1063,
+      "command": "bridge",
+      "content": "vec![\"link\", \"add\", \"name\", &temp, \"type\", \"bridge\"],",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1082,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1106,
+      "command": "bridge",
+      "content": "vec![\"link\", \"add\", \"name\", &temp, \"type\", \"bridge\"],",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1117,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1167,
+      "command": "bridge",
+      "content": "vec![\"link\", \"add\", \"name\", &bridge_temp, \"type\", \"bridge\"],",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1196,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1223,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1283,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1320,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1357,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([Response::output(",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1399,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1441,
+      "command": "Command::new",
+      "content": "let reopened_command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1549,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1681,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1747,
+      "command": "Command::new",
+      "content": "let first = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1785,
+      "command": "Command::new",
+      "content": "let reopened_command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1898,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1970,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1995,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2113,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new(responses);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2173,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2233,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2293,
+      "command": "Command::new",
+      "content": "let command = FakeNetworkCommand::new([Response::output(",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2769,
+      "command": "bridge",
+      "content": "self.run_ip([\"link\", \"add\", \"name\", &temp_name, \"type\", \"bridge\"])?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 18,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 23,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 32,
+      "command": "ip",
+      "content": "let _ = self.command.run(\"ip\", &[\"link\", \"del\", \"o3k-u\"]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 35,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"netns\", \"del\", &self.config.fabric_namespace]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 45,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 55,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 77,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"netns\", \"add\", &self.config.fabric_namespace])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 82,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 95,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 112,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 132,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 137,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 148,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 153,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 167,
+      "command": "ip",
+      "content": "let _ = self.command.run(\"ip\", &[\"link\", \"del\", \"o3k-u\"]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 171,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 180,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 192,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"link\", \"set\", \"o3k-u\", \"up\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 197,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 202,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 213,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 218,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 230,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 237,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 242,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 260,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 272,
+      "command": "iptables",
+      "content": "\"iptables\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 287,
+      "command": "iptables",
+      "content": "\"iptables\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 349,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 388,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 412,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 417,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 452,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"netns\", \"exec\", &fabric.namespace, \"true\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 458,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 463,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 475,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 480,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 491,
+      "command": "ip",
+      "content": "let _ = self.command.run(\"ip\", &[\"link\", \"del\", \"o3k-u\"]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 493,
+      "command": "iptables",
+      "content": "\"iptables\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 539,
+      "command": "iptables",
+      "content": "let _ = self.command.run(\"iptables\", &rule);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+      "line": 541,
+      "command": "ip",
+      "content": "let _ = self.command.run(\"ip\", &[\"netns\", \"del\", &fabric.namespace]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 39,
+      "command": "ip",
+      "content": ".output(\"nft\", &[\"list\", \"table\", \"ip\", &root_table])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 47,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 52,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 55,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 95,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 106,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 118,
+      "command": "ip",
+      "content": ".run(\"ip\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 150,
+      "command": "ip",
+      "content": ".run(\"ip\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 171,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"rule\", \"list\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 178,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 195,
+      "command": "ip",
+      "content": ".run(\"nft\", &[\"delete\", \"table\", \"ip\", &root_table])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 204,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 209,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 212,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 225,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 236,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 255,
+      "command": "nft",
+      "content": ".run(\"nft\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 270,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 274,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 279,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 300,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 303,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 315,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 318,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 338,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 341,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 360,
+      "command": "ip",
+      "content": ".run(\"ip\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 382,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 385,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 388,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 401,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 404,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 409,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 421,
+      "command": "ip",
+      "content": ".run(\"ip\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 436,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"link\", \"show\", \"dev\", &ownership.public_host_veth])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 441,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 446,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 481,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 491,
+      "command": "ip",
+      "content": ".run(\"ip\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 519,
+      "command": "ip",
+      "content": ".output(\"nft\", &[\"list\", \"table\", \"ip\", &root_table])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 527,
+      "command": "ip",
+      "content": ".run(\"nft\", &[\"delete\", \"table\", \"ip\", &root_table])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 536,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 539,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 544,
+      "command": "ip",
+      "content": ".output(\"ip\", &realm_list_args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 553,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 558,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 561,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 572,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 596,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 614,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 632,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"rule\", \"list\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 641,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 657,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"link\", \"show\", \"dev\", &current.public_host_veth])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+      "line": 662,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"link\", \"del\", &current.public_host_veth])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 75,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"link\", \"show\", \"dev\", &ownership.bridge])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 80,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"netns\", \"delete\", &ownership.namespace]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 88,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"netns\", \"exec\", &ownership.namespace, \"true\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 102,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"link\", \"show\", \"dev\", interface])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 112,
+      "command": "bridge",
+      "content": "vec![\"link\", \"add\", ownership.bridge.as_str(), \"type\", \"bridge\"],",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 167,
+      "command": "ip",
+      "content": ".run(\"ip\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 176,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 181,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 199,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 201,
+      "command": "ip",
+      "content": "\"netns\", \"exec\", namespace, \"ip\", \"link\", \"set\", interface, \"up\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 212,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 241,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 246,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 270,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"link\", \"set\", \"dev\", interface, \"mtu\", &tenant_mtu])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 296,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 298,
+      "command": "ip",
+      "content": "\"netns\", \"exec\", namespace, \"ip\", \"link\", \"set\", \"dev\", interface, \"mtu\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 323,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 328,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 340,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 345,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 361,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 366,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 428,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"-d\", \"link\", \"show\", \"dev\", &wanted.interface])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 471,
+      "command": "ip",
+      "content": ".run(\"ip\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 500,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"-d\", \"link\", \"show\", \"dev\", &tap.interface])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+      "line": 508,
+      "command": "ip",
+      "content": ".run(\"ip\", &[\"link\", \"del\", \"dev\", &tap.interface])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 59,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 64,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 80,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 85,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 115,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 120,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 165,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 170,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 183,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 188,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 212,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 224,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 235,
+      "command": "ip",
+      "content": ".run(\"ip\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 244,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 249,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 289,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 294,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 302,
+      "command": "bridge",
+      "content": "if bridge_exists && !bridge_output.contains(\"bridge\") {",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 309,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 314,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 319,
+      "command": "bridge",
+      "content": "\"bridge\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 331,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 342,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 353,
+      "command": "ip",
+      "content": ".run(\"ip\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 362,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 367,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 381,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 386,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 402,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 418,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 425,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 437,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 449,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 460,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 472,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 484,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 494,
+      "command": "ip",
+      "content": ".run(\"ip\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 512,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 514,
+      "command": "bridge",
+      "content": "\"netns\", \"exec\", fabric_ns, \"bridge\", \"fdb\", \"replace\", mac, \"dev\", device,",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 534,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 539,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 548,
+      "command": "bridge",
+      "content": "if exists && !output.contains(\"bridge\") {",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 555,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 560,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 577,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 582,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 595,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 600,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 612,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+      "line": 617,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 26,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 28,
+      "command": "ip",
+      "content": "\"netns\", \"exec\", namespace, \"nft\", \"list\", \"table\", \"ip\", &table,",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 44,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 46,
+      "command": "ip",
+      "content": "\"netns\", \"exec\", namespace, \"nft\", \"delete\", \"table\", \"ip\", &table,",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 59,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 62,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 74,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 77,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 97,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 100,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 113,
+      "command": "ip",
+      "content": ".run(\"ip\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 131,
+      "command": "nft",
+      "content": "\"nft\".to_owned(),",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 134,
+      "command": "ip",
+      "content": "\"ip\".to_owned(),",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 140,
+      "command": "ip",
+      "content": "\"ip\".to_owned(),",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 146,
+      "command": "ip",
+      "content": "\"ip\".to_owned(),",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 154,
+      "command": "ip",
+      "content": "args.extend([\"ip\".to_owned(), \"saddr\".to_owned(), prefix]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 156,
+      "command": "ip",
+      "content": "args.extend([\"ip\".to_owned(), \"daddr\".to_owned(), prefix]);",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 178,
+      "command": "ip",
+      "content": ".run(\"ip\", &refs)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 195,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 198,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 201,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 211,
+      "command": "ip",
+      "content": ".run(\"ip\", &refs)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 220,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 223,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 226,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 236,
+      "command": "ip",
+      "content": ".run(\"ip\", &refs)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 259,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 264,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 267,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 279,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 284,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+      "line": 287,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 150,
+      "command": "Command::new",
+      "content": "let output = Command::new(program).args(args).output()?;",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 158,
+      "command": "Command::new",
+      "content": "Ok(Command::new(program).args(args).status()?.success())",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 345,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 350,
+      "command": "nft",
+      "content": "\"nft\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 353,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 440,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 445,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 463,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 468,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 487,
+      "command": "ip",
+      "content": "\"ip\",",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 500,
+      "command": "ip",
+      "content": ".run(\"ip\", &args)",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 520,
+      "command": "ip",
+      "content": ".output(\"ip\", &[\"netns\", \"exec\", &ownership.namespace, \"true\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 599,
+      "command": "ip",
+      "content": "prefix: Ipv4Prefix::new(\"10.40.1.0\".parse().expect(\"ip\"), 24).expect(\"prefix\"),",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 608,
+      "command": "ip",
+      "content": "fixed_ip: \"10.40.1.12\".parse().expect(\"ip\"),",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 702,
+      "command": "ip",
+      "content": "program == \"ip\"",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 719,
+      "command": "ip",
+      "content": "program == \"ip\"",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 736,
+      "command": "ip",
+      "content": "program == \"ip\"",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 743,
+      "command": "ip",
+      "content": "program == \"ip\"",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 744,
+      "command": "bridge",
+      "content": "&& args.contains(&\"bridge\".to_owned())",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 750,
+      "command": "ip",
+      "content": "program == \"ip\" && args.windows(2).any(|window| window == [\"mtu\", \"1400\"])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 776,
+      "command": "ip",
+      "content": "prog == \"ip\"",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 777,
+      "command": "bridge",
+      "content": "&& args.contains(&\"bridge\".to_owned())",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 818,
+      "command": "ip",
+      "content": "Ipv4Prefix::new(\"192.0.2.0\".parse().expect(\"ip\"), 24).expect(\"prefix\"),",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 829,
+      "command": "ip",
+      "content": "program == \"ip\"",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 832,
+      "command": "ip",
+      "content": ".any(|window| window == [\"nft\", \"add\", \"table\", \"ip\", table.as_str()])",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 835,
+      "command": "ip",
+      "content": "program == \"ip\"",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 924,
+      "command": "ip",
+      "content": "public_address: \"203.0.113.10\".parse().expect(\"ip\"),",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 932,
+      "command": "ip",
+      "content": "program == \"ip\"",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 937,
+      "command": "ip",
+      "content": "program == \"ip\"",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 942,
+      "command": "nft",
+      "content": "program == \"nft\"",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 949,
+      "command": "ip",
+      "content": "vec![\"203.0.113.10\".parse::<Ipv4Addr>().expect(\"ip\")]",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 1009,
+      "command": "ip",
+      "content": "program == \"ip\"",
+      "classification": "domain-owned execution adapter"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 180,
+      "command": "Command::new",
+      "content": "let dump_output = Command::new(\"pg_dump\")",
+      "classification": "test/conformance"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 196,
+      "command": "Command::new",
+      "content": "let _ = Command::new(\"psql\")",
+      "classification": "test/conformance"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 202,
+      "command": "Command::new",
+      "content": "let create_db = Command::new(\"psql\")",
+      "classification": "test/conformance"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 213,
+      "command": "Command::new",
+      "content": "let mut psql_child = Command::new(\"psql\")",
+      "classification": "test/conformance"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 289,
+      "command": "Command::new",
+      "content": "let _ = Command::new(\"psql\")",
+      "classification": "test/conformance"
+    }
+  ]
+}

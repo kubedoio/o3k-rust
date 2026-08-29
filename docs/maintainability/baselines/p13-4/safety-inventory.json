@@ -1,0 +1,6311 @@
+{
+  "workspace_unsafe_policy": "forbid (from workspace Cargo.toml)",
+  "production_unwrap": [
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2652,
+      "content": ".body(Body::from(serde_json::to_vec(&body).unwrap()))"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2700,
+      "content": "assert!(json[\"complete\"].as_bool().unwrap());"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2701,
+      "content": "let operation_id = json[\"operation_id\"].as_str().unwrap().to_owned();"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2702,
+      "content": "let resource_id = json[\"resource_id\"].as_str().unwrap().to_owned();"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2736,
+      "content": "assert!(first[\"complete\"].as_bool().unwrap());"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2821,
+      "content": ".get_resource(uuid::Uuid::parse_str(first_b[\"resource_id\"].as_str().unwrap()).unwrap())"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2842,
+      "content": "first_a[\"resource_id\"].as_str().unwrap()"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2855,
+      "content": "&format!(\"/operations/{}\", first_a[\"operation_id\"].as_str().unwrap()),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3055,
+      "content": ".body(Body::from(serde_json::to_vec(&body).unwrap()))"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3056,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3059,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3070,
+      "content": ".body(Body::from(serde_json::to_vec(&body).unwrap()))"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3071,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3074,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3085,
+      "content": ".body(Body::from(serde_json::to_vec(&body).unwrap()))"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3086,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3089,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3101,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3104,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3112,
+      "content": "let resource_id = created[\"resource_id\"].as_str().unwrap();"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3113,
+      "content": "let operation_id = created[\"operation_id\"].as_str().unwrap();"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3162,
+      "content": "let resource_id = json[\"resource_id\"].as_str().unwrap().to_owned();"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3176,
+      "content": "let operation_id = delete_json[\"operation_id\"].as_str().unwrap().to_owned();"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3177,
+      "content": "assert!(!delete_json[\"complete\"].as_bool().unwrap());"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3218,
+      "content": "let resource_id = json[\"resource_id\"].as_str().unwrap().to_owned();"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3272,
+      "content": "let resource_id = json[\"resource_id\"].as_str().unwrap().to_owned();"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3298,
+      "content": "assert_ne!(recreate[\"resource_id\"].as_str().unwrap(), resource_id);"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3299,
+      "content": "assert!(recreate[\"complete\"].as_bool().unwrap());"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 1863,
+      "content": "std::fs::create_dir(&directory).unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 1864,
+      "content": "std::fs::write(directory.join(\"bad.json\"), b\"not-json\").unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 1867,
+      "content": "std::fs::remove_dir_all(directory).unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 1931,
+      "content": "resource_type: ResourceType::new(\"compute\", \"server\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2027,
+      "content": "reg.register(valid_database_manifest()).unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2036,
+      "content": "resource_type: ResourceType::new(\"database\", \"instance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2064,
+      "content": "resource_type: ResourceType::new(\"network\", \"port\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2088,
+      "content": "reg.register(valid_database_manifest()).unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2093,
+      "content": "resource_type: ResourceType::new(\"database-2\", \"instance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2111,
+      "content": "reg.register(valid_database_manifest()).unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2126,
+      "content": "reg.register(valid_database_manifest()).unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2134,
+      "content": "resource_type: ResourceType::new(\"database\", \"instance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2152,
+      "content": "resource_type: ResourceType::new(\"other\", \"resource\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2196,
+      "content": "reg.seed_core().unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2210,
+      "content": "reg.seed_core().unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2215,
+      "content": "assert_eq!(svc.unwrap().namespace, *ns);"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2225,
+      "content": "reg.seed_core().unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2233,
+      "content": "resource_type: ResourceType::new(\"compute\", \"server\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2263,
+      "content": "reg.seed_core().unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2285,
+      "content": "resource_type: ResourceType::new(\"compute\", \"custom_resource\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2305,
+      "content": "reg.register(m).unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2498,
+      "content": "assert!(json[\"kind\"].as_str().unwrap().contains(':'));"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 3093,
+      "content": "reg.seed_core().unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 3103,
+      "content": "reg.seed_core().unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 3119,
+      "content": "reg.seed_core().unwrap();"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 3279,
+      "content": "resource_type: ResourceType::new(\"database\", format!(\"instance_{i}\")).unwrap(),"
+    },
+    {
+      "path": "crates/o3k-kernel/src/controller.rs",
+      "line": 398,
+      "content": "let json = serde_json::to_string(&outcome).unwrap();"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 905,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1056,
+      "content": "network_create: ActionId::new(\"network\", \"CreateNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1057,
+      "content": "network_observe: ActionId::new(\"network\", \"ReadNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1058,
+      "content": "network_delete: ActionId::new(\"network\", \"DeleteNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1059,
+      "content": "volume_create: ActionId::new(\"volume\", \"CreateVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1060,
+      "content": "volume_observe: ActionId::new(\"volume\", \"ReadVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1061,
+      "content": "volume_delete: ActionId::new(\"volume\", \"DeleteVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1062,
+      "content": "compute_create: ActionId::new(\"compute\", \"CreateServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1063,
+      "content": "compute_observe: ActionId::new(\"compute\", \"ReadServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1064,
+      "content": "compute_delete: ActionId::new(\"compute\", \"DeleteServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1068,
+      "content": "o3k_kernel::ScopeId::new(\"project-recovery\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1076,
+      "content": "action: ActionId::new(\"database\", \"CreateInstance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1086,
+      "content": "resource_type: o3k_kernel::ResourceType::new(\"database\", \"instance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1087,
+      "content": "resource_id: o3k_kernel::ResourceId::new(\"parent-recovery\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1130,
+      "content": "network_create: ActionId::new(\"network\", \"CreateNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1131,
+      "content": "network_observe: ActionId::new(\"network\", \"ReadNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1132,
+      "content": "network_delete: ActionId::new(\"network\", \"DeleteNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1133,
+      "content": "volume_create: ActionId::new(\"volume\", \"CreateVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1134,
+      "content": "volume_observe: ActionId::new(\"volume\", \"ReadVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1135,
+      "content": "volume_delete: ActionId::new(\"volume\", \"DeleteVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1136,
+      "content": "compute_create: ActionId::new(\"compute\", \"CreateServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1137,
+      "content": "compute_observe: ActionId::new(\"compute\", \"ReadServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1138,
+      "content": "compute_delete: ActionId::new(\"compute\", \"DeleteServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1142,
+      "content": "resource_type: o3k_kernel::ResourceType::new(\"database\", \"instance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1143,
+      "content": "resource_id: o3k_kernel::ResourceId::new(\"parent-1\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1147,
+      "content": "o3k_kernel::ScopeId::new(\"project-1\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1155,
+      "content": "action: ActionId::new(\"database\", \"CreateInstance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1179,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1191,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1192,
+      "content": "resource_id: o3k_kernel::ResourceId::new(\"parent-1\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1199,
+      "content": "o3k_kernel::ScopeId::new(\"project-1\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1212,
+      "content": "resource_type: o3k_kernel::ResourceType::new(\"database\", \"instance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1213,
+      "content": "resource_id: o3k_kernel::ResourceId::new(\"parent-1\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1220,
+      "content": "o3k_kernel::ScopeId::new(\"project-1\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1227,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1246,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1247,
+      "content": "resource_id: o3k_kernel::ResourceId::new(\"parent-1\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1254,
+      "content": "o3k_kernel::ScopeId::new(\"project-1\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1267,
+      "content": "referenced_state.network.as_mut().unwrap().ownership ="
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1274,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1275,
+      "content": "resource_id: o3k_kernel::ResourceId::new(\"parent-1\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1282,
+      "content": "o3k_kernel::ScopeId::new(\"project-1\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1303,
+      "content": "network_create: ActionId::new(\"network\", \"CreateNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1304,
+      "content": "network_observe: ActionId::new(\"network\", \"ReadNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1305,
+      "content": "network_delete: ActionId::new(\"network\", \"DeleteNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1306,
+      "content": "volume_create: ActionId::new(\"volume\", \"CreateVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1307,
+      "content": "volume_observe: ActionId::new(\"volume\", \"ReadVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1308,
+      "content": "volume_delete: ActionId::new(\"volume\", \"DeleteVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1309,
+      "content": "compute_create: ActionId::new(\"compute\", \"CreateServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1310,
+      "content": "compute_observe: ActionId::new(\"compute\", \"ReadServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1311,
+      "content": "compute_delete: ActionId::new(\"compute\", \"DeleteServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1315,
+      "content": "resource_type: o3k_kernel::ResourceType::new(\"database\", \"instance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1316,
+      "content": "resource_id: o3k_kernel::ResourceId::new(\"parent-failure\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1320,
+      "content": "o3k_kernel::ScopeId::new(\"project-failure\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1328,
+      "content": "action: ActionId::new(\"database\", \"CreateInstance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1368,
+      "content": "network_create: ActionId::new(\"network\", \"CreateNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1369,
+      "content": "network_observe: ActionId::new(\"network\", \"ReadNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1370,
+      "content": "network_delete: ActionId::new(\"network\", \"DeleteNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1371,
+      "content": "volume_create: ActionId::new(\"volume\", \"CreateVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1372,
+      "content": "volume_observe: ActionId::new(\"volume\", \"ReadVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1373,
+      "content": "volume_delete: ActionId::new(\"volume\", \"DeleteVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1374,
+      "content": "compute_create: ActionId::new(\"compute\", \"CreateServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1375,
+      "content": "compute_observe: ActionId::new(\"compute\", \"ReadServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1376,
+      "content": "compute_delete: ActionId::new(\"compute\", \"DeleteServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1380,
+      "content": "o3k_kernel::ScopeId::new(\"project-network-failure\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1388,
+      "content": "action: ActionId::new(\"database\", \"CreateInstance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1400,
+      "content": "resource_type: o3k_kernel::ResourceType::new(\"database\", \"instance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1401,
+      "content": "resource_id: o3k_kernel::ResourceId::new(\"parent-network-failure\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1429,
+      "content": "network_create: ActionId::new(\"network\", \"CreateNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1430,
+      "content": "network_observe: ActionId::new(\"network\", \"ReadNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1431,
+      "content": "network_delete: ActionId::new(\"network\", \"DeleteNetwork\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1432,
+      "content": "volume_create: ActionId::new(\"volume\", \"CreateVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1433,
+      "content": "volume_observe: ActionId::new(\"volume\", \"ReadVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1434,
+      "content": "volume_delete: ActionId::new(\"volume\", \"DeleteVolume\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1435,
+      "content": "compute_create: ActionId::new(\"compute\", \"CreateServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1436,
+      "content": "compute_observe: ActionId::new(\"compute\", \"ReadServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1437,
+      "content": "compute_delete: ActionId::new(\"compute\", \"DeleteServer\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1441,
+      "content": "o3k_kernel::ScopeId::new(\"project-compute-failure\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1449,
+      "content": "action: ActionId::new(\"database\", \"CreateInstance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1461,
+      "content": "resource_type: o3k_kernel::ResourceType::new(\"database\", \"instance\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1462,
+      "content": "resource_id: o3k_kernel::ResourceId::new(\"parent-compute-failure\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1063,
+      "content": "store.begin(&offer).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1076,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1087,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1089,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1126,
+      "content": "assert_eq!(std::fs::read(&resolved).unwrap(), content);"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1146,
+      "content": "store.begin(&offer).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1159,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1170,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1178,
+      "content": "let statuses = store.artifact_statuses(\"epoch-new\").unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1197,
+      "content": "store.begin(&offer).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1209,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1217,
+      "content": "let statuses = store.artifact_statuses(\"epoch-new\").unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1235,
+      "content": "store.begin(&offer).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1258,
+      "content": "store.artifact_statuses(\"epoch-new\").unwrap().is_empty(),"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1274,
+      "content": "store.begin(&offer).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1287,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1292,
+      "content": "let mut received = fs::read(&part).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1293,
+      "content": "let last = received.last_mut().unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1295,
+      "content": "fs::write(&part, received).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1324,
+      "content": "store.artifact_statuses(\"epoch-new\").unwrap().is_empty(),"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1352,
+      "content": "store.begin(offer).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1365,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1376,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1383,
+      "content": "let mut bytes = fs::read(&tampered_final).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1384,
+      "content": "let last = bytes.last_mut().unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1386,
+      "content": "fs::write(&tampered_final, bytes).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1388,
+      "content": "let statuses = store.artifact_statuses(\"epoch-new\").unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1409,
+      "content": "store.begin(&offer).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1422,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1429,
+      "content": "fs::rename(&part, &final_path).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1431,
+      "content": "let statuses = store.artifact_statuses(\"epoch-new\").unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1439,
+      "content": "let reopened = ArtifactStore::open(&root, \"agent-1\").unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1440,
+      "content": "let receipt = reopened.begin(&offer).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1456,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1458,
+      "content": "assert_eq!(fs::read(&final_path).unwrap(), content);"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1466,
+      "content": "store.begin(&offer).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1479,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1490,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1491,
+      "content": "assert_eq!(fs::read(receipt.path.unwrap()).unwrap(), content);"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1492,
+      "content": "let reopened = ArtifactStore::open(&root, \"agent-1\").unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1506,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1508,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1511,
+      "content": "fs::remove_dir_all(root).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1518,
+      "content": "store.begin(&offer).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1526,
+      "content": "store.accept_chunk(&offer, &chunk).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1535,
+      "content": "fs::remove_dir_all(root).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1542,
+      "content": "let path = resolve(&store, &query(&offer)).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1544,
+      "content": "assert_eq!(fs::read(path).unwrap(), content);"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1545,
+      "content": "fs::remove_dir_all(root).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1585,
+      "content": "fs::remove_dir_all(root).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1592,
+      "content": "fs::write(&path, b\"tampered\").unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1597,
+      "content": "fs::remove_dir_all(root).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1608,
+      "content": "fs::write(&outside, content).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1609,
+      "content": "fs::remove_file(&path).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1610,
+      "content": "symlink(&outside, &path).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1615,
+      "content": "fs::remove_file(&path).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1617,
+      "content": "let manifest = store.manifest_path(&offer.transfer_id).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1619,
+      "content": "fs::copy(&manifest, &foreign).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1620,
+      "content": "fs::remove_file(&manifest).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1621,
+      "content": "symlink(&foreign, &manifest).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1626,
+      "content": "fs::remove_file(&manifest).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1627,
+      "content": "fs::remove_file(&foreign).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1628,
+      "content": "fs::remove_file(&outside).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1629,
+      "content": "fs::remove_dir_all(root).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1636,
+      "content": "let reopened = ArtifactStore::open(&root, \"agent-1\").unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1637,
+      "content": "let path = resolve(&reopened, &query(&offer)).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1639,
+      "content": "assert_eq!(fs::read(path).unwrap(), content);"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1646,
+      "content": "store.begin(&offer).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1658,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1660,
+      "content": "let statuses = store.artifact_statuses(\"epoch-2\").unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1674,
+      "content": "fs::remove_dir_all(root).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1683,
+      "content": "store.begin(&offer).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1696,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1707,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1711,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1717,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1723,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1726,
+      "content": "fs::remove_dir_all(root).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1739,
+      "content": "store.begin(&offer).unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1752,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1763,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1768,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1771,
+      "content": "fs::remove_dir_all(root).unwrap();"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 67,
+      "content": "\"10.40.0.10\".parse().unwrap(),"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 76,
+      "content": "\"10.40.0.10\".parse().unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 103,
+      "content": "gateway_ip: Ipv4Addr::from_str(\"10.0.0.1\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 104,
+      "content": "allocation_start: Ipv4Addr::from_str(\"10.0.0.10\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 105,
+      "content": "allocation_end: Ipv4Addr::from_str(\"10.0.0.200\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 118,
+      "content": "fixed_ip: Ipv4Addr::from_str(\"10.0.0.55\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 265,
+      "content": "(ta.await.unwrap(), tb.await.unwrap())"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 622,
+      "content": "let outcomes = (ta.await.unwrap(), tb.await.unwrap());"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 666,
+      "content": "(ta.await.unwrap(), tb.await.unwrap())"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 856,
+      "content": "(ta.await.unwrap(), tb.await.unwrap())"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 200,
+      "content": "fixed_ip: \"10.0.0.10\".parse().unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 414,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 415,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 423,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 443,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 444,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 452,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 540,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 548,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 586,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 593,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 600,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1147,
+      "content": "assert_eq!(store.list_network_intents(&proj).await.unwrap().len(), 1);"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1166,
+      "content": "gateway_ip: Ipv4Addr::from_str(\"192.168.1.1\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1167,
+      "content": "allocation_start: Ipv4Addr::from_str(\"192.168.1.10\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1168,
+      "content": "allocation_end: Ipv4Addr::from_str(\"192.168.1.200\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1187,
+      "content": "fixed_ip: Ipv4Addr::from_str(\"192.168.1.50\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1352,
+      "content": "let key_servers = LimitKey::new(\"compute\", \"servers\").unwrap();"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1353,
+      "content": "let key_vcpus = LimitKey::new(\"compute\", \"vcpus\").unwrap();"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1592,
+      "content": "gateway_ip: Ipv4Addr::from_str(\"192.168.1.1\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1593,
+      "content": "allocation_start: Ipv4Addr::from_str(\"192.168.1.10\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1594,
+      "content": "allocation_end: Ipv4Addr::from_str(\"192.168.1.200\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1607,
+      "content": "fixed_ip: Ipv4Addr::from_str(\"192.168.1.50\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1623,
+      "content": "fixed_ip: Ipv4Addr::from_str(\"192.168.1.50\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1643,
+      "content": "fixed_ip: Ipv4Addr::from_str(\"192.168.1.51\").unwrap(),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1962,
+      "content": "let store = Arc::new(SqliteStore::connect(\"sqlite::memory:\").await.unwrap());"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1233,
+      "content": "let store = Arc::new(O3kStore::connect_sqlite_memory().await.unwrap());"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1256,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1281,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1288,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1313,
+      "content": "let first = workflow.attach(request.clone()).await.unwrap();"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1322,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1323,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1329,
+      "content": "let replay = workflow.attach(request).await.unwrap();"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1343,
+      "content": "let detached = workflow.detach(detach_request).await.unwrap();"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1351,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1352,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1376,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1381,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1382,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1386,
+      "content": "let result = workflow.reconcile(&command.command_id, 7).await.unwrap();"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1409,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1420,
+      "content": "let result = takeover.reconcile(&command.command_id, 8).await.unwrap();"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1424,
+      "content": "let recovered = store.get_agent_command(&command.command_id).await.unwrap();"
+    },
+    {
+      "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+      "line": 1425,
+      "content": "let envelope: StorageCommandEnvelope = serde_json::from_slice(&recovered.payload).unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/error.rs",
+      "line": 290,
+      "content": "let json = serde_json::to_value(&pd).unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/error.rs",
+      "line": 308,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-native-api/src/error.rs",
+      "line": 310,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-native-api/src/pagination.rs",
+      "line": 171,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/pagination.rs",
+      "line": 200,
+      "content": "let (payload_b64, _) = encoded.split_once('.').unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/pagination.rs",
+      "line": 204,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-native-api/src/pagination.rs",
+      "line": 206,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/pagination.rs",
+      "line": 210,
+      "content": "let tampered_json = serde_json::to_string(&payload).unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/resource.rs",
+      "line": 342,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/resource.rs",
+      "line": 345,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/resource.rs",
+      "line": 349,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-native-api/src/resource.rs",
+      "line": 357,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-native-api/src/resource.rs",
+      "line": 370,
+      "content": "registry.register(value).unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/resource.rs",
+      "line": 393,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 351,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 356,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 358,
+      "content": "tower::ServiceExt::oneshot(app, response).await.unwrap(),"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 364,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 366,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 380,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 385,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 387,
+      "content": "tower::ServiceExt::oneshot(app, response).await.unwrap(),"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 393,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 395,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 405,
+      "content": "reg.seed_core().unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 414,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 419,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 421,
+      "content": "tower::ServiceExt::oneshot(app, response).await.unwrap(),"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 427,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 429,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 430,
+      "content": "let services = body[\"services\"].as_array().unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 449,
+      "content": "registry.seed_core().unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 458,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 463,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 465,
+      "content": "tower::ServiceExt::oneshot(app, response).await.unwrap(),"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 471,
+      "content": ".unwrap(),"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 473,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 500,
+      "content": ".unwrap();"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 502,
+      "content": "tower::ServiceExt::oneshot(app, response).await.unwrap(),"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 508,
+      "content": ".unwrap()"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 510,
+      "content": ".unwrap(),"
+    }
+  ],
+  "production_expect": [
+    {
+      "path": "bins/o3kd/tests/p12_7_convergence.rs",
+      "line": 40,
+      "content": ".expect(\"response body\");"
+    },
+    {
+      "path": "bins/o3kd/tests/p12_7_convergence.rs",
+      "line": 116,
+      "content": ".expect(\"request\"),"
+    },
+    {
+      "path": "bins/o3kd/tests/p12_7_convergence.rs",
+      "line": 119,
+      "content": ".expect(\"response\");"
+    },
+    {
+      "path": "bins/o3kd/tests/p12_7_convergence.rs",
+      "line": 124,
+      "content": ".expect(\"error body\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 165,
+      "content": ".expect(\"sqlite store\"),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 181,
+      "content": ".expect(\"resource\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 216,
+      "content": ".expect(\"idempotency identity\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 220,
+      "content": ".expect(\"canonical operation triplet\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 227,
+      "content": ".expect(\"reopen sqlite store\"),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 244,
+      "content": ".expect(\"test manifest registry is valid\")"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 253,
+      "content": ".expect(\"request\")"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 259,
+      "content": ".expect(\"owner response\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 264,
+      "content": ".expect(\"body\"),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 266,
+      "content": ".expect(\"json\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 290,
+      "content": ".expect(\"foreign response\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 294,
+      "content": ".expect(\"missing response\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 300,
+      "content": ".expect(\"foreign body\"),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 302,
+      "content": ".expect(\"foreign json\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 306,
+      "content": ".expect(\"missing body\"),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 308,
+      "content": ".expect(\"missing json\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 312,
+      "content": "std::fs::remove_file(path).expect(\"cleanup\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2543,
+      "content": ".expect(\"store\"),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2556,
+      "content": ".expect(\"network service\"),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2561,
+      "content": ".expect(\"foreign network\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2569,
+      "content": "Some(\"198.51.100.10\".parse().expect(\"pool start\")),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2570,
+      "content": "Some(\"198.51.100.200\".parse().expect(\"pool end\")),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2573,
+      "content": ".expect(\"foreign subnet\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2577,
+      "content": ".expect(\"foreign port\")"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2605,
+      "content": ".expect(\"native state\")"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2637,
+      "content": ".expect(\"request\")"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2653,
+      "content": ".expect(\"request\")"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2663,
+      "content": ".expect(\"request\")"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2669,
+      "content": "let response = router.clone().oneshot(req).await.expect(\"request\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2673,
+      "content": ".expect(\"body\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2674,
+      "content": "let json: serde_json::Value = serde_json::from_slice(body_bytes).expect(\"json\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2823,
+      "content": ".expect(\"tenant B resource\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2883,
+      "content": "let cursor_a = page_a[\"next_cursor\"].as_str().expect(\"tenant A cursor\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2925,
+      "content": ".expect(\"cursor anchor\")"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2927,
+      "content": "let cursor = first_page[\"next_cursor\"].as_str().expect(\"cursor\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2936,
+      "content": ".expect(\"delete response\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2963,
+      "content": ".expect(\"request\"),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2966,
+      "content": ".expect(\"response\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2988,
+      "content": ".expect(\"request\"),"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 2991,
+      "content": ".expect(\"response\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3029,
+      "content": ".expect(\"resource list\")"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3167,
+      "content": ".expect(\"set failure\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3223,
+      "content": ".expect(\"clear failure\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3234,
+      "content": ".expect(\"delete\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3277,
+      "content": ".expect(\"clear failure\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3288,
+      "content": ".expect(\"delete\");"
+    },
+    {
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "line": 3305,
+      "content": "let manifest = registry.get(\"compute\").expect(\"compute manifest\");"
+    },
+    {
+      "path": "bins/o3k-network/src/main.rs",
+      "line": 558,
+      "content": ".expect(\"tls\")"
+    },
+    {
+      "path": "bins/o3k-network/src/agent.rs",
+      "line": 359,
+      "content": ".expect(\"network command must decode\");"
+    },
+    {
+      "path": "bins/o3k-network/src/agent.rs",
+      "line": 385,
+      "content": ".expect(\"executor\");"
+    },
+    {
+      "path": "bins/o3k-network/src/agent.rs",
+      "line": 413,
+      "content": ".expect(\"clock\")"
+    },
+    {
+      "path": "bins/o3k-network/src/agent.rs",
+      "line": 429,
+      "content": "o3k_network::canonical_plan_fingerprint(&plan).expect(\"fingerprint\");"
+    },
+    {
+      "path": "bins/o3k-network/src/agent.rs",
+      "line": 441,
+      "content": "NetworkPlanExecutor::open(&root, agent.clone(), controller.clone()).expect(\"executor\");"
+    },
+    {
+      "path": "bins/o3k-network/src/agent.rs",
+      "line": 444,
+      "content": ".expect(\"accepted journal entry\");"
+    },
+    {
+      "path": "bins/o3k-network/src/agent.rs",
+      "line": 449,
+      "content": "NetworkPlanExecutor::open(&root, agent.clone(), controller.clone()).expect(\"restart\"),"
+    },
+    {
+      "path": "bins/o3k-network/src/agent.rs",
+      "line": 455,
+      "content": "service.reconcile_pending().expect(\"startup reconciliation\"),"
+    },
+    {
+      "path": "bins/o3k-network/src/agent.rs",
+      "line": 466,
+      "content": ".expect(\"registration\");"
+    },
+    {
+      "path": "bins/o3k-network/src/agent.rs",
+      "line": 478,
+      "content": "plan_json: serde_json::to_string(&plan).expect(\"plan json\"),"
+    },
+    {
+      "path": "bins/o3k-network/src/agent.rs",
+      "line": 481,
+      "content": ".expect(\"recovery result\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 1467,
+      "content": ".expect(\"registered manifest must have valid resource types\")"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 1478,
+      "content": ".expect(\"registered manifest must have valid actions\")"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 1821,
+      "content": ".expect(\"registered manifest must have valid resource types\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2349,
+      "content": "serde_json::from_str(SERVICE_MANIFEST_SCHEMA).expect(\"valid schema JSON\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2350,
+      "content": "let compiled = jsonschema::validator_for(&schema).expect(\"valid compiled schema\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2383,
+      "content": "let json = serde_json::to_value(&wire).expect(\"serialization\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2392,
+      "content": "serde_json::from_str(SERVICE_MANIFEST_SCHEMA).expect(\"valid schema JSON\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2393,
+      "content": "let compiled = jsonschema::validator_for(&schema).expect(\"valid compiled schema\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2423,
+      "content": "let json = serde_json::to_value(&wire).expect(\"serialization\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2434,
+      "content": "serde_json::from_str(SERVICE_MANIFEST_SCHEMA).expect(\"valid schema JSON\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2435,
+      "content": "let compiled = jsonschema::validator_for(&schema).expect(\"valid compiled schema\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2469,
+      "content": "serde_json::from_str(RESOURCE_ENVELOPE_SCHEMA).expect(\"valid schema JSON\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2470,
+      "content": "let compiled = jsonschema::validator_for(&schema).expect(\"valid compiled schema\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2490,
+      "content": "let json = serde_json::to_value(&wire).expect(\"serialization\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2504,
+      "content": "serde_json::from_str(PROJECTION_SCHEMA).expect(\"valid schema JSON\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2505,
+      "content": "let compiled = jsonschema::validator_for(&schema).expect(\"valid compiled schema\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2531,
+      "content": "let json = serde_json::to_value(&wire).expect(\"serialization\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2569,
+      "content": "let internal: ServiceManifest = wire.try_into().expect(\"conversion succeeds\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2653,
+      "content": "let internal: ServiceManifest = wire.try_into().expect(\"conversion\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2705,
+      "content": "let internal: ServiceManifest = wire.try_into().expect(\"conversion\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2757,
+      "content": "let internal: ServiceManifest = wire.try_into().expect(\"conversion\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2802,
+      "content": "let internal: ServiceManifest = wire.try_into().expect(\"conversion\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2839,
+      "content": "let internal: ServiceManifest = wire.try_into().expect(\"conversion\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2841,
+      "content": "let ctrl = internal.controller.expect(\"controller should be present\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2891,
+      "content": "let internal: ServiceManifest = wire.try_into().expect(\"conversion\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2942,
+      "content": "wire.try_into().expect(\"projection conversion\");"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 3600,
+      "content": "registry.seed_core().expect(\"core manifests\");"
+    },
+    {
+      "path": "crates/o3k-scheduler/src/lib.rs",
+      "line": 258,
+      "content": "let store = o3k_store::testkit::open_memory().await.expect(\"store\");"
+    },
+    {
+      "path": "crates/o3k-scheduler/src/lib.rs",
+      "line": 262,
+      "content": ".expect(\"ledger\");"
+    },
+    {
+      "path": "crates/o3k-scheduler/src/lib.rs",
+      "line": 488,
+      "content": "let first = first.expect(\"first scheduler task panicked\");"
+    },
+    {
+      "path": "crates/o3k-scheduler/src/lib.rs",
+      "line": 489,
+      "content": "let second = second.expect(\"second scheduler task panicked\");"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 36,
+      "content": ".expect(\"database example manifest is valid JSON\");"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 37,
+      "content": "wire.try_into().expect(\"database example manifest is valid\")"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 989,
+      "content": ".expect(\"calls lock\")"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1013,
+      "content": ".expect(\"observe failure lock\")"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1026,
+      "content": "self.calls.lock().expect(\"calls lock\").push(slot.clone());"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 1030,
+      "content": ".expect(\"delete failure lock\")"
+    },
+    {
+      "path": "crates/o3k-placement/src/lib.rs",
+      "line": 654,
+      "content": ".expect(\"ledger opens\")"
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "line": 1124,
+      "content": ".expect(\"committed artifact must resolve\");"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 685,
+      "content": ".expect(\"calls lock\")"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 689,
+      "content": ".expect(\"outputs lock\")"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 691,
+      "content": ".expect(\"scripted Ceph response\")"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 737,
+      "content": ".expect(\"valid config\");"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 742,
+      "content": ".expect(\"create converges\");"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 757,
+      "content": ".expect(\"valid config\");"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 775,
+      "content": ".expect(\"valid config\");"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 805,
+      "content": ".expect(\"valid config\");"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 809,
+      "content": ".expect(\"snapshot converges\");"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 815,
+      "content": ".expect(\"equivalent snapshot create replays\");"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 825,
+      "content": ".expect(\"valid config\");"
+    },
+    {
+      "path": "crates/o3k-storage/src/ceph.rs",
+      "line": 835,
+      "content": ".expect(\"valid config\");"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 1040,
+      "content": "LvmStorageProvider::with_runner(config(), FakeRunner::default()).expect(\"valid config\");"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 1058,
+      "content": "assert_eq!(parse_lvs(lvs).expect(\"lvs\")[0].tags.len(), 2);"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 1061,
+      "content": "assert_eq!(parse_vgs(vgs).expect(\"vgs\")[0].free_bytes, 4000);"
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "line": 1074,
+      "content": "let provider = LvmStorageProvider::with_runner(config(), runner).expect(\"valid config\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 15,
+      "content": ".expect(\"O3K_DATABASE_URL must be set for P13.1F2 PostgreSQL conformance\")"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 32,
+      "content": ".expect(\"connect PostgreSQL\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 36,
+      "content": ".expect(\"reset schema\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 40,
+      "content": ".expect(\"create schema\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 45,
+      "content": ".expect(\"connect O3K PostgreSQL store\"),"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 50,
+      "content": ".expect(\"open network service\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 54,
+      "content": ".expect(\"network\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 58,
+      "content": ".expect(\"realm a\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 62,
+      "content": ".expect(\"realm b\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 71,
+      "content": ".expect(\"endpoint a\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 80,
+      "content": ".expect(\"endpoint b\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 85,
+      "content": ".expect(\"remove endpoint dependency for cleanup proof\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 98,
+      "content": ".expect(\"binding\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 103,
+      "content": ".expect(\"snapshot\")"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 118,
+      "content": ".expect(\"replay deletion\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 135,
+      "content": ".expect(\"unknown observation\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 140,
+      "content": ".expect(\"reopen network service\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 144,
+      "content": ".expect(\"replay after restart\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 157,
+      "content": ".expect(\"absence observation\"),"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 163,
+      "content": ".expect(\"reconstruct after deletion\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 182,
+      "content": ".expect(\"connect PostgreSQL\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 186,
+      "content": ".expect(\"reset schema\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+      "line": 190,
+      "content": ".expect(\"create schema\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 44,
+      "content": ".expect(\"cleanup\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 59,
+      "content": ".expect(\"network\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 71,
+      "content": ".expect(\"realm\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 83,
+      "content": ".expect(\"endpoint\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 103,
+      "content": ".expect(\"policy\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 132,
+      "content": "store.insert_policy_rule(&rules[index]).await.expect(\"rule\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 160,
+      "content": ".expect(\"attachment\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 167,
+      "content": ".expect(\"compile\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 181,
+      "content": ".expect(\"sqlite\"),"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 190,
+      "content": ".expect(\"sqlite\"),"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 203,
+      "content": "let url = std::env::var(\"O3K_DATABASE_URL\").expect(\"O3K_DATABASE_URL\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 204,
+      "content": "let initial_store = PostgresStore::connect(&url).await.expect(\"postgres\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 206,
+      "content": "let first_store = Arc::new(PostgresStore::connect(&url).await.expect(\"postgres\"));"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 212,
+      "content": "let cleanup = PostgresStore::connect(&url).await.expect(\"postgres\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 214,
+      "content": "let second_url = std::env::var(\"O3K_DATABASE_URL_PARITY\").expect(\"O3K_DATABASE_URL_PARITY\");"
+    },
+    {
+      "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+      "line": 215,
+      "content": "let second_store = Arc::new(PostgresStore::connect(&second_url).await.expect(\"postgres\"));"
+    },
+    {
+      "path": "crates/o3k-network/src/fabric.rs",
+      "line": 272,
+      "content": "realizer.realize(&first).expect(\"apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/fabric.rs",
+      "line": 304,
+      "content": "realizer.realize(&current).expect(\"apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/fabric.rs",
+      "line": 309,
+      "content": "assert!(realizer.observe(&current).expect(\"observe\"));"
+    },
+    {
+      "path": "crates/o3k-network/src/fabric.rs",
+      "line": 310,
+      "content": "realizer.remove(&current).expect(\"remove\");"
+    },
+    {
+      "path": "crates/o3k-network/src/fabric.rs",
+      "line": 311,
+      "content": "assert!(realizer.observe_removed(&current).expect(\"removed\"));"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 925,
+      "content": ".expect(\"sqlite store\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 940,
+      "content": ".expect(\"network\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 952,
+      "content": ".expect(\"realm\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 964,
+      "content": ".expect(\"endpoint\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 979,
+      "content": ".expect(\"policy\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 990,
+      "content": ".expect(\"attachment\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1011,
+      "content": ".expect(\"apply queue\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1021,
+      "content": ".expect(\"observation queue\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1037,
+      "content": ".expect(\"compile\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1054,
+      "content": ".expect(\"failed reconcile\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1059,
+      "content": ".expect(\"retry recovery\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1066,
+      "content": ".expect(\"realization\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1067,
+      "content": ".expect(\"realization row\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1077,
+      "content": ".expect(\"compile unknown\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1092,
+      "content": ".expect(\"unknown reconcile\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1097,
+      "content": ".expect(\"unknown recovery\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1103,
+      "content": ".expect(\"unknown realization\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1104,
+      "content": ".expect(\"unknown row\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1127,
+      "content": ".expect(\"second endpoint\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1138,
+      "content": ".expect(\"second attachment\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1155,
+      "content": ".expect(\"independent reconciliation\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1169,
+      "content": ".expect(\"endpoint A realization\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1170,
+      "content": ".expect(\"endpoint A row\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1178,
+      "content": ".expect(\"endpoint B realization\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1179,
+      "content": ".expect(\"endpoint B row\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1192,
+      "content": ".expect(\"compile\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1210,
+      "content": ".expect(\"initial unknown\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1214,
+      "content": ".expect(\"unknown recovery\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1221,
+      "content": ".expect(\"realization\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1222,
+      "content": ".expect(\"row\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1232,
+      "content": ".expect(\"compile stale\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1252,
+      "content": ".expect(\"stale unknown\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1257,
+      "content": ".expect(\"pre-recovery realization\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1258,
+      "content": ".expect(\"pre-recovery row\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1265,
+      "content": ".expect(\"stale recovery\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1273,
+      "content": ".expect(\"stale realization\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1274,
+      "content": ".expect(\"stale row\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1287,
+      "content": ".expect(\"compile\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1303,
+      "content": ".expect(\"applying realization\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1316,
+      "content": ".expect(\"applying recovery\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1322,
+      "content": ".expect(\"applying row\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1323,
+      "content": ".expect(\"applying realization\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1356,
+      "content": ".expect(\"empty policy graph\")"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1369,
+      "content": ".expect(\"deny default compilation\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1425,
+      "content": ".expect(\"rule compilation\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1470,
+      "content": ".expect(\"compatible policy composition\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1497,
+      "content": ".expect(\"create isolated namespace\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1516,
+      "content": ".expect(\"first realizer\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1530,
+      "content": ".expect(\"second realizer\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1549,
+      "content": ".expect(\"third realizer\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1580,
+      "content": ".expect(\"fourth realizer\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1604,
+      "content": ".expect(\"create isolated namespace\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1629,
+      "content": ".expect(\"first realizer\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1664,
+      "content": ".expect(\"second realizer\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1685,
+      "content": ".expect(\"third realizer\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1705,
+      "content": ".expect(\"fourth realizer\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1734,
+      "content": ".expect(\"inspect isolated nftables table\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1742,
+      "content": ".expect(\"fifth realizer\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1752,
+      "content": ".expect(\"sixth realizer\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1805,
+      "content": ".expect(\"attached graph\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1814,
+      "content": ".expect(\"fingerprint\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1824,
+      "content": ".expect(\"fingerprint\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1840,
+      "content": ".expect(\"graph A\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1857,
+      "content": ".expect(\"graph B\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1873,
+      "content": ".expect(\"fingerprint A\");"
+    },
+    {
+      "path": "crates/o3k-network/src/canonical_policy.rs",
+      "line": 1882,
+      "content": ".expect(\"fingerprint B\");"
+    },
+    {
+      "path": "crates/o3k-network/src/execution.rs",
+      "line": 874,
+      "content": ".expect(\"executor\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1901,
+      "content": "self.calls.lock().expect(\"calls\").push(("
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1906,
+      "content": "return Ok((*self.namespace.lock().expect(\"namespace\"), String::new()));"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1909,
+      "content": "let known = *self.link.lock().expect(\"link\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1914,
+      "content": ".is_some_and(|name| self.links.lock().expect(\"links\").contains(*name));"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1921,
+      "content": "self.calls.lock().expect(\"calls\").push(("
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1926,
+      "content": "*self.namespace.lock().expect(\"namespace\") = true;"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1930,
+      "content": "self.links.lock().expect(\"links\").insert((*name).to_owned());"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1933,
+      "content": "self.links.lock().expect(\"links\").insert((*name).to_owned());"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1950,
+      "content": "realm_prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect(\"prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1963,
+      "content": "let first = LinuxL3GatewayProvider::open(&root, BTreeMap::new()).expect(\"first provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1964,
+      "content": "let first_lease = first.acquire_lease().expect(\"first lease\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1965,
+      "content": "let second = LinuxL3GatewayProvider::open(&root, BTreeMap::new()).expect(\"second provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1980,
+      "content": "realizer.apply(&a).expect(\"apply a\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1981,
+      "content": "realizer.apply(&b).expect(\"apply b\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 1992,
+      "content": "realizer.apply(&current).expect(\"current\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2004,
+      "content": "realm_prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24).expect(\"prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2011,
+      "content": "gateway_plan_fingerprint(&first).expect(\"first\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2012,
+      "content": "gateway_plan_fingerprint(&second).expect(\"second\")"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2052,
+      "content": ".expect(\"first provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2053,
+      "content": "L3GatewayBackend::apply(&mut first, &desired).expect(\"apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2060,
+      "content": ".expect(\"fresh provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2064,
+      "content": ".expect(\"observe\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2092,
+      "content": "Some(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24).expect(\"prefix\"));"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2098,
+      "content": "LinuxL3GatewayProvider::with_command(&root, contexts, command).expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2099,
+      "content": "provider.apply(&desired).expect(\"apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2104,
+      "content": ".expect(\"calls\")"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2112,
+      "content": ".expect(\"calls\")"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2275,
+      "content": "realm_prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 30, 0, 0), 24).expect(\"prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2283,
+      "content": "realm_prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 40, 0, 0), 24).expect(\"prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2290,
+      "content": "let mut provider = LinuxL3GatewayProvider::open(&root, contexts.clone()).expect(\"open\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2291,
+      "content": "provider.apply(&initial).expect(\"initial apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2324,
+      "content": ".expect(\"listener\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2336,
+      "content": ".expect(\"connection\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2340,
+      "content": "let mut provider = LinuxL3GatewayProvider::open(&root, contexts.clone()).expect(\"reopen\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2344,
+      "content": ".expect(\"observe\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2347,
+      "content": "provider.apply(&updated).expect(\"update A\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2349,
+      "content": "let mut provider = LinuxL3GatewayProvider::open(&root, contexts.clone()).expect(\"reopen 2\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2353,
+      "content": ".expect(\"observe 2\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2358,
+      "content": "provider.apply(&only_b).expect(\"remove A\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2369,
+      "content": ".expect(\"listener after detach\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2381,
+      "content": ".expect(\"blocked connection\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2385,
+      "content": "let provider = LinuxL3GatewayProvider::open(&root, contexts).expect(\"reopen 3\");"
+    },
+    {
+      "path": "crates/o3k-network/src/gateway.rs",
+      "line": 2389,
+      "content": ".expect(\"observe 3\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1039,
+      "content": "self.calls.lock().expect(\"calls\").push("
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1059,
+      "content": "self.calls.lock().expect(\"calls\").push(call);"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1071,
+      "content": "prefix: Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 29).expect(\"prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1076,
+      "content": ".expect(\"allocator\")"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1084,
+      "content": ".expect(\"allocation\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1087,
+      "content": ".expect(\"replay\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1090,
+      "content": "PublicAddressAllocator::open(&allocator.root, allocator.pool.clone()).expect(\"reopen\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1092,
+      "content": "reopened.get(\"project-a\", first.allocation_id).expect(\"get\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1102,
+      "content": ".expect(\"allocation\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1119,
+      "content": ".expect(\"allocation\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1122,
+      "content": ".expect(\"associate\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1126,
+      "content": ".expect(\"replay\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1135,
+      "content": ".expect(\"disassociate\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1138,
+      "content": ".expect(\"release\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1145,
+      "content": "prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect(\"realm prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1172,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1177,
+      "content": "assert!(command.calls.lock().expect(\"calls\").is_empty());"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1194,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1206,
+      "content": "assert!(command.calls.lock().expect(\"calls\").is_empty());"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1223,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1239,
+      "content": "assert_eq!(command.calls.lock().expect(\"calls\").len(), 1);"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1245,
+      "content": "fs::create_dir_all(&root).expect(\"root\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1246,
+      "content": "fs::write(root.join(\"ownership\"), PUBLIC_MARKER).expect(\"ownership\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1259,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1267,
+      "content": "provider.apply(&intents).expect(\"rebuild\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1268,
+      "content": "let calls = command.calls.lock().expect(\"calls\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1308,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1314,
+      "content": "prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect(\"realm prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1324,
+      "content": "provider.apply(&first_intents).expect(\"first binding\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1328,
+      "content": "prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect(\"realm prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1344,
+      "content": "provider.apply(&second_intents).expect(\"second binding\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1348,
+      "content": ".expect(\"remove first\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1351,
+      "content": "let stored = fs::read_to_string(root.join(OWNED_BINDING_FILE)).expect(\"stored bindings\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1370,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1400,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1407,
+      "content": "prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect(\"realm prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1429,
+      "content": ".expect(\"realm A binding\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1440,
+      "content": ".expect(\"realm B binding\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1455,
+      "content": "let calls = command.calls.lock().expect(\"calls\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1484,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1503,
+      "content": "fs::create_dir_all(&root).expect(\"root\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1504,
+      "content": "fs::write(root.join(\"ownership\"), PUBLIC_MARKER).expect(\"ownership\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1506,
+      "content": "store_owned_addresses(&root.join(OWNED_ADDRESS_FILE), &[address]).expect(\"addresses\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1518,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1520,
+      "content": "provider.remove().expect(\"cleanup\");"
+    },
+    {
+      "path": "crates/o3k-network/src/public.rs",
+      "line": 1521,
+      "content": "let calls = command.calls.lock().expect(\"calls\");"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 469,
+      "content": "self.calls.lock().expect(\"calls\").push(("
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 474,
+      "content": "return Ok(self.table_output.lock().expect(\"table\").clone());"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 483,
+      "content": "self.calls.lock().expect(\"calls\").push(("
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 489,
+      "content": "&& *self.fail_route_delete.lock().expect(\"route failure\")"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 509,
+      "content": "prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect(\"prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 525,
+      "content": "LinuxRoutedProvider::with_command(config(), &root, command).expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 542,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 547,
+      "content": "assert!(command.calls.lock().expect(\"calls\").is_empty());"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 560,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 563,
+      "content": "destination: Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24).expect(\"prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 571,
+      "content": "assert!(command.calls.lock().expect(\"calls\").is_empty());"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 587,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 592,
+      "content": "assert_eq!(command.calls.lock().expect(\"calls\").len(), 1);"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 605,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 608,
+      "content": ".expect(\"routed apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 609,
+      "content": "let calls = command.calls.lock().expect(\"calls\");"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 627,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 630,
+      "content": ".expect(\"routed apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 635,
+      "content": ".expect(\"calls\")"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 639,
+      "content": "provider.remove().expect(\"routed remove\");"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 644,
+      "content": ".expect(\"calls\")"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 660,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 663,
+      "content": ".expect(\"routed apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 664,
+      "content": "*command.fail_route_delete.lock().expect(\"route failure\") = true;"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 669,
+      "content": "*command.fail_route_delete.lock().expect(\"route failure\") = false;"
+    },
+    {
+      "path": "crates/o3k-network/src/routed.rs",
+      "line": 670,
+      "content": "provider.remove().expect(\"retry cleanup\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 828,
+      "content": ".expect(\"calls\")"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 830,
+      "content": "let mut listing = self.listing.lock().expect(\"listing\").clone();"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 834,
+      "content": "for call in self.calls.lock().expect(\"calls\").iter() {"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 848,
+      "content": ".expect(\"calls\")"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 906,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 911,
+      "content": "assert!(command.calls.lock().expect(\"calls\").is_empty());"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 925,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 935,
+      "content": ".expect(\"empty snapshot\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 937,
+      "content": "assert!(command.calls.lock().expect(\"calls\").is_empty());"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 952,
+      "content": ".expect(\"ip command\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 959,
+      "content": ".expect(\"create namespace\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1044,
+      "content": ".expect(\"enable forwarding\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1062,
+      "content": "o3k_domain::Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 2), 32).expect(\"client prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1097,
+      "content": ".expect(\"policy realizer\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1098,
+      "content": "let runtime = tokio::runtime::Runtime::new().expect(\"runtime\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1127,
+      "content": ".expect(\"start server\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1139,
+      "content": ".expect(\"allowed client\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1172,
+      "content": ".expect(\"start deny-rule server\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1186,
+      "content": ".expect(\"deny-rule client\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1249,
+      "content": ".expect(\"start multi-policy server\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1265,
+      "content": ".expect(\"multi-policy client\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1302,
+      "content": ".expect(\"start established server\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1316,
+      "content": ".expect(\"start established client\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1333,
+      "content": ".expect(\"wait established client\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1353,
+      "content": ".expect(\"start new-flow server\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1369,
+      "content": ".expect(\"new-flow client\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1384,
+      "content": ".expect(\"client destination\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1418,
+      "content": ".expect(\"start egress listener\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1430,
+      "content": ".expect(\"egress client\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1456,
+      "content": ".expect(\"start allow-default server\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1468,
+      "content": ".expect(\"allow-default client\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1494,
+      "content": ".expect(\"start baseline server\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1506,
+      "content": ".expect(\"baseline client\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1532,
+      "content": ".expect(\"start deny server\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1546,
+      "content": ".expect(\"denied client\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1568,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1580,
+      "content": "assert_eq!(command.calls.lock().expect(\"calls\").len(), 1);"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1594,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1607,
+      "content": ".expect(\"first policy\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1610,
+      "content": ".expect(\"second policy\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1615,
+      "content": ".expect(\"ownership\")"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1622,
+      "content": ".expect(\"remove first policy\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1623,
+      "content": "let ownership = provider.ownership.as_ref().expect(\"remaining ownership\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1643,
+      "content": ".expect(\"first provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1650,
+      "content": ".expect(\"initial aggregate\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1654,
+      "content": ".expect(\"ownership\")"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1668,
+      "content": ".expect(\"stale provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1679,
+      "content": ".expect(\"newer provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1686,
+      "content": ".expect(\"newer aggregate\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1691,
+      "content": ".expect(\"new ownership\")"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1695,
+      "content": "*stale_command.listing.lock().expect(\"listing\") ="
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1708,
+      "content": "assert_eq!(stale_command.calls.lock().expect(\"calls\").len(), 1);"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1722,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1739,
+      "content": "assert!(command.calls.lock().expect(\"calls\").is_empty());"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1753,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1763,
+      "content": ".expect(\"deny default\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1764,
+      "content": "let calls = command.calls.lock().expect(\"calls\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1791,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1817,
+      "content": ".expect(\"policy apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1818,
+      "content": "let calls = command.calls.lock().expect(\"calls\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1842,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1852,
+      "content": ".expect(\"policy apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1855,
+      "content": "provider.remove().expect(\"policy cleanup\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1871,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1880,
+      "content": ".expect(\"policy apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1884,
+      "content": ".expect(\"ownership\")"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1890,
+      "content": ".expect(\"record endpoint evidence\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1891,
+      "content": "*command.listing.lock().expect(\"listing\") ="
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1899,
+      "content": ".expect(\"reopened provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1903,
+      "content": ".expect(\"observation\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1931,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1934,
+      "content": ".expect(\"apply A\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1938,
+      "content": ".expect(\"ownership\")"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1943,
+      "content": ".expect(\"record endpoint evidence\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1944,
+      "content": "*command.listing.lock().expect(\"listing\") ="
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1949,
+      "content": ".expect(\"apply B\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1953,
+      "content": ".expect(\"ownership\")"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1957,
+      "content": "*command.listing.lock().expect(\"listing\") ="
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 1990,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 2011,
+      "content": ".expect(\"initial aggregate\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 2014,
+      "content": ".expect(\"record A\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 2017,
+      "content": ".expect(\"record B\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 2021,
+      "content": ".expect(\"ownership\")"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 2024,
+      "content": "*command.listing.lock().expect(\"listing\") ="
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 2039,
+      "content": ".expect(\"replace A\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 2042,
+      "content": ".expect(\"record A2\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 2046,
+      "content": ".expect(\"ownership\")"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 2049,
+      "content": "*command.listing.lock().expect(\"listing\") ="
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 2062,
+      "content": ".expect(\"remove A\");"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 2066,
+      "content": ".expect(\"ownership\")"
+    },
+    {
+      "path": "crates/o3k-network/src/policy.rs",
+      "line": 2069,
+      "content": "*command.listing.lock().expect(\"listing\") ="
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 240,
+      "content": ".expect(\"plan\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 243,
+      "content": ".expect(\"plan\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 266,
+      "content": ".expect(\"plan\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 325,
+      "content": "let plan = base.clone().with_fabric(fabric).expect(\"valid P11 plan\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 330,
+      "content": "invalid.fabric.as_mut().expect(\"fabric\").routes[0].destination = prefix(\"10.0.0.0\", 24);"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 343,
+      "content": ".expect(\"plan\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 346,
+      "content": ".expect(\"retried plan\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 349,
+      "content": "canonical_plan_fingerprint(&first).expect(\"fingerprint\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 353,
+      "content": "canonical_plan_fingerprint(&retried).expect(\"fingerprint\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 399,
+      "content": ".expect(\"overlap-capable provider plan\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 472,
+      "content": ".expect(\"plan\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 542,
+      "content": ".expect(\"gateway plan\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 841,
+      "content": ".expect(\"plan\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1149,
+      "content": "let tap = HostNetworkManager::tap_name(\"port-1\").expect(\"valid test tap name\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1160,
+      "content": ".expect(\"tuntap add call\")"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1206,
+      "content": "manager.reap_partial_links().expect(\"partial reap\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1235,
+      "content": "manager.reap_partial_links().expect(\"partial reap\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1367,
+      "content": "manager.discover_managed().expect(\"discovery succeeds\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1746,
+      "content": "let tap = HostNetworkManager::tap_name(\"port-1\").expect(\"valid test tap name\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1855,
+      "content": "let tap_a = HostNetworkManager::tap_name(\"port-a\").expect(\"valid test tap name\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 1856,
+      "content": "let tap_b = HostNetworkManager::tap_name(\"port-b\").expect(\"valid test tap name\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2041,
+      "content": ".expect(\"tuntap add call\")"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2125,
+      "content": "let tap = HostNetworkManager::tap_name(\"port-1\").expect(\"valid test tap name\");"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2135,
+      "content": ".expect(\"tuntap add call\")"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2397,
+      "content": ".expect(\"test calls mutex\")"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2401,
+      "content": ".expect(\"test responses mutex\")"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2403,
+      "content": ".expect(\"test response for every command\")"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2407,
+      "content": "self.calls.lock().expect(\"test calls mutex\").clone()"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2417,
+      "content": ".expect(\"test calls mutex\")"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2458,
+      "content": ".expect(\"valid test network configuration\")"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 572,
+      "content": "self.calls.lock().expect(\"calls\").push(("
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 586,
+      "content": "self.calls.lock().expect(\"calls\").push(("
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 599,
+      "content": "prefix: Ipv4Prefix::new(\"10.40.1.0\".parse().expect(\"ip\"), 24).expect(\"prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 608,
+      "content": "fixed_ip: \"10.40.1.12\".parse().expect(\"ip\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 617,
+      "content": ".expect(\"directory\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 622,
+      "content": "fabric_transport_ip: \"198.18.0.1\".parse().expect(\"transport ip\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 632,
+      "content": "fabric_transport_ip: \"198.18.0.2\".parse().expect(\"transport ip\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 647,
+      "content": ".expect(\"plan\")"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 659,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 677,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 678,
+      "content": "provider.apply(&plan()).expect(\"apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 679,
+      "content": "let state = fs::read_to_string(root.join(\"ownership.json\")).expect(\"state\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 682,
+      "content": ".expect(\"plan\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 688,
+      "content": ".expect(\"key\")"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 694,
+      "content": "let calls = command_for_assertion.calls.lock().expect(\"calls\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 734,
+      "content": ".expect(\"remote attachment\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 765,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 766,
+      "content": "provider.apply(&plan()).expect(\"apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 767,
+      "content": "let calls = command_for_assertion.calls.lock().expect(\"calls\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 804,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 818,
+      "content": "Ipv4Prefix::new(\"192.0.2.0\".parse().expect(\"ip\"), 24).expect(\"prefix\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 824,
+      "content": ".expect(\"policy plan\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 825,
+      "content": "provider.apply(&current).expect(\"apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 827,
+      "content": "let calls = command_for_assertion.calls.lock().expect(\"calls\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 840,
+      "content": "let ownership = provider.state.realms.get(&current.realm_id).expect(\"realm\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 844,
+      "content": "provider.remove(&current).expect(\"remove\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 845,
+      "content": "assert!(provider.observe_removed(&current).expect(\"removed\"));"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 855,
+      "content": ".expect(\"marker\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 874,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 892,
+      "content": ".expect(\"policy snapshot\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 901,
+      "content": ".expect(\"calls\")"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 919,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 924,
+      "content": "public_address: \"203.0.113.10\".parse().expect(\"ip\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 928,
+      "content": ".expect(\"public plan\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 929,
+      "content": "provider.apply(&current).expect(\"apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 930,
+      "content": "let calls = command_for_assertion.calls.lock().expect(\"calls\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 946,
+      "content": "let ownership = provider.state.realms.get(&current.realm_id).expect(\"realm\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 949,
+      "content": "vec![\"203.0.113.10\".parse::<Ipv4Addr>().expect(\"ip\")]"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 952,
+      "content": "provider.remove(&current).expect(\"remove\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 953,
+      "content": "assert!(provider.observe_removed(&current).expect(\"removed\"));"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 966,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 968,
+      "content": "provider.apply(&current).expect(\"apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 975,
+      "content": "provider.remove(&current).expect(\"remove\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 976,
+      "content": "assert!(provider.observe_removed(&current).expect(\"removed\"));"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 986,
+      "content": "fs::create_dir_all(&root).expect(\"root\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 989,
+      "content": "fs::write(&key_path, &provisioned).expect(\"key\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 990,
+      "content": "fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).expect(\"mode\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 998,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 999,
+      "content": "provider.apply(&plan()).expect(\"apply\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 1000,
+      "content": "assert_eq!(fs::read_to_string(&key_path).expect(\"key\"), provisioned);"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 1001,
+      "content": "let calls = command_for_assertion.calls.lock().expect(\"calls\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 1007,
+      "content": "let key_path_argument = key_path.to_str().expect(\"path\").to_owned();"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 1020,
+      "content": "fs::create_dir_all(&root).expect(\"root\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 1022,
+      "content": "fs::write(&key_path, \"not-a-wireguard-key\\n\").expect(\"key\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 1023,
+      "content": "fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).expect(\"mode\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 1030,
+      "content": ".expect(\"provider\");"
+    },
+    {
+      "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+      "line": 1037,
+      "content": "fs::read_to_string(&key_path).expect(\"key\"),"
+    },
+    {
+      "path": "crates/o3k-domain/src/storage.rs",
+      "line": 668,
+      "content": "let encoded = serde_json::to_string(&attachment).expect(\"domain serialization\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1373,
+      "content": ".expect(\"public binding snapshot\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1424,
+      "content": ".expect(\"remote plan\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1460,
+      "content": ".expect(\"policy snapshot\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1486,
+      "content": ".expect(\"deny default policy snapshot\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1505,
+      "content": ".expect(\"allow default policy snapshot\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1545,
+      "content": ".expect(\"precedence policy snapshot\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1602,
+      "content": ".expect(\"realm A directory\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1604,
+      "content": ".expect(\"realm B directory\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1628,
+      "content": ".expect(\"A binding\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1631,
+      "content": ".expect(\"B binding\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1635,
+      "content": ".expect(\"A plan\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1638,
+      "content": ".expect(\"B plan\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1656,
+      "content": "let first = registry.ensure(domain, realm_id, 4).expect(\"binding\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1666,
+      "content": "registry.release(&first, true).expect(\"release\");"
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "line": 1669,
+      "content": ".expect(\"next binding\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 12,
+      "content": ".expect(\"O3K_DATABASE_URL must be set for PostgreSQL P13.4 storage conformance\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 20,
+      "content": ".expect(\"connect\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 21,
+      "content": "store.clean_tables_for_testing().await.expect(\"clean\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 43,
+      "content": "store.insert_volume(&volume).await.expect(\"volume insert\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 62,
+      "content": ".expect(\"attachment insert\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 66,
+      "content": ".expect(\"reopen\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 70,
+      "content": ".expect(\"volume read\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 71,
+      "content": ".expect(\"volume exists\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 76,
+      "content": ".expect(\"attachment read\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 77,
+      "content": ".expect(\"attachment exists\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 83,
+      "content": ".expect(\"volume list\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 91,
+      "content": ".expect(\"attachment list\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 99,
+      "content": ".expect(\"detach finalization\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+      "line": 106,
+      "content": ".expect(\"reattach same volume with new identity\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 58,
+      "content": ".expect(\"clean tables\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 73,
+      "content": "store.insert_resource(&res).await.expect(\"insert_resource\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 85,
+      "content": "store.insert_operation(&op).await.expect(\"insert_operation\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 94,
+      "content": "store.insert_network(&net).await.expect(\"insert_network\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 109,
+      "content": "store.insert_subnet(&sub).await.expect(\"insert_subnet\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 124,
+      "content": "store.insert_port(&port).await.expect(\"insert_port\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 138,
+      "content": "store.insert_image(&img).await.expect(\"insert_image\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 152,
+      "content": ".expect(\"register_provider\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 164,
+      "content": ".expect(\"set_limit\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 173,
+      "content": ".expect(\"reserve_quota\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 177,
+      "content": ".expect(\"commit_reservation\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 186,
+      "content": ".expect(\"execute pg_dump\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 208,
+      "content": ".expect(\"create database\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 218,
+      "content": ".expect(\"spawn psql restore\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 222,
+      "content": "let stdin = psql_child.stdin.as_mut().expect(\"psql stdin\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 225,
+      "content": ".expect(\"write dump to psql stdin\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 227,
+      "content": "let restore_status = psql_child.wait().expect(\"wait for psql restore\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 233,
+      "content": ".expect(\"connect to restored store\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 238,
+      "content": ".expect(\"get resource\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 245,
+      "content": ".expect(\"get operation\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 251,
+      "content": ".expect(\"get network\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 252,
+      "content": ".expect(\"some\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 258,
+      "content": ".expect(\"get port\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 259,
+      "content": ".expect(\"some\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 265,
+      "content": ".expect(\"get image\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 266,
+      "content": ".expect(\"some\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 272,
+      "content": ".expect(\"list providers\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 278,
+      "content": ".expect(\"get limit\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 284,
+      "content": ".expect(\"get resv\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 285,
+      "content": ".expect(\"some\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 311,
+      "content": ".expect(\"clean tables\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 324,
+      "content": "store.insert_resource(&res).await.expect(\"insert_resource\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 19,
+      "content": ".expect(\"O3K_DATABASE_URL must be set for PostgreSQL P12.4 conformance\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 26,
+      "content": "let store = PostgresStore::connect(&url()).await.expect(\"connect\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 27,
+      "content": "store.clean_tables_for_testing().await.expect(\"clean\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 35,
+      "content": ".expect(\"parent resource\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 49,
+      "content": "let first = store.reserve_relationship(&record).await.expect(\"reserve\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 52,
+      "content": "store.reserve_relationship(&record).await.expect(\"replay\"),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 61,
+      "content": ".expect(\"child resource\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 65,
+      "content": ".expect(\"bind\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 67,
+      "content": "let listed = store.list_relationships(parent).await.expect(\"list\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 76,
+      "content": "let store = PostgresStore::connect(&url()).await.expect(\"connect\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 77,
+      "content": "store.clean_tables_for_testing().await.expect(\"clean\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 94,
+      "content": ".expect(\"create\"),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 118,
+      "content": ".expect(\"replay\"),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 147,
+      "content": ".expect(\"delete request\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 156,
+      "content": ".expect(\"delete\"),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 164,
+      "content": ".expect(\"canonical delete\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 225,
+      "content": ".expect(\"valid reservation\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 229,
+      "content": "let row = sqlx::query(\"SELECT (SELECT count(*) FROM operations) AS operations, (SELECT count(*) FROM canonical_operation"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 254,
+      "content": ".expect(\"race caller a\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 262,
+      "content": ".expect(\"race caller b\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 275,
+      "content": ".expect(\"connect\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 279,
+      "content": ".expect(\"clean dedicated database\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 285,
+      "content": ".expect(\"resource\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 333,
+      "content": ".expect(\"clean conflict\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 338,
+      "content": ".expect(\"resource\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 383,
+      "content": ".expect(\"clean scopes\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 389,
+      "content": ".expect(\"resource a\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 393,
+      "content": ".expect(\"resource b\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 417,
+      "content": ".expect(\"clean rollback\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 422,
+      "content": ".expect(\"resource\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 426,
+      "content": "sqlx::query(&format!(\"CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.idempotency_key ="
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 427,
+      "content": "sqlx::query(&format!(\"CREATE TRIGGER {trigger} BEFORE INSERT ON idempotency_reservations FOR EACH ROW EXECUTE FUNCTION {"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 443,
+      "content": ".expect(\"drop trigger\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 447,
+      "content": ".expect(\"drop trigger function\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 457,
+      "content": ".expect(\"create reload\"),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 463,
+      "content": ".expect(\"reconnect\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 468,
+      "content": ".expect(\"reload canonical\"),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 470,
+      "content": ".expect(\"kernel conversion\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 500,
+      "content": ".expect(\"running lifecycle update\"),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 503,
+      "content": ".expect(\"running lifecycle persistence\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 512,
+      "content": ".expect(\"reload running\"),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 514,
+      "content": ".expect(\"running kernel conversion\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 530,
+      "content": ".expect(\"succeeded lifecycle update\"),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 533,
+      "content": ".expect(\"succeeded lifecycle persistence\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 541,
+      "content": ".expect(\"reload terminal\"),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 543,
+      "content": ".expect(\"terminal kernel conversion\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 559,
+      "content": ".expect(\"authoritative operation state\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 564,
+      "content": ".expect(\"reconnect lifecycle\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 569,
+      "content": ".expect(\"reload after reconnect\"),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 571,
+      "content": ".expect(\"reconnected kernel conversion\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 602,
+      "content": ".expect(\"replay\"),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 631,
+      "content": ".expect(\"final resource\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 655,
+      "content": ".expect(\"race caller a\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 663,
+      "content": ".expect(\"race caller b\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 673,
+      "content": "let store = PostgresStore::connect(&url()).await.expect(\"connect\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 674,
+      "content": "store.clean_tables_for_testing().await.expect(\"clean\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 768,
+      "content": "let store = PostgresStore::connect(&url()).await.expect(\"connect\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 769,
+      "content": "store.clean_tables_for_testing().await.expect(\"clean\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 845,
+      "content": ".expect(\"race lifecycle caller a\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 853,
+      "content": ".expect(\"race lifecycle caller b\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 863,
+      "content": "let store = PostgresStore::connect(&url()).await.expect(\"connect\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 864,
+      "content": "store.clean_tables_for_testing().await.expect(\"clean\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 870,
+      "content": ".expect(\"pre-insert resource\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 907,
+      "content": ".expect(\"delete request a\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+      "line": 918,
+      "content": ".expect(\"delete request b\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 18,
+      "content": ".expect(\"O3K_DATABASE_URL must be set for P13.1F1 PostgreSQL conformance\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 26,
+      "content": ".expect(\"connect to PostgreSQL\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 30,
+      "content": ".expect(\"drop test schema\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 34,
+      "content": ".expect(\"create test schema\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 46,
+      "content": "legacy.run(pool).await.expect(\"apply legacy migrations\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 70,
+      "content": ".expect(\"legacy networks\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 80,
+      "content": ".expect(\"legacy network intent\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 103,
+      "content": ".expect(\"legacy subnets\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 118,
+      "content": ".expect(\"legacy endpoint\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 134,
+      "content": ".expect(\"run canonical migration and backfill\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 138,
+      "content": ".expect(\"get migrated network\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 139,
+      "content": ".expect(\"network exists\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 155,
+      "content": ".expect(\"empty realm lookup\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 162,
+      "content": ".expect(\"list migrated realms\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 171,
+      "content": ".expect(\"list migrated pools\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 179,
+      "content": ".expect(\"list migrated endpoints\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 186,
+      "content": ".expect(\"list migrated policies\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 194,
+      "content": ".expect(\"list overlapping realm\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 208,
+      "content": ".expect(\"same IP in another realm\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 234,
+      "content": "let reopened = PostgresStore::connect(&url).await.expect(\"reopen store\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 239,
+      "content": ".expect(\"reopened network\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 240,
+      "content": ".expect(\"reopened network exists\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 252,
+      "content": ".expect(\"remove canonical policies\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 257,
+      "content": ".expect(\"remove test endpoint\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 262,
+      "content": ".expect(\"remove test pool\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 266,
+      "content": ".expect(\"remove realm\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 271,
+      "content": ".expect(\"list after realm removal\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 278,
+      "content": ".expect(\"network after realm removal\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 287,
+      "content": ".expect(\"inspect canonical constraints\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 309,
+      "content": ".expect(\"clean conformance database\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 327,
+      "content": ".expect(\"legacy network\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 335,
+      "content": ".expect(\"invalid legacy subnet fixture\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 344,
+      "content": ".expect(\"inspect rolled-back backfill\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 349,
+      "content": ".expect(\"drop invalid fixture schema\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 353,
+      "content": ".expect(\"restore public schema\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 366,
+      "content": ".expect(\"migrate store\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 375,
+      "content": ".expect(\"legacy projection\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 386,
+      "content": ".expect(\"canonical network\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 401,
+      "content": ".expect(\"canonical realm\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 407,
+      "content": ".expect(\"atomic canonical/projection rename\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 431,
+      "content": "let reopened = PostgresStore::connect(&url).await.expect(\"reopen store\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 435,
+      "content": ".expect(\"reopened canonical network\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 436,
+      "content": ".expect(\"canonical network exists\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 461,
+      "content": ".expect(\"clean test database\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 476,
+      "content": ".expect(\"migrate store\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 486,
+      "content": ".expect(\"legacy network projection\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 497,
+      "content": ".expect(\"canonical network\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 535,
+      "content": ".expect(\"create subnet bundle\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 579,
+      "content": ".expect(\"delete subnet bundle\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 581,
+      "content": "let reopened = PostgresStore::connect(&url).await.expect(\"reopen store\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 618,
+      "content": ".expect(\"migrate store\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 628,
+      "content": ".expect(\"legacy network projection\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 639,
+      "content": ".expect(\"canonical network\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 675,
+      "content": ".expect(\"subnet bundle\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 701,
+      "content": ".expect(\"atomic endpoint and port create\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 706,
+      "content": ".expect(\"endpoint read\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 707,
+      "content": ".expect(\"endpoint exists\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 714,
+      "content": ".expect(\"atomic endpoint and port delete\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 717,
+      "content": "let reopened = PostgresStore::connect(&url).await.expect(\"reopen store\");"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 722,
+      "content": ".expect(\"endpoint after reopen\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 729,
+      "content": ".expect(\"projection after reopen\")"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+      "line": 736,
+      "content": ".expect(\"network after reopen\")"
+    },
+    {
+      "path": "crates/o3k-store/src/storage.rs",
+      "line": 949,
+      "content": "let store = crate::testkit::open_memory().await.expect(\"store\");"
+    },
+    {
+      "path": "crates/o3k-store/src/storage.rs",
+      "line": 951,
+      "content": "store.insert_volume(&record).await.expect(\"insert\");"
+    },
+    {
+      "path": "crates/o3k-store/src/storage.rs",
+      "line": 956,
+      "content": ".expect(\"get\"),"
+    },
+    {
+      "path": "crates/o3k-store/src/storage.rs",
+      "line": 971,
+      "content": "let store = crate::testkit::open_memory().await.expect(\"store\");"
+    },
+    {
+      "path": "crates/o3k-store/src/storage.rs",
+      "line": 973,
+      "content": "store.insert_volume(&volume).await.expect(\"insert volume\");"
+    },
+    {
+      "path": "crates/o3k-store/src/storage.rs",
+      "line": 992,
+      "content": ".expect(\"insert attachment\");"
+    },
+    {
+      "path": "crates/o3k-store/src/storage.rs",
+      "line": 997,
+      "content": ".expect(\"list\")"
+    },
+    {
+      "path": "crates/o3k-store/src/storage.rs",
+      "line": 1010,
+      "content": ".expect(\"remove setup attachment\");"
+    },
+    {
+      "path": "crates/o3k-store/src/storage.rs",
+      "line": 1014,
+      "content": ".expect(\"insert terminal attachment\");"
+    },
+    {
+      "path": "crates/o3k-store/src/storage.rs",
+      "line": 1021,
+      "content": ".expect(\"reattach after terminal history\");"
+    },
+    {
+      "path": "crates/o3k-store/src/storage.rs",
+      "line": 1046,
+      "content": ".expect(\"insert snapshot\");"
+    },
+    {
+      "path": "crates/o3k-store/src/storage.rs",
+      "line": 1051,
+      "content": ".expect(\"get\")"
+    },
+    {
+      "path": "crates/o3k-store/src/storage.rs",
+      "line": 1052,
+      "content": ".expect(\"snapshot\"),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 104,
+      "content": ".expect(\"insert_resource\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 111,
+      "content": "let fetched = store.get_resource(res_id).await.expect(\"get_resource\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 121,
+      "content": ".expect(\"list_resources\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 136,
+      "content": ".expect(\"update_resource\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 154,
+      "content": ".expect(\"update_resource_from_observation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 170,
+      "content": ".expect(\"replay observation update\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 188,
+      "content": "store.insert_resource(&res).await.expect(\"insert_resource\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 200,
+      "content": "store.insert_operation(&op).await.expect(\"insert_operation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 202,
+      "content": "let fetched = store.get_operation(op_id).await.expect(\"get_operation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 210,
+      "content": ".expect(\"list_non_terminal_lifecycle_operations\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 223,
+      "content": ".expect(\"update_operation running\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 229,
+      "content": ".expect(\"increment_operation_retry\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 242,
+      "content": ".expect(\"update_operation succeeded\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 248,
+      "content": ".expect(\"list_non_terminal_lifecycle_operations\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 266,
+      "content": "store.insert_resource(&res).await.expect(\"insert_resource\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 277,
+      "content": ".expect(\"attach_provider_reference\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 289,
+      "content": ".expect(\"get_provider_reference\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 307,
+      "content": "store.insert_resource(&res).await.expect(\"insert_resource\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 319,
+      "content": "store.insert_operation(&op).await.expect(\"insert_operation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 344,
+      "content": ".expect(\"insert_agent_command\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 349,
+      "content": ".expect(\"get_agent_command\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 355,
+      "content": ".expect(\"get_agent_command_by_idempotency_key\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 361,
+      "content": ".expect(\"get_agent_command_by_operation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 374,
+      "content": ".expect(\"update_agent_command\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 379,
+      "content": ".expect(\"list_recoverable_agent_commands\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 397,
+      "content": "store.insert_resource(&res).await.expect(\"insert_resource\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 409,
+      "content": "store.insert_operation(&op).await.expect(\"insert_operation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 432,
+      "content": ".expect(\"insert_agent_command\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 461,
+      "content": ".expect(\"insert_artifact_transfer\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 466,
+      "content": ".expect(\"get_artifact_transfer\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 479,
+      "content": ".expect(\"update_artifact_transfer\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 487,
+      "content": ".expect(\"list_recoverable_artifact_transfers\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 494,
+      "content": ".expect(\"update_operation to succeeded\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 499,
+      "content": ".expect(\"expire_transfers_of_terminal_operations\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 505,
+      "content": ".expect(\"get_artifact_transfer expired\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 523,
+      "content": "store.insert_resource(&res).await.expect(\"insert_resource\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 535,
+      "content": "store.insert_operation(&op).await.expect(\"insert_operation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 560,
+      "content": ".expect(\"insert_image_overlay\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 565,
+      "content": ".expect(\"get_image_overlay\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 571,
+      "content": ".expect(\"count_image_overlay_references\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 577,
+      "content": ".expect(\"list_image_overlays\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 589,
+      "content": ".expect(\"update_image_overlay to ready\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 594,
+      "content": ".expect(\"get ready\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 600,
+      "content": ".expect(\"delete_image_overlay\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 606,
+      "content": ".expect(\"get deleted\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 622,
+      "content": ".expect(\"insert_keystone_domain\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 626,
+      "content": ".expect(\"list_keystone_domains\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 641,
+      "content": ".expect(\"insert_keystone_project\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 645,
+      "content": ".expect(\"list_keystone_projects\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 661,
+      "content": ".expect(\"insert_keystone_user\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 665,
+      "content": ".expect(\"list_keystone_users\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 678,
+      "content": ".expect(\"insert_keystone_role\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 682,
+      "content": ".expect(\"list_keystone_roles\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 695,
+      "content": ".expect(\"insert_keystone_role_assignment\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 699,
+      "content": ".expect(\"list_keystone_role_assignments\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 714,
+      "content": ".expect(\"insert_keystone_service\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 718,
+      "content": ".expect(\"list_keystone_services\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 734,
+      "content": ".expect(\"insert_keystone_endpoint\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 738,
+      "content": ".expect(\"list_keystone_endpoints\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 752,
+      "content": ".expect(\"insert_keystone_region\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 756,
+      "content": ".expect(\"list_keystone_regions\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 776,
+      "content": ".expect(\"validate test key\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 789,
+      "content": "store.insert_keypair(&kp).await.expect(\"insert_keypair\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 794,
+      "content": ".expect(\"list_keypairs\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 801,
+      "content": ".expect(\"get_keypair\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 819,
+      "content": ".expect(\"insert srv for keypair\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 824,
+      "content": ".expect(\"attach_server_keypair\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 828,
+      "content": ".expect(\"get_server_keypair_name\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 834,
+      "content": ".expect(\"detach_server_keypair\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 838,
+      "content": ".expect(\"get detached\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 844,
+      "content": ".expect(\"delete_keypair\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 869,
+      "content": ".expect(\"insert srv for vol attachment\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 900,
+      "content": ".expect(\"insert_volume_attachment\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 905,
+      "content": ".expect(\"get by id\")"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 906,
+      "content": ".expect(\"some\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 912,
+      "content": ".expect(\"get by vol\")"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 913,
+      "content": ".expect(\"some\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 919,
+      "content": ".expect(\"get by srv vol\")"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 920,
+      "content": ".expect(\"some\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 926,
+      "content": ".expect(\"list_volume_attachments\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 933,
+      "content": ".expect(\"update_volume_attachment_phase\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 953,
+      "content": ".expect(\"update_volume_attachment_outcome\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 963,
+      "content": ".expect(\"delete_volume_attachment\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 967,
+      "content": ".expect(\"get after del\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 987,
+      "content": "store.insert_image(&img).await.expect(\"insert_image\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 989,
+      "content": "let list = store.list_images(&proj).await.expect(\"list_images\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 995,
+      "content": ".expect(\"get_image\")"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 996,
+      "content": ".expect(\"some\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1002,
+      "content": ".expect(\"activate_image\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1009,
+      "content": ".expect(\"delete_image\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1013,
+      "content": ".expect(\"get after delete\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1033,
+      "content": ".expect(\"allocate_network_address\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1044,
+      "content": ".expect(\"idempotent address allocation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1061,
+      "content": ".expect(\"release_network_address\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1083,
+      "content": "let first = first.expect(\"first concurrent allocation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1084,
+      "content": "let second = second.expect(\"second concurrent allocation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1098,
+      "content": ".expect(\"insert_network_intent\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1102,
+      "content": ".expect(\"idempotent network intent retry\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1113,
+      "content": ".expect(\"cross-project intent lookup\")"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1126,
+      "content": ".expect(\"update_network_intent\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1157,
+      "content": "store.insert_network(&net).await.expect(\"insert_network\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1172,
+      "content": "store.insert_subnet(&sub).await.expect(\"insert_subnet\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1192,
+      "content": "store.insert_port(&port).await.expect(\"insert_port\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1197,
+      "content": ".expect(\"get_port\")"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1198,
+      "content": ".expect(\"some\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1204,
+      "content": ".expect(\"update_port_binding\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1215,
+      "content": ".expect(\"delete_port\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1219,
+      "content": ".expect(\"delete_subnet\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1223,
+      "content": ".expect(\"delete_network\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1249,
+      "content": ".expect(\"register_provider\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1278,
+      "content": ".expect(\"commit_allocation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1285,
+      "content": ".expect(\"idempotent commit_allocation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1308,
+      "content": ".expect(\"release_allocation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1322,
+      "content": "store.upsert_intent(&intent).await.expect(\"upsert_intent\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1326,
+      "content": ".expect(\"get_intent\")"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1327,
+      "content": ".expect(\"some\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1334,
+      "content": ".expect(\"reconcile_consumers\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1359,
+      "content": ".expect(\"get_limit default\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1366,
+      "content": ".expect(\"set_limit 2\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1370,
+      "content": ".expect(\"set_limit 8\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1375,
+      "content": ".expect(\"get_limit servers\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1387,
+      "content": ".expect(\"reserve_quota 1\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1394,
+      "content": ".expect(\"reserve_quota 1 retry\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1401,
+      "content": ".expect(\"get_usage servers\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1415,
+      "content": ".expect(\"commit_reservation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1419,
+      "content": ".expect(\"get op1\")"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1420,
+      "content": ".expect(\"some\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1427,
+      "content": ".expect(\"release_reservation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1431,
+      "content": ".expect(\"get op1\")"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1432,
+      "content": ".expect(\"some\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1448,
+      "content": ".expect(\"set_limit 1\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1466,
+      "content": "match handle.await.expect(\"join handle\") {"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1496,
+      "content": ".expect(\"register_provider\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1538,
+      "content": "let res1 = h1.await.expect(\"join h1\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1539,
+      "content": "let res2 = h2.await.expect(\"join h2\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1583,
+      "content": "store.insert_network(&net).await.expect(\"insert_network\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1598,
+      "content": "store.insert_subnet(&subnet).await.expect(\"insert_subnet\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1613,
+      "content": "store.insert_port(&port1).await.expect(\"insert port 1\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1669,
+      "content": "store.insert_resource(&res).await.expect(\"insert_resource\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1681,
+      "content": "store.insert_operation(&op).await.expect(\"insert_operation\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1719,
+      "content": ".expect(\"register_controller_session\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1724,
+      "content": ".expect(\"list_active_controller_sessions\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1736,
+      "content": ".expect(\"heartbeat\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1750,
+      "content": ".expect(\"acquire_work_lease\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1767,
+      "content": ".expect(\"inspect_work_lease\")"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1768,
+      "content": ".expect(\"lease must exist\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1781,
+      "content": ".expect(\"reacquire_work_lease\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1802,
+      "content": ".expect(\"renew_work_lease\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1815,
+      "content": ".expect(\"stale renew\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1828,
+      "content": ".expect(\"competing acquire\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1852,
+      "content": ".expect(\"acquire expire lease\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1873,
+      "content": ".expect(\"takeover expired lease\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1895,
+      "content": ".expect(\"old renew\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1902,
+      "content": ".expect(\"old release\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1909,
+      "content": ".expect(\"new release\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1915,
+      "content": ".expect(\"inspect after release\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1922,
+      "content": ".expect(\"drain_controller_session\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1928,
+      "content": ".expect(\"list active sessions after drain\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1973,
+      "content": ".expect(\"connect to Postgres\");"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1977,
+      "content": ".expect(\"clean tables\");"
+    }
+  ],
+  "production_panic": [
+    {
+      "path": "bins/o3kd/tests/p12_7_convergence.rs",
+      "line": 42,
+      "content": "panic!("
+    },
+    {
+      "path": "bins/o3kd/tests/p12_7_convergence.rs",
+      "line": 393,
+      "content": "panic!("
+    },
+    {
+      "path": "bins/o3kd/tests/p12_7_convergence.rs",
+      "line": 549,
+      "content": "panic!("
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2385,
+      "content": "panic!(\"ServiceManifestV1 schema validation failed:\\n{}\", errors);"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2492,
+      "content": "panic!(\"NativeResourceV1 schema validation failed:\\n{}\", errors);"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 2533,
+      "content": "panic!("
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2432,
+      "content": "Response::Status(_) => panic!(\"test output response expected\"),"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 2445,
+      "content": "Response::Output(_, _) => panic!(\"test status response expected\"),"
+    },
+    {
+      "path": "crates/o3k-store/tests/postgres_ops.rs",
+      "line": 330,
+      "content": "other => panic!(\"expected StoreError::ResourceAlreadyExists, got {other:?}\"),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1469,
+      "content": "Err(other) => panic!(\"unexpected error during quota race: {other:?}\"),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1760,
+      "content": "LeaseAcquireOutcome::Busy { .. } => panic!(\"first acquire must succeed\"),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1789,
+      "content": "_ => panic!(\"same owner reacquire must succeed\"),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1838,
+      "content": "_ => panic!(\"competing controller must see Busy on active lease\"),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1857,
+      "content": "_ => panic!(\"acquire expire lease must succeed\"),"
+    },
+    {
+      "path": "crates/o3k-store/src/conformance.rs",
+      "line": 1882,
+      "content": "_ => panic!(\"takeover on expired lease must succeed\"),"
+    }
+  ],
+  "production_allow_overrides": [
+    {
+      "path": "bins/o3k/src/upgrade/engine.rs",
+      "line": 292,
+      "content": "#[allow(clippy::too_many_lines)]"
+    },
+    {
+      "path": "bins/o3k/src/upgrade/engine.rs",
+      "line": 324,
+      "content": "#[allow(clippy::too_many_lines)]"
+    },
+    {
+      "path": "bins/o3k/src/upgrade/engine.rs",
+      "line": 838,
+      "content": "#[allow(clippy::too_many_lines)]"
+    },
+    {
+      "path": "bins/o3k-compute/src/main.rs",
+      "line": 3938,
+      "content": "#[allow(clippy::type_complexity)]"
+    },
+    {
+      "path": "bins/o3k-compute/src/main.rs",
+      "line": 4597,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 1462,
+      "content": "#[allow(clippy::expect_used)]"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 1473,
+      "content": "#[allow(clippy::expect_used)]"
+    },
+    {
+      "path": "crates/o3k-kernel/src/manifest.rs",
+      "line": 1814,
+      "content": "#[allow(clippy::expect_used)]"
+    },
+    {
+      "path": "crates/o3k-kernel/src/operation.rs",
+      "line": 87,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-kernel/src/auth_context.rs",
+      "line": 31,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-kernel/src/controller.rs",
+      "line": 397,
+      "content": "#[allow(clippy::unwrap_used)]"
+    },
+    {
+      "path": "crates/o3k-compute/src/lib.rs",
+      "line": 5036,
+      "content": "#[allow(clippy::type_complexity)]"
+    },
+    {
+      "path": "crates/o3k-compute/src/lib.rs",
+      "line": 5410,
+      "content": "#[allow(clippy::type_complexity)]"
+    },
+    {
+      "path": "crates/o3k-compute/src/lib.rs",
+      "line": 5857,
+      "content": "#[allow(clippy::type_complexity)]"
+    },
+    {
+      "path": "crates/o3k-compute/src/lib.rs",
+      "line": 6405,
+      "content": "#[allow(clippy::type_complexity)]"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 32,
+      "content": "#[allow(clippy::expect_used)]"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 106,
+      "content": "#[allow(clippy::result_large_err)]"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 132,
+      "content": "#[allow(clippy::result_large_err)]"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 152,
+      "content": "#[allow(clippy::result_large_err)]"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 596,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "line": 786,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-network/examples/fabric-regression-helper.rs",
+      "line": 70,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 6885,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 7506,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 7571,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-network/src/lib.rs",
+      "line": 7808,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-service-sdk/src/lib.rs",
+      "line": 376,
+      "content": "#[allow(clippy::result_large_err)]"
+    },
+    {
+      "path": "crates/o3k-service-sdk/src/lib.rs",
+      "line": 1553,
+      "content": "#[allow(clippy::result_large_err)]"
+    },
+    {
+      "path": "crates/o3k-provider-contract/src/lib.rs",
+      "line": 8,
+      "content": "#[allow(clippy::large_enum_variant)]"
+    },
+    {
+      "path": "crates/o3k-store/src/postgres.rs",
+      "line": 3952,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-store/src/reusable_policy.rs",
+      "line": 143,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-store/src/reusable_policy.rs",
+      "line": 938,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-store/src/reusable_policy.rs",
+      "line": 1778,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-store/src/unified.rs",
+      "line": 1523,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-store/src/lib.rs",
+      "line": 1718,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-store/src/lib.rs",
+      "line": 1823,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-store/src/lib.rs",
+      "line": 2849,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-store/src/lib.rs",
+      "line": 8719,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    },
+    {
+      "path": "crates/o3k-api/src/network.rs",
+      "line": 1152,
+      "content": "#[allow(dead_code)]"
+    },
+    {
+      "path": "crates/o3k-api/src/network.rs",
+      "line": 2551,
+      "content": "#[allow(clippy::result_large_err)]"
+    },
+    {
+      "path": "crates/o3k-api/src/network.rs",
+      "line": 2904,
+      "content": "#[allow(clippy::result_large_err)]"
+    },
+    {
+      "path": "crates/o3k-api/src/auth.rs",
+      "line": 12,
+      "content": "#[allow(clippy::result_large_err)]"
+    },
+    {
+      "path": "crates/o3k-api/src/compute.rs",
+      "line": 367,
+      "content": "#[allow(clippy::result_large_err)]"
+    },
+    {
+      "path": "crates/o3k-api/src/compute.rs",
+      "line": 384,
+      "content": "#[allow(clippy::result_large_err)]"
+    },
+    {
+      "path": "crates/o3k-native-api/src/pagination.rs",
+      "line": 135,
+      "content": "#[allow(dead_code)]"
+    },
+    {
+      "path": "crates/o3k-native-api/src/lib.rs",
+      "line": 45,
+      "content": "#[allow(clippy::too_many_arguments)]"
+    }
+  ]
+}
