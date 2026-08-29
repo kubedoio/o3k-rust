@@ -1339,27 +1339,6 @@ pub struct AgentCommandRecord {
     pub provider_resource_id: Option<String>,
 }
 
-#[derive(Debug, Error)]
-// StoreError and ResourceRelationshipRecord moved to model/error.rs
-
-/// Generic durable parent/child relationship intent used by external service
-/// composition. The record is intentionally service-neutral; service-owned
-/// slot names are data, not schema.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResourceRelationshipRecord {
-    pub parent_resource_id: Uuid,
-    pub parent_resource_type: String,
-    pub slot: String,
-    pub expected_child_resource_type: String,
-    pub child_resource_id: Option<Uuid>,
-    pub ownership: String,
-    pub parent_operation_id: Uuid,
-    pub child_operation_id: Option<Uuid>,
-    pub owner_scope: String,
-    pub state: String,
-    pub fingerprint: String,
-}
-
 /// Generic durable parent/child relationship port.
 ///
 /// This deliberately contains no service-specific vocabulary.  External
