@@ -39,6 +39,7 @@ mod identity;
 mod image;
 mod network;
 mod placement;
+mod policy;
 mod quota;
 mod relationship;
 mod storage;
