@@ -1,3 +1,26 @@
+//! Compute application service: server CRUD, keypairs, flavors,
+//! convergence sweeps, agent event dispatch, binding projection.
+//!
+//! ## Responsibility
+//!
+//! `o3k-compute` implements the compute-domain use cases. It drives the
+//! reconciler's durable state machine from the application layer and
+//! handles compute-specific post-processing (port binding projection,
+//! config-drive cleanup, failed-create compensation, inventory sync).
+//!
+//! ## Boundary
+//!
+//! The durable reconciliation state machine (operation journal, evidence
+//! fencing, retry budget) lives in `o3k-reconciler`. `o3k-compute` calls
+//! into it; it does not duplicate journaling or state-machine logic.
+//!
+//! ## Sub-modules
+//!
+//! - `types` — compute-domain types (flavors, keypairs, errors)
+//! - `attachment` — Cinder volume attachment orchestration
+//!
+//! See also: `o3k-reconciler` for the reconciliation state machine.
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

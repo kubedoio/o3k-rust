@@ -1,15 +1,27 @@
-//! Durable operation journal and reconciler for O3K compute and storage.
+//! Durable operation journal, evidence fencing, retry budget, and
+//! reconciliation state machine.
 //!
-//! Architecture:
-//!   lines 1-48:   imports, module declarations, test helpers
-//!   lines 49-215: event types (JournalEventKind, LifecycleAction, CanonicalMutationContext,
-//!                 JournalEvent, ReconcileError)
-//!   lines 218-2584: OperationJournal (state machine, idempotency, fencing, evidence, retry)
-//!   lines 2585-6200: Tests
+//! ## Responsibility
 //!
-//! The journal persists durable operations before provider side effects.
-//! Unknown outcomes require observation before retry. Agent evidence and
-//! observation evidence are kept in separate sequence fences.
+//! The reconciler owns the durable reconciliation lifecycle: it persists
+//! operation intents, fences evidence, applies bounded retries, and
+//! drives provider-observation → compensation transitions through a
+//! validated state machine (`reconcile_once`, `reconcile_lifecycle_once`,
+//! `observe_lifecycle`, etc.).
+//!
+//! ## Boundary
+//!
+//! Compute-domain application logic (server CRUD, keypairs, flavors,
+//! agent event subscription, convergence orchestration, binding
+//! projection) belongs in `o3k-compute`, not here. The reconciler
+//! provides the durable state machine; `o3k-compute` drives it.
+//!
+//! ## Sub-modules
+//!
+//! - `types` — reconciler-domain types (events, lifecycle actions, errors)
+//! - `storage_workflow` — cross-boundary volume attach/detach coordination
+//!
+//! See also: `o3k-compute` for the compute application service.
 //!
 #![allow(unused_imports)]
 

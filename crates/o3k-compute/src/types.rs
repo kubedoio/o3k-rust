@@ -1,4 +1,10 @@
-//! Compute domain types: flavor, keypair, server input, errors.
+//! Compute-domain types: flavors, keypairs, server creation input,
+//! compute error types.
+//!
+//! ## Boundary
+//!
+//! Reconciler-domain types (journal events, lifecycle actions, reconcile
+//! errors) live in `o3k-reconciler::types`.
 
 use serde::{Deserialize, Serialize};
 

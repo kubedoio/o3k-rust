@@ -1,4 +1,10 @@
-//! Reconciler domain types: events, actions, errors.
+//! Reconciler-domain types: journal events, lifecycle actions,
+//! canonical mutation context, reconciler errors.
+//!
+//! ## Boundary
+//!
+//! These types belong to the reconciliation domain. Compute-domain
+//! types (flavors, keypairs, server inputs) live in `o3k-compute::types`.
 
 use std::sync::{Arc, Mutex};
 
