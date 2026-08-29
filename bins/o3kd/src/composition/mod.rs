@@ -8,14 +8,13 @@ use async_trait::async_trait;
 use o3k_domain::ServerId;
 use o3k_kernel::Controller;
 use o3k_provider::{
-    AgentNodeSnapshot, ArtifactKind, BlockDeviceAttachment, ComputeProvider,
-    ConfigDriveRequest, CreateArtifactResolver, CreateInstanceRequest, OperationState,
-    ProviderError, ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
+    AgentNodeSnapshot, ArtifactKind, BlockDeviceAttachment, ComputeProvider, ConfigDriveRequest,
+    CreateArtifactResolver, CreateInstanceRequest, OperationState, ProviderError,
+    ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
 };
 use o3k_store::{
-    ComputeRepository, ControllerId, ControllerEpoch, ControllerSession,
-    DurableStore, ImageRepository, NetworkRepository, PlacementRepository,
-    StorageRepository,
+    ComputeRepository, ControllerEpoch, ControllerId, ControllerSession, DurableStore,
+    ImageRepository, NetworkRepository, PlacementRepository, StorageRepository,
 };
 use rustix::fs::{FlockOperation, flock};
 use std::{
@@ -32,18 +31,18 @@ use tracing::info;
 use uuid::Uuid;
 
 use self::compute::{
-    agent_inspect_probe_from_env, DaemonCreateResolver, parse_extra_project_seeds,
+    DaemonCreateResolver, agent_inspect_probe_from_env, parse_extra_project_seeds,
     run_agent_inspect_probe, validate_inspect_probe_paths,
 };
 use self::external_controllers::external_controllers_from_config;
 use self::network::{
-    network_dispatcher_from_env, NetworkAgentDispatcher, NetworkBindingProjector,
+    NetworkAgentDispatcher, NetworkBindingProjector, network_dispatcher_from_env,
     public_allocator_from_env,
 };
 use self::runtime::{control_shutdown_signal, spawn_console_event_consumer};
 use self::storage::{
-    storage_intent_epoch, LocalComputeAttachmentExecutor, LocalStorageFence,
-    NativeStorageAttachmentWorkflow,
+    LocalComputeAttachmentExecutor, LocalStorageFence, NativeStorageAttachmentWorkflow,
+    storage_intent_epoch,
 };
 
 fn placement_consumer_ids(resources: &[o3k_store::ResourceRecord]) -> Vec<String> {
@@ -56,7 +55,6 @@ fn placement_consumer_ids(resources: &[o3k_store::ResourceRecord]) -> Vec<String
     ids.dedup();
     ids
 }
-
 
 fn unix_time_millis() -> u64 {
     std::time::SystemTime::now()

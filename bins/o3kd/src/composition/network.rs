@@ -1,20 +1,19 @@
 use async_trait::async_trait;
-use o3k_network::{
-    AttachmentPlanInput, NetworkAgentIdentity, NetworkControllerLease,
-    NetworkDispatchError, NetworkPlanAction, NetworkPlanCommand, NetworkPlanDispatcher,
-    NetworkPlanStatus, NetworkService, PortBindingState, NetworkError,
-    compile_attachment_plan,
-};
-use o3k_network;
-use o3k_network_protocol;
 use o3k_compute::PortBindingProjector;
+use o3k_network;
+use o3k_network::{
+    AttachmentPlanInput, NetworkAgentIdentity, NetworkControllerLease, NetworkDispatchError,
+    NetworkError, NetworkPlanAction, NetworkPlanCommand, NetworkPlanDispatcher, NetworkPlanStatus,
+    NetworkService, PortBindingState, compile_attachment_plan,
+};
+use o3k_network_protocol;
 use o3k_provider::AgentNodeRegistry;
-use std::path::PathBuf;
-use std::sync::Arc;
-use uuid::Uuid;
-use tracing;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tracing;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub(crate) struct NetworkAgentDispatcher {
@@ -133,7 +132,6 @@ impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
         }
     }
 }
-
 
 pub(crate) fn public_allocator_from_env(
     data_dir: &std::path::Path,

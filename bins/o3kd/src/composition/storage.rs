@@ -1,25 +1,28 @@
 use async_trait::async_trait;
+use o3k_api::NativeAttachmentWorkflow;
+use o3k_provider::BlockDeviceAttachment;
 use o3k_reconciler;
-use o3k_store::{
-    ControllerId, ControllerEpoch, CoordinationRepository, DurableStore, FencingToken,
-    LeaseAcquireOutcome, StorageRepository,
-};
 use o3k_reconciler::storage_workflow::{
     ComputeAttachmentExecutor, StorageAttachmentWorkflow, StorageControllerFence,
     StorageWorkflowError,
 };
-use o3k_api::NativeAttachmentWorkflow;
-use o3k_provider::BlockDeviceAttachment;
-use o3k_store;
 use o3k_storage;
+use o3k_store;
+use o3k_store::{
+    ControllerEpoch, ControllerId, CoordinationRepository, DurableStore, FencingToken,
+    LeaseAcquireOutcome, StorageRepository,
+};
+use rustix::fs::{FlockOperation, flock};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 use tracing;
 use uuid::Uuid;
-use rustix::fs::{FlockOperation, flock};
 
 pub(crate) struct LocalStorageFence {
     pub(crate) coordination: Arc<dyn o3k_store::CoordinationRepository>,

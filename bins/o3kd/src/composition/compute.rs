@@ -1,26 +1,26 @@
 use async_trait::async_trait;
+use o3k_compute_agent;
+use o3k_config_drive;
 use o3k_domain::ServerId;
+use o3k_identity;
+use o3k_image;
+use o3k_network::{
+    AttachmentPlanInput, NetworkAgentIdentity, NetworkControllerLease, NetworkDispatchError,
+    NetworkPlanAction, NetworkPlanCommand, NetworkPlanDispatcher, NetworkPlanStatus,
+    NetworkService, compile_attachment_plan,
+};
 use o3k_provider::{
     AgentNodeSnapshot, ArtifactKind, ConfigDriveRequest, CreateArtifactResolver,
     CreateInstanceRequest, OperationState, ProviderError, ResolvedCreateArtifact,
     ResolvedCreateInputs, ResolvedCreateResolver,
 };
 use o3k_store::{ComputeRepository, DurableStore, StorageRepository};
-use o3k_image;
-use o3k_network::{
-    NetworkPlanDispatcher, compile_attachment_plan, NetworkPlanCommand,
-    NetworkPlanAction, NetworkPlanStatus, NetworkDispatchError, AttachmentPlanInput,
-    NetworkControllerLease, NetworkService, NetworkAgentIdentity,
-};
-use o3k_config_drive;
-use o3k_compute_agent;
-use o3k_identity;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use uuid::Uuid;
 use tracing;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub(crate) struct DaemonCreateResolver {
@@ -365,7 +365,10 @@ pub(crate) fn parse_extra_project_seeds()
     }])
 }
 
-pub(crate) fn validate_inspect_probe_paths(output: Option<&str>, resource_file: Option<&str>) -> bool {
+pub(crate) fn validate_inspect_probe_paths(
+    output: Option<&str>,
+    resource_file: Option<&str>,
+) -> bool {
     let Some(output) = output else {
         return false;
     };
