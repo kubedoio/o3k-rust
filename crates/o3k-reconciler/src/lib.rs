@@ -44,6 +44,8 @@ fn test_fault_pause_ms_value(raw: Option<String>) -> Option<u64> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// ─── Event types ──────────────────────────────────────────
+
 pub enum JournalEventKind {
     IntentPersisted,
     ProviderStarted,
@@ -211,6 +213,8 @@ struct AgentEvidencePermit {
     _epoch_lease: Option<Box<dyn o3k_provider::AgentEpochLease>>,
 }
 
+
+// ─── Operation journal ─────────────────────────────────────
 pub struct OperationJournal<S: ?Sized, P: ?Sized> {
     store: Arc<S>,
     provider: Arc<P>,
@@ -2463,6 +2467,8 @@ where
     }
 }
 
+
+// ─── Internal helpers ─────────────────────────────────────
 fn agent_error_category(
     category: Option<AgentErrorCategory>,
 ) -> Result<&'static str, ReconcileError> {
@@ -2574,6 +2580,8 @@ fn valid_agent_reference(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
 }
 
+
+// ─── Tests ───────────────────────────────────────────────-
 #[cfg(test)]
 mod tests {
     use super::*;

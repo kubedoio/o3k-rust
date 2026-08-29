@@ -84,6 +84,8 @@ pub use storage::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+
+// ─── Model types ─────────────────────────────────────────────
 pub struct DatabaseHealth {
     pub status: String,
     pub journal_mode: String,
@@ -623,6 +625,8 @@ pub struct KeystoneRegionRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+
+// ─── Operation state types ──────────────────────────────────
 pub enum OperationState {
     Pending,
     Running,
@@ -1085,6 +1089,8 @@ pub(crate) fn canonical_resource_type_for_record(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+
+// ─── Idempotency types ───────────────────────────────────────
 pub struct IdempotencyReservationRequest {
     pub owner_scope: String,
     pub action: String,
@@ -2394,6 +2400,8 @@ pub mod testkit {
 }
 
 #[derive(Clone, Debug)]
+
+// ─── SQLite adapter ──────────────────────────────────────────
 pub struct SqliteStore {
     pub(crate) pool: SqlitePool,
     agent_command_projection_lock: Arc<tokio::sync::Mutex<()>>,
