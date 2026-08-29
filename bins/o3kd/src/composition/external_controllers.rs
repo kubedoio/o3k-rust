@@ -1,11 +1,8 @@
 use ed25519_dalek;
 use o3k_kernel;
 use o3k_service_sdk;
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tracing;
 
 #[derive(Debug, serde::Deserialize)]
 struct ExternalControllerConfigFile {

@@ -4,40 +4,19 @@ pub mod network;
 pub mod runtime;
 pub mod storage;
 
-use async_trait::async_trait;
-use o3k_domain::ServerId;
 use o3k_kernel::Controller;
-use o3k_provider::{
-    AgentNodeSnapshot, ArtifactKind, BlockDeviceAttachment, ComputeProvider, ConfigDriveRequest,
-    CreateArtifactResolver, CreateInstanceRequest, OperationState, ProviderError,
-    ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
-};
-use o3k_store::{
-    ComputeRepository, ControllerEpoch, ControllerId, ControllerSession, DurableStore,
-    ImageRepository, NetworkRepository, PlacementRepository, StorageRepository,
-};
-use rustix::fs::{FlockOperation, flock};
-use std::{
-    collections::BTreeMap,
-    fs::{self, File, OpenOptions},
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use o3k_provider::ComputeProvider;
+use o3k_store::ComputeRepository;
+use std::{sync::Arc, time::Duration};
 use tracing::info;
 use uuid::Uuid;
 
 use self::compute::{
     DaemonCreateResolver, agent_inspect_probe_from_env, parse_extra_project_seeds,
-    run_agent_inspect_probe, validate_inspect_probe_paths,
 };
 use self::external_controllers::external_controllers_from_config;
 use self::network::{
-    NetworkAgentDispatcher, NetworkBindingProjector, network_dispatcher_from_env,
-    public_allocator_from_env,
+    NetworkBindingProjector, network_dispatcher_from_env, public_allocator_from_env,
 };
 use self::runtime::{control_shutdown_signal, spawn_console_event_consumer};
 use self::storage::{
@@ -812,7 +791,6 @@ pub async fn build_composition(
 /// Runs an opt-in, read-only process-boundary probe for protected validation.
 /// It is deliberately absent unless its output and either a fixed resource ID
 /// or a lifecycle-produced resource-ID file are configured. It records only
-
 pub async fn shutdown_signal(state: o3k_api::AppState) {
     let ctrl_c = async { tokio::signal::ctrl_c().await };
 
@@ -846,6 +824,7 @@ pub async fn shutdown_signal(state: o3k_api::AppState) {
 #[cfg(test)]
 mod tests {
     use super::{DaemonCreateResolver, NetworkBindingProjector, placement_consumer_ids};
+    use crate::composition::compute::validate_inspect_probe_paths;
     use o3k_compute::PortBindingProjector;
     use std::net::Ipv4Addr;
     use std::path::Path;
@@ -915,15 +894,15 @@ mod tests {
 
     #[test]
     fn agent_inspect_probe_rejects_invalid_relative_traversal_or_symlinked_paths() {
-        assert!(!super::validate_inspect_probe_paths(
+        assert!(!validate_inspect_probe_paths(
             Some("relative/path.json"),
             None
         ));
-        assert!(!super::validate_inspect_probe_paths(
+        assert!(!validate_inspect_probe_paths(
             Some("/tmp/valid-output.json"),
             Some("/tmp/../etc/passwd")
         ));
-        assert!(super::validate_inspect_probe_paths(
+        assert!(validate_inspect_probe_paths(
             Some("/tmp/valid-output.json"),
             Some("/tmp/valid-resource-file")
         ));

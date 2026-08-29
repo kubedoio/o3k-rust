@@ -4,19 +4,13 @@ use o3k_config_drive;
 use o3k_domain::ServerId;
 use o3k_identity;
 use o3k_image;
-use o3k_network::{
-    AttachmentPlanInput, NetworkAgentIdentity, NetworkControllerLease, NetworkDispatchError,
-    NetworkPlanAction, NetworkPlanCommand, NetworkPlanDispatcher, NetworkPlanStatus,
-    NetworkService, compile_attachment_plan,
-};
 use o3k_provider::{
     AgentNodeSnapshot, ArtifactKind, ConfigDriveRequest, CreateArtifactResolver,
     CreateInstanceRequest, OperationState, ProviderError, ResolvedCreateArtifact,
     ResolvedCreateInputs, ResolvedCreateResolver,
 };
-use o3k_store::{ComputeRepository, DurableStore, StorageRepository};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing;
