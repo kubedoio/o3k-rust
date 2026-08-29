@@ -1,4 +1,14 @@
-use super::*;
+use async_trait::async_trait;
+use uuid::Uuid;
+
+use crate::{
+    IdentityRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
+    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
+    StoreError,
+};
+
+use super::O3kStore;
 
 #[async_trait]
 impl IdentityRepository for O3kStore {

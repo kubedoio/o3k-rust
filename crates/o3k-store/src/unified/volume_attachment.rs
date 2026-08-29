@@ -1,4 +1,9 @@
-use super::*;
+use async_trait::async_trait;
+use uuid::Uuid;
+
+use crate::{StoreError, VolumeAttachmentRecord, VolumeAttachmentRepository};
+
+use super::O3kStore;
 
 #[async_trait]
 impl VolumeAttachmentRepository for O3kStore {

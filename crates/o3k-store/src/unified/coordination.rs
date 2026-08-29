@@ -1,4 +1,11 @@
-use super::*;
+use async_trait::async_trait;
+
+use crate::{
+    ControllerEpoch, ControllerId, ControllerSession, CoordinationRepository, FencingToken,
+    LeaseAcquireOutcome, StoreError, WorkLease,
+};
+
+use super::O3kStore;
 
 #[async_trait]
 impl CoordinationRepository for O3kStore {

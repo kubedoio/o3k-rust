@@ -1,4 +1,8 @@
-use super::*;
+use async_trait::async_trait;
+
+use crate::{ComputeRepository, ResourceRecord, StoreError};
+
+use super::O3kStore;
 
 #[async_trait]
 impl ComputeRepository for O3kStore {

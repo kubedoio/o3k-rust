@@ -1,4 +1,13 @@
-use super::*;
+use async_trait::async_trait;
+use sqlx::Row;
+
+use crate::{
+    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository,
+    PlacementResourceRecord, StoreError,
+};
+
+use super::PostgresStore;
 
 #[async_trait]
 impl PlacementRepository for PostgresStore {

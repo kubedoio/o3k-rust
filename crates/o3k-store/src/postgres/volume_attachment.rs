@@ -1,4 +1,12 @@
-use super::*;
+use async_trait::async_trait;
+use uuid::Uuid;
+
+use crate::{StoreError, VolumeAttachmentRecord, VolumeAttachmentRepository};
+
+use super::{
+    PostgresStore,
+    helpers::{map_pg_error, parse_pg_volume_attachment},
+};
 
 #[async_trait]
 impl VolumeAttachmentRepository for PostgresStore {

@@ -1,35 +1,11 @@
 //! Unified O3K store abstraction supporting both SQLite and PostgreSQL backends.
 
-use async_trait::async_trait;
 use std::path::Path;
 use uuid::Uuid;
 
-use o3k_kernel::{
-    LimitKey, LimitValue, OwnershipScope, Reservation, ReservationId, ResourceAmount, Usage,
-};
-
 use crate::{
-    AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
-    CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
-    CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord,
-    CanonicalNetworkPolicyRuleRecord, CanonicalNetworkRecord, CanonicalOperationRecord,
-    CanonicalPolicyAttachmentRecord, CanonicalPolicyRealizationRecord, CanonicalPolicyRepository,
-    CanonicalRealmBindingRecord, CanonicalReusableNetworkPolicyRecord, ComputeRepository,
-    ControllerEpoch, ControllerId, ControllerSession, CoordinationRepository, DatabaseHealth,
-    DurableStore, FencingToken, IdempotencyReservation, IdempotencyReservationRequest,
-    IdentityRepository, ImageMetadataRecord, ImageOverlayIdentity, ImageOverlayOwnershipRecord,
-    ImageOverlayUpdate, ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
-    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
-    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    LeaseAcquireOutcome, NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord,
-    NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
-    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
-    PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository, PortRecord,
-    PostgresStore, ProviderReference, RelationshipRepository, ResourceRecord,
-    ResourceRelationshipRecord, SecurityGroupBindingRecord, SecurityGroupRecord,
-    SecurityGroupRuleRecord, SnapshotRecord, SqliteStore, StorageBackendRecord, StorageRepository,
-    StoreError, SubnetRecord, VolumeAttachmentRecord, VolumeAttachmentRecordV1,
-    VolumeAttachmentRepository, VolumeRecord, WorkLease, quota::QuotaRepository,
+    DatabaseHealth, DurableStore, PostgresStore, ResourceRelationshipRecord, SqliteStore,
+    StoreError,
 };
 
 mod compute;
