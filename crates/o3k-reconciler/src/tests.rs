@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod reconciler_tests {
     use crate::storage_workflow;
     use crate::*;
     use o3k_provider::{FailureInjection, FakeComputeProvider};
