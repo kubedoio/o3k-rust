@@ -35,11 +35,22 @@ BASELINE_SHA = "edb464ec43b1d12207faae903ea14b7824123f39"
 
 
 def is_test_or_example(path: str) -> bool:
-    """True if the file is test-only, an example, or conformance."""
-    return any(p in path for p in [
-        "/tests/", "/examples/", "/conformance/",
-        "test_", "_test",
-    ])
+    """True if the file is test-only, an example, or conformance.
+
+    Uses precise filename/directory matching rather than fragile substring
+    checks to avoid misclassifying production files.
+    """
+    # Dedicated test/example/conformance directories
+    # Handles both "tests/..." (relative root) and ".../tests/..." (nested)
+    if re.search(r"(?:^|/)tests/", path) \
+       or re.search(r"(?:^|/)examples/", path) \
+       or re.search(r"(?:^|/)conformance/", path):
+        return True
+    # Test-only file patterns: tests.rs, *_tests.rs
+    fname = path.rsplit("/", 1)[-1] if "/" in path else path
+    if fname == "tests.rs" or fname.endswith("_tests.rs"):
+        return True
+    return False
 
 
 def rust_source_files() -> list[Path]:
@@ -124,16 +135,7 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
 
         lines = path.read_text(encoding="utf-8").splitlines()
 
-        # Skip everything after the first #[cfg(test)]
-        cfg_test_line: int | None = None
-        for j, ln in enumerate(lines, 1):
-            if "#[cfg(test)]" in ln:
-                cfg_test_line = j
-                break
-
         for i, line in enumerate(lines, 1):
-            if cfg_test_line is not None and i >= cfg_test_line:
-                break
             for pat in SQL_PATTERNS:
                 if re.search(pat, line):
                     key = f"{rel}:{i}"
@@ -213,15 +215,7 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
 
         lines = path.read_text(encoding="utf-8").splitlines()
 
-        cfg_test_line: int | None = None
-        for j, ln in enumerate(lines, 1):
-            if "#[cfg(test)]" in ln:
-                cfg_test_line = j
-                break
-
         for i, line in enumerate(lines, 1):
-            if cfg_test_line is not None and i >= cfg_test_line:
-                break
             for pat, name in HOST_CMD_PATTERNS:
                 if re.search(pat, line):
                     key = f"{rel}:{i}"
