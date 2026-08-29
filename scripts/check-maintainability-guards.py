@@ -90,7 +90,17 @@ SQL_PATTERNS = [
 # SQL belongs behind the store port; only the persistence adapter,
 # diagnostic tools, and upgrade code may contain it.
 APPROVED_SQL_PATHS_ALLOWLIST = {
-    "crates/o3k-store/src",
+    "crates/o3k-store/src/lib.rs",
+    "crates/o3k-store/src/sqlite",
+    "crates/o3k-store/src/postgres",
+    "crates/o3k-store/src/unified",
+    "crates/o3k-store/src/coordination",
+    "crates/o3k-store/src/storage",
+    "crates/o3k-store/src/quota",
+    "crates/o3k-store/src/reusable_policy",
+    "crates/o3k-store/src/artifact_transfer",
+    "crates/o3k-store/src/server_state",
+    "crates/o3k-store/src/conformance",
     "bins/o3k/src/db.rs",
     "bins/o3k/src/upgrade/runner.rs",
 }

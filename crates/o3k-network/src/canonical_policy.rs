@@ -1,5 +1,10 @@
 //! Compilation of reusable canonical policy state into endpoint execution
 //! intents. This module deliberately has no OpenStack or provider types.
+//!
+//! ARCHITECTURE NOTE: this module executes Linux CLI commands (`ip`) directly.
+//! A future refactoring should consolidate all Linux host execution into
+//! `linux_fabric` so the canonical application root never executes CLI
+//! commands directly.
 
 use async_trait::async_trait;
 use o3k_domain::{

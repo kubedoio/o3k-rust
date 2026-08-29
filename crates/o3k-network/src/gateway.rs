@@ -1,5 +1,10 @@
 //! Provider-independent execution boundary for canonical multi-Realm gateways.
 //!
+//! ARCHITECTURE NOTE: this module executes Linux CLI commands (`ip`) directly.
+//! A future refactoring should consolidate all Linux host execution into
+//! `linux_fabric` so the canonical application root never executes CLI
+//! commands directly.
+//!
 //! `NamespacedRoutedFabricPlan` remains a one-Realm fabric plan.  This module
 //! owns the separate execution unit for an L3 gateway and deliberately keeps
 //! provider names (Linux namespaces, links, and routing tables) out of the

@@ -16,6 +16,12 @@
 //! ## Sub-modules
 //!
 //! - `tests` — Integration tests for the compute runtime
+//!
+//! ARCHITECTURE NOTE: this binary owns significant runtime implementation
+//! (iSCSI lifecycle, DHCP cleanup, pidfd process safety, network preparation)
+//! inline in main.rs. A future refactoring should extract these into a
+//! `runtime/` module tree so main.rs is only configuration, construction,
+//! listener startup, and shutdown.
 
 use std::{
     env,

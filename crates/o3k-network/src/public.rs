@@ -3,6 +3,11 @@
 //! This is canonical allocation state, not host networking state. A later
 //! provider realization consumes the public binding and owns only its
 //! node-local uplink address plus DNAT/SNAT mutation.
+//!
+//! ARCHITECTURE NOTE: this module executes Linux CLI commands directly.
+//! A future refactoring should consolidate all Linux host execution into
+//! `linux_fabric` so the canonical application root never executes CLI
+//! commands directly.
 
 use o3k_domain::{Ipv4Prefix, NetworkPlanIntent};
 use serde::{Deserialize, Serialize};
