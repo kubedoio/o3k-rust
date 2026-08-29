@@ -15,13 +15,14 @@
 //!
 //! ## Sub-modules
 //!
-//! - `tests` — Integration tests for the compute runtime
-//!
-//! ARCHITECTURE NOTE: this binary owns significant runtime implementation
-//! (iSCSI lifecycle, DHCP cleanup, pidfd process safety, network preparation)
-//! inline in main.rs. A future refactoring should extract these into a
-//! `runtime/` module tree so main.rs is only configuration, construction,
-//! listener startup, and shutdown.
+//! - `iscsi` — host connector and iSCSI lifecycle
+//! - `process` — process ownership and pidfd safety
+//! - `dhcp` — DHCP runtime and orphan recovery
+//! - `network` — network preparation, rollback, and recovery
+//! - `cleanup` — artifact and config-drive cleanup
+//! - `runtime` — compute command execution and startup restoration
+//! - `main.rs` — configuration, construction, health server, startup
+//!   coordination, and shutdown
 
 mod cleanup;
 mod dhcp;
@@ -30,12 +31,8 @@ mod network;
 mod process;
 mod runtime;
 
-use cleanup::{cleanup_console_log, reap_config_drive_artifacts, reap_orphaned_transfer_parts};
+use cleanup::reap_orphaned_transfer_parts;
 use dhcp::DhcpRuntime;
-use network::{
-    DomainPresence, NetworkPreparation, cleanup_instance_network, prepare_network,
-    reap_stale_instance_networks, return_after_create_rollback, return_after_network_rollback,
-};
 use runtime::{
     CommandJournalStartupRefresh, LibvirtCommandExecutor, NetworkStartupTapRestore,
     reap_startup_residue, reconcile_dhcp_on_startup, restore_expected_running_domains,
@@ -49,16 +46,9 @@ use std::{
     time::Duration,
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
-use async_trait::async_trait;
 use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
-use o3k_compute_agent::{
-    AgentClient, AgentConfig, AgentError, CommandExecutionResult, CommandExecutor,
-    ConsoleLogResult, TlsFiles,
-};
-use o3k_libvirt::{ErrorCategory, LibvirtAdapter, LibvirtConfig, stable_domain_name};
+use o3k_compute_agent::{AgentClient, AgentConfig, AgentError, TlsFiles};
+use o3k_libvirt::{LibvirtAdapter, LibvirtConfig};
 use o3k_provider_contract::compute_proto as proto;
 use tokio::net::TcpListener;
 use tracing::info;

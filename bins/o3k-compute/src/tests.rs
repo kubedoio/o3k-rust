@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod tests {
     use crate::cleanup::cleanup_config_drive_artifact;
+    use crate::cleanup::reap_config_drive_artifacts;
     use crate::dhcp::DhcpRuntime;
+    use crate::network::{DomainPresence, cleanup_instance_network};
     use crate::process::pid_is_alive;
     use crate::runtime::{
         CommittedArtifact, CommittedCreateInputs, CreateDomainIdentity, OwnedTap,
@@ -11,6 +13,7 @@ mod tests {
         restore_expected_running_domains_with_window, verify_owned_domain,
     };
     use crate::*;
+    use async_trait::async_trait;
     use o3k_compute_agent::ArtifactStore;
     use rustix::process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal};
     use std::path::PathBuf;
