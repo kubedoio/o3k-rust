@@ -1,38 +1,14 @@
 //! Deterministic first-fit Nova scheduling backed by Placement allocations.
 
+pub mod types;
+
+use std::collections::{BTreeMap, BTreeSet};
+
 use o3k_placement::{
     Allocation, DISK_GB, MEMORY_MB, PlacementError, PlacementLedger, ProviderState, VCPU,
 };
-use std::collections::{BTreeMap, BTreeSet};
-use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Flavor {
-    pub vcpus: u64,
-    pub memory_mb: u64,
-    pub disk_gb: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScheduleDecision {
-    pub provider_id: String,
-    pub allocation_id: String,
-    pub allocation: Allocation,
-}
-
-#[derive(Debug, Error)]
-pub enum SchedulerError {
-    #[error("no valid compute host is available")]
-    NoValidHost,
-    #[error("placement allocation conflict")]
-    Conflict,
-    #[error("placement allocation is not owned by the requested server")]
-    AllocationMismatch,
-    #[error("invalid flavor")]
-    InvalidFlavor,
-    #[error("placement failure")]
-    Placement(#[from] PlacementError),
-}
+pub use types::{Flavor, ScheduleDecision, SchedulerError};
 
 #[derive(Clone)]
 pub struct Scheduler {
