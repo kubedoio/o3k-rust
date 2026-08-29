@@ -3,7 +3,6 @@ use std::{
     fs, io,
     net::Ipv4Addr,
     path::{Path, PathBuf},
-    process::Command,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -895,32 +894,7 @@ pub struct TapOwnership {
     pub created_by_o3k: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NetworkCommandOutput {
-    success: bool,
-    stdout: String,
-}
-
-trait NetworkCommand: Send + Sync {
-    fn output(&self, args: &[&str]) -> io::Result<NetworkCommandOutput>;
-    fn status(&self, args: &[&str]) -> io::Result<bool>;
-}
-
-struct SystemNetworkCommand;
-
-impl NetworkCommand for SystemNetworkCommand {
-    fn output(&self, args: &[&str]) -> io::Result<NetworkCommandOutput> {
-        let output = Command::new("ip").args(args).output()?;
-        Ok(NetworkCommandOutput {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        })
-    }
-
-    fn status(&self, args: &[&str]) -> io::Result<bool> {
-        Ok(Command::new("ip").args(args).status()?.success())
-    }
-}
+use linux_fabric::network_execution::{NetworkCommand, NetworkCommandOutput, SystemNetworkCommand};
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
