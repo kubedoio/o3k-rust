@@ -1,3 +1,22 @@
+//! O3K Compute host execution runtime.
+//!
+//! ## Responsibility
+//!
+//! This binary is the host-level compute runtime. It wires libvirt
+//! hypervisor access, the compute-agent protocol bridge, TAP/networking
+//! setup, config-drive publishing, and the runtime health/probe endpoint.
+//!
+//! ## Boundary
+//!
+//! Host execution (libvirt, qemu-img, network CLI) belongs here — not
+//! in the control-plane o3kd binary. The compute service logic (server
+//! CRUD, reconciler dispatch, port binding projection) lives in the
+//! `o3k-compute` crate and is wired through the o3kd composition root.
+//!
+//! ## Sub-modules
+//!
+//! - `tests` — Integration tests for the compute runtime
+
 use std::{
     env,
     net::{Ipv4Addr, SocketAddr},
