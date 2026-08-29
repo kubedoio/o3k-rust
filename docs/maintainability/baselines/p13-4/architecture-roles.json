@@ -1,0 +1,499 @@
+{
+  "o3k": {
+    "role": "unresolved",
+    "manifest": "bins/o3k/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "clap",
+      "serde",
+      "serde_json",
+      "sha2",
+      "sqlx",
+      "tokio"
+    ]
+  },
+  "o3k-api": {
+    "role": "API / OpenStack compatibility projection",
+    "manifest": "crates/o3k-api/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "axum",
+      "chrono",
+      "o3k-compute",
+      "o3k-compute-agent",
+      "o3k-config-drive",
+      "o3k-console",
+      "o3k-domain",
+      "o3k-identity",
+      "o3k-image",
+      "o3k-kernel",
+      "o3k-native-api",
+      "o3k-network",
+      "o3k-provider",
+      "o3k-reconciler",
+      "o3k-storage",
+      "o3k-store",
+      "serde",
+      "serde_json",
+      "sha2",
+      "tokio-stream",
+      "tracing",
+      "uuid"
+    ]
+  },
+  "o3k-cellhv": {
+    "role": "provider adapter / host execution",
+    "manifest": "crates/o3k-cellhv/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "o3k-provider",
+      "o3k-provider-contract",
+      "thiserror",
+      "tokio",
+      "tonic",
+      "uuid"
+    ]
+  },
+  "o3k-cinder": {
+    "role": "external-service client",
+    "manifest": "crates/o3k-cinder/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "axum",
+      "base64",
+      "bytes",
+      "http",
+      "http-body-util",
+      "hyper",
+      "hyper-util",
+      "o3k-identity",
+      "o3k-provider",
+      "serde",
+      "serde_json",
+      "sha2",
+      "thiserror",
+      "tokio",
+      "tracing",
+      "uuid"
+    ]
+  },
+  "o3k-compute": {
+    "role": "application/service",
+    "manifest": "crates/o3k-compute/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "o3k-config-drive",
+      "o3k-domain",
+      "o3k-kernel",
+      "o3k-placement",
+      "o3k-provider",
+      "o3k-reconciler",
+      "o3k-scheduler",
+      "o3k-store",
+      "serde",
+      "serde_json",
+      "thiserror",
+      "tokio",
+      "tracing",
+      "uuid"
+    ]
+  },
+  "o3k-compute-agent": {
+    "role": "provider adapter / host execution",
+    "manifest": "crates/o3k-compute-agent/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "base64",
+      "http",
+      "hyper-util",
+      "o3k-domain",
+      "o3k-image",
+      "o3k-provider",
+      "o3k-provider-contract",
+      "o3k-store",
+      "prost",
+      "rustls",
+      "serde",
+      "serde_json",
+      "sha2",
+      "thiserror",
+      "tokio",
+      "tokio-rustls",
+      "tokio-stream",
+      "tonic",
+      "tower",
+      "tracing",
+      "uuid"
+    ]
+  },
+  "o3k-compute-bin": {
+    "role": "unresolved",
+    "manifest": "bins/o3k-compute/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "axum",
+      "o3k-compute-agent",
+      "o3k-console",
+      "o3k-dhcp",
+      "o3k-libvirt",
+      "o3k-network",
+      "o3k-provider",
+      "o3k-provider-contract",
+      "rustix",
+      "serde",
+      "serde_json",
+      "tokio",
+      "tracing",
+      "tracing-subscriber"
+    ]
+  },
+  "o3k-config": {
+    "role": "diagnostics/upgrade/maintenance",
+    "manifest": "crates/o3k-config/Cargo.toml",
+    "dependencies": [
+      "serde",
+      "thiserror",
+      "toml"
+    ]
+  },
+  "o3k-config-drive": {
+    "role": "provider adapter / host execution",
+    "manifest": "crates/o3k-config-drive/Cargo.toml",
+    "dependencies": [
+      "serde",
+      "serde_json",
+      "sha2",
+      "thiserror",
+      "uuid"
+    ]
+  },
+  "o3k-console": {
+    "role": "provider adapter / host execution",
+    "manifest": "crates/o3k-console/Cargo.toml",
+    "dependencies": [
+      "thiserror",
+      "uuid"
+    ]
+  },
+  "o3k-controller-protocol": {
+    "role": "protocol",
+    "manifest": "crates/o3k-controller-protocol/Cargo.toml",
+    "dependencies": [
+      "o3k-kernel",
+      "prost",
+      "thiserror",
+      "tonic",
+      "uuid"
+    ]
+  },
+  "o3k-database-example": {
+    "role": "example/evidence",
+    "manifest": "crates/o3k-database-example/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "ed25519-dalek",
+      "o3k-controller-protocol",
+      "o3k-kernel",
+      "o3k-service-sdk",
+      "serde",
+      "serde_json",
+      "thiserror",
+      "tokio",
+      "tonic",
+      "uuid"
+    ]
+  },
+  "o3k-dhcp": {
+    "role": "provider adapter / host execution",
+    "manifest": "crates/o3k-dhcp/Cargo.toml",
+    "dependencies": [
+      "serde",
+      "serde_json",
+      "thiserror",
+      "uuid"
+    ]
+  },
+  "o3k-domain": {
+    "role": "contracts/kernel/domain",
+    "manifest": "crates/o3k-domain/Cargo.toml",
+    "dependencies": [
+      "serde",
+      "thiserror",
+      "uuid"
+    ]
+  },
+  "o3k-identity": {
+    "role": "application/service",
+    "manifest": "crates/o3k-identity/Cargo.toml",
+    "dependencies": [
+      "base64",
+      "hmac",
+      "o3k-kernel",
+      "o3k-store",
+      "serde",
+      "serde_json",
+      "sha2",
+      "thiserror",
+      "uuid"
+    ]
+  },
+  "o3k-image": {
+    "role": "application/service",
+    "manifest": "crates/o3k-image/Cargo.toml",
+    "dependencies": [
+      "o3k-kernel",
+      "o3k-store",
+      "serde",
+      "serde_json",
+      "sha2",
+      "thiserror",
+      "tokio",
+      "uuid"
+    ]
+  },
+  "o3k-kernel": {
+    "role": "contracts/kernel/domain",
+    "manifest": "crates/o3k-kernel/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "serde",
+      "serde_json",
+      "thiserror",
+      "uuid"
+    ]
+  },
+  "o3k-libvirt": {
+    "role": "provider adapter / host execution",
+    "manifest": "crates/o3k-libvirt/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "o3k-provider",
+      "o3k-provider-contract",
+      "sha2",
+      "thiserror",
+      "tokio",
+      "tracing",
+      "uuid",
+      "virt"
+    ]
+  },
+  "o3k-native-api": {
+    "role": "API / native API",
+    "manifest": "crates/o3k-native-api/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "axum",
+      "base64",
+      "hmac",
+      "o3k-kernel",
+      "serde",
+      "serde_json",
+      "sha2",
+      "thiserror",
+      "tracing",
+      "uuid"
+    ]
+  },
+  "o3k-network": {
+    "role": "application/service",
+    "manifest": "crates/o3k-network/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "o3k-dhcp",
+      "o3k-domain",
+      "o3k-kernel",
+      "o3k-store",
+      "rustix",
+      "serde",
+      "serde_json",
+      "sha2",
+      "thiserror",
+      "tokio",
+      "uuid"
+    ]
+  },
+  "o3k-network-bin": {
+    "role": "unresolved",
+    "manifest": "bins/o3k-network/Cargo.toml",
+    "dependencies": [
+      "o3k-domain",
+      "o3k-network",
+      "o3k-network-protocol",
+      "prost",
+      "rustls",
+      "serde_json",
+      "thiserror",
+      "tokio",
+      "tokio-stream",
+      "tonic",
+      "tracing",
+      "tracing-subscriber",
+      "uuid"
+    ]
+  },
+  "o3k-network-protocol": {
+    "role": "protocol",
+    "manifest": "crates/o3k-network-protocol/Cargo.toml",
+    "dependencies": [
+      "prost",
+      "rustls",
+      "thiserror",
+      "tokio",
+      "tokio-stream",
+      "tonic"
+    ]
+  },
+  "o3k-placement": {
+    "role": "application/service",
+    "manifest": "crates/o3k-placement/Cargo.toml",
+    "dependencies": [
+      "o3k-store",
+      "serde",
+      "serde_json",
+      "thiserror"
+    ]
+  },
+  "o3k-provider": {
+    "role": "provider port + adapters",
+    "manifest": "crates/o3k-provider/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "o3k-domain",
+      "serde",
+      "thiserror",
+      "tokio",
+      "uuid"
+    ]
+  },
+  "o3k-provider-contract": {
+    "role": "provider contract/protocol",
+    "manifest": "crates/o3k-provider-contract/Cargo.toml",
+    "dependencies": [
+      "o3k-provider",
+      "prost",
+      "tonic",
+      "uuid"
+    ]
+  },
+  "o3k-reconciler": {
+    "role": "reconciler/workflow",
+    "manifest": "crates/o3k-reconciler/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "chrono",
+      "o3k-domain",
+      "o3k-kernel",
+      "o3k-provider",
+      "o3k-storage",
+      "o3k-store",
+      "serde",
+      "serde_json",
+      "sha2",
+      "thiserror",
+      "tracing",
+      "uuid"
+    ]
+  },
+  "o3k-scheduler": {
+    "role": "application/service",
+    "manifest": "crates/o3k-scheduler/Cargo.toml",
+    "dependencies": [
+      "o3k-placement",
+      "thiserror"
+    ]
+  },
+  "o3k-service-sdk": {
+    "role": "protocol / SDK",
+    "manifest": "crates/o3k-service-sdk/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "ed25519-dalek",
+      "o3k-controller-protocol",
+      "o3k-kernel",
+      "prost",
+      "rustls",
+      "serde",
+      "serde_json",
+      "sha2",
+      "thiserror",
+      "tokio",
+      "tonic",
+      "uuid"
+    ]
+  },
+  "o3k-storage": {
+    "role": "provider adapter / host execution",
+    "manifest": "crates/o3k-storage/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "o3k-domain",
+      "serde",
+      "serde_json",
+      "sha2",
+      "thiserror",
+      "tokio",
+      "uuid"
+    ]
+  },
+  "o3k-store": {
+    "role": "persistence port + SQLite adapter",
+    "manifest": "crates/o3k-store/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "base64",
+      "chrono",
+      "md-5",
+      "o3k-domain",
+      "o3k-kernel",
+      "serde",
+      "serde_json",
+      "sha2",
+      "sqlx",
+      "thiserror",
+      "tokio",
+      "url",
+      "uuid"
+    ]
+  },
+  "o3kd": {
+    "role": "unresolved",
+    "manifest": "bins/o3kd/Cargo.toml",
+    "dependencies": [
+      "async-trait",
+      "axum",
+      "chrono",
+      "ed25519-dalek",
+      "o3k-api",
+      "o3k-cellhv",
+      "o3k-cinder",
+      "o3k-compute",
+      "o3k-compute-agent",
+      "o3k-config",
+      "o3k-config-drive",
+      "o3k-console",
+      "o3k-domain",
+      "o3k-identity",
+      "o3k-image",
+      "o3k-kernel",
+      "o3k-native-api",
+      "o3k-network",
+      "o3k-network-protocol",
+      "o3k-placement",
+      "o3k-provider",
+      "o3k-provider-contract",
+      "o3k-reconciler",
+      "o3k-scheduler",
+      "o3k-service-sdk",
+      "o3k-storage",
+      "o3k-store",
+      "rustix",
+      "serde",
+      "serde_json",
+      "tokio",
+      "tonic",
+      "tracing",
+      "tracing-subscriber",
+      "uuid"
+    ]
+  }
+}

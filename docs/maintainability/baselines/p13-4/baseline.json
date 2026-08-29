@@ -1,0 +1,2104 @@
+{
+  "git_sha": "edb464ec43b1d12207faae903ea14b7824123f39",
+  "branch": "HEAD",
+  "workspace_root": ".",
+  "packages": {
+    "o3k": {
+      "name": "o3k",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "bins/o3k/Cargo.toml",
+      "targets": [
+        {
+          "name": "cli",
+          "kind": [
+            "test"
+          ],
+          "src_path": "bins/o3k/tests/cli.rs"
+        },
+        {
+          "name": "o3k",
+          "kind": [
+            "bin"
+          ],
+          "src_path": "bins/o3k/src/main.rs"
+        },
+        {
+          "name": "o3k",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "bins/o3k/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-api": {
+      "name": "o3k-api",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-api/Cargo.toml",
+      "targets": [
+        {
+          "name": "attachment_isolation",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-api/tests/attachment_isolation.rs"
+        },
+        {
+          "name": "gate_c_nova_callback",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-api/tests/gate_c_nova_callback.rs"
+        },
+        {
+          "name": "health",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-api/tests/health.rs"
+        },
+        {
+          "name": "native_storage",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-api/tests/native_storage.rs"
+        },
+        {
+          "name": "o3k_api",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-api/src/lib.rs"
+        },
+        {
+          "name": "two_tenant_isolation",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-api/tests/two_tenant_isolation.rs"
+        }
+      ]
+    },
+    "o3k-cellhv": {
+      "name": "o3k-cellhv",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-cellhv/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_cellhv",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-cellhv/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-cinder": {
+      "name": "o3k-cinder",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-cinder/Cargo.toml",
+      "targets": [
+        {
+          "name": "client",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-cinder/tests/client.rs"
+        },
+        {
+          "name": "gate_a_identity",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-cinder/tests/gate_a_identity.rs"
+        },
+        {
+          "name": "gate_b_protocol",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-cinder/tests/gate_b_protocol.rs"
+        },
+        {
+          "name": "o3k_cinder",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-cinder/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-compute": {
+      "name": "o3k-compute",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-compute/Cargo.toml",
+      "targets": [
+        {
+          "name": "multi_controller_acceptance",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-compute/tests/multi_controller_acceptance.rs"
+        },
+        {
+          "name": "o3k_compute",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-compute/src/lib.rs"
+        },
+        {
+          "name": "placement_crash_window",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-compute/tests/placement_crash_window.rs"
+        }
+      ]
+    },
+    "o3k-compute-agent": {
+      "name": "o3k-compute-agent",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-compute-agent/Cargo.toml",
+      "targets": [
+        {
+          "name": "agent_mtls",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-compute-agent/tests/agent_mtls.rs"
+        },
+        {
+          "name": "o3k_compute_agent",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-compute-agent/src/lib.rs"
+        },
+        {
+          "name": "registration_tls",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-compute-agent/tests/registration_tls.rs"
+        }
+      ]
+    },
+    "o3k-compute-bin": {
+      "name": "o3k-compute-bin",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "bins/o3k-compute/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k-compute-bin",
+          "kind": [
+            "bin"
+          ],
+          "src_path": "bins/o3k-compute/src/main.rs"
+        }
+      ]
+    },
+    "o3k-config": {
+      "name": "o3k-config",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-config/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_config",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-config/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-config-drive": {
+      "name": "o3k-config-drive",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-config-drive/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_config_drive",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-config-drive/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-console": {
+      "name": "o3k-console",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-console/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_console",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-console/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-controller-protocol": {
+      "name": "o3k-controller-protocol",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-controller-protocol/Cargo.toml",
+      "targets": [
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "src_path": "crates/o3k-controller-protocol/build.rs"
+        },
+        {
+          "name": "o3k_controller_protocol",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-controller-protocol/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-database-example": {
+      "name": "o3k-database-example",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-database-example/Cargo.toml",
+      "targets": [
+        {
+          "name": "database-controller",
+          "kind": [
+            "bin"
+          ],
+          "src_path": "crates/o3k-database-example/src/bin/database-controller.rs"
+        },
+        {
+          "name": "o3k_database_example",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-database-example/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-dhcp": {
+      "name": "o3k-dhcp",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-dhcp/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_dhcp",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-dhcp/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-domain": {
+      "name": "o3k-domain",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-domain/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_domain",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-domain/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-identity": {
+      "name": "o3k-identity",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-identity/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_identity",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-identity/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-image": {
+      "name": "o3k-image",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-image/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_image",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-image/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-kernel": {
+      "name": "o3k-kernel",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-kernel/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_kernel",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-kernel/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-libvirt": {
+      "name": "o3k-libvirt",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-libvirt/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_libvirt",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-libvirt/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-native-api": {
+      "name": "o3k-native-api",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-native-api/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_native_api",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-native-api/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-network": {
+      "name": "o3k-network",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-network/Cargo.toml",
+      "targets": [
+        {
+          "name": "edge-fabric-multi-host-driver",
+          "kind": [
+            "example"
+          ],
+          "src_path": "crates/o3k-network/examples/edge-fabric-multi-host-driver.rs"
+        },
+        {
+          "name": "fabric-regression-helper",
+          "kind": [
+            "example"
+          ],
+          "src_path": "crates/o3k-network/examples/fabric-regression-helper.rs"
+        },
+        {
+          "name": "linux-fabric-fip-smoke",
+          "kind": [
+            "example"
+          ],
+          "src_path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs"
+        },
+        {
+          "name": "linux-fabric-smoke",
+          "kind": [
+            "example"
+          ],
+          "src_path": "crates/o3k-network/examples/linux-fabric-smoke.rs"
+        },
+        {
+          "name": "network-plan-fingerprint",
+          "kind": [
+            "example"
+          ],
+          "src_path": "crates/o3k-network/examples/network-plan-fingerprint.rs"
+        },
+        {
+          "name": "o3k_network",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-network/src/lib.rs"
+        },
+        {
+          "name": "p13_f3_runtime_acceptance",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-network/tests/p13_f3_runtime_acceptance.rs"
+        },
+        {
+          "name": "p13_r2a_fingerprint_parity",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs"
+        },
+        {
+          "name": "postgres_p13_f2_r1",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs"
+        }
+      ]
+    },
+    "o3k-network-bin": {
+      "name": "o3k-network-bin",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "bins/o3k-network/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k-network-bin",
+          "kind": [
+            "bin"
+          ],
+          "src_path": "bins/o3k-network/src/main.rs"
+        }
+      ]
+    },
+    "o3k-network-protocol": {
+      "name": "o3k-network-protocol",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-network-protocol/Cargo.toml",
+      "targets": [
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "src_path": "crates/o3k-network-protocol/build.rs"
+        },
+        {
+          "name": "network-agent-client",
+          "kind": [
+            "example"
+          ],
+          "src_path": "crates/o3k-network-protocol/examples/network-agent-client.rs"
+        },
+        {
+          "name": "o3k_network_protocol",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-network-protocol/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-placement": {
+      "name": "o3k-placement",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-placement/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_placement",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-placement/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-provider": {
+      "name": "o3k-provider",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-provider/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_provider",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-provider/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-provider-contract": {
+      "name": "o3k-provider-contract",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-provider-contract/Cargo.toml",
+      "targets": [
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "src_path": "crates/o3k-provider-contract/build.rs"
+        },
+        {
+          "name": "o3k_provider_contract",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-provider-contract/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-reconciler": {
+      "name": "o3k-reconciler",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-reconciler/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_reconciler",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-reconciler/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-scheduler": {
+      "name": "o3k-scheduler",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-scheduler/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3k_scheduler",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-scheduler/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-service-sdk": {
+      "name": "o3k-service-sdk",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-service-sdk/Cargo.toml",
+      "targets": [
+        {
+          "name": "mtls",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-service-sdk/tests/mtls.rs"
+        },
+        {
+          "name": "o3k_service_sdk",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-service-sdk/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-storage": {
+      "name": "o3k-storage",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-storage/Cargo.toml",
+      "targets": [
+        {
+          "name": "ceph-rbd-provider-volume",
+          "kind": [
+            "example"
+          ],
+          "src_path": "crates/o3k-storage/examples/ceph-rbd-provider-volume.rs"
+        },
+        {
+          "name": "lvm-provider-smoke",
+          "kind": [
+            "example"
+          ],
+          "src_path": "crates/o3k-storage/examples/lvm-provider-smoke.rs"
+        },
+        {
+          "name": "lvm-provider-volume",
+          "kind": [
+            "example"
+          ],
+          "src_path": "crates/o3k-storage/examples/lvm-provider-volume.rs"
+        },
+        {
+          "name": "o3k_storage",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-storage/src/lib.rs"
+        }
+      ]
+    },
+    "o3k-store": {
+      "name": "o3k-store",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "crates/o3k-store/Cargo.toml",
+      "targets": [
+        {
+          "name": "kernel_operation_mapping",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-store/tests/kernel_operation_mapping.rs"
+        },
+        {
+          "name": "o3k_store",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "crates/o3k-store/src/lib.rs"
+        },
+        {
+          "name": "postgres_ops",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-store/tests/postgres_ops.rs"
+        },
+        {
+          "name": "postgres_p12_4",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-store/tests/postgres_p12_4.rs"
+        },
+        {
+          "name": "postgres_p13_4_storage",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-store/tests/postgres_p13_4_storage.rs"
+        },
+        {
+          "name": "postgres_p13_b1",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-store/tests/postgres_p13_b1.rs"
+        },
+        {
+          "name": "postgres_p13_f1",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-store/tests/postgres_p13_f1.rs"
+        },
+        {
+          "name": "sqlite_p12_4_lifecycle",
+          "kind": [
+            "test"
+          ],
+          "src_path": "crates/o3k-store/tests/sqlite_p12_4_lifecycle.rs"
+        }
+      ]
+    },
+    "o3kd": {
+      "name": "o3kd",
+      "version": "0.4.0-alpha.1",
+      "manifest_path": "bins/o3kd/Cargo.toml",
+      "targets": [
+        {
+          "name": "o3kd",
+          "kind": [
+            "bin"
+          ],
+          "src_path": "bins/o3kd/src/main.rs"
+        },
+        {
+          "name": "o3kd",
+          "kind": [
+            "lib"
+          ],
+          "src_path": "bins/o3kd/src/lib.rs"
+        },
+        {
+          "name": "p12_6_process",
+          "kind": [
+            "test"
+          ],
+          "src_path": "bins/o3kd/tests/p12_6_process.rs"
+        },
+        {
+          "name": "p12_7_convergence",
+          "kind": [
+            "test"
+          ],
+          "src_path": "bins/o3kd/tests/p12_7_convergence.rs"
+        },
+        {
+          "name": "shutdown",
+          "kind": [
+            "test"
+          ],
+          "src_path": "bins/o3kd/tests/shutdown.rs"
+        }
+      ]
+    }
+  },
+  "workspace_members": [
+    "path+file://./bins/o3k#0.4.0-alpha.1",
+    "path+file://./bins/o3k-compute#o3k-compute-bin@0.4.0-alpha.1",
+    "path+file://./bins/o3k-network#o3k-network-bin@0.4.0-alpha.1",
+    "path+file://./bins/o3kd#0.4.0-alpha.1",
+    "path+file://./crates/o3k-api#0.4.0-alpha.1",
+    "path+file://./crates/o3k-cellhv#0.4.0-alpha.1",
+    "path+file://./crates/o3k-cinder#0.4.0-alpha.1",
+    "path+file://./crates/o3k-compute#0.4.0-alpha.1",
+    "path+file://./crates/o3k-compute-agent#0.4.0-alpha.1",
+    "path+file://./crates/o3k-config#0.4.0-alpha.1",
+    "path+file://./crates/o3k-config-drive#0.4.0-alpha.1",
+    "path+file://./crates/o3k-console#0.4.0-alpha.1",
+    "path+file://./crates/o3k-controller-protocol#0.4.0-alpha.1",
+    "path+file://./crates/o3k-database-example#0.4.0-alpha.1",
+    "path+file://./crates/o3k-dhcp#0.4.0-alpha.1",
+    "path+file://./crates/o3k-domain#0.4.0-alpha.1",
+    "path+file://./crates/o3k-identity#0.4.0-alpha.1",
+    "path+file://./crates/o3k-image#0.4.0-alpha.1",
+    "path+file://./crates/o3k-kernel#0.4.0-alpha.1",
+    "path+file://./crates/o3k-libvirt#0.4.0-alpha.1",
+    "path+file://./crates/o3k-native-api#0.4.0-alpha.1",
+    "path+file://./crates/o3k-network#0.4.0-alpha.1",
+    "path+file://./crates/o3k-network-protocol#0.4.0-alpha.1",
+    "path+file://./crates/o3k-placement#0.4.0-alpha.1",
+    "path+file://./crates/o3k-provider#0.4.0-alpha.1",
+    "path+file://./crates/o3k-provider-contract#0.4.0-alpha.1",
+    "path+file://./crates/o3k-reconciler#0.4.0-alpha.1",
+    "path+file://./crates/o3k-scheduler#0.4.0-alpha.1",
+    "path+file://./crates/o3k-service-sdk#0.4.0-alpha.1",
+    "path+file://./crates/o3k-storage#0.4.0-alpha.1",
+    "path+file://./crates/o3k-store#0.4.0-alpha.1"
+  ],
+  "source_files": {
+    "total_count": 176,
+    "total_lines": 180047,
+    "total_bytes": 6871368,
+    "total_prod_loc": 114819,
+    "total_test_loc": 52668
+  },
+  "files_by_crate": {
+    "o3k": 30,
+    "o3k-api": 16,
+    "o3k-cellhv": 1,
+    "o3k-cinder": 6,
+    "o3k-compute": 4,
+    "o3k-compute-agent": 8,
+    "o3k-compute-bin": 1,
+    "o3k-config": 1,
+    "o3k-config-drive": 1,
+    "o3k-console": 1,
+    "o3k-controller-protocol": 3,
+    "o3k-database-example": 2,
+    "o3k-dhcp": 1,
+    "o3k-domain": 3,
+    "o3k-identity": 1,
+    "o3k-image": 1,
+    "o3k-kernel": 15,
+    "o3k-libvirt": 1,
+    "o3k-native-api": 10,
+    "o3k-network": 25,
+    "o3k-network-bin": 2,
+    "o3k-network-protocol": 3,
+    "o3k-placement": 1,
+    "o3k-provider": 4,
+    "o3k-provider-contract": 2,
+    "o3k-reconciler": 2,
+    "o3k-scheduler": 1,
+    "o3k-service-sdk": 2,
+    "o3k-storage": 5,
+    "o3k-store": 17,
+    "o3kd": 6
+  },
+  "crate_to_sources": {
+    "o3k": [
+      {
+        "path": "bins/o3k/src/checks/cloud.rs",
+        "byte_size": 5526,
+        "line_count": 170,
+        "prod_loc_approx": 103,
+        "test_loc_approx": 56
+      },
+      {
+        "path": "bins/o3k/src/checks/compute.rs",
+        "byte_size": 21513,
+        "line_count": 603,
+        "prod_loc_approx": 368,
+        "test_loc_approx": 201
+      },
+      {
+        "path": "bins/o3k/src/checks/control.rs",
+        "byte_size": 6634,
+        "line_count": 197,
+        "prod_loc_approx": 128,
+        "test_loc_approx": 48
+      },
+      {
+        "path": "bins/o3k/src/checks/database.rs",
+        "byte_size": 11919,
+        "line_count": 351,
+        "prod_loc_approx": 253,
+        "test_loc_approx": 79
+      },
+      {
+        "path": "bins/o3k/src/checks/host.rs",
+        "byte_size": 8629,
+        "line_count": 265,
+        "prod_loc_approx": 175,
+        "test_loc_approx": 68
+      },
+      {
+        "path": "bins/o3k/src/checks/identity.rs",
+        "byte_size": 13785,
+        "line_count": 377,
+        "prod_loc_approx": 274,
+        "test_loc_approx": 84
+      },
+      {
+        "path": "bins/o3k/src/checks/libvirt.rs",
+        "byte_size": 11048,
+        "line_count": 316,
+        "prod_loc_approx": 205,
+        "test_loc_approx": 90
+      },
+      {
+        "path": "bins/o3k/src/checks/mod.rs",
+        "byte_size": 2707,
+        "line_count": 98,
+        "prod_loc_approx": 77,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "bins/o3k/src/checks/network.rs",
+        "byte_size": 21898,
+        "line_count": 636,
+        "prod_loc_approx": 445,
+        "test_loc_approx": 158
+      },
+      {
+        "path": "bins/o3k/src/checks/release.rs",
+        "byte_size": 29805,
+        "line_count": 809,
+        "prod_loc_approx": 543,
+        "test_loc_approx": 236
+      },
+      {
+        "path": "bins/o3k/src/checks/security.rs",
+        "byte_size": 10734,
+        "line_count": 305,
+        "prod_loc_approx": 205,
+        "test_loc_approx": 77
+      },
+      {
+        "path": "bins/o3k/src/checks/services.rs",
+        "byte_size": 4758,
+        "line_count": 147,
+        "prod_loc_approx": 80,
+        "test_loc_approx": 55
+      },
+      {
+        "path": "bins/o3k/src/context.rs",
+        "byte_size": 17291,
+        "line_count": 443,
+        "prod_loc_approx": 292,
+        "test_loc_approx": 36
+      },
+      {
+        "path": "bins/o3k/src/db.rs",
+        "byte_size": 10092,
+        "line_count": 264,
+        "prod_loc_approx": 225,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "bins/o3k/src/engine.rs",
+        "byte_size": 15851,
+        "line_count": 412,
+        "prod_loc_approx": 65,
+        "test_loc_approx": 336
+      },
+      {
+        "path": "bins/o3k/src/lib.rs",
+        "byte_size": 2699,
+        "line_count": 65,
+        "prod_loc_approx": 7,
+        "test_loc_approx": 43
+      },
+      {
+        "path": "bins/o3k/src/main.rs",
+        "byte_size": 11089,
+        "line_count": 355,
+        "prod_loc_approx": 317,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "bins/o3k/src/native_cli.rs",
+        "byte_size": 8462,
+        "line_count": 229,
+        "prod_loc_approx": 184,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "bins/o3k/src/output.rs",
+        "byte_size": 10471,
+        "line_count": 318,
+        "prod_loc_approx": 210,
+        "test_loc_approx": 49
+      },
+      {
+        "path": "bins/o3k/src/sys.rs",
+        "byte_size": 24440,
+        "line_count": 647,
+        "prod_loc_approx": 510,
+        "test_loc_approx": 32
+      },
+      {
+        "path": "bins/o3k/src/testutil.rs",
+        "byte_size": 22353,
+        "line_count": 609,
+        "prod_loc_approx": 544,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "bins/o3k/src/upgrade/backup.rs",
+        "byte_size": 16242,
+        "line_count": 447,
+        "prod_loc_approx": 140,
+        "test_loc_approx": 259
+      },
+      {
+        "path": "bins/o3k/src/upgrade/engine.rs",
+        "byte_size": 77093,
+        "line_count": 2002,
+        "prod_loc_approx": 874,
+        "test_loc_approx": 970
+      },
+      {
+        "path": "bins/o3k/src/upgrade/fence.rs",
+        "byte_size": 9573,
+        "line_count": 292,
+        "prod_loc_approx": 89,
+        "test_loc_approx": 172
+      },
+      {
+        "path": "bins/o3k/src/upgrade/mod.rs",
+        "byte_size": 685,
+        "line_count": 19,
+        "prod_loc_approx": 12,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "bins/o3k/src/upgrade/output.rs",
+        "byte_size": 5193,
+        "line_count": 160,
+        "prod_loc_approx": 48,
+        "test_loc_approx": 88
+      },
+      {
+        "path": "bins/o3k/src/upgrade/runner.rs",
+        "byte_size": 81789,
+        "line_count": 1924,
+        "prod_loc_approx": 1517,
+        "test_loc_approx": 169
+      },
+      {
+        "path": "bins/o3k/src/upgrade/state.rs",
+        "byte_size": 11706,
+        "line_count": 331,
+        "prod_loc_approx": 155,
+        "test_loc_approx": 128
+      },
+      {
+        "path": "bins/o3k/src/version.rs",
+        "byte_size": 15878,
+        "line_count": 469,
+        "prod_loc_approx": 186,
+        "test_loc_approx": 232
+      },
+      {
+        "path": "bins/o3k/tests/cli.rs",
+        "byte_size": 5029,
+        "line_count": 151,
+        "prod_loc_approx": 125,
+        "test_loc_approx": 0
+      }
+    ],
+    "o3k-api": [
+      {
+        "path": "crates/o3k-api/src/auth.rs",
+        "byte_size": 1363,
+        "line_count": 42,
+        "prod_loc_approx": 35,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/src/compute.rs",
+        "byte_size": 57246,
+        "line_count": 1604,
+        "prod_loc_approx": 1363,
+        "test_loc_approx": 168
+      },
+      {
+        "path": "crates/o3k-api/src/error.rs",
+        "byte_size": 786,
+        "line_count": 34,
+        "prod_loc_approx": 30,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/src/identity.rs",
+        "byte_size": 5333,
+        "line_count": 168,
+        "prod_loc_approx": 154,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/src/image.rs",
+        "byte_size": 10665,
+        "line_count": 338,
+        "prod_loc_approx": 322,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/src/lib.rs",
+        "byte_size": 20647,
+        "line_count": 568,
+        "prod_loc_approx": 473,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/src/middleware.rs",
+        "byte_size": 17522,
+        "line_count": 495,
+        "prod_loc_approx": 450,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/src/network.rs",
+        "byte_size": 114582,
+        "line_count": 3487,
+        "prod_loc_approx": 3364,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/src/placement.rs",
+        "byte_size": 919,
+        "line_count": 33,
+        "prod_loc_approx": 28,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/src/volume.rs",
+        "byte_size": 25725,
+        "line_count": 708,
+        "prod_loc_approx": 665,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/src/volume_attachment.rs",
+        "byte_size": 18885,
+        "line_count": 533,
+        "prod_loc_approx": 492,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/tests/attachment_isolation.rs",
+        "byte_size": 23253,
+        "line_count": 618,
+        "prod_loc_approx": 525,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/tests/gate_c_nova_callback.rs",
+        "byte_size": 20370,
+        "line_count": 586,
+        "prod_loc_approx": 530,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/tests/health.rs",
+        "byte_size": 92600,
+        "line_count": 2348,
+        "prod_loc_approx": 2258,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/tests/native_storage.rs",
+        "byte_size": 13714,
+        "line_count": 400,
+        "prod_loc_approx": 380,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-api/tests/two_tenant_isolation.rs",
+        "byte_size": 12892,
+        "line_count": 380,
+        "prod_loc_approx": 334,
+        "test_loc_approx": 0
+      }
+    ],
+    "o3k-cellhv": [
+      {
+        "path": "crates/o3k-cellhv/src/lib.rs",
+        "byte_size": 13868,
+        "line_count": 369,
+        "prod_loc_approx": 308,
+        "test_loc_approx": 43
+      }
+    ],
+    "o3k-cinder": [
+      {
+        "path": "crates/o3k-cinder/src/lib.rs",
+        "byte_size": 42214,
+        "line_count": 1141,
+        "prod_loc_approx": 959,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-cinder/src/testkit.rs",
+        "byte_size": 37278,
+        "line_count": 1033,
+        "prod_loc_approx": 935,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-cinder/tests/client.rs",
+        "byte_size": 15316,
+        "line_count": 390,
+        "prod_loc_approx": 359,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-cinder/tests/common/mod.rs",
+        "byte_size": 6852,
+        "line_count": 153,
+        "prod_loc_approx": 140,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-cinder/tests/gate_a_identity.rs",
+        "byte_size": 13586,
+        "line_count": 339,
+        "prod_loc_approx": 283,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-cinder/tests/gate_b_protocol.rs",
+        "byte_size": 13550,
+        "line_count": 352,
+        "prod_loc_approx": 299,
+        "test_loc_approx": 0
+      }
+    ],
+    "o3k-compute": [
+      {
+        "path": "crates/o3k-compute/src/attachment.rs",
+        "byte_size": 89911,
+        "line_count": 2195,
+        "prod_loc_approx": 1173,
+        "test_loc_approx": 815
+      },
+      {
+        "path": "crates/o3k-compute/src/lib.rs",
+        "byte_size": 413603,
+        "line_count": 9962,
+        "prod_loc_approx": 3516,
+        "test_loc_approx": 5962
+      },
+      {
+        "path": "crates/o3k-compute/tests/multi_controller_acceptance.rs",
+        "byte_size": 15115,
+        "line_count": 463,
+        "prod_loc_approx": 356,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-compute/tests/placement_crash_window.rs",
+        "byte_size": 29473,
+        "line_count": 769,
+        "prod_loc_approx": 671,
+        "test_loc_approx": 0
+      }
+    ],
+    "o3k-compute-agent": [
+      {
+        "path": "crates/o3k-compute-agent/src/artifact.rs",
+        "byte_size": 73449,
+        "line_count": 1773,
+        "prod_loc_approx": 864,
+        "test_loc_approx": 763
+      },
+      {
+        "path": "crates/o3k-compute-agent/src/config_drive.rs",
+        "byte_size": 4042,
+        "line_count": 106,
+        "prod_loc_approx": 59,
+        "test_loc_approx": 38
+      },
+      {
+        "path": "crates/o3k-compute-agent/src/events.rs",
+        "byte_size": 20472,
+        "line_count": 483,
+        "prod_loc_approx": 225,
+        "test_loc_approx": 202
+      },
+      {
+        "path": "crates/o3k-compute-agent/src/image.rs",
+        "byte_size": 21148,
+        "line_count": 540,
+        "prod_loc_approx": 317,
+        "test_loc_approx": 195
+      },
+      {
+        "path": "crates/o3k-compute-agent/src/lib.rs",
+        "byte_size": 302066,
+        "line_count": 7568,
+        "prod_loc_approx": 4333,
+        "test_loc_approx": 2844
+      },
+      {
+        "path": "crates/o3k-compute-agent/src/provider.rs",
+        "byte_size": 183015,
+        "line_count": 4197,
+        "prod_loc_approx": 1778,
+        "test_loc_approx": 2169
+      },
+      {
+        "path": "crates/o3k-compute-agent/tests/agent_mtls.rs",
+        "byte_size": 9149,
+        "line_count": 251,
+        "prod_loc_approx": 239,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-compute-agent/tests/registration_tls.rs",
+        "byte_size": 8275,
+        "line_count": 220,
+        "prod_loc_approx": 216,
+        "test_loc_approx": 0
+      }
+    ],
+    "o3k-compute-bin": [
+      {
+        "path": "bins/o3k-compute/src/main.rs",
+        "byte_size": 225817,
+        "line_count": 5297,
+        "prod_loc_approx": 2565,
+        "test_loc_approx": 2267
+      }
+    ],
+    "o3k-config": [
+      {
+        "path": "crates/o3k-config/src/lib.rs",
+        "byte_size": 35199,
+        "line_count": 928,
+        "prod_loc_approx": 677,
+        "test_loc_approx": 215
+      }
+    ],
+    "o3k-config-drive": [
+      {
+        "path": "crates/o3k-config-drive/src/lib.rs",
+        "byte_size": 62362,
+        "line_count": 1604,
+        "prod_loc_approx": 901,
+        "test_loc_approx": 587
+      }
+    ],
+    "o3k-console": [
+      {
+        "path": "crates/o3k-console/src/lib.rs",
+        "byte_size": 12835,
+        "line_count": 353,
+        "prod_loc_approx": 221,
+        "test_loc_approx": 110
+      }
+    ],
+    "o3k-controller-protocol": [
+      {
+        "path": "crates/o3k-controller-protocol/build.rs",
+        "byte_size": 628,
+        "line_count": 18,
+        "prod_loc_approx": 18,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-controller-protocol/src/conversion.rs",
+        "byte_size": 5736,
+        "line_count": 141,
+        "prod_loc_approx": 122,
+        "test_loc_approx": 9
+      },
+      {
+        "path": "crates/o3k-controller-protocol/src/lib.rs",
+        "byte_size": 1837,
+        "line_count": 68,
+        "prod_loc_approx": 26,
+        "test_loc_approx": 34
+      }
+    ],
+    "o3k-database-example": [
+      {
+        "path": "crates/o3k-database-example/src/bin/database-controller.rs",
+        "byte_size": 3693,
+        "line_count": 82,
+        "prod_loc_approx": 75,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-database-example/src/lib.rs",
+        "byte_size": 59645,
+        "line_count": 1489,
+        "prod_loc_approx": 758,
+        "test_loc_approx": 627
+      }
+    ],
+    "o3k-dhcp": [
+      {
+        "path": "crates/o3k-dhcp/src/lib.rs",
+        "byte_size": 34299,
+        "line_count": 876,
+        "prod_loc_approx": 421,
+        "test_loc_approx": 339
+      }
+    ],
+    "o3k-domain": [
+      {
+        "path": "crates/o3k-domain/src/lib.rs",
+        "byte_size": 13538,
+        "line_count": 343,
+        "prod_loc_approx": 136,
+        "test_loc_approx": 156
+      },
+      {
+        "path": "crates/o3k-domain/src/network.rs",
+        "byte_size": 71759,
+        "line_count": 1950,
+        "prod_loc_approx": 1200,
+        "test_loc_approx": 570
+      },
+      {
+        "path": "crates/o3k-domain/src/storage.rs",
+        "byte_size": 25817,
+        "line_count": 781,
+        "prod_loc_approx": 574,
+        "test_loc_approx": 151
+      }
+    ],
+    "o3k-identity": [
+      {
+        "path": "crates/o3k-identity/src/lib.rs",
+        "byte_size": 75840,
+        "line_count": 2192,
+        "prod_loc_approx": 1360,
+        "test_loc_approx": 634
+      }
+    ],
+    "o3k-image": [
+      {
+        "path": "crates/o3k-image/src/lib.rs",
+        "byte_size": 129454,
+        "line_count": 3362,
+        "prod_loc_approx": 1575,
+        "test_loc_approx": 1609
+      }
+    ],
+    "o3k-kernel": [
+      {
+        "path": "crates/o3k-kernel/src/action.rs",
+        "byte_size": 2196,
+        "line_count": 77,
+        "prod_loc_approx": 61,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-kernel/src/audit.rs",
+        "byte_size": 9249,
+        "line_count": 298,
+        "prod_loc_approx": 230,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-kernel/src/auth_context.rs",
+        "byte_size": 3283,
+        "line_count": 114,
+        "prod_loc_approx": 81,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-kernel/src/authorization.rs",
+        "byte_size": 11162,
+        "line_count": 331,
+        "prod_loc_approx": 280,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-kernel/src/controller.rs",
+        "byte_size": 14293,
+        "line_count": 419,
+        "prod_loc_approx": 264,
+        "test_loc_approx": 38
+      },
+      {
+        "path": "crates/o3k-kernel/src/envelope.rs",
+        "byte_size": 3600,
+        "line_count": 100,
+        "prod_loc_approx": 63,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-kernel/src/error.rs",
+        "byte_size": 848,
+        "line_count": 32,
+        "prod_loc_approx": 22,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-kernel/src/lib.rs",
+        "byte_size": 13612,
+        "line_count": 349,
+        "prod_loc_approx": 52,
+        "test_loc_approx": 280
+      },
+      {
+        "path": "crates/o3k-kernel/src/manifest.rs",
+        "byte_size": 142939,
+        "line_count": 3609,
+        "prod_loc_approx": 1410,
+        "test_loc_approx": 1775
+      },
+      {
+        "path": "crates/o3k-kernel/src/operation.rs",
+        "byte_size": 4183,
+        "line_count": 115,
+        "prod_loc_approx": 67,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-kernel/src/principal.rs",
+        "byte_size": 3797,
+        "line_count": 157,
+        "prod_loc_approx": 120,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-kernel/src/quota.rs",
+        "byte_size": 14623,
+        "line_count": 479,
+        "prod_loc_approx": 308,
+        "test_loc_approx": 101
+      },
+      {
+        "path": "crates/o3k-kernel/src/registry.rs",
+        "byte_size": 23007,
+        "line_count": 620,
+        "prod_loc_approx": 517,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-kernel/src/resource.rs",
+        "byte_size": 4511,
+        "line_count": 158,
+        "prod_loc_approx": 124,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-kernel/src/scope.rs",
+        "byte_size": 2825,
+        "line_count": 119,
+        "prod_loc_approx": 94,
+        "test_loc_approx": 0
+      }
+    ],
+    "o3k-libvirt": [
+      {
+        "path": "crates/o3k-libvirt/src/lib.rs",
+        "byte_size": 88763,
+        "line_count": 2561,
+        "prod_loc_approx": 1625,
+        "test_loc_approx": 750
+      }
+    ],
+    "o3k-native-api": [
+      {
+        "path": "crates/o3k-native-api/src/auth.rs",
+        "byte_size": 9023,
+        "line_count": 266,
+        "prod_loc_approx": 138,
+        "test_loc_approx": 77
+      },
+      {
+        "path": "crates/o3k-native-api/src/compute.rs",
+        "byte_size": 8894,
+        "line_count": 258,
+        "prod_loc_approx": 200,
+        "test_loc_approx": 18
+      },
+      {
+        "path": "crates/o3k-native-api/src/error.rs",
+        "byte_size": 11055,
+        "line_count": 314,
+        "prod_loc_approx": 171,
+        "test_loc_approx": 86
+      },
+      {
+        "path": "crates/o3k-native-api/src/identity.rs",
+        "byte_size": 3390,
+        "line_count": 94,
+        "prod_loc_approx": 66,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-native-api/src/lib.rs",
+        "byte_size": 18076,
+        "line_count": 514,
+        "prod_loc_approx": 234,
+        "test_loc_approx": 239
+      },
+      {
+        "path": "crates/o3k-native-api/src/network.rs",
+        "byte_size": 9081,
+        "line_count": 254,
+        "prod_loc_approx": 196,
+        "test_loc_approx": 17
+      },
+      {
+        "path": "crates/o3k-native-api/src/operation.rs",
+        "byte_size": 1763,
+        "line_count": 56,
+        "prod_loc_approx": 46,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-native-api/src/pagination.rs",
+        "byte_size": 8717,
+        "line_count": 247,
+        "prod_loc_approx": 99,
+        "test_loc_approx": 104
+      },
+      {
+        "path": "crates/o3k-native-api/src/resource.rs",
+        "byte_size": 24311,
+        "line_count": 723,
+        "prod_loc_approx": 572,
+        "test_loc_approx": 96
+      },
+      {
+        "path": "crates/o3k-native-api/src/volume.rs",
+        "byte_size": 9250,
+        "line_count": 266,
+        "prod_loc_approx": 208,
+        "test_loc_approx": 21
+      }
+    ],
+    "o3k-network": [
+      {
+        "path": "crates/o3k-network/examples/edge-fabric-multi-host-driver.rs",
+        "byte_size": 19411,
+        "line_count": 578,
+        "prod_loc_approx": 514,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/examples/fabric-regression-helper.rs",
+        "byte_size": 10787,
+        "line_count": 323,
+        "prod_loc_approx": 259,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/examples/linux-fabric-fip-smoke.rs",
+        "byte_size": 7494,
+        "line_count": 227,
+        "prod_loc_approx": 212,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/examples/linux-fabric-smoke.rs",
+        "byte_size": 6719,
+        "line_count": 188,
+        "prod_loc_approx": 182,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/examples/network-plan-fingerprint.rs",
+        "byte_size": 508,
+        "line_count": 14,
+        "prod_loc_approx": 12,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/src/canonical_policy.rs",
+        "byte_size": 71337,
+        "line_count": 1921,
+        "prod_loc_approx": 825,
+        "test_loc_approx": 1031
+      },
+      {
+        "path": "crates/o3k-network/src/execution.rs",
+        "byte_size": 35002,
+        "line_count": 1010,
+        "prod_loc_approx": 574,
+        "test_loc_approx": 369
+      },
+      {
+        "path": "crates/o3k-network/src/fabric.rs",
+        "byte_size": 11382,
+        "line_count": 313,
+        "prod_loc_approx": 140,
+        "test_loc_approx": 138
+      },
+      {
+        "path": "crates/o3k-network/src/gateway.rs",
+        "byte_size": 91880,
+        "line_count": 2394,
+        "prod_loc_approx": 818,
+        "test_loc_approx": 1482
+      },
+      {
+        "path": "crates/o3k-network/src/lib.rs",
+        "byte_size": 414962,
+        "line_count": 11071,
+        "prod_loc_approx": 5250,
+        "test_loc_approx": 5422
+      },
+      {
+        "path": "crates/o3k-network/src/linux_fabric/fabric.rs",
+        "byte_size": 18677,
+        "line_count": 549,
+        "prod_loc_approx": 529,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
+        "byte_size": 20556,
+        "line_count": 629,
+        "prod_loc_approx": 628,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/src/linux_fabric/mod.rs",
+        "byte_size": 40187,
+        "line_count": 1042,
+        "prod_loc_approx": 482,
+        "test_loc_approx": 508
+      },
+      {
+        "path": "crates/o3k-network/src/linux_fabric/naming.rs",
+        "byte_size": 6611,
+        "line_count": 192,
+        "prod_loc_approx": 175,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/src/linux_fabric/ownership.rs",
+        "byte_size": 3518,
+        "line_count": 106,
+        "prod_loc_approx": 96,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/src/linux_fabric/persistence.rs",
+        "byte_size": 2839,
+        "line_count": 85,
+        "prod_loc_approx": 78,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/src/linux_fabric/policy.rs",
+        "byte_size": 11652,
+        "line_count": 335,
+        "prod_loc_approx": 334,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/src/linux_fabric/public_.rs",
+        "byte_size": 22817,
+        "line_count": 700,
+        "prod_loc_approx": 698,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/src/linux_fabric/realm.rs",
+        "byte_size": 19939,
+        "line_count": 515,
+        "prod_loc_approx": 509,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/src/policy.rs",
+        "byte_size": 74714,
+        "line_count": 2081,
+        "prod_loc_approx": 192,
+        "test_loc_approx": 1844
+      },
+      {
+        "path": "crates/o3k-network/src/public.rs",
+        "byte_size": 55162,
+        "line_count": 1529,
+        "prod_loc_approx": 412,
+        "test_loc_approx": 1069
+      },
+      {
+        "path": "crates/o3k-network/src/routed.rs",
+        "byte_size": 22955,
+        "line_count": 673,
+        "prod_loc_approx": 136,
+        "test_loc_approx": 511
+      },
+      {
+        "path": "crates/o3k-network/tests/p13_f3_runtime_acceptance.rs",
+        "byte_size": 4747,
+        "line_count": 144,
+        "prod_loc_approx": 134,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/tests/p13_r2a_fingerprint_parity.rs",
+        "byte_size": 7337,
+        "line_count": 220,
+        "prod_loc_approx": 205,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network/tests/postgres_p13_f2_r1.rs",
+        "byte_size": 8692,
+        "line_count": 267,
+        "prod_loc_approx": 253,
+        "test_loc_approx": 0
+      }
+    ],
+    "o3k-network-bin": [
+      {
+        "path": "bins/o3k-network/src/agent.rs",
+        "byte_size": 17833,
+        "line_count": 487,
+        "prod_loc_approx": 279,
+        "test_loc_approx": 187
+      },
+      {
+        "path": "bins/o3k-network/src/main.rs",
+        "byte_size": 23621,
+        "line_count": 617,
+        "prod_loc_approx": 463,
+        "test_loc_approx": 120
+      }
+    ],
+    "o3k-network-protocol": [
+      {
+        "path": "crates/o3k-network-protocol/build.rs",
+        "byte_size": 459,
+        "line_count": 14,
+        "prod_loc_approx": 14,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network-protocol/examples/network-agent-client.rs",
+        "byte_size": 2268,
+        "line_count": 56,
+        "prod_loc_approx": 52,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-network-protocol/src/lib.rs",
+        "byte_size": 4421,
+        "line_count": 115,
+        "prod_loc_approx": 104,
+        "test_loc_approx": 0
+      }
+    ],
+    "o3k-placement": [
+      {
+        "path": "crates/o3k-placement/src/lib.rs",
+        "byte_size": 47938,
+        "line_count": 1351,
+        "prod_loc_approx": 552,
+        "test_loc_approx": 734
+      }
+    ],
+    "o3k-provider": [
+      {
+        "path": "crates/o3k-provider/src/agent.rs",
+        "byte_size": 5843,
+        "line_count": 166,
+        "prod_loc_approx": 112,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-provider/src/attachment.rs",
+        "byte_size": 8903,
+        "line_count": 251,
+        "prod_loc_approx": 179,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-provider/src/lib.rs",
+        "byte_size": 50316,
+        "line_count": 1376,
+        "prod_loc_approx": 973,
+        "test_loc_approx": 267
+      },
+      {
+        "path": "crates/o3k-provider/src/node.rs",
+        "byte_size": 6315,
+        "line_count": 181,
+        "prod_loc_approx": 123,
+        "test_loc_approx": 0
+      }
+    ],
+    "o3k-provider-contract": [
+      {
+        "path": "crates/o3k-provider-contract/build.rs",
+        "byte_size": 625,
+        "line_count": 18,
+        "prod_loc_approx": 18,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-provider-contract/src/lib.rs",
+        "byte_size": 5616,
+        "line_count": 152,
+        "prod_loc_approx": 54,
+        "test_loc_approx": 89
+      }
+    ],
+    "o3k-reconciler": [
+      {
+        "path": "crates/o3k-reconciler/src/lib.rs",
+        "byte_size": 255670,
+        "line_count": 6192,
+        "prod_loc_approx": 2200,
+        "test_loc_approx": 3615
+      },
+      {
+        "path": "crates/o3k-reconciler/src/storage_workflow.rs",
+        "byte_size": 54156,
+        "line_count": 1428,
+        "prod_loc_approx": 968,
+        "test_loc_approx": 389
+      }
+    ],
+    "o3k-scheduler": [
+      {
+        "path": "crates/o3k-scheduler/src/lib.rs",
+        "byte_size": 16631,
+        "line_count": 508,
+        "prod_loc_approx": 192,
+        "test_loc_approx": 292
+      }
+    ],
+    "o3k-service-sdk": [
+      {
+        "path": "crates/o3k-service-sdk/src/lib.rs",
+        "byte_size": 80874,
+        "line_count": 2053,
+        "prod_loc_approx": 1857,
+        "test_loc_approx": 96
+      },
+      {
+        "path": "crates/o3k-service-sdk/tests/mtls.rs",
+        "byte_size": 4923,
+        "line_count": 149,
+        "prod_loc_approx": 146,
+        "test_loc_approx": 0
+      }
+    ],
+    "o3k-storage": [
+      {
+        "path": "crates/o3k-storage/examples/ceph-rbd-provider-volume.rs",
+        "byte_size": 5870,
+        "line_count": 141,
+        "prod_loc_approx": 129,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-storage/examples/lvm-provider-smoke.rs",
+        "byte_size": 3495,
+        "line_count": 91,
+        "prod_loc_approx": 86,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-storage/examples/lvm-provider-volume.rs",
+        "byte_size": 3928,
+        "line_count": 102,
+        "prod_loc_approx": 93,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-storage/src/ceph.rs",
+        "byte_size": 27621,
+        "line_count": 838,
+        "prod_loc_approx": 592,
+        "test_loc_approx": 195
+      },
+      {
+        "path": "crates/o3k-storage/src/lib.rs",
+        "byte_size": 34481,
+        "line_count": 1079,
+        "prod_loc_approx": 873,
+        "test_loc_approx": 111
+      }
+    ],
+    "o3k-store": [
+      {
+        "path": "crates/o3k-store/src/artifact_transfer.rs",
+        "byte_size": 33828,
+        "line_count": 858,
+        "prod_loc_approx": 433,
+        "test_loc_approx": 383
+      },
+      {
+        "path": "crates/o3k-store/src/conformance.rs",
+        "byte_size": 63363,
+        "line_count": 1983,
+        "prod_loc_approx": 1694,
+        "test_loc_approx": 46
+      },
+      {
+        "path": "crates/o3k-store/src/coordination.rs",
+        "byte_size": 35122,
+        "line_count": 975,
+        "prod_loc_approx": 875,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-store/src/lib.rs",
+        "byte_size": 573261,
+        "line_count": 14607,
+        "prod_loc_approx": 10656,
+        "test_loc_approx": 3082
+      },
+      {
+        "path": "crates/o3k-store/src/postgres.rs",
+        "byte_size": 284224,
+        "line_count": 7104,
+        "prod_loc_approx": 6649,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-store/src/quota.rs",
+        "byte_size": 40479,
+        "line_count": 1097,
+        "prod_loc_approx": 561,
+        "test_loc_approx": 466
+      },
+      {
+        "path": "crates/o3k-store/src/reusable_policy.rs",
+        "byte_size": 112296,
+        "line_count": 2507,
+        "prod_loc_approx": 1973,
+        "test_loc_approx": 495
+      },
+      {
+        "path": "crates/o3k-store/src/server_state.rs",
+        "byte_size": 4423,
+        "line_count": 123,
+        "prod_loc_approx": 34,
+        "test_loc_approx": 74
+      },
+      {
+        "path": "crates/o3k-store/src/storage.rs",
+        "byte_size": 48391,
+        "line_count": 1056,
+        "prod_loc_approx": 848,
+        "test_loc_approx": 142
+      },
+      {
+        "path": "crates/o3k-store/src/unified.rs",
+        "byte_size": 100434,
+        "line_count": 2994,
+        "prod_loc_approx": 2814,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-store/tests/kernel_operation_mapping.rs",
+        "byte_size": 2136,
+        "line_count": 62,
+        "prod_loc_approx": 55,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-store/tests/postgres_ops.rs",
+        "byte_size": 10695,
+        "line_count": 332,
+        "prod_loc_approx": 294,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-store/tests/postgres_p12_4.rs",
+        "byte_size": 32368,
+        "line_count": 964,
+        "prod_loc_approx": 922,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-store/tests/postgres_p13_4_storage.rs",
+        "byte_size": 3829,
+        "line_count": 108,
+        "prod_loc_approx": 103,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-store/tests/postgres_p13_b1.rs",
+        "byte_size": 19609,
+        "line_count": 590,
+        "prod_loc_approx": 578,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
+        "byte_size": 23615,
+        "line_count": 739,
+        "prod_loc_approx": 702,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "crates/o3k-store/tests/sqlite_p12_4_lifecycle.rs",
+        "byte_size": 4988,
+        "line_count": 141,
+        "prod_loc_approx": 135,
+        "test_loc_approx": 0
+      }
+    ],
+    "o3kd": [
+      {
+        "path": "bins/o3kd/src/lib.rs",
+        "byte_size": 166,
+        "line_count": 3,
+        "prod_loc_approx": 1,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "bins/o3kd/src/main.rs",
+        "byte_size": 114656,
+        "line_count": 2782,
+        "prod_loc_approx": 2124,
+        "test_loc_approx": 511
+      },
+      {
+        "path": "bins/o3kd/src/native_adapters.rs",
+        "byte_size": 134625,
+        "line_count": 3328,
+        "prod_loc_approx": 1996,
+        "test_loc_approx": 1225
+      },
+      {
+        "path": "bins/o3kd/tests/p12_6_process.rs",
+        "byte_size": 84916,
+        "line_count": 2002,
+        "prod_loc_approx": 1907,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "bins/o3kd/tests/p12_7_convergence.rs",
+        "byte_size": 40521,
+        "line_count": 1059,
+        "prod_loc_approx": 1010,
+        "test_loc_approx": 0
+      },
+      {
+        "path": "bins/o3kd/tests/shutdown.rs",
+        "byte_size": 3045,
+        "line_count": 91,
+        "prod_loc_approx": 83,
+        "test_loc_approx": 0
+      }
+    ]
+  }
+}

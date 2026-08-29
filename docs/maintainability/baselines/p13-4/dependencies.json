@@ -1,0 +1,424 @@
+{
+  "workspace_edges": 104,
+  "self_edges": 0,
+  "edges": [
+    {
+      "source": "o3k-api",
+      "target": "o3k-cinder"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-compute"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-compute-agent"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-config-drive"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-console"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-domain"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-identity"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-identity"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-image"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-kernel"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-native-api"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-network"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-placement"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-provider"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-provider-contract"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-reconciler"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-scheduler"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-storage"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-store"
+    },
+    {
+      "source": "o3k-api",
+      "target": "o3k-store"
+    },
+    {
+      "source": "o3k-cellhv",
+      "target": "o3k-provider"
+    },
+    {
+      "source": "o3k-cellhv",
+      "target": "o3k-provider-contract"
+    },
+    {
+      "source": "o3k-cinder",
+      "target": "o3k-identity"
+    },
+    {
+      "source": "o3k-cinder",
+      "target": "o3k-provider"
+    },
+    {
+      "source": "o3k-compute",
+      "target": "o3k-cinder"
+    },
+    {
+      "source": "o3k-compute",
+      "target": "o3k-compute-agent"
+    },
+    {
+      "source": "o3k-compute",
+      "target": "o3k-config-drive"
+    },
+    {
+      "source": "o3k-compute",
+      "target": "o3k-domain"
+    },
+    {
+      "source": "o3k-compute",
+      "target": "o3k-kernel"
+    },
+    {
+      "source": "o3k-compute",
+      "target": "o3k-placement"
+    },
+    {
+      "source": "o3k-compute",
+      "target": "o3k-provider"
+    },
+    {
+      "source": "o3k-compute",
+      "target": "o3k-reconciler"
+    },
+    {
+      "source": "o3k-compute",
+      "target": "o3k-scheduler"
+    },
+    {
+      "source": "o3k-compute",
+      "target": "o3k-store"
+    },
+    {
+      "source": "o3k-compute-agent",
+      "target": "o3k-domain"
+    },
+    {
+      "source": "o3k-compute-agent",
+      "target": "o3k-image"
+    },
+    {
+      "source": "o3k-compute-agent",
+      "target": "o3k-provider"
+    },
+    {
+      "source": "o3k-compute-agent",
+      "target": "o3k-provider-contract"
+    },
+    {
+      "source": "o3k-compute-agent",
+      "target": "o3k-store"
+    },
+    {
+      "source": "o3k-compute-bin",
+      "target": "o3k-compute-agent"
+    },
+    {
+      "source": "o3k-compute-bin",
+      "target": "o3k-console"
+    },
+    {
+      "source": "o3k-compute-bin",
+      "target": "o3k-dhcp"
+    },
+    {
+      "source": "o3k-compute-bin",
+      "target": "o3k-libvirt"
+    },
+    {
+      "source": "o3k-compute-bin",
+      "target": "o3k-network"
+    },
+    {
+      "source": "o3k-compute-bin",
+      "target": "o3k-provider"
+    },
+    {
+      "source": "o3k-compute-bin",
+      "target": "o3k-provider-contract"
+    },
+    {
+      "source": "o3k-controller-protocol",
+      "target": "o3k-kernel"
+    },
+    {
+      "source": "o3k-database-example",
+      "target": "o3k-controller-protocol"
+    },
+    {
+      "source": "o3k-database-example",
+      "target": "o3k-kernel"
+    },
+    {
+      "source": "o3k-database-example",
+      "target": "o3k-service-sdk"
+    },
+    {
+      "source": "o3k-identity",
+      "target": "o3k-kernel"
+    },
+    {
+      "source": "o3k-identity",
+      "target": "o3k-store"
+    },
+    {
+      "source": "o3k-image",
+      "target": "o3k-kernel"
+    },
+    {
+      "source": "o3k-image",
+      "target": "o3k-store"
+    },
+    {
+      "source": "o3k-libvirt",
+      "target": "o3k-provider"
+    },
+    {
+      "source": "o3k-libvirt",
+      "target": "o3k-provider-contract"
+    },
+    {
+      "source": "o3k-native-api",
+      "target": "o3k-kernel"
+    },
+    {
+      "source": "o3k-network",
+      "target": "o3k-dhcp"
+    },
+    {
+      "source": "o3k-network",
+      "target": "o3k-domain"
+    },
+    {
+      "source": "o3k-network",
+      "target": "o3k-kernel"
+    },
+    {
+      "source": "o3k-network",
+      "target": "o3k-network-protocol"
+    },
+    {
+      "source": "o3k-network",
+      "target": "o3k-store"
+    },
+    {
+      "source": "o3k-network-bin",
+      "target": "o3k-domain"
+    },
+    {
+      "source": "o3k-network-bin",
+      "target": "o3k-network"
+    },
+    {
+      "source": "o3k-network-bin",
+      "target": "o3k-network-protocol"
+    },
+    {
+      "source": "o3k-placement",
+      "target": "o3k-store"
+    },
+    {
+      "source": "o3k-provider",
+      "target": "o3k-domain"
+    },
+    {
+      "source": "o3k-provider-contract",
+      "target": "o3k-provider"
+    },
+    {
+      "source": "o3k-reconciler",
+      "target": "o3k-domain"
+    },
+    {
+      "source": "o3k-reconciler",
+      "target": "o3k-kernel"
+    },
+    {
+      "source": "o3k-reconciler",
+      "target": "o3k-provider"
+    },
+    {
+      "source": "o3k-reconciler",
+      "target": "o3k-storage"
+    },
+    {
+      "source": "o3k-reconciler",
+      "target": "o3k-store"
+    },
+    {
+      "source": "o3k-scheduler",
+      "target": "o3k-placement"
+    },
+    {
+      "source": "o3k-scheduler",
+      "target": "o3k-store"
+    },
+    {
+      "source": "o3k-service-sdk",
+      "target": "o3k-controller-protocol"
+    },
+    {
+      "source": "o3k-service-sdk",
+      "target": "o3k-kernel"
+    },
+    {
+      "source": "o3k-storage",
+      "target": "o3k-domain"
+    },
+    {
+      "source": "o3k-store",
+      "target": "o3k-domain"
+    },
+    {
+      "source": "o3k-store",
+      "target": "o3k-kernel"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-api"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-cellhv"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-cinder"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-compute"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-compute-agent"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-config"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-config-drive"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-console"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-database-example"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-domain"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-identity"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-image"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-kernel"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-native-api"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-network"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-network-protocol"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-placement"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-provider"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-provider-contract"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-reconciler"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-scheduler"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-service-sdk"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-storage"
+    },
+    {
+      "source": "o3kd",
+      "target": "o3k-store"
+    }
+  ],
+  "self_edge_details": [],
+  "cycles": []
+}
