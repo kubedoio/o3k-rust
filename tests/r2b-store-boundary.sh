@@ -29,8 +29,7 @@ while IFS= read -r path; do
         "$store_src/server_state.rs"|\
         "$store_src/storage.rs"|\
         "$store_src/conformance.rs"|\
-        "$store_src/tests.rs"|\
-        "$store_src/lib.rs") ;;
+        "$store_src/tests.rs") ;;
         *) fail "SQL is outside an implementation module: $path" ;;
     esac
 done <<< "$postgres_hits"
