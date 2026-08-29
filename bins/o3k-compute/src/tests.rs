@@ -1,6 +1,18 @@
 #[cfg(test)]
 mod tests {
+    use crate::cleanup::cleanup_config_drive_artifact;
+    use crate::dhcp::DhcpRuntime;
+    use crate::process::pid_is_alive;
+    use crate::runtime::{
+        CommittedArtifact, CommittedCreateInputs, CreateDomainIdentity, OwnedTap,
+        StartupDomainRestore, StartupJournalRefresh, StartupTapRestore, capacity_failure_result,
+        create_disk_gib, definitive_create_failure_result, definitive_failure_result,
+        inspect_not_found_result, resolve_create_domain_spec,
+        restore_expected_running_domains_with_window, verify_owned_domain,
+    };
     use crate::*;
+    use o3k_compute_agent::ArtifactStore;
+    use rustix::process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal};
     use std::path::PathBuf;
 
     #[test]

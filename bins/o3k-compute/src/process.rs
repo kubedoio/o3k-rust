@@ -1,7 +1,6 @@
-use super::*;
 use rustix::{
     fd::OwnedFd,
-    process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal},
+    process::{Pid, PidfdFlags, pidfd_open},
 };
 pub(super) fn pid_is_alive(pid: i32) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {

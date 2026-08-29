@@ -1,4 +1,14 @@
-use super::*;
+use super::{AgentError, process, proto};
+use rustix::process::{Signal, pidfd_send_signal};
+use std::{net::Ipv4Addr, path::PathBuf};
+
+pub(crate) struct DhcpRuntime {
+    pub(crate) service: o3k_dhcp::DhcpService,
+    pub(crate) supervisor: Option<o3k_dhcp::DnsmasqSupervisor>,
+    pub(crate) binary: PathBuf,
+    pub(crate) interface: String,
+    pub(crate) root: PathBuf,
+}
 
 impl DhcpRuntime {
     pub(super) fn open(
@@ -296,7 +306,7 @@ impl DhcpRuntime {
                 return;
             }
         };
-        let _ = process::pidfd_send_signal(&pidfd, process::Signal::Term);
+        let _ = pidfd_send_signal(&pidfd, Signal::Term);
         // Bounded wait for SIGTERM to take effect; SIGKILL only if the
         // process is still alive after the window.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
@@ -304,7 +314,7 @@ impl DhcpRuntime {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         if process::pid_is_alive(pid) {
-            let _ = process::pidfd_send_signal(&pidfd, process::Signal::Kill);
+            let _ = pidfd_send_signal(&pidfd, Signal::Kill);
             let kill_deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
             while process::pid_is_alive(pid) && std::time::Instant::now() < kill_deadline {
                 std::thread::sleep(std::time::Duration::from_millis(50));

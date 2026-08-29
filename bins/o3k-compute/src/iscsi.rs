@@ -1,4 +1,27 @@
-use super::*;
+use super::AgentError;
+use std::time::Duration;
+
+fn read_hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .and_then(|value| super::normalized_hostname(&value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "o3k-compute".to_owned())
+}
+
+fn read_first_ip() -> String {
+    match std::process::Command::new("hostname").arg("-I").output() {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .split_whitespace()
+                .next()
+                .unwrap_or("127.0.0.1")
+                .to_owned()
+        }
+        _ => "127.0.0.1".to_owned(),
+    }
+}
 
 pub(super) fn read_iscsi_initiator() -> Option<String> {
     let contents = std::fs::read_to_string("/etc/iscsi/initiatorname.iscsi").ok()?;
