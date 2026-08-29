@@ -14,18 +14,6 @@
       ]
     },
     {
-      "path": "bins/o3kd/src/native_adapters.rs",
-      "crate": "o3kd",
-      "byte_size": 134625,
-      "line_count": 3328,
-      "prod_loc_approx": 1996,
-      "score": 2,
-      "reasons": [
-        "large (1996 prod LOC)",
-        "wiring/composition root"
-      ]
-    },
-    {
       "path": "bins/o3kd/src/main.rs",
       "crate": "o3kd",
       "byte_size": 114656,
@@ -38,74 +26,26 @@
       ]
     },
     {
-      "path": "crates/o3k-config-drive/src/lib.rs",
-      "crate": "o3k-config-drive",
-      "byte_size": 62362,
-      "line_count": 1604,
-      "prod_loc_approx": 901,
-      "score": 1.5,
+      "path": "bins/o3kd/src/native_adapters.rs",
+      "crate": "o3kd",
+      "byte_size": 134625,
+      "line_count": 3328,
+      "prod_loc_approx": 1996,
+      "score": 2,
       "reasons": [
-        "large (901 prod LOC)",
-        "module root"
+        "large (1996 prod LOC)",
+        "wiring/composition root"
       ]
     },
     {
-      "path": "crates/o3k-compute/src/lib.rs",
-      "crate": "o3k-compute",
-      "byte_size": 413603,
-      "line_count": 9962,
-      "prod_loc_approx": 3516,
+      "path": "crates/o3k-cinder/src/lib.rs",
+      "crate": "o3k-cinder",
+      "byte_size": 42214,
+      "line_count": 1141,
+      "prod_loc_approx": 959,
       "score": 1.5,
       "reasons": [
-        "large (3516 prod LOC)",
-        "module root"
-      ]
-    },
-    {
-      "path": "crates/o3k-image/src/lib.rs",
-      "crate": "o3k-image",
-      "byte_size": 129454,
-      "line_count": 3362,
-      "prod_loc_approx": 1575,
-      "score": 1.5,
-      "reasons": [
-        "large (1575 prod LOC)",
-        "module root"
-      ]
-    },
-    {
-      "path": "crates/o3k-provider/src/lib.rs",
-      "crate": "o3k-provider",
-      "byte_size": 50316,
-      "line_count": 1376,
-      "prod_loc_approx": 973,
-      "score": 1.5,
-      "reasons": [
-        "large (973 prod LOC)",
-        "module root"
-      ]
-    },
-    {
-      "path": "crates/o3k-database-example/src/lib.rs",
-      "crate": "o3k-database-example",
-      "byte_size": 59645,
-      "line_count": 1489,
-      "prod_loc_approx": 758,
-      "score": 1.5,
-      "reasons": [
-        "large (758 prod LOC)",
-        "module root"
-      ]
-    },
-    {
-      "path": "crates/o3k-placement/src/lib.rs",
-      "crate": "o3k-placement",
-      "byte_size": 47938,
-      "line_count": 1351,
-      "prod_loc_approx": 552,
-      "score": 1.5,
-      "reasons": [
-        "large (552 prod LOC)",
+        "large (959 prod LOC)",
         "module root"
       ]
     },
@@ -122,26 +62,26 @@
       ]
     },
     {
-      "path": "crates/o3k-storage/src/lib.rs",
-      "crate": "o3k-storage",
-      "byte_size": 34481,
-      "line_count": 1079,
-      "prod_loc_approx": 873,
+      "path": "crates/o3k-compute/src/lib.rs",
+      "crate": "o3k-compute",
+      "byte_size": 413603,
+      "line_count": 9962,
+      "prod_loc_approx": 3516,
       "score": 1.5,
       "reasons": [
-        "large (873 prod LOC)",
+        "large (3516 prod LOC)",
         "module root"
       ]
     },
     {
-      "path": "crates/o3k-cinder/src/lib.rs",
-      "crate": "o3k-cinder",
-      "byte_size": 42214,
-      "line_count": 1141,
-      "prod_loc_approx": 959,
+      "path": "crates/o3k-config-drive/src/lib.rs",
+      "crate": "o3k-config-drive",
+      "byte_size": 62362,
+      "line_count": 1604,
+      "prod_loc_approx": 901,
       "score": 1.5,
       "reasons": [
-        "large (959 prod LOC)",
+        "large (901 prod LOC)",
         "module root"
       ]
     },
@@ -158,26 +98,14 @@
       ]
     },
     {
-      "path": "crates/o3k-network/src/lib.rs",
-      "crate": "o3k-network",
-      "byte_size": 414962,
-      "line_count": 11071,
-      "prod_loc_approx": 5250,
+      "path": "crates/o3k-database-example/src/lib.rs",
+      "crate": "o3k-database-example",
+      "byte_size": 59645,
+      "line_count": 1489,
+      "prod_loc_approx": 758,
       "score": 1.5,
       "reasons": [
-        "large (5250 prod LOC)",
-        "module root"
-      ]
-    },
-    {
-      "path": "crates/o3k-service-sdk/src/lib.rs",
-      "crate": "o3k-service-sdk",
-      "byte_size": 80874,
-      "line_count": 2053,
-      "prod_loc_approx": 1857,
-      "score": 1.5,
-      "reasons": [
-        "large (1857 prod LOC)",
+        "large (758 prod LOC)",
         "module root"
       ]
     },
@@ -194,26 +122,14 @@
       ]
     },
     {
-      "path": "crates/o3k-store/src/lib.rs",
-      "crate": "o3k-store",
-      "byte_size": 573261,
-      "line_count": 14607,
-      "prod_loc_approx": 10656,
+      "path": "crates/o3k-image/src/lib.rs",
+      "crate": "o3k-image",
+      "byte_size": 129454,
+      "line_count": 3362,
+      "prod_loc_approx": 1575,
       "score": 1.5,
       "reasons": [
-        "large (10656 prod LOC)",
-        "module root"
-      ]
-    },
-    {
-      "path": "crates/o3k-reconciler/src/lib.rs",
-      "crate": "o3k-reconciler",
-      "byte_size": 255670,
-      "line_count": 6192,
-      "prod_loc_approx": 2200,
-      "score": 1.5,
-      "reasons": [
-        "large (2200 prod LOC)",
+        "large (1575 prod LOC)",
         "module root"
       ]
     },
@@ -230,36 +146,98 @@
       ]
     },
     {
-      "path": "bins/o3k/src/sys.rs",
-      "crate": "o3k",
-      "byte_size": 24440,
-      "line_count": 647,
-      "prod_loc_approx": 510,
-      "score": 1,
+      "path": "crates/o3k-network/src/lib.rs",
+      "crate": "o3k-network",
+      "byte_size": 414962,
+      "line_count": 11071,
+      "prod_loc_approx": 5250,
+      "score": 1.5,
       "reasons": [
-        "large (510 prod LOC)"
+        "large (5250 prod LOC)",
+        "module root"
       ]
     },
     {
-      "path": "bins/o3k/src/main.rs",
-      "crate": "o3k",
-      "byte_size": 11089,
-      "line_count": 355,
-      "prod_loc_approx": 317,
+      "path": "crates/o3k-placement/src/lib.rs",
+      "crate": "o3k-placement",
+      "byte_size": 47938,
+      "line_count": 1351,
+      "prod_loc_approx": 552,
+      "score": 1.5,
+      "reasons": [
+        "large (552 prod LOC)",
+        "module root"
+      ]
+    },
+    {
+      "path": "crates/o3k-provider/src/lib.rs",
+      "crate": "o3k-provider",
+      "byte_size": 50316,
+      "line_count": 1376,
+      "prod_loc_approx": 973,
+      "score": 1.5,
+      "reasons": [
+        "large (973 prod LOC)",
+        "module root"
+      ]
+    },
+    {
+      "path": "crates/o3k-reconciler/src/lib.rs",
+      "crate": "o3k-reconciler",
+      "byte_size": 255670,
+      "line_count": 6192,
+      "prod_loc_approx": 2200,
+      "score": 1.5,
+      "reasons": [
+        "large (2200 prod LOC)",
+        "module root"
+      ]
+    },
+    {
+      "path": "crates/o3k-service-sdk/src/lib.rs",
+      "crate": "o3k-service-sdk",
+      "byte_size": 80874,
+      "line_count": 2053,
+      "prod_loc_approx": 1857,
+      "score": 1.5,
+      "reasons": [
+        "large (1857 prod LOC)",
+        "module root"
+      ]
+    },
+    {
+      "path": "crates/o3k-storage/src/lib.rs",
+      "crate": "o3k-storage",
+      "byte_size": 34481,
+      "line_count": 1079,
+      "prod_loc_approx": 873,
+      "score": 1.5,
+      "reasons": [
+        "large (873 prod LOC)",
+        "module root"
+      ]
+    },
+    {
+      "path": "crates/o3k-store/src/lib.rs",
+      "crate": "o3k-store",
+      "byte_size": 573261,
+      "line_count": 14607,
+      "prod_loc_approx": 10656,
+      "score": 1.5,
+      "reasons": [
+        "large (10656 prod LOC)",
+        "module root"
+      ]
+    },
+    {
+      "path": "bins/o3k-network/src/main.rs",
+      "crate": "o3k-network-bin",
+      "byte_size": 23621,
+      "line_count": 617,
+      "prod_loc_approx": 463,
       "score": 1,
       "reasons": [
         "binary entry point"
-      ]
-    },
-    {
-      "path": "bins/o3k/src/testutil.rs",
-      "crate": "o3k",
-      "byte_size": 22353,
-      "line_count": 609,
-      "prod_loc_approx": 544,
-      "score": 1,
-      "reasons": [
-        "large (544 prod LOC)"
       ]
     },
     {
@@ -274,14 +252,36 @@
       ]
     },
     {
-      "path": "bins/o3k/src/upgrade/runner.rs",
+      "path": "bins/o3k/src/main.rs",
       "crate": "o3k",
-      "byte_size": 81789,
-      "line_count": 1924,
-      "prod_loc_approx": 1517,
+      "byte_size": 11089,
+      "line_count": 355,
+      "prod_loc_approx": 317,
       "score": 1,
       "reasons": [
-        "large (1517 prod LOC)"
+        "binary entry point"
+      ]
+    },
+    {
+      "path": "bins/o3k/src/sys.rs",
+      "crate": "o3k",
+      "byte_size": 24440,
+      "line_count": 647,
+      "prod_loc_approx": 510,
+      "score": 1,
+      "reasons": [
+        "large (510 prod LOC)"
+      ]
+    },
+    {
+      "path": "bins/o3k/src/testutil.rs",
+      "crate": "o3k",
+      "byte_size": 22353,
+      "line_count": 609,
+      "prod_loc_approx": 544,
+      "score": 1,
+      "reasons": [
+        "large (544 prod LOC)"
       ]
     },
     {
@@ -293,6 +293,17 @@
       "score": 1,
       "reasons": [
         "large (874 prod LOC)"
+      ]
+    },
+    {
+      "path": "bins/o3k/src/upgrade/runner.rs",
+      "crate": "o3k",
+      "byte_size": 81789,
+      "line_count": 1924,
+      "prod_loc_approx": 1517,
+      "score": 1,
+      "reasons": [
+        "large (1517 prod LOC)"
       ]
     },
     {
@@ -318,14 +329,146 @@
       ]
     },
     {
-      "path": "bins/o3k-network/src/main.rs",
-      "crate": "o3k-network-bin",
-      "byte_size": 23621,
-      "line_count": 617,
-      "prod_loc_approx": 463,
+      "path": "crates/o3k-api/src/compute.rs",
+      "crate": "o3k-api",
+      "byte_size": 57246,
+      "line_count": 1604,
+      "prod_loc_approx": 1363,
       "score": 1,
       "reasons": [
-        "binary entry point"
+        "large (1363 prod LOC)"
+      ]
+    },
+    {
+      "path": "crates/o3k-api/src/network.rs",
+      "crate": "o3k-api",
+      "byte_size": 114582,
+      "line_count": 3487,
+      "prod_loc_approx": 3364,
+      "score": 1,
+      "reasons": [
+        "large (3364 prod LOC)"
+      ]
+    },
+    {
+      "path": "crates/o3k-api/src/volume.rs",
+      "crate": "o3k-api",
+      "byte_size": 25725,
+      "line_count": 708,
+      "prod_loc_approx": 665,
+      "score": 1,
+      "reasons": [
+        "large (665 prod LOC)"
+      ]
+    },
+    {
+      "path": "crates/o3k-api/tests/attachment_isolation.rs",
+      "crate": "o3k-api",
+      "byte_size": 23253,
+      "line_count": 618,
+      "prod_loc_approx": 525,
+      "score": 1,
+      "reasons": [
+        "large (525 prod LOC)"
+      ]
+    },
+    {
+      "path": "crates/o3k-api/tests/gate_c_nova_callback.rs",
+      "crate": "o3k-api",
+      "byte_size": 20370,
+      "line_count": 586,
+      "prod_loc_approx": 530,
+      "score": 1,
+      "reasons": [
+        "large (530 prod LOC)"
+      ]
+    },
+    {
+      "path": "crates/o3k-api/tests/health.rs",
+      "crate": "o3k-api",
+      "byte_size": 92600,
+      "line_count": 2348,
+      "prod_loc_approx": 2258,
+      "score": 1,
+      "reasons": [
+        "large (2258 prod LOC)"
+      ]
+    },
+    {
+      "path": "crates/o3k-cinder/src/testkit.rs",
+      "crate": "o3k-cinder",
+      "byte_size": 37278,
+      "line_count": 1033,
+      "prod_loc_approx": 935,
+      "score": 1,
+      "reasons": [
+        "large (935 prod LOC)"
+      ]
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/artifact.rs",
+      "crate": "o3k-compute-agent",
+      "byte_size": 73449,
+      "line_count": 1773,
+      "prod_loc_approx": 864,
+      "score": 1,
+      "reasons": [
+        "large (864 prod LOC)"
+      ]
+    },
+    {
+      "path": "crates/o3k-compute-agent/src/provider.rs",
+      "crate": "o3k-compute-agent",
+      "byte_size": 183015,
+      "line_count": 4197,
+      "prod_loc_approx": 1778,
+      "score": 1,
+      "reasons": [
+        "large (1778 prod LOC)"
+      ]
+    },
+    {
+      "path": "crates/o3k-compute/src/attachment.rs",
+      "crate": "o3k-compute",
+      "byte_size": 89911,
+      "line_count": 2195,
+      "prod_loc_approx": 1173,
+      "score": 1,
+      "reasons": [
+        "large (1173 prod LOC)"
+      ]
+    },
+    {
+      "path": "crates/o3k-compute/tests/placement_crash_window.rs",
+      "crate": "o3k-compute",
+      "byte_size": 29473,
+      "line_count": 769,
+      "prod_loc_approx": 671,
+      "score": 1,
+      "reasons": [
+        "large (671 prod LOC)"
+      ]
+    },
+    {
+      "path": "crates/o3k-domain/src/network.rs",
+      "crate": "o3k-domain",
+      "byte_size": 71759,
+      "line_count": 1950,
+      "prod_loc_approx": 1200,
+      "score": 1,
+      "reasons": [
+        "large (1200 prod LOC)"
+      ]
+    },
+    {
+      "path": "crates/o3k-domain/src/storage.rs",
+      "crate": "o3k-domain",
+      "byte_size": 25817,
+      "line_count": 781,
+      "prod_loc_approx": 574,
+      "score": 1,
+      "reasons": [
+        "large (574 prod LOC)"
       ]
     },
     {
@@ -351,69 +494,14 @@
       ]
     },
     {
-      "path": "crates/o3k-compute/tests/placement_crash_window.rs",
-      "crate": "o3k-compute",
-      "byte_size": 29473,
-      "line_count": 769,
-      "prod_loc_approx": 671,
+      "path": "crates/o3k-native-api/src/resource.rs",
+      "crate": "o3k-native-api",
+      "byte_size": 24311,
+      "line_count": 723,
+      "prod_loc_approx": 572,
       "score": 1,
       "reasons": [
-        "large (671 prod LOC)"
-      ]
-    },
-    {
-      "path": "crates/o3k-compute/src/attachment.rs",
-      "crate": "o3k-compute",
-      "byte_size": 89911,
-      "line_count": 2195,
-      "prod_loc_approx": 1173,
-      "score": 1,
-      "reasons": [
-        "large (1173 prod LOC)"
-      ]
-    },
-    {
-      "path": "crates/o3k-compute-agent/src/provider.rs",
-      "crate": "o3k-compute-agent",
-      "byte_size": 183015,
-      "line_count": 4197,
-      "prod_loc_approx": 1778,
-      "score": 1,
-      "reasons": [
-        "large (1778 prod LOC)"
-      ]
-    },
-    {
-      "path": "crates/o3k-compute-agent/src/artifact.rs",
-      "crate": "o3k-compute-agent",
-      "byte_size": 73449,
-      "line_count": 1773,
-      "prod_loc_approx": 864,
-      "score": 1,
-      "reasons": [
-        "large (864 prod LOC)"
-      ]
-    },
-    {
-      "path": "crates/o3k-storage/src/ceph.rs",
-      "crate": "o3k-storage",
-      "byte_size": 27621,
-      "line_count": 838,
-      "prod_loc_approx": 592,
-      "score": 1,
-      "reasons": [
-        "large (592 prod LOC)"
-      ]
-    },
-    {
-      "path": "crates/o3k-cinder/src/testkit.rs",
-      "crate": "o3k-cinder",
-      "byte_size": 37278,
-      "line_count": 1033,
-      "prod_loc_approx": 935,
-      "score": 1,
-      "reasons": [
-        "large (935 prod LOC)"
+        "large (572 prod LOC)"
       ]
     },
     {
@@ -472,28 +560,6 @@
       ]
     },
     {
-      "path": "crates/o3k-network/src/linux_fabric/public_.rs",
-      "crate": "o3k-network",
-      "byte_size": 22817,
-      "line_count": 700,
-      "prod_loc_approx": 698,
-      "score": 1,
-      "reasons": [
-        "large (698 prod LOC)"
-      ]
-    },
-    {
-      "path": "crates/o3k-network/src/linux_fabric/realm.rs",
-      "crate": "o3k-network",
-      "byte_size": 19939,
-      "line_count": 515,
-      "prod_loc_approx": 509,
-      "score": 1,
-      "reasons": [
-        "large (509 prod LOC)"
-      ]
-    },
-    {
       "path": "crates/o3k-network/src/linux_fabric/geneve.rs",
       "crate": "o3k-network",
       "byte_size": 20556,
@@ -502,72 +568,6 @@
       "score": 1,
       "reasons": [
         "large (628 prod LOC)"
-      ]
-    },
-    {
-      "path": "crates/o3k-domain/src/storage.rs",
-      "crate": "o3k-domain",
-      "byte_size": 25817,
-      "line_count": 781,
-      "prod_loc_approx": 574,
-      "score": 1,
-      "reasons": [
-        "large (574 prod LOC)"
-      ]
-    },
-    {
-      "path": "crates/o3k-domain/src/network.rs",
-      "crate": "o3k-domain",
-      "byte_size": 71759,
-      "line_count": 1950,
-      "prod_loc_approx": 1200,
-      "score": 1,
-      "reasons": [
-        "large (1200 prod LOC)"
-      ]
-    },
-    {
-      "path": "crates/o3k-store/tests/postgres_p13_b1.rs",
-      "crate": "o3k-store",
-      "byte_size": 19609,
-      "line_count": 590,
-      "prod_loc_approx": 578,
-      "score": 1,
-      "reasons": [
-        "large (578 prod LOC)"
-      ]
-    },
-    {
-      "path": "crates/o3k-store/tests/postgres_p12_4.rs",
-      "crate": "o3k-store",
-      "byte_size": 32368,
-      "line_count": 964,
-      "prod_loc_approx": 922,
-      "score": 1,
-      "reasons": [
-        "large (922 prod LOC)"
-      ]
-    },
-    {
-      "path": "crates/o3k-store/tests/postgres_p13_f1.rs",
-      "crate": "o3k-store",
-      "byte_size": 23615,
-      "line_count": 739,
-      "prod_loc_approx": 702,
-      "score": 1,
-      "reasons": [
-        "large (702 prod LOC)"
-      ]
-    },
-    {
-      "path": "crates/o3k-store/src/storage.rs",
-      "crate": "o3k-store",
-      "byte_size": 48391,
-      "line_count": 1056,
-      "prod_loc_approx": 848,
-      "score": 1,
-      "reasons": [
-        "large (848 prod LOC)"
       ]
     }
   ]

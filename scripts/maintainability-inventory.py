@@ -17,6 +17,27 @@ OUTPUT_DIR = REPO_ROOT / "target" / "generated-maintainability"
 DOCS_DIR = REPO_ROOT / "docs" / "maintainability"
 
 
+def repository_relative_path(value):
+    """Return a stable repository-relative path for metadata path fields."""
+    path = Path(value)
+    try:
+        return path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
+    except ValueError:
+        return str(value)
+
+
+def repository_relative_member_id(value):
+    """Normalize Cargo path member IDs without changing package identity."""
+    prefix = "path+file://"
+    if not value.startswith(prefix):
+        return value
+    path_and_version = value[len(prefix):]
+    path, separator, version = path_and_version.partition("#")
+    relative = repository_relative_path(path)
+    normalized = f"{prefix}./{relative}"
+    return f"{normalized}{separator}{version}" if separator else normalized
+
+
 def run(cmd, cwd=None):
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd or REPO_ROOT)
     if result.returncode != 0:
@@ -42,24 +63,26 @@ def inventory_workspace():
     metadata = json.loads(stdout)
 
     packages = {}
-    for pkg in metadata["packages"]:
+    for pkg in sorted(metadata["packages"], key=lambda item: item["name"]):
         packages[pkg["name"]] = {
             "name": pkg["name"],
             "version": pkg["version"],
-            "manifest_path": pkg["manifest_path"],
+            "manifest_path": repository_relative_path(pkg["manifest_path"]),
             "targets": [],
         }
-        for tgt in pkg["targets"]:
+        for tgt in sorted(pkg["targets"], key=lambda item: (item["name"], item["kind"])):
             kinds = tgt["kind"]
             packages[pkg["name"]]["targets"].append({
                 "name": tgt["name"],
                 "kind": kinds,
-                "src_path": tgt["src_path"],
+                "src_path": repository_relative_path(tgt["src_path"]),
             })
 
     # Walk all Rust source files
     source_files = []
     for root, dirs, files in os.walk(REPO_ROOT):
+        dirs.sort()
+        files.sort()
         # Skip generated/metadata dirs
         rel = Path(root).relative_to(REPO_ROOT)
         parts = rel.parts
@@ -97,23 +120,28 @@ def inventory_workspace():
                     "prod_loc_approx": prod_loc,
                     "test_loc_approx": test_loc,
                 })
+    source_files.sort(key=lambda item: item["path"])
 
     # Classify by crate
     crate_to_sources = defaultdict(list)
     for sf in source_files:
-        p = Path(sf["path"])
+        p = REPO_ROOT / sf["path"]
         # Determine which crate it belongs to
         crate = None
         for pkg_name, info in packages.items():
             manifest = Path(info["manifest_path"]).parent
+            if not manifest.is_absolute():
+                manifest = REPO_ROOT / manifest
             try:
-                p.relative_to(manifest.relative_to(REPO_ROOT))
+                p.relative_to(manifest)
                 crate = pkg_name
                 break
             except ValueError:
                 continue
         if crate:
             crate_to_sources[crate].append(sf)
+    for sources in crate_to_sources.values():
+        sources.sort(key=lambda item: item["path"])
 
     # Find examples, tests, migrations
     examples = list((REPO_ROOT / "examples").glob("**/*"))
@@ -122,9 +150,11 @@ def inventory_workspace():
     return {
         "git_sha": get_git_sha(),
         "branch": get_branch(),
-        "workspace_root": str(metadata["workspace_root"]),
+        "workspace_root": repository_relative_path(metadata["workspace_root"]),
         "packages": packages,
-        "workspace_members": metadata["workspace_members"],
+        "workspace_members": sorted(
+            repository_relative_member_id(member) for member in metadata["workspace_members"]
+        ),
         "source_files": {
             "total_count": len(source_files),
             "total_lines": sum(sf["line_count"] for sf in source_files),
@@ -132,8 +162,8 @@ def inventory_workspace():
             "total_prod_loc": sum(sf["prod_loc_approx"] for sf in source_files),
             "total_test_loc": sum(sf["test_loc_approx"] for sf in source_files),
         },
-        "files_by_crate": {k: len(v) for k, v in crate_to_sources.items()},
-        "crate_to_sources": {k: v for k, v in crate_to_sources.items()},
+        "files_by_crate": {k: len(crate_to_sources[k]) for k in sorted(crate_to_sources)},
+        "crate_to_sources": {k: crate_to_sources[k] for k in sorted(crate_to_sources)},
     }
 
 
@@ -198,11 +228,11 @@ def get_dependency_graph():
             return
         visited.add(node)
         path.append(node)
-        for neighbor in adj.get(node, set()):
+        for neighbor in sorted(adj.get(node, set())):
             dfs(neighbor)
         path.pop()
 
-    for node in list(adj.keys()):
+    for node in sorted(adj):
         dfs(node)
 
     # Deduplicate cycles by sorted tuple
@@ -221,9 +251,9 @@ def get_dependency_graph():
     return {
         "workspace_edges": len(cross_edges),
         "self_edges": len(self_edges),
-        "edges": cross_edges,
-        "self_edge_details": self_edges,
-        "cycles": unique_cycles,
+        "edges": sorted(cross_edges, key=lambda edge: (edge["source"], edge["target"])),
+        "self_edge_details": sorted(self_edges, key=lambda edge: (edge["source"], edge["target"])),
+        "cycles": sorted(unique_cycles, key=lambda cycle: tuple(cycle)),
     }
 
 
@@ -242,6 +272,8 @@ def inventory_sql():
     """Find all SQL usage call sites across the workspace."""
     results = []
     for root, dirs, files in os.walk(REPO_ROOT):
+        dirs.sort()
+        files.sort()
         rel = Path(root).relative_to(REPO_ROOT)
         parts = rel.parts
         if any(p in (".git", "target", "node_modules") for p in parts):
@@ -265,6 +297,7 @@ def inventory_sql():
                             "classification": classification,
                         })
                         break
+    results.sort(key=lambda item: (item["path"], item["line"], item["pattern"]))
     return results
 
 
@@ -328,6 +361,8 @@ HOST_CMD_PATTERNS = [
 def inventory_host_commands():
     results = []
     for root, dirs, files in os.walk(REPO_ROOT):
+        dirs.sort()
+        files.sort()
         rel = Path(root).relative_to(REPO_ROOT)
         parts = rel.parts
         if any(p in (".git", "target", "node_modules") for p in parts):
@@ -350,6 +385,7 @@ def inventory_host_commands():
                             "classification": cls,
                         })
                         break
+    results.sort(key=lambda item: (item["path"], item["line"], item["command"]))
     return results
 
 
@@ -405,6 +441,8 @@ def inventory_safety():
     }
 
     for root, dirs, files in os.walk(REPO_ROOT):
+        dirs.sort()
+        files.sort()
         rel = Path(root).relative_to(REPO_ROOT)
         parts = rel.parts
         if any(p in (".git", "target", "node_modules") for p in parts):
@@ -464,6 +502,8 @@ def inventory_safety():
                         "content": stripped[:120],
                     })
 
+    for key in ("production_unwrap", "production_expect", "production_panic", "production_allow_overrides"):
+        results[key].sort(key=lambda item: (item["path"], item["line"], item["content"]))
     return results
 
 
@@ -504,12 +544,12 @@ def classify_roles():
     results = {}
     stdout, _, _ = run(["cargo", "metadata", "--no-deps", "--format-version", "1"])
     meta = json.loads(stdout)
-    for pkg in meta["packages"]:
+    for pkg in sorted(meta["packages"], key=lambda item: item["name"]):
         name = pkg["name"]
         role = ARCHITECTURE_ROLES.get(name, "unresolved")
         results[name] = {
             "role": role,
-            "manifest": pkg["manifest_path"],
+            "manifest": repository_relative_path(pkg["manifest_path"]),
             "dependencies": [d["name"] for d in pkg.get("dependencies", [])
                            if not d.get("kind")],
         }
@@ -557,7 +597,7 @@ def analyze_hotspots(crate_to_sources):
                     "reasons": reasons,
                 })
 
-    hotspots.sort(key=lambda h: -h["score"])
+    hotspots.sort(key=lambda h: (-h["score"], h["path"]))
     return hotspots
 
 
@@ -669,7 +709,6 @@ def main():
 
 - **SHA**: `{ws['git_sha']}`
 - **Branch**: `{ws['branch']}`
-- **Date**: {__import__('datetime').datetime.now().isoformat()}
 
 ## Workspace Summary
 
