@@ -8873,4 +8873,5 @@ fn deterministic_port_mac(port_id: Uuid) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests;

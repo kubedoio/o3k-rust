@@ -11546,4 +11546,5 @@ fn restrict_sqlite_sidecars(path: &Path) -> Result<(), StoreError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests;

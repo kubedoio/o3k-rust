@@ -2,19 +2,20 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use o3k_domain::{Server, ServerId, ServerState};
+#[cfg(test)]
+use o3k_kernel::LimitValue;
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
-    LimitKey, LimitValue, NoopAuditSink, OwnershipScope, ResourceAmount, ResourceId,
-    ResourceTarget, ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
+    LimitKey, NoopAuditSink, OwnershipScope, ResourceAmount, ResourceId, ResourceTarget,
+    ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
 };
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
 use o3k_provider::{
     AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentNodeRegistry,
     AgentNodeSnapshot, BlockDeviceAttachment, BlockDeviceObservation, Capabilities,
-    ComputeProvider, ConfigDriveRequest, ConnectorInfo, CreateInstanceRequest,
-    DeleteInstanceRequest, Instance, InstanceAction, Operation, ProviderError,
-    VolumeAttachmentProvider,
+    ComputeProvider, ConnectorInfo, CreateInstanceRequest, DeleteInstanceRequest, Instance,
+    InstanceAction, Operation, ProviderError, VolumeAttachmentProvider,
 };
 use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
 use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
@@ -23,12 +24,10 @@ use o3k_store::{
     server_state_to_storage,
 };
 
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use thiserror::Error;
 use uuid::Uuid;
 
 pub mod attachment;
@@ -3962,7 +3961,6 @@ fn keypair_from_record(record: o3k_store::KeypairRecord) -> Keypair {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::CreateMutationReceipt;
     use o3k_provider::{
         AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentErrorCategory,
         AgentNodeSnapshot, AgentObservation, AgentOperationState, AgentOperationUpdate,

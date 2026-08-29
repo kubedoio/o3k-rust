@@ -1,9 +1,8 @@
 //! Compute domain types: flavor, keypair, server input, errors.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
-use o3k_domain::{Server, ServerId};
+use o3k_domain::Server;
 use o3k_kernel::{LimitKey, LimitValue};
 use o3k_provider::{ConfigDriveRequest, ProviderError};
 use o3k_reconciler::ReconcileError;

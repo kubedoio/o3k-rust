@@ -192,10 +192,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Architecture boundary check
         run: python3 scripts/check-architecture-boundaries.py
-      - name: Maintainability guardrails
-        run: |
-          python3 scripts/maintainability-inventory.py
-          python3 scripts/check-maintainability-guards.py
+      - name: Maintainability guardrails (immutable baseline)
+        run: python3 scripts/check-maintainability-guards.py
       - name: Install pinned cargo-nextest
         run: cargo install cargo-nextest --version 0.9.131 --locked
       - name: Test governed nextest PR profile
