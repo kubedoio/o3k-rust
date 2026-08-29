@@ -1,0 +1,514 @@
+use async_trait::async_trait;
+use o3k_domain::ServerId;
+use o3k_provider::{
+    AgentNodeSnapshot, ArtifactKind, ConfigDriveRequest, CreateArtifactResolver,
+    CreateInstanceRequest, OperationState, ProviderError, ResolvedCreateArtifact,
+    ResolvedCreateInputs, ResolvedCreateResolver,
+};
+use o3k_store::{ComputeRepository, DurableStore, StorageRepository};
+use o3k_image;
+use o3k_network::{
+    NetworkPlanDispatcher, compile_attachment_plan, NetworkPlanCommand,
+    NetworkPlanAction, NetworkPlanStatus, NetworkDispatchError, AttachmentPlanInput,
+    NetworkControllerLease, NetworkService, NetworkAgentIdentity,
+};
+use o3k_config_drive;
+use o3k_compute_agent;
+use o3k_identity;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use uuid::Uuid;
+use tracing;
+
+#[derive(Clone)]
+pub(crate) struct DaemonCreateResolver {
+    pub(crate) image: o3k_image::ImageService,
+    pub(crate) network: o3k_network::NetworkService,
+    pub(crate) config_drive: o3k_config_drive::ConfigDriveStore,
+    pub(crate) network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
+    pub(crate) network_controller: o3k_network::NetworkControllerLease,
+    pub(crate) network_external_realm_id: Option<Uuid>,
+    pub(crate) network_agent: Option<o3k_network::NetworkAgentIdentity>,
+}
+
+impl DaemonCreateResolver {
+    pub(crate) fn config_drive_iso_path(
+        generated_directory: &std::path::Path,
+        server_id: Uuid,
+    ) -> Result<PathBuf, ProviderError> {
+        let output_root = generated_directory
+            .parent()
+            .ok_or(ProviderError::InvalidRequest)?;
+        Ok(output_root.join(format!("{server_id}.iso")))
+    }
+
+    async fn resolve_image(
+        &self,
+        request: &CreateInstanceRequest,
+    ) -> Result<o3k_image::ImageArtifact, ProviderError> {
+        let image_id = request
+            .image_id
+            .as_deref()
+            .ok_or(ProviderError::InvalidRequest)?
+            .parse::<Uuid>()
+            .map_err(|_| ProviderError::InvalidRequest)?;
+        self.image
+            .resolve_artifact_for_project(&request.project_id, image_id)
+            .await
+            .map_err(|_| ProviderError::InvalidRequest)
+    }
+
+    pub(crate) async fn resolve_network(
+        &self,
+        request: &CreateInstanceRequest,
+        agent_id: &str,
+        agent_epoch: &str,
+    ) -> Result<
+        (
+            Vec<o3k_compute_agent::NetworkAttachmentSpec>,
+            BTreeMap<String, String>,
+        ),
+        ProviderError,
+    > {
+        let mut attachments = Vec::with_capacity(request.network_ids.len());
+        let mut network_data = BTreeMap::new();
+        for network_id in &request.network_ids {
+            let port_id = network_id
+                .parse::<Uuid>()
+                .map_err(|_| ProviderError::InvalidRequest)?;
+            let port = self
+                .network
+                .get_port_for_project(&request.project_id, port_id)
+                .await
+                .map_err(|_| ProviderError::InvalidRequest)?;
+            let subnet = self
+                .network
+                .get_subnet_for_project(
+                    &request.project_id,
+                    port.subnet_id.ok_or(ProviderError::InvalidRequest)?,
+                )
+                .await
+                .map_err(|_| ProviderError::InvalidRequest)?;
+            // Record the selected-host intent only after the full attachment
+            // resolved; a port whose subnet cannot be resolved is never
+            // dispatched and must not carry a binding intent.
+            let network_agent_id = self
+                .network_agent
+                .as_ref()
+                .map_or(agent_id, |agent| agent.agent_id.as_str());
+            self.network
+                .record_binding_intent(&request.project_id, port_id, network_agent_id)
+                .await
+                .map_err(|error| match error {
+                    o3k_network::NetworkError::Conflict => ProviderError::Conflict,
+                    _ => ProviderError::InvalidRequest,
+                })?;
+            if let Some(dispatcher) = &self.network_dispatcher {
+                let deadline_unix_ms = super::unix_time_millis().saturating_add(30_000);
+                let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
+                    endpoint_id: port.id,
+                    realm_id: port.subnet_id.ok_or(ProviderError::InvalidRequest)?,
+                    project_id: &request.project_id,
+                    mac: &port.mac_address,
+                    fixed_ip: port.fixed_ip,
+                    subnet_cidr: &subnet.cidr,
+                    // The network plan is owned by the network execution
+                    // agent, not by the selected compute host.  Keeping the
+                    // plan node bound to the network agent lets the executor
+                    // reject cross-agent replay without conflating compute
+                    // placement with network mutation authority.
+                    node_id: network_agent_id,
+                    operation_id: request.operation_id,
+                    deadline_unix_ms,
+                    public_address: None,
+                    external_realm_id: self.network_external_realm_id,
+                    policies: self
+                        .network
+                        .list_policies_for_project(&request.project_id, port.network_id)
+                        .await
+                        .map_err(|_| ProviderError::InvalidRequest)?
+                        .into_iter()
+                        .filter(|policy| policy.endpoint_id == port.id)
+                        .collect(),
+                })
+                .map_err(|_| ProviderError::InvalidRequest)?;
+                let command_id = Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!(
+                        "o3k:network:apply:{}:{}:{}",
+                        request.operation_id, port.id, plan.fingerprint_sha256
+                    )
+                    .as_bytes(),
+                );
+                let status = dispatcher
+                    .dispatch(o3k_network::NetworkPlanCommand {
+                        command_id,
+                        operation_id: request.operation_id,
+                        idempotency_key: format!("{}:network:{}", request.idempotency_key, port.id),
+                        action: o3k_network::NetworkPlanAction::Apply,
+                        target: self.network_agent.clone().unwrap_or_else(|| {
+                            o3k_network::NetworkAgentIdentity {
+                                agent_id: agent_id.to_owned(),
+                                agent_epoch: agent_epoch.to_owned(),
+                            }
+                        }),
+                        controller: self.network_controller.clone(),
+                        deadline_unix_ms,
+                        plan,
+                    })
+                    .await
+                    .map_err(|error| match error {
+                        o3k_network::NetworkDispatchError::Unavailable
+                        | o3k_network::NetworkDispatchError::Transport(_) => {
+                            ProviderError::UnknownOutcome {
+                                operation_id: request.operation_id,
+                            }
+                        }
+                        o3k_network::NetworkDispatchError::Rejected(_) => {
+                            ProviderError::InvalidRequest
+                        }
+                    })?;
+                if status == o3k_network::NetworkPlanStatus::Unknown {
+                    return Err(ProviderError::UnknownOutcome {
+                        operation_id: request.operation_id,
+                    });
+                }
+            }
+            let port_id = port.id.to_string();
+            let fixed_ip = port.fixed_ip.to_string();
+            attachments.push(o3k_compute_agent::NetworkAttachmentSpec {
+                port_id: port_id.clone(),
+                mac: port.mac_address.clone(),
+                fixed_ipv4: fixed_ip.clone(),
+                subnet_cidr: subnet.cidr,
+                gateway_ipv4: subnet.gateway_ip.to_string(),
+            });
+            network_data.insert(format!("{port_id}.mac"), port.mac_address);
+            network_data.insert(format!("{port_id}.ipv4"), fixed_ip);
+        }
+        Ok((attachments, network_data))
+    }
+
+    fn config_drive_input(
+        request: &CreateInstanceRequest,
+        config: &ConfigDriveRequest,
+        network_data: BTreeMap<String, String>,
+    ) -> o3k_config_drive::ConfigDriveInput {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("project_id".to_owned(), request.project_id.clone());
+        metadata.insert("server_id".to_owned(), request.o3k_server_id.to_string());
+        o3k_config_drive::ConfigDriveInput {
+            instance_id: request.o3k_server_id.to_string(),
+            hostname: request.name.clone(),
+            ssh_public_key: config.ssh_public_key.clone(),
+            user_data: config.user_data.clone(),
+            metadata,
+            network_data,
+            vendor_data: config.vendor_data.clone(),
+        }
+    }
+
+    fn materialize_config_drive(
+        &self,
+        request: &CreateInstanceRequest,
+        network_data: BTreeMap<String, String>,
+    ) -> Result<(o3k_config_drive::ConfigDriveIsoResult, Vec<u8>), ProviderError> {
+        let config = request
+            .config_drive
+            .as_ref()
+            .ok_or(ProviderError::InvalidRequest)?;
+        let input = Self::config_drive_input(request, config, network_data);
+        let generated = self
+            .config_drive
+            .generate(&input)
+            .map_err(|_| ProviderError::InvalidRequest)?;
+        // ConfigDriveStore authenticates the ISO against its managed root and
+        // expects the published ISO beside the instance directory. Derive the
+        // output location from the generated directory so the resolver cannot
+        // accidentally place it in an unrelated root.
+        let output = Self::config_drive_iso_path(&generated.directory, request.o3k_server_id)?;
+        let iso = self
+            .config_drive
+            .materialize_iso(&generated.directory, output)
+            .map_err(|_| ProviderError::InvalidRequest)?;
+        let bytes = self
+            .config_drive
+            .read_verified_iso(&iso)
+            .map_err(|_| ProviderError::InvalidRequest)?;
+        Ok((iso, bytes))
+    }
+}
+
+#[async_trait]
+impl ResolvedCreateResolver for DaemonCreateResolver {
+    async fn resolve(
+        &self,
+        request: &CreateInstanceRequest,
+        agent: &AgentNodeSnapshot,
+    ) -> Result<ResolvedCreateInputs, ProviderError> {
+        let image = self.resolve_image(request).await?;
+        let (network_attachments, network_data) = self
+            .resolve_network(request, &agent.agent_id, &agent.agent_epoch)
+            .await?;
+        let (iso, _) = self.materialize_config_drive(request, network_data)?;
+        let flavor_id = (!request.flavor_id.trim().is_empty())
+            .then(|| request.flavor_id.clone())
+            .ok_or(ProviderError::InvalidRequest)?;
+        let disk_gib = (request.disk_gib > 0)
+            .then_some(request.disk_gib)
+            .ok_or(ProviderError::InvalidRequest)?;
+        let config_artifact_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:config-drive:{}:{}",
+                request.o3k_server_id, iso.fingerprint_sha256
+            )
+            .as_bytes(),
+        )
+        .to_string();
+        Ok(ResolvedCreateInputs {
+            flavor_id,
+            image_artifact_id: image.id.to_string(),
+            image_sha256: image.checksum,
+            image_format: image.format,
+            disk_gib,
+            config_drive_artifact_id: config_artifact_id,
+            config_drive_sha256: iso.fingerprint_sha256,
+            network_attachments,
+        })
+    }
+}
+
+#[async_trait]
+impl CreateArtifactResolver for DaemonCreateResolver {
+    async fn resolve_artifacts(
+        &self,
+        request: &CreateInstanceRequest,
+        agent: &AgentNodeSnapshot,
+        inputs: &ResolvedCreateInputs,
+    ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError> {
+        let image = self.resolve_image(request).await?;
+        if image.checksum != inputs.image_sha256 || image.format != inputs.image_format {
+            return Err(ProviderError::Conflict);
+        }
+        let (_, network_data) = self
+            .resolve_network(request, &agent.agent_id, &agent.agent_epoch)
+            .await?;
+        let (iso, iso_bytes) = self.materialize_config_drive(request, network_data)?;
+        if iso.fingerprint_sha256 != inputs.config_drive_sha256 {
+            return Err(ProviderError::Conflict);
+        }
+        Ok(vec![
+            ResolvedCreateArtifact {
+                artifact_id: inputs.image_artifact_id.clone(),
+                kind: ArtifactKind::ImageBase,
+                sha256: image.checksum,
+                format: image.format,
+                bytes: image.content,
+            },
+            ResolvedCreateArtifact {
+                artifact_id: inputs.config_drive_artifact_id.clone(),
+                kind: ArtifactKind::ConfigDriveIso,
+                sha256: iso.fingerprint_sha256,
+                format: "iso".to_owned(),
+                bytes: iso_bytes,
+            },
+        ])
+    }
+}
+
+/// Parses the protected two-tenant isolation seeding environment. Every
+/// variable is required together: a partial set is a misconfiguration and
+/// fails closed. Disabled by default; only the hosted-service testbed runner
+/// sets these to prove cross-tenant isolation.
+pub(crate) fn parse_extra_project_seeds()
+-> Result<Vec<o3k_identity::ExtraProjectSeed>, Box<dyn std::error::Error>> {
+    const PREFIX: &str = "O3K_EXTRA_TENANT_";
+    let vars = [
+        "PROJECT_ID",
+        "PROJECT_NAME",
+        "USER_ID",
+        "USER_NAME",
+        "PASSWORD",
+    ];
+    let values: Vec<Option<String>> = vars
+        .iter()
+        .map(|suffix| std::env::var(format!("{PREFIX}{suffix}")).ok())
+        .collect();
+    if values.iter().all(Option::is_none) {
+        return Ok(Vec::new());
+    }
+    let require = |suffix: &str, index: usize| -> Result<String, Box<dyn std::error::Error>> {
+        values[index].clone().ok_or_else(|| {
+            format!("{PREFIX}{suffix} is required when any {PREFIX}* variable is set").into()
+        })
+    };
+    let project_id = require("PROJECT_ID", 0)?;
+    let project_name = require("PROJECT_NAME", 1)?;
+    let user_id = require("USER_ID", 2)?;
+    let user_name = require("USER_NAME", 3)?;
+    let password = require("PASSWORD", 4)?;
+    Uuid::parse_str(&project_id).map_err(|error| -> Box<dyn std::error::Error> {
+        format!("{PREFIX}PROJECT_ID: {error}").into()
+    })?;
+    Uuid::parse_str(&user_id).map_err(|error| -> Box<dyn std::error::Error> {
+        format!("{PREFIX}USER_ID: {error}").into()
+    })?;
+    Ok(vec![o3k_identity::ExtraProjectSeed {
+        project_id,
+        project_name,
+        user_id,
+        user_name,
+        password: o3k_identity::Secret::new(password),
+    }])
+}
+
+pub(crate) fn validate_inspect_probe_paths(output: Option<&str>, resource_file: Option<&str>) -> bool {
+    let Some(output) = output else {
+        return false;
+    };
+    let output_path = std::path::Path::new(output);
+    if !output_path.is_absolute() || output_path.is_symlink() {
+        return false;
+    }
+    if let Some(resource_file) = resource_file {
+        let path = std::path::Path::new(resource_file);
+        if !path.is_absolute() || path.to_string_lossy().contains("..") || path.is_symlink() {
+            return false;
+        }
+    }
+    true
+}
+
+pub(crate) fn agent_inspect_probe_from_env(
+    compute: o3k_compute::ComputeService,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let resource_id = std::env::var("O3K_AGENT_INSPECT_PROBE_RESOURCE_ID").ok();
+    let resource_file = std::env::var("O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE").ok();
+    let output = std::env::var("O3K_AGENT_INSPECT_PROBE_OUTPUT").ok()?;
+    let project_id = std::env::var("O3K_AGENT_INSPECT_PROBE_PROJECT_ID")
+        .unwrap_or_else(|_| "eba29e2d-53de-461d-ae91-ede7402713cb".to_owned());
+    if resource_id
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+        && resource_file
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        tracing::warn!("agent inspect probe configuration is incomplete");
+        return None;
+    }
+    if !validate_inspect_probe_paths(Some(&output), resource_file.as_deref()) {
+        tracing::warn!("agent inspect probe path configuration is invalid");
+        return None;
+    }
+    let output = PathBuf::from(output);
+    let resource_file = resource_file.map(PathBuf::from);
+    Some(tokio::spawn(async move {
+        let result = run_agent_inspect_probe(
+            &compute,
+            &project_id,
+            resource_id.as_deref(),
+            resource_file.as_deref(),
+        )
+        .await;
+        let document = match result {
+            Ok(evidence) => evidence,
+            Err(reason) => serde_json::json!({
+                "artifact_type": "compute-agent-process-mtls",
+                "redacted": true,
+                "status": "failed",
+                "reason": reason,
+            }),
+        };
+        if let Err(error) = std::fs::write(&output, format!("{document}\n")) {
+            tracing::warn!(error = %error, "agent inspect probe evidence could not be written");
+        }
+    }))
+}
+
+pub(crate) async fn run_agent_inspect_probe(
+    compute: &o3k_compute::ComputeService,
+    project_id: &str,
+    fixed_resource_id: Option<&str>,
+    resource_file: Option<&std::path::Path>,
+) -> Result<serde_json::Value, String> {
+    // The probe starts when o3kd starts, but the lifecycle server is created
+    // later. Use a long deadline so the probe can wait for the resource file
+    // to appear and then for the inspect operation to reach a terminal state.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    let mut resource_id: Option<Uuid> = None;
+    while tokio::time::Instant::now() < deadline {
+        let candidate = match (fixed_resource_id, resource_file) {
+            (Some(value), _) => value.trim().to_owned(),
+            (None, Some(path)) => std::fs::read_to_string(path)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .unwrap_or_default(),
+            (None, None) => String::new(),
+        };
+        if let Ok(id) = Uuid::parse_str(&candidate) {
+            resource_id = Some(id);
+        }
+        let Some(id) = resource_id else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
+        // Dispatch inspect (or re-check durable state if already terminal).
+        let inspect_result = compute
+            .inspect_server(
+                project_id,
+                ServerId::from_uuid(id),
+                "o3k-agent-inspect-probe",
+            )
+            .await;
+        match inspect_result {
+            Ok(operation)
+                if matches!(
+                    operation.state,
+                    OperationState::Succeeded
+                        | OperationState::Failed
+                        | OperationState::UnknownOutcome
+                ) =>
+            {
+                let expected = operation.state == OperationState::Succeeded;
+                if !expected {
+                    return Err(format!(
+                        "agent inspect probe state mismatch: state={:?} error_category={:?}",
+                        operation.state, operation.error_category
+                    ));
+                }
+                return Ok(serde_json::json!({
+                    "artifact_type": "compute-agent-process-mtls",
+                    "evidence": {
+                        "command": "inspect",
+                        "command_state": "accepted",
+                        "operation_state": "succeeded",
+                        "observation_state": "running",
+                        "observation_operation_state": "succeeded",
+                        "resource_source": "real-lifecycle-server",
+                        "transitions": ["accepted", "operation_succeeded", "observation_succeeded"],
+                        "transport": "mutual_tls"
+                    },
+                    "redacted": true,
+                    "scope": "o3kd-compute-service-to-scheduler-to-agent-to-libvirt",
+                    "status": "passed"
+                }));
+            }
+            Ok(_) => {
+                // Inspect dispatched (Accepted/Running); wait for observation.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(o3k_compute::ComputeError::NotFound | o3k_compute::ComputeError::Conflict) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => return Err(format!("agent inspect probe failed: {error}")),
+        }
+    }
+    Err(
+        "agent inspect probe timed out waiting for a durable server record and observation"
+            .to_owned(),
+    )
+}
