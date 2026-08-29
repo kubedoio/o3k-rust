@@ -255,28 +255,6 @@ pub(crate) fn validate_canonical_resource_acceptance(
     Ok(())
 }
 
-async fn insert_sqlite_canonical_acceptance(
-    connection: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
-    operation: &OperationRecord,
-    canonical: &CanonicalOperationRecord,
-    request: &IdempotencyReservationRequest,
-) -> Result<(), StoreError> {
-    sqlx::query("INSERT INTO operations (id,resource_id,kind,state,provider_operation_id,error_category,error_message) VALUES (?,?,?,?,?,?,?)")
-        .bind(operation.id.to_string()).bind(operation.resource_id.to_string()).bind(&operation.kind)
-        .bind(operation.state.as_str()).bind(&operation.provider_operation_id).bind(&operation.error_category)
-        .bind(&operation.error_message).execute(&mut **connection).await.map_err(StoreError::Database)?;
-    sqlx::query("INSERT INTO canonical_operation_metadata (operation_id,service,action,actor,owner_scope,resource_type,resource_id,attempt,created_at,started_at,finished_at,error,request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
-        .bind(canonical.id.to_string()).bind(&canonical.service).bind(&canonical.action).bind(&canonical.actor)
-        .bind(&canonical.owner_scope).bind(&canonical.resource_type).bind(&canonical.resource_id)
-        .bind(i64::from(canonical.attempt)).bind(&canonical.created_at).bind(&canonical.started_at)
-        .bind(&canonical.finished_at).bind(&canonical.error).bind(&canonical.request_id)
-        .execute(&mut **connection).await.map_err(StoreError::Database)?;
-    sqlx::query("INSERT INTO idempotency_reservations (owner_scope,action,idempotency_key,fingerprint,operation_id) VALUES (?,?,?,?,?)")
-        .bind(&request.owner_scope).bind(&request.action).bind(&request.key).bind(&request.fingerprint)
-        .bind(request.operation_id.to_string()).execute(&mut **connection).await.map_err(StoreError::Database)?;
-    Ok(())
-}
-
 /// Map the durable/internal resource discriminator to the canonical Kernel
 /// resource type.  These values intentionally are not required to be equal:
 /// historical Compute rows use `compute_instance`, while the native contract
