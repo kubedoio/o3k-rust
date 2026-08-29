@@ -1,18 +1,32 @@
 //! O3K Network service: connectivity intent, address realms, policy enforcement.
 //!
-//! Architecture:
-//!   execution module:  network execution adapters (TAP, bridge, DHCP, routing)
-//!   fabric module:     fabric backend abstractions and realizers
-//!   linux_fabric:      Linux kernel network execution (ip, nft, bridge CLI)
-//!   gateway module:    L3 gateway realization and routing
-//!   policy module:     stateful network policy and packet filtering
-//!   canonical_policy:  canonical policy compilation and realization
-//!   public module:     public API handlers and OpenStack compatibility
-//!   routed module:     routed fabric topology
+//! ## Responsibility
 //!
-//! The network service owns technology-independent connectivity intent.
-//! Neutron resources are compatibility projections. Execution providers
-//! (nftables, ip, bridge) are bounded by the execution module.
+//! o3k-network owns technology-independent connectivity intent. It
+//! defines the canonical network data model (realms, pools, endpoints,
+//! gateways) and compiles it into provider-neutral execution plans.
+//! Neutron resources are compatibility projections.
+//!
+//! ## Boundary
+//!
+//! Execution providers (nftables, ip, bridge, DHCP) are bounded by the
+//! `execution` and `linux_fabric` modules and must not leak into the
+//! canonical model. The network service does not own compute-side port
+//! binding or address allocation for running instances — those belong
+//! to `o3k-compute` and `o3k-compute-agent`.
+//!
+//! ## Module Overview
+//!
+//! | Module | Role |
+//! |--------|------|
+//! | `execution` | Network execution adapters (TAP, bridge, DHCP, routing) |
+//! | `fabric` | Fabric backend abstractions and realizers |
+//! | `linux_fabric` | Linux kernel network execution (ip, nft, bridge CLI) |
+//! | `gateway` | L3 gateway realization and routing |
+//! | `policy` | Stateful network policy and packet filtering |
+//! | `canonical_policy` | Canonical policy compilation and realization |
+//! | `public` | Public API handlers and OpenStack compatibility |
+//! | `routed` | Routed fabric topology |
 //!
 
 use std::{
