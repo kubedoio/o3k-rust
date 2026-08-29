@@ -1,3 +1,20 @@
+//! O3K Network service: connectivity intent, address realms, policy enforcement.
+//!
+//! Architecture:
+//!   execution module:  network execution adapters (TAP, bridge, DHCP, routing)
+//!   fabric module:     fabric backend abstractions and realizers
+//!   linux_fabric:      Linux kernel network execution (ip, nft, bridge CLI)
+//!   gateway module:    L3 gateway realization and routing
+//!   policy module:     stateful network policy and packet filtering
+//!   canonical_policy:  canonical policy compilation and realization
+//!   public module:     public API handlers and OpenStack compatibility
+//!   routed module:     routed fabric topology
+//!
+//! The network service owns technology-independent connectivity intent.
+//! Neutron resources are compatibility projections. Execution providers
+//! (nftables, ip, bridge) are bounded by the execution module.
+//!
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fs, io,

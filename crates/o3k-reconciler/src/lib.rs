@@ -1,3 +1,17 @@
+//! Durable operation journal and reconciler for O3K compute and storage.
+//!
+//! Architecture:
+//!   lines 1-48:   imports, module declarations, test helpers
+//!   lines 49-215: event types (JournalEventKind, LifecycleAction, CanonicalMutationContext,
+//!                 JournalEvent, ReconcileError)
+//!   lines 218-2584: OperationJournal (state machine, idempotency, fencing, evidence, retry)
+//!   lines 2585-6200: Tests
+//!
+//! The journal persists durable operations before provider side effects.
+//! Unknown outcomes require observation before retry. Agent evidence and
+//! observation evidence are kept in separate sequence fences.
+//!
+
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -215,6 +229,8 @@ struct AgentEvidencePermit {
 
 
 // ─── Operation journal ─────────────────────────────────────
+
+// ─── OperationJournal ──────────────────────────────────────
 pub struct OperationJournal<S: ?Sized, P: ?Sized> {
     store: Arc<S>,
     provider: Arc<P>,
