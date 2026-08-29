@@ -16,6 +16,8 @@ use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::linux_fabric::policy_realization::{test_ip_output, test_ip_status};
 use crate::{NetworkPlanError, NodeNetworkPlan, canonical_plan_fingerprint};
 use crate::{PolicyEndpoint, PolicyNetworkError, StatefulPolicyProvider};
 
@@ -1491,10 +1493,7 @@ mod tests {
     async fn linux_realizer_observes_exact_fingerprint_after_fresh_instances() {
         let namespace = format!("o3k-r2a-{}", Uuid::now_v7().simple());
         let root = std::env::temp_dir().join(format!("o3k-r2a-{}", Uuid::now_v7()));
-        let add = std::process::Command::new("ip")
-            .args(["netns", "add", &namespace])
-            .status()
-            .expect("create isolated namespace");
+        let add = test_ip_status(&["netns", "add", &namespace]).expect("create isolated namespace");
         assert!(add.success(), "ip netns add failed");
         let endpoint_id = Uuid::from_u128(1);
         let endpoint = PolicyEndpoint {
@@ -1587,9 +1586,7 @@ mod tests {
             }
         );
         drop(fourth);
-        let _ = std::process::Command::new("ip")
-            .args(["netns", "del", &namespace])
-            .status();
+        let _ = test_ip_status(&["netns", "del", &namespace]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1598,10 +1595,7 @@ mod tests {
     async fn linux_realizer_rebuilds_one_endpoint_without_removing_another() {
         let namespace = format!("o3k-r2a-ab-{}", Uuid::now_v7().simple());
         let root = std::env::temp_dir().join(format!("o3k-r2a-ab-{}", Uuid::now_v7()));
-        let add = std::process::Command::new("ip")
-            .args(["netns", "add", &namespace])
-            .status()
-            .expect("create isolated namespace");
+        let add = test_ip_status(&["netns", "add", &namespace]).expect("create isolated namespace");
         assert!(add.success(), "ip netns add failed");
         let endpoint_a = Uuid::from_u128(101);
         let endpoint_b = Uuid::from_u128(102);
@@ -1719,20 +1713,17 @@ mod tests {
                 provider_resource_id: Some(format!("linux-policy:{endpoint_b}")),
             }
         );
-        let listing = std::process::Command::new("ip")
-            .args([
-                "netns",
-                "exec",
-                &namespace,
-                "nft",
-                "list",
-                "table",
-                "ip",
-                "o3k_policy",
-            ])
-            .output()
-            .expect("inspect isolated nftables table");
-        let listing = String::from_utf8_lossy(&listing.stdout);
+        let (_, listing) = test_ip_output(&[
+            "netns",
+            "exec",
+            &namespace,
+            "nft",
+            "list",
+            "table",
+            "ip",
+            "o3k_policy",
+        ])
+        .expect("inspect isolated nftables table");
         assert!(listing.contains("10.0.0.10"), "nft listing: {listing}");
         assert!(listing.contains("10.0.0.11"), "nft listing: {listing}");
         drop(fourth);
@@ -1763,9 +1754,7 @@ mod tests {
             PolicyObservation::Absent
         );
         drop(sixth);
-        let _ = std::process::Command::new("ip")
-            .args(["netns", "del", &namespace])
-            .status();
+        let _ = test_ip_status(&["netns", "del", &namespace]);
         let _ = std::fs::remove_dir_all(root);
     }
 
