@@ -7,6 +7,8 @@
 //! are compiled into an owned nftables table; established/related return
 //! traffic is accepted by conntrack.
 
+use crate::canonical_policy::{PolicyApplyOutcome, PolicyObservation, PolicySnapshotRealizer};
+use async_trait::async_trait;
 use o3k_domain::{
     NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDefaultIntent, PolicyDirection,
     PolicyIntent, PolicyStatefulMode,
@@ -36,6 +38,109 @@ pub(crate) fn test_ip_output(args: &[&str]) -> io::Result<(bool, String)> {
         output.status.success(),
         String::from_utf8_lossy(&output.stdout).into_owned(),
     ))
+}
+
+/// Production adapter from the canonical policy reconciler to this Linux
+/// stateful policy provider. Durable endpoint fingerprints remain derived
+/// provider evidence, not canonical policy authority.
+pub struct LinuxPolicySnapshotRealizer {
+    provider: tokio::sync::Mutex<StatefulPolicyProvider>,
+    endpoints: Vec<PolicyEndpoint>,
+}
+
+impl LinuxPolicySnapshotRealizer {
+    pub fn open(
+        root: impl Into<PathBuf>,
+        endpoints: Vec<PolicyEndpoint>,
+    ) -> Result<Self, PolicyNetworkError> {
+        Ok(Self {
+            provider: tokio::sync::Mutex::new(StatefulPolicyProvider::open(root)?),
+            endpoints,
+        })
+    }
+
+    pub fn open_in_namespace(
+        root: impl Into<PathBuf>,
+        namespace: impl Into<String>,
+        endpoints: Vec<PolicyEndpoint>,
+    ) -> Result<Self, PolicyNetworkError> {
+        Ok(Self {
+            provider: tokio::sync::Mutex::new(StatefulPolicyProvider::open_in_namespace(
+                root, namespace,
+            )?),
+            endpoints,
+        })
+    }
+}
+
+#[async_trait]
+impl PolicySnapshotRealizer for LinuxPolicySnapshotRealizer {
+    async fn apply_policy_snapshot(
+        &self,
+        endpoint_id: Uuid,
+        snapshot: &[NetworkPlanIntent],
+        fingerprint: &str,
+    ) -> PolicyApplyOutcome {
+        let mut provider = self.provider.lock().await;
+        if let Err(error) = provider.apply_endpoint_snapshot(endpoint_id, snapshot, &self.endpoints)
+        {
+            return PolicyApplyOutcome::Unknown {
+                reason: error.to_string(),
+            };
+        }
+        let has_policy = snapshot.iter().any(|intent| {
+            matches!(
+                intent,
+                NetworkPlanIntent::Policy(_) | NetworkPlanIntent::PolicyDefault(_)
+            )
+        });
+        if has_policy
+            && let Err(error) = provider.record_endpoint_fingerprint(endpoint_id, fingerprint)
+        {
+            return PolicyApplyOutcome::Unknown {
+                reason: error.to_string(),
+            };
+        }
+        match provider.observe_endpoint_fingerprint(endpoint_id) {
+            Ok(Some(observed)) if has_policy && observed == fingerprint => {}
+            Ok(None) if !has_policy => {}
+            Ok(Some(observed)) => {
+                return PolicyApplyOutcome::Unknown {
+                    reason: format!(
+                        "provider observed endpoint fingerprint {observed}, expected {fingerprint}"
+                    ),
+                };
+            }
+            Ok(None) => {
+                return PolicyApplyOutcome::Unknown {
+                    reason: "provider did not observe the applied endpoint policy".into(),
+                };
+            }
+            Err(error) => {
+                return PolicyApplyOutcome::Unknown {
+                    reason: error.to_string(),
+                };
+            }
+        }
+        PolicyApplyOutcome::Success {
+            provider_resource_id: Some(format!("linux-policy:{endpoint_id}")),
+        }
+    }
+
+    async fn observe_policy_snapshot(&self, endpoint_id: Uuid) -> PolicyObservation {
+        let provider = self.provider.lock().await;
+        match provider.observe_endpoint_fingerprint(endpoint_id) {
+            Ok(Some(fingerprint)) => PolicyObservation::Observed {
+                fingerprint,
+                generation: None,
+                provider_resource_id: Some(format!("linux-policy:{endpoint_id}")),
+            },
+            Ok(None) => PolicyObservation::Absent,
+            Err(error) => PolicyObservation::Unknown {
+                reason: error.to_string(),
+            },
+        }
+    }
 }
 
 const TABLE: &str = "o3k_policy";
