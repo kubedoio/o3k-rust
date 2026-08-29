@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::*;
     use crate::storage_workflow;
+    use crate::*;
     use o3k_provider::{FailureInjection, FakeComputeProvider};
     use o3k_store::testkit::TestStore;
     use std::path::PathBuf;

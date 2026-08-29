@@ -227,7 +227,6 @@ struct AgentEvidencePermit {
     _epoch_lease: Option<Box<dyn o3k_provider::AgentEpochLease>>,
 }
 
-
 // ─── Operation journal ─────────────────────────────────────
 
 // ─── OperationJournal ──────────────────────────────────────
@@ -2483,7 +2482,6 @@ where
     }
 }
 
-
 // ─── Internal helpers ─────────────────────────────────────
 fn agent_error_category(
     category: Option<AgentErrorCategory>,
@@ -2595,7 +2593,6 @@ fn valid_agent_reference(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
 }
-
 
 // ─── Tests ───────────────────────────────────────────────-
 
