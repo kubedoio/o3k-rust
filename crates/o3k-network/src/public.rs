@@ -330,29 +330,7 @@ struct OwnedBinding {
     public_address: Ipv4Addr,
 }
 
-trait PublicCommand: Send + Sync {
-    fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)>;
-    fn run(&self, program: &str, args: &[&str]) -> io::Result<bool>;
-}
-
-struct SystemPublicCommand;
-
-impl PublicCommand for SystemPublicCommand {
-    fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)> {
-        let output = std::process::Command::new(program).args(args).output()?;
-        Ok((
-            output.status.success(),
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-        ))
-    }
-
-    fn run(&self, program: &str, args: &[&str]) -> io::Result<bool> {
-        Ok(std::process::Command::new(program)
-            .args(args)
-            .status()?
-            .success())
-    }
-}
+use crate::linux_fabric::public_execution::{PublicCommand, SystemPublicCommand};
 
 const PUBLIC_TABLE: &str = "o3k_public";
 const PUBLIC_MARKER: &str = "o3k-p9-public";

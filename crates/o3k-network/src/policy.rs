@@ -19,7 +19,6 @@ use std::{
     io::{self, ErrorKind, Write},
     net::Ipv4Addr,
     path::{Path, PathBuf},
-    process::Command,
     sync::Arc,
 };
 use thiserror::Error;
@@ -58,42 +57,7 @@ struct Ownership {
     endpoint_aggregate_fingerprints: BTreeMap<Uuid, String>,
 }
 
-trait PolicyCommand: Send + Sync {
-    fn output(&self, args: &[&str]) -> io::Result<(bool, String)>;
-    fn run(&self, args: &[&str]) -> io::Result<bool>;
-}
-
-struct SystemPolicyCommand {
-    namespace: Option<String>,
-}
-
-impl PolicyCommand for SystemPolicyCommand {
-    fn output(&self, args: &[&str]) -> io::Result<(bool, String)> {
-        let mut command = if let Some(namespace) = &self.namespace {
-            let mut command = Command::new("ip");
-            command.args(["netns", "exec", namespace, "nft"]);
-            command
-        } else {
-            Command::new("nft")
-        };
-        let output = command.args(args).output()?;
-        Ok((
-            output.status.success(),
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-        ))
-    }
-
-    fn run(&self, args: &[&str]) -> io::Result<bool> {
-        let mut command = if let Some(namespace) = &self.namespace {
-            let mut command = Command::new("ip");
-            command.args(["netns", "exec", namespace, "nft"]);
-            command
-        } else {
-            Command::new("nft")
-        };
-        Ok(command.args(args).status()?.success())
-    }
-}
+use crate::linux_fabric::policy_execution::{PolicyCommand, SystemPolicyCommand};
 
 #[derive(Debug, Error)]
 pub enum PolicyNetworkError {
