@@ -3,6 +3,8 @@ mod tests {
     use crate::*;
     use std::error::Error;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Duration;
     use uuid::Uuid;
 
     #[tokio::test]

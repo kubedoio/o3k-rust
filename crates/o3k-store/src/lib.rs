@@ -17,21 +17,10 @@ use std::{
     fs,
     net::Ipv4Addr,
     path::{Path, PathBuf},
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
 };
 
-use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use chrono::{DateTime, Utc};
-use md5::{Digest as Md5Digest, Md5};
-use sqlx::{
-    Row, SqlitePool,
-    sqlite::{
-        SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow, SqliteSynchronous,
-    },
-};
+use chrono::DateTime;
 use uuid::Uuid;
 
 #[cfg(unix)]

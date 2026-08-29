@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use md5::{Digest as Md5Digest, Md5};
 use sqlx::{
     Row, SqlitePool,
@@ -15,43 +15,30 @@ use sqlx::{
 };
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::{
-    fs,
-    net::Ipv4Addr,
-    path::{Path, PathBuf},
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{fs, net::Ipv4Addr, path::Path, str::FromStr, sync::Arc, time::Duration};
 use uuid::Uuid;
 
 use crate::{
-    AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
-    ArtifactTransferUpdate, CanonicalAcceptanceOutcome, CanonicalAddressPoolRecord,
-    CanonicalAddressRealmRecord, CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord,
-    CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord, CanonicalNetworkPolicyRuleRecord,
-    CanonicalNetworkRecord, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
-    CanonicalPolicyAttachmentRecord, CanonicalPolicyRepository, CanonicalRealmBindingRecord,
-    CanonicalReusableNetworkPolicyRecord, ComputeRepository, ControllerEpoch, ControllerId,
-    ControllerSession, ControllerState, CoordinationRepository, DatabaseHealth, DurableStore,
-    FencingToken, IdempotencyReservation, IdempotencyReservationRequest, IdentityRepository,
+    AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
+    CanonicalAcceptanceOutcome, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
+    CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord,
+    CanonicalNetworkPolicyRecord, CanonicalNetworkRecord, CanonicalOperationLifecycleUpdate,
+    CanonicalOperationRecord, CanonicalRealmBindingRecord, ComputeRepository, DatabaseHealth,
+    DurableStore, IdempotencyReservation, IdempotencyReservationRequest, IdentityRepository,
     ImageMetadataRecord, ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayState,
     ImageOverlayUpdate, ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
     KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    LeaseAcquireOutcome, NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord,
-    NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
-    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
-    PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository,
-    PlacementResourceRecord, PortRecord, ProviderReference, QuotaRepository, RELATIONSHIP_BOUND,
-    RELATIONSHIP_DELETED, RELATIONSHIP_DELETING, RELATIONSHIP_RESERVED, RELATIONSHIP_UNKNOWN,
-    RelationshipRepository, ResourceRecord, ResourceRelationshipRecord, SQLITE_BUSY_MAX_ATTEMPTS,
-    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SnapshotRecord,
-    StorageBackendRecord, StoreError, SubnetRecord, VolumeAttachmentRecord,
-    VolumeAttachmentRecordV1, VolumeAttachmentRepository, VolumeRecord, WalCheckpointMode,
-    WorkLease, canonical_resource_type_for_record, insert_sqlite_canonical_acceptance,
+    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, NetworkRepository,
+    ObservationUpdate, OperationRecord, OperationState, PlacementAllocationRecord,
+    PlacementIntentRecord, PlacementInventoryRecord, PlacementProviderRecord,
+    PlacementReconcileRecord, PlacementRepository, PlacementResourceRecord, PortRecord,
+    ProviderReference, RELATIONSHIP_BOUND, RELATIONSHIP_DELETED, RELATIONSHIP_DELETING,
+    RELATIONSHIP_RESERVED, RELATIONSHIP_UNKNOWN, RelationshipRepository, ResourceRecord,
+    ResourceRelationshipRecord, SQLITE_BUSY_MAX_ATTEMPTS, SecurityGroupBindingRecord,
+    SecurityGroupRecord, SecurityGroupRuleRecord, StoreError, SubnetRecord, VolumeAttachmentRecord,
+    VolumeAttachmentRepository, WalCheckpointMode, insert_sqlite_canonical_acceptance,
     is_sqlite_busy, legacy_policy_records, relationship_from_row, restrict_sqlite_sidecars,
-    server_state_from_storage, server_state_to_storage,
     validate_canonical_idempotent_operation_identity, validate_canonical_lifecycle_update,
     validate_canonical_operation_read, validate_canonical_resource_acceptance,
 };
