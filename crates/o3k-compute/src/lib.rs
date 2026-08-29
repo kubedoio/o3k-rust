@@ -35,23 +35,28 @@ use o3k_kernel::{
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
 use o3k_provider::{
-    AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentNodeRegistry,
-    AgentNodeSnapshot, BlockDeviceAttachment, BlockDeviceObservation, Capabilities,
-    ComputeProvider, ConnectorInfo, CreateInstanceRequest, DeleteInstanceRequest, Instance,
-    InstanceAction, Operation, ProviderError, VolumeAttachmentProvider,
+    AgentAdministrativeState, AgentAvailability, AgentNodeRegistry, BlockDeviceAttachment,
+    BlockDeviceObservation, Capabilities, ComputeProvider, ConnectorInfo, CreateInstanceRequest,
+    DeleteInstanceRequest, Instance, InstanceAction, Operation, ProviderError,
+    VolumeAttachmentProvider,
 };
 use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
-use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
+use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler};
 use o3k_store::{
     ComputeRepository, StoreError, VolumeAttachmentRecord, server_state_from_storage,
     server_state_to_storage,
 };
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
+
+#[cfg(test)]
+use o3k_scheduler::SchedulerError;
+#[cfg(test)]
+use std::collections::BTreeMap;
 
 pub mod attachment;
 
