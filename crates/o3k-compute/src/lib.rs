@@ -1,35 +1,62 @@
+//! Compute application service: server CRUD, keypairs, flavors,
+//! convergence sweeps, agent event dispatch, binding projection.
+//!
+//! ## Responsibility
+//!
+//! `o3k-compute` implements the compute-domain use cases. It drives the
+//! reconciler's durable state machine from the application layer and
+//! handles compute-specific post-processing (port binding projection,
+//! config-drive cleanup, failed-create compensation, inventory sync).
+//!
+//! ## Boundary
+//!
+//! The durable reconciliation state machine (operation journal, evidence
+//! fencing, retry budget) lives in `o3k-reconciler`. `o3k-compute` calls
+//! into it; it does not duplicate journaling or state-machine logic.
+//!
+//! ## Sub-modules
+//!
+//! - `types` — compute-domain types (flavors, keypairs, errors)
+//! - `attachment` — Cinder volume attachment orchestration
+//!
+//! See also: `o3k-reconciler` for the reconciliation state machine.
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use o3k_domain::{Server, ServerId, ServerState};
+#[cfg(test)]
+use o3k_kernel::LimitValue;
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
-    LimitKey, LimitValue, NoopAuditSink, OwnershipScope, ResourceAmount, ResourceId,
-    ResourceTarget, ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
+    LimitKey, NoopAuditSink, OwnershipScope, ResourceAmount, ResourceId, ResourceTarget,
+    ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
 };
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
 use o3k_provider::{
-    AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentNodeRegistry,
-    AgentNodeSnapshot, BlockDeviceAttachment, BlockDeviceObservation, Capabilities,
-    ComputeProvider, ConfigDriveRequest, ConnectorInfo, CreateInstanceRequest,
+    AgentAdministrativeState, AgentAvailability, AgentNodeRegistry, BlockDeviceAttachment,
+    BlockDeviceObservation, Capabilities, ComputeProvider, ConnectorInfo, CreateInstanceRequest,
     DeleteInstanceRequest, Instance, InstanceAction, Operation, ProviderError,
     VolumeAttachmentProvider,
 };
 use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
-use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
+use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler};
 use o3k_store::{
     ComputeRepository, StoreError, VolumeAttachmentRecord, server_state_from_storage,
     server_state_to_storage,
 };
 
-use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use thiserror::Error;
 use uuid::Uuid;
+
+#[cfg(test)]
+use o3k_scheduler::SchedulerError;
+#[cfg(test)]
+use std::collections::BTreeMap;
 
 pub mod attachment;
 
@@ -59,83 +86,8 @@ fn test_fault_pause_ms_value(raw: Option<String>) -> Option<u64> {
     Some(ms)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Flavor {
-    pub id: Uuid,
-    pub name: String,
-    pub vcpus: u32,
-    pub ram_mib: u64,
-    pub disk_gib: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Keypair {
-    pub id: Uuid,
-    pub user_id: String,
-    pub project_id: String,
-    pub name: String,
-    pub key_type: String,
-    pub public_key: String,
-    pub fingerprint: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerCreateInput {
-    pub user_id: String,
-    pub project_id: String,
-    pub name: String,
-    pub image_id: String,
-    pub flavor_id: Uuid,
-    pub network_ids: Vec<String>,
-    pub key_name: Option<String>,
-    pub config_drive: Option<ConfigDriveRequest>,
-    pub idempotency_key: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MutationReceipt<T> {
-    pub resource: T,
-    pub operation_id: Uuid,
-    pub operation_state: o3k_store::OperationState,
-    pub replayed: bool,
-}
-
-struct CreateMutationReceipt {
-    server: Server,
-    operation_id: Uuid,
-    operation_state: o3k_store::OperationState,
-    replayed: bool,
-}
-
-#[derive(Debug, Error)]
-pub enum ComputeError {
-    #[error("unauthorized")]
-    Unauthorized,
-    #[error("compute resource was not found")]
-    NotFound,
-    #[error("compute request conflicts with existing state")]
-    Conflict,
-    #[error("compute request is invalid")]
-    InvalidRequest,
-    #[error("quota exceeded for {key}: limit {limit}, used {used}, requested {requested}")]
-    QuotaExceeded {
-        key: LimitKey,
-        limit: LimitValue,
-        used: u64,
-        requested: u64,
-    },
-    #[error("compute store error")]
-    Store(#[from] StoreError),
-    #[error("compute reconciliation error")]
-    Reconcile(#[from] ReconcileError),
-    #[error("compute provider error")]
-    Provider(#[from] ProviderError),
-    #[error("compute scheduler error")]
-    Scheduler(#[from] SchedulerError),
-    #[error("compute service is unavailable or misconfigured")]
-    Unavailable,
-}
+pub mod types;
+pub use types::*;
 
 #[derive(Clone)]
 pub struct ComputeService {
@@ -189,97 +141,8 @@ pub trait PortBindingProjector: Send + Sync {
 /// shape required by the scheduler. Missing capacity is represented as zero
 /// and makes the provider unschedulable; capability flags and disk formats are
 /// never treated as capacity.
-pub fn agent_inventory(
-    capabilities: &AgentCapabilities,
-) -> BTreeMap<String, o3k_placement::Inventory> {
-    BTreeMap::from([
-        (
-            o3k_placement::VCPU.to_owned(),
-            o3k_placement::Inventory {
-                total: capabilities.max_vcpus,
-                reserved: 0,
-                allocation_ratio: 1.0,
-                used: 0,
-            },
-        ),
-        (
-            o3k_placement::MEMORY_MB.to_owned(),
-            o3k_placement::Inventory {
-                total: capabilities.max_memory_mib,
-                reserved: 0,
-                allocation_ratio: 1.0,
-                used: 0,
-            },
-        ),
-        (
-            o3k_placement::DISK_GB.to_owned(),
-            o3k_placement::Inventory {
-                total: capabilities.max_disk_gb,
-                reserved: 0,
-                allocation_ratio: 1.0,
-                used: 0,
-            },
-        ),
-    ])
-}
-
-fn agent_provider_state(snapshot: &AgentNodeSnapshot) -> o3k_placement::ProviderState {
-    if snapshot.availability != AgentAvailability::Available
-        || snapshot.administrative_state == AgentAdministrativeState::Disabled
-        || snapshot.capabilities.max_vcpus == 0
-        || snapshot.capabilities.max_memory_mib == 0
-        || snapshot.capabilities.max_disk_gb == 0
-    {
-        o3k_placement::ProviderState::Unavailable
-    } else if snapshot.administrative_state == AgentAdministrativeState::Draining {
-        o3k_placement::ProviderState::Draining
-    } else {
-        o3k_placement::ProviderState::Enabled
-    }
-}
-
-/// Synchronizes the current authenticated agent snapshots into Placement.
-/// The stable agent ID is the Placement provider ID, so reconnects update the
-/// same provider and preserve durable allocations.
-pub async fn sync_agent_inventory(
-    registry: &dyn AgentNodeRegistry,
-    placement: &o3k_placement::PlacementLedger,
-) -> Result<(), SchedulerError> {
-    for snapshot in registry.all().await {
-        placement
-            .sync_provider(
-                &snapshot.agent_id,
-                agent_inventory(&snapshot.capabilities),
-                agent_provider_state(&snapshot),
-            )
-            .await?;
-    }
-    Ok(())
-}
-
-/// Starts the bounded periodic inventory publisher used by `o3kd`.
-/// `registration` is woken by every successful agent registration, so a
-/// freshly registered agent's capacity is published immediately instead of
-/// waiting up to one tick (issue #606); the 5 s tick remains the steady-state
-/// sync.
-pub fn spawn_agent_inventory_publisher(
-    registry: Arc<dyn AgentNodeRegistry>,
-    placement: o3k_placement::PlacementLedger,
-    registration: Arc<tokio::sync::Notify>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {}
-                _ = registration.notified() => {}
-            }
-            if let Err(error) = sync_agent_inventory(registry.as_ref(), &placement).await {
-                tracing::warn!(%error, "agent inventory publication failed");
-            }
-        }
-    })
-}
+pub mod inventory;
+pub use inventory::{agent_inventory, spawn_agent_inventory_publisher, sync_agent_inventory};
 
 fn provider_error_category_from_name(name: &str) -> Option<o3k_provider::ErrorCategory> {
     match name {
