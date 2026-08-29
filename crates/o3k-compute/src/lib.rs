@@ -59,83 +59,8 @@ fn test_fault_pause_ms_value(raw: Option<String>) -> Option<u64> {
     Some(ms)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Flavor {
-    pub id: Uuid,
-    pub name: String,
-    pub vcpus: u32,
-    pub ram_mib: u64,
-    pub disk_gib: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Keypair {
-    pub id: Uuid,
-    pub user_id: String,
-    pub project_id: String,
-    pub name: String,
-    pub key_type: String,
-    pub public_key: String,
-    pub fingerprint: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerCreateInput {
-    pub user_id: String,
-    pub project_id: String,
-    pub name: String,
-    pub image_id: String,
-    pub flavor_id: Uuid,
-    pub network_ids: Vec<String>,
-    pub key_name: Option<String>,
-    pub config_drive: Option<ConfigDriveRequest>,
-    pub idempotency_key: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MutationReceipt<T> {
-    pub resource: T,
-    pub operation_id: Uuid,
-    pub operation_state: o3k_store::OperationState,
-    pub replayed: bool,
-}
-
-struct CreateMutationReceipt {
-    server: Server,
-    operation_id: Uuid,
-    operation_state: o3k_store::OperationState,
-    replayed: bool,
-}
-
-#[derive(Debug, Error)]
-pub enum ComputeError {
-    #[error("unauthorized")]
-    Unauthorized,
-    #[error("compute resource was not found")]
-    NotFound,
-    #[error("compute request conflicts with existing state")]
-    Conflict,
-    #[error("compute request is invalid")]
-    InvalidRequest,
-    #[error("quota exceeded for {key}: limit {limit}, used {used}, requested {requested}")]
-    QuotaExceeded {
-        key: LimitKey,
-        limit: LimitValue,
-        used: u64,
-        requested: u64,
-    },
-    #[error("compute store error")]
-    Store(#[from] StoreError),
-    #[error("compute reconciliation error")]
-    Reconcile(#[from] ReconcileError),
-    #[error("compute provider error")]
-    Provider(#[from] ProviderError),
-    #[error("compute scheduler error")]
-    Scheduler(#[from] SchedulerError),
-    #[error("compute service is unavailable or misconfigured")]
-    Unavailable,
-}
+pub mod types;
+pub use types::*;
 
 #[derive(Clone)]
 pub struct ComputeService {
@@ -4037,6 +3962,7 @@ fn keypair_from_record(record: o3k_store::KeypairRecord) -> Keypair {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::CreateMutationReceipt;
     use o3k_provider::{
         AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentErrorCategory,
         AgentNodeSnapshot, AgentObservation, AgentOperationState, AgentOperationUpdate,

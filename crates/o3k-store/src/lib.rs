@@ -1,3 +1,18 @@
+//! O3K durable store: persistence records, repository ports, SQLite/PostgreSQL adapters.
+//!
+//! Architecture:
+//!   model types (72-2382): persistence record structs and repository traits
+//!   sqlite adapter (2382+): SQLite implementation with `SqliteStore`
+//!   postgres module: PostgreSQL implementation with `PostgresStore`
+//!   unified module: backend dispatch with `O3kStore`
+//!   coordination module: distributed coordination primitives
+//!   quota module: resource quota management
+//!   storage module: storage persistence
+//!
+//! Domain-specific code remains inline where it preserves atomic invariants
+//! across repository, SQL, and business logic boundaries.
+//!
+
 use std::{
     fs,
     net::Ipv4Addr,
