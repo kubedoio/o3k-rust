@@ -19,6 +19,7 @@
 //!
 //! Timeouts are classified as unknown outcomes (`CinderError::UnknownOutcome`);
 //! the caller must observe before retrying or compensating.
+#![allow(unused_imports)]
 
 use std::{
     collections::HashMap,
