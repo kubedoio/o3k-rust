@@ -4,17 +4,12 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use std::{
     fs,
     path::PathBuf,
-    sync::Arc,
     time::{Duration, SystemTime},
 };
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use uuid::Uuid;
 
-use o3k_provider::AgentAvailability;
 use o3k_provider_contract::compute_proto as proto;
-use o3k_store::StoreError;
 
 use sha2::{Digest, Sha256};
 
