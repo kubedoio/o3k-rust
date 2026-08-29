@@ -1,6 +1,6 @@
-use super::*
+use super::*;
 
-pub(super) impl DhcpRuntime {
+impl DhcpRuntime {
     pub(super) fn open(
         root: impl Into<PathBuf>,
         binary: impl Into<PathBuf>,
@@ -16,7 +16,10 @@ pub(super) impl DhcpRuntime {
         })
     }
 
-    pub(super) fn validate(&self, attachments: &[proto::NetworkAttachment]) -> Result<(), AgentError> {
+    pub(super) fn validate(
+        &self,
+        attachments: &[proto::NetworkAttachment],
+    ) -> Result<(), AgentError> {
         let Some(first) = attachments.first() else {
             return Err(AgentError::Protocol(
                 "DHCP requires a network attachment".to_owned(),

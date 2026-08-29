@@ -1,5 +1,8 @@
-use rustix::{fd::OwnedFd, process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal}};
 use super::*;
+use rustix::{
+    fd::OwnedFd,
+    process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal},
+};
 pub(super) fn pid_is_alive(pid: i32) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
@@ -16,7 +19,10 @@ pub(super) fn pid_is_alive(pid: i32) -> bool {
 /// argv). The canonicalized variant is accepted too, for hosts where the
 /// agent and the spawned process disagree on symlinks. A read failure
 /// (permissions, pid reuse race) is an unverifiable pid, never ownership.
-pub(super) fn cmdline_contains_dhcp_root(pid: i32, root: &std::path::Path) -> Result<bool, std::io::Error> {
+pub(super) fn cmdline_contains_dhcp_root(
+    pid: i32,
+    root: &std::path::Path,
+) -> Result<bool, std::io::Error> {
     let raw = std::fs::read(format!("/proc/{pid}/cmdline"))?;
     let cmdline = String::from_utf8_lossy(&raw);
     if cmdline.contains(root.to_string_lossy().as_ref()) {
