@@ -107,6 +107,24 @@ check_fixture "extended grouped SQLx imports" 1 "SQL ARCHITECTURE VIOLATION" \
 echo "Test 12d: extended aliased SQLx imports -> FAIL"
 check_fixture "extended aliased SQLx imports" 1 "SQL ARCHITECTURE VIOLATION" \
     $'use sqlx::raw_sql as execute_raw;\nuse sqlx::QueryBuilder as Builder;\nfn z_query() { execute_raw("DELETE FROM t"); let _ = Builder::new("SELECT 1"); }' "crates/o3k-kernel/src"
+echo "Test 12e: SQLx Executor import and alias -> FAIL"
+check_fixture "SQLx Executor import and alias" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'use sqlx::Executor as DbExecutor;\nasync fn z_query(pool: &sqlx::PgPool) { pool.execute("DELETE FROM t").await.unwrap(); }' "crates/o3k-kernel/src"
+echo "Test 12f: SQLx prelude Executor imports -> FAIL"
+check_fixture "SQLx prelude Executor imports" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'use sqlx::prelude::Executor;\nuse sqlx::prelude::Executor as DbExecutor;\nfn z_query() { let _ = std::marker::PhantomData::<DbExecutor>; }' "crates/o3k-kernel/src"
+echo "Test 12g: grouped SQLx Executor imports -> FAIL"
+check_fixture "grouped SQLx Executor imports" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'use sqlx::{Executor, Execute, AnyExecutor, Row};\nfn z_query() { sqlx::Executor::execute; }' "crates/o3k-kernel/src"
+echo "Test 12h: SQLx prelude wildcard -> FAIL"
+check_fixture "SQLx prelude wildcard" 1 "SQL ARCHITECTURE VIOLATION" \
+    'use sqlx::prelude::*;' "crates/o3k-kernel/src"
+echo "Test 12i: SQLx wildcard -> FAIL"
+check_fixture "SQLx wildcard" 1 "SQL ARCHITECTURE VIOLATION" \
+    'use sqlx::*;' "crates/o3k-kernel/src"
+echo "Test 12j: nested QueryBuilder path and alias -> FAIL"
+check_fixture "nested QueryBuilder path and alias" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'use sqlx::query_builder::QueryBuilder as Builder;\nfn z_query() { let _ = sqlx::query_builder::QueryBuilder::new("DELETE FROM t"); let _ = Builder::new("SELECT 1"); }' "crates/o3k-kernel/src"
 
 echo "Test 13: SQL path-prefix collision -> FAIL"
 check_fixture "SQL path-prefix collision" 1 "SQL ARCHITECTURE VIOLATION" \
@@ -204,6 +222,9 @@ check_fixture "approved SQLite persistence" 0 "" \
 echo "Test 32: approved PostgreSQL persistence -> ACCEPT"
 check_fixture "approved PostgreSQL persistence" 0 "" \
     'pub fn z_query() { sqlx::query("SELECT 1"); }' "crates/o3k-store/src/postgres"
+echo "Test 32a: approved PostgreSQL execution capabilities -> ACCEPT"
+check_fixture "approved PostgreSQL execution capabilities" 0 "" \
+    $'use sqlx::Executor;\nfn z_query() { let _ = sqlx::query_builder::QueryBuilder::new("SELECT 1"); }' "crates/o3k-store/src/postgres"
 echo "Test 33: approved Linux Network execution -> ACCEPT"
 check_fixture "approved Linux Network execution" 0 "" \
     'pub fn z_run() { let _ = std::process::Command::new("ip"); }' "crates/o3k-network/src/linux_fabric"

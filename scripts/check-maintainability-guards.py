@@ -82,16 +82,31 @@ SQL_API_NAMES = (
     r"|QueryBuilder"
     r")"
 )
+SQL_CAPABILITY_NAMES = r"(?:Executor|Execute|AnyExecutor)"
 
-SQL_PATTERNS = [rf"sqlx::{SQL_API_NAMES}(?:!|\b)"]
+SQL_PATTERNS = [
+    rf"sqlx::{SQL_API_NAMES}(?:!|\b)",
+    r"sqlx::query_builder::QueryBuilder\b",
+    rf"sqlx::(?:prelude::)?{SQL_CAPABILITY_NAMES}\b",
+]
 
 SQL_IMPORT_PATTERN = re.compile(
     r"^\s*use\s+sqlx::(?:"
-    + SQL_API_NAMES
+    + rf"(?:{SQL_API_NAMES}|{SQL_CAPABILITY_NAMES})"
     + r"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?"
     + r"|\{[^;]*\b"
-    + SQL_API_NAMES
+    + rf"(?:{SQL_API_NAMES}|{SQL_CAPABILITY_NAMES})"
     + r"\b[^;]*\})\s*;",
+    re.MULTILINE | re.DOTALL,
+)
+
+SQL_NESTED_IMPORT_PATTERN = re.compile(
+    r"^\s*use\s+sqlx::(?:"
+    r"query_builder::QueryBuilder"
+    r"|prelude::(?:Executor|Execute|AnyExecutor)"
+    r")(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;"
+    r"|^\s*use\s+sqlx::prelude::\*\s*;"
+    r"|^\s*use\s+sqlx::\*\s*;",
     re.MULTILINE | re.DOTALL,
 )
 
@@ -132,15 +147,16 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
         lines = path.read_text(encoding="utf-8").splitlines()
         source = "\n".join(lines)
 
-        for match in SQL_IMPORT_PATTERN.finditer(source):
-            line_number = source.count("\n", 0, match.start()) + 1
-            errors.append(
-                f"SQL ARCHITECTURE VIOLATION: {rel}:{line_number}\n"
-                "  pattern: raw sqlx query primitive import\n"
-                f"  code: {match.group(0).strip()[:100]}\n"
-                "  SQL belongs in an explicit persistence, database diagnostic, "
-                "or upgrade boundary."
-            )
+        for import_pattern in (SQL_IMPORT_PATTERN, SQL_NESTED_IMPORT_PATTERN):
+            for match in import_pattern.finditer(source):
+                line_number = source.count("\n", 0, match.start()) + 1
+                errors.append(
+                    f"SQL ARCHITECTURE VIOLATION: {rel}:{line_number}\n"
+                    "  pattern: raw sqlx query/execution capability import\n"
+                    f"  code: {match.group(0).strip()[:100]}\n"
+                    "  SQL belongs in an explicit persistence, database diagnostic, "
+                    "or upgrade boundary."
+                )
 
         for i, line in enumerate(lines, 1):
             for pat in SQL_PATTERNS:
