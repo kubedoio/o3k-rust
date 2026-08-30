@@ -61,11 +61,11 @@ modules. `domain/`, `port/`, `unified/`, `o3kd/src/composition/`, and service
 application code remain SQL-free. A new SQL-owning adapter requires
 architecture review and a deliberate exact path or boundary addition.
 
-The current exact-file allowance for `crates/o3k-image/src/lib.rs` is a
-residual exception for the sandboxed `run_qemu_img` qemu-img invocation. It is
-kept exact because that execution still lives in the existing mixed module;
-the desired follow-up is to extract it into an explicit Image execution
-adapter. This exception must not be broadened.
+The exact-file allowance for `crates/o3k-image/src/execution.rs` owns the
+sandboxed `run_qemu_img` qemu-img invocation and its directly related process
+safety. `crates/o3k-image/src/lib.rs` is intentionally not approved for host
+execution. A future Image execution change must remain in this explicit
+adapter boundary rather than broadening the allowance.
 
 ### Host-execution ownership
 

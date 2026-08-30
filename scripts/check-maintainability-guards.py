@@ -249,7 +249,7 @@ APPROVED_HOST_EXECUTION_PATHS = {
     "bins/o3k-compute/src/iscsi.rs",
     "crates/o3k-config-drive/src/lib.rs",
     "crates/o3k-dhcp/src/lib.rs",
-    "crates/o3k-image/src/lib.rs",
+    "crates/o3k-image/src/execution.rs",
     "crates/o3k-network/src/linux_fabric",
     "crates/o3k-storage/src/ceph.rs",
     "crates/o3k-storage/src/lib.rs",
