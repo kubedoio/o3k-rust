@@ -95,6 +95,19 @@ echo "Test 12: multiline grouped SQL imports -> FAIL"
 check_fixture "multiline grouped SQL imports" 1 "SQL ARCHITECTURE VIOLATION" \
     $'use sqlx::{\n    query,\n    query_as,\n};\nfn z_query() { query("SELECT 1"); }' "crates/o3k-kernel/src"
 
+echo "Test 12a: extended SQLx query APIs -> FAIL"
+check_fixture "extended SQLx query APIs" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'fn z_query() {\n    sqlx::query_with("SELECT 1", ());\n    sqlx::query_as_with("SELECT 1", ());\n    sqlx::query_scalar_with("SELECT 1", ());\n    sqlx::raw_sql("DELETE FROM t");\n    let _builder = sqlx::QueryBuilder::new("SELECT 1");\n}' "crates/o3k-kernel/src"
+echo "Test 12b: SQLx file and unchecked macros -> FAIL"
+check_fixture "SQLx file and unchecked macros" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'fn z_query() {\n    sqlx::query_unchecked!("SELECT 1");\n    sqlx::query_file!("query.sql");\n    sqlx::query_file_unchecked!("query.sql");\n    sqlx::query_file_as!("query.sql");\n    sqlx::query_file_scalar_unchecked!("query.sql");\n}' "crates/o3k-kernel/src"
+echo "Test 12c: extended grouped SQLx imports -> FAIL"
+check_fixture "extended grouped SQLx imports" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'use sqlx::{query_with, query_as_with, query_scalar_with, raw_sql, QueryBuilder};\nfn z_query() { query_with("SELECT 1", ()); }' "crates/o3k-kernel/src"
+echo "Test 12d: extended aliased SQLx imports -> FAIL"
+check_fixture "extended aliased SQLx imports" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'use sqlx::raw_sql as execute_raw;\nuse sqlx::QueryBuilder as Builder;\nfn z_query() { execute_raw("DELETE FROM t"); let _ = Builder::new("SELECT 1"); }' "crates/o3k-kernel/src"
+
 echo "Test 13: SQL path-prefix collision -> FAIL"
 check_fixture "SQL path-prefix collision" 1 "SQL ARCHITECTURE VIOLATION" \
     'pub fn z_query() { sqlx::query("SELECT 1"); }' "crates/o3k-store/src" "postgres-extra.rs"
@@ -194,6 +207,9 @@ check_fixture "approved PostgreSQL persistence" 0 "" \
 echo "Test 33: approved Linux Network execution -> ACCEPT"
 check_fixture "approved Linux Network execution" 0 "" \
     'pub fn z_run() { let _ = std::process::Command::new("ip"); }' "crates/o3k-network/src/linux_fabric"
+echo "Test 33a: shell alias remains forbidden in approved execution -> FAIL"
+check_fixture "shell alias in approved execution" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
+    $'use std::process::Command as HostCommand;\npub fn z_run() { let _ = HostCommand::new("sh").arg("-c"); }' "crates/o3k-network/src/linux_fabric"
 
 echo "Test 34: test-only file -> ACCEPT"
 TEST_FIXTURE_DIR="$REPO_ROOT/tests/z_guard_fixtures"

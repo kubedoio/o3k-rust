@@ -74,19 +74,24 @@ def _load_baseline(name: str) -> dict | None:
 
 # ─── Guard 1: SQL architecture boundary ───
 
-SQL_PATTERNS = [
-    r"sqlx::query\b",
-    r"sqlx::query_as\b",
-    r"sqlx::query_scalar\b",
-    r"sqlx::query!\b",
-    r"sqlx::query_as!\b",
-    r"sqlx::query_scalar!\b",
-]
+SQL_API_NAMES = (
+    r"(?:"
+    r"query(?:_as|_scalar)?(?:_with|_unchecked)?"
+    r"|query_file(?:_(?:as|scalar))?(?:_unchecked)?"
+    r"|raw_sql"
+    r"|QueryBuilder"
+    r")"
+)
+
+SQL_PATTERNS = [rf"sqlx::{SQL_API_NAMES}(?:!|\b)"]
 
 SQL_IMPORT_PATTERN = re.compile(
     r"^\s*use\s+sqlx::(?:"
-    r"(?:query|query_as|query_scalar)(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?"
-    r"|\{[^;]*\b(?:query|query_as|query_scalar)\b[^;]*\})\s*;",
+    + SQL_API_NAMES
+    + r"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?"
+    + r"|\{[^;]*\b"
+    + SQL_API_NAMES
+    + r"\b[^;]*\})\s*;",
     re.MULTILINE | re.DOTALL,
 )
 
@@ -188,6 +193,38 @@ HOST_IMPORT_PATTERNS = [
     ), "process Command type alias"),
 ]
 
+HOST_COMMAND_ALIAS_PATTERN = re.compile(
+    r"use\s+(?:std|tokio)::process::Command"
+    r"(?:\s+as\s+(?P<alias>[A-Za-z_][A-Za-z0-9_]*))?\s*;"
+)
+HOST_COMMAND_GROUP_PATTERN = re.compile(
+    r"use\s+(?:std|tokio)::process::\{(?P<body>[^;]*)\}\s*;",
+    re.DOTALL,
+)
+HOST_COMMAND_TYPE_ALIAS_PATTERN = re.compile(
+    r"type\s+(?P<alias>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+    r"(?:std|tokio)::process::Command\s*;"
+)
+
+
+def _host_command_aliases(source: str) -> set[str]:
+    aliases = {
+        match.group("alias") or "Command"
+        for match in HOST_COMMAND_ALIAS_PATTERN.finditer(source)
+    }
+    for match in HOST_COMMAND_GROUP_PATTERN.finditer(source):
+        for item in match.group("body").split(","):
+            item = item.strip()
+            if not re.match(r"Command(?:\s+as\s+)?", item):
+                continue
+            alias_match = re.search(r"\bas\s+([A-Za-z_][A-Za-z0-9_]*)", item)
+            aliases.add(alias_match.group(1) if alias_match else "Command")
+    aliases.update(
+        match.group("alias")
+        for match in HOST_COMMAND_TYPE_ALIAS_PATTERN.finditer(source)
+    )
+    return aliases
+
 # Explicit execution boundaries.  Mixed application crates are narrowed to
 # the files that currently own host-tool invocation.
 APPROVED_HOST_EXECUTION_PATHS = {
@@ -219,6 +256,7 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
 
         lines = path.read_text(encoding="utf-8").splitlines()
         source = "\n".join(lines)
+        command_aliases = _host_command_aliases(source)
 
         for pattern, name in HOST_IMPORT_PATTERNS:
             for match in pattern.finditer(source):
@@ -233,6 +271,20 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
                 )
 
         for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if not stripped.startswith("//"):
+                for alias in command_aliases - {"Command"}:
+                    shell_alias = re.search(
+                        rf"\b{re.escape(alias)}\s*::new\(\s*[\"'](?:sh|bash)[\"']",
+                        line,
+                    )
+                    if shell_alias:
+                        errors.append(
+                            f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{i}\n"
+                            "  command: aliased shell command (forbidden)\n"
+                            f"  code: {stripped[:120]}"
+                        )
+                        break
             for pat, name in HOST_CMD_PATTERNS:
                 if re.search(pat, line):
                     stripped = line.strip()
