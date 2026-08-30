@@ -1,0 +1,651 @@
+use super::{
+    AgentNodeRegistry, Arc, AttachmentOrchestrator, ComputeError, ComputeService,
+    CreateInstanceRequest, Duration, NoopAuditSink, OperationJournal, PortBindingProjector,
+    ProviderBackend, Scheduler, StaticAuthorizer, Uuid, VolumeAttachmentProvider,
+};
+
+use o3k_kernel::{AuditSink, Authorizer};
+use o3k_store::ComputeRepository;
+
+impl ComputeService {
+    #[must_use]
+    pub fn new<P>(store: Arc<dyn ComputeRepository>, provider: Arc<P>) -> Self
+    where
+        Arc<P>: Into<ProviderBackend>,
+    {
+        let provider = Arc::new(provider.into());
+        let journal = OperationJournal::new(store.clone(), provider.clone(), 3);
+        let attachments = AttachmentOrchestrator::new(store.clone(), provider.clone(), None);
+        Self {
+            store,
+            provider,
+            journal,
+            scheduler: None,
+            agent_registry: None,
+            cinder: None,
+            attachments,
+            binding_projector: None,
+            config_drive_cleaner: None,
+            authorizer: Arc::new(StaticAuthorizer::standard()),
+            audit_sink: Arc::new(NoopAuditSink),
+            coordination: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_coordination(
+        mut self,
+        coordination: Arc<dyn o3k_store::CoordinationRepository>,
+        controller_id: o3k_store::ControllerId,
+        controller_epoch: o3k_store::ControllerEpoch,
+    ) -> Self {
+        self.coordination = Some((coordination, controller_id, controller_epoch));
+        self
+    }
+
+    #[must_use]
+    pub fn with_authorizer(mut self, authorizer: Arc<dyn Authorizer>) -> Self {
+        self.authorizer = authorizer;
+        self
+    }
+
+    #[must_use]
+    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = audit_sink;
+        self
+    }
+
+    /// Configures the control-plane config-drive store whose per-instance
+    /// media is reaped when a server delete reaches terminal success.
+    /// Reaping is best-effort and idempotent; without this builder the
+    /// cleanup is a no-op, so tests and hosts that do not own a config-drive
+    /// store are unchanged.
+    #[must_use]
+    pub fn with_config_drive_cleaner(mut self, store: o3k_config_drive::ConfigDriveStore) -> Self {
+        self.config_drive_cleaner = Some(store);
+        self
+    }
+
+    /// Best-effort removal of the per-instance config-drive media owned by
+    /// this control plane once a server delete is known terminal. A failed
+    /// cleanup is logged, never a compute failure: the leak verifier catches
+    /// residue separately, and the cleanup is idempotent so a replayed
+    /// terminal update reaps nothing more than the first one.
+    pub(super) fn cleanup_config_drive_best_effort(&self, server_id: &str) {
+        let Some(store) = self.config_drive_cleaner.as_ref() else {
+            return;
+        };
+        if let Err(error) = store.cleanup(server_id) {
+            tracing::warn!(
+                server_id = %server_id,
+                error = %error,
+                "config-drive cleanup failed; the delete outcome is unaffected"
+            );
+        }
+    }
+
+    /// Configures the projector that reflects terminal create/delete outcomes
+    /// into the durable port binding state of the network control plane.
+    #[must_use]
+    pub fn with_binding_projector(
+        mut self,
+        binding_projector: Arc<dyn PortBindingProjector>,
+    ) -> Self {
+        self.binding_projector = Some(binding_projector);
+        self
+    }
+
+    /// Configures the external volume-attachment provider used for the
+    /// durable attachment lifecycle. External-hosted volume attachment
+    /// requires it; the concrete adapter is selected at the composition root.
+    #[must_use]
+    pub fn with_attachment_provider(mut self, provider: Arc<dyn VolumeAttachmentProvider>) -> Self {
+        self.cinder = Some(provider.clone());
+        self.attachments =
+            AttachmentOrchestrator::new(self.store.clone(), self.provider.clone(), Some(provider));
+        self
+    }
+
+    #[must_use]
+    pub fn attachment_orchestrator(&self) -> AttachmentOrchestrator {
+        self.attachments.clone()
+    }
+
+    #[must_use]
+    pub fn with_scheduler(mut self, scheduler: Scheduler) -> Self {
+        self.scheduler = Some(scheduler);
+        self
+    }
+
+    /// Restricts scheduler candidates to agents that are currently registered,
+    /// alive, and administratively enabled. The registry is intentionally
+    /// optional so direct fake-provider operation keeps its existing behavior.
+    /// The same registry backs the journal's evidence fence: without it the
+    /// fence stays anchored to each operation's first evidence epoch (issue
+    /// #87 crash-restart replay needs the registry's current epoch to accept
+    /// a re-registered agent's replay while rejecting dead epochs).
+    #[must_use]
+    pub fn with_agent_registry(mut self, registry: Arc<dyn AgentNodeRegistry>) -> Self {
+        self.journal = self.journal.clone().with_agent_registry(registry.clone());
+        self.agent_registry = Some(registry);
+        self
+    }
+
+    #[must_use]
+    pub fn provider(&self) -> Arc<ProviderBackend> {
+        self.provider.clone()
+    }
+
+    /// Reports whether the explicitly configured external-Cinder attachment
+    /// provider enables the hosted attachment API profile.
+    #[must_use]
+    pub fn cinder_configured(&self) -> bool {
+        self.attachments.cinder_configured()
+    }
+
+    /// Applies a live authenticated agent result through the durable journal.
+    /// The control-plane event consumer owns subscription and retry policy.
+    pub async fn apply_agent_update(
+        &self,
+        update: &o3k_provider::AgentOperationUpdate,
+    ) -> Result<o3k_store::OperationState, ComputeError> {
+        let state = self.journal.apply_agent_update(update).await?;
+        if matches!(
+            state,
+            o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
+        ) {
+            self.project_terminal_binding_outcome(update.operation_id.to_string().as_str(), state)
+                .await;
+        }
+        if state == o3k_store::OperationState::Failed {
+            self.compensate_failed_create(update.operation_id).await?;
+        }
+        Ok(state)
+    }
+
+    /// Reflects a terminal operation outcome into the durable port binding
+    /// state of the network control plane, and reaps the per-instance
+    /// config-drive media when a delete reached terminal success. The
+    /// server's ports are read from the durable desired-state snapshot, and
+    /// the binding host comes from the intent the network service recorded at
+    /// dispatch. Projection and reaping are best-effort and idempotent: they
+    /// are side observations, never compute failures, and a replayed terminal
+    /// update projects and reaps the same state again. Integrity anomalies (a
+    /// missing operation or resource, or an unparseable desired-state
+    /// snapshot) are surfaced as warnings instead of failing the compute path.
+    pub(super) async fn project_terminal_binding_outcome(
+        &self,
+        operation_id: &str,
+        state: o3k_store::OperationState,
+    ) {
+        let Ok(operation_id) = Uuid::parse_str(operation_id) else {
+            tracing::warn!(
+                operation_id = %operation_id,
+                "port binding outcome skipped: operation id is not a UUID"
+            );
+            return;
+        };
+        let Ok(operation) = self.store.get_operation(operation_id).await else {
+            tracing::warn!(
+                operation_id = %operation_id,
+                "port binding outcome skipped: operation is missing from the durable store"
+            );
+            return;
+        };
+        // Terminal successful delete reaps the per-instance config-drive
+        // media owned by this control plane (best-effort, idempotent, and
+        // independent of the binding projector).
+        if operation.kind == "lifecycle:delete" && state == o3k_store::OperationState::Succeeded {
+            self.cleanup_config_drive_best_effort(&operation.resource_id.to_string());
+        }
+        let Some(projector) = self.binding_projector.as_ref() else {
+            return;
+        };
+        let Ok(resource) = self.store.get_resource(operation.resource_id).await else {
+            tracing::warn!(
+                operation_id = %operation_id,
+                resource_id = %operation.resource_id,
+                "port binding outcome skipped: server resource is missing from the durable store"
+            );
+            return;
+        };
+        let Ok(request) = serde_json::from_str::<CreateInstanceRequest>(&resource.desired_state)
+        else {
+            tracing::warn!(
+                operation_id = %operation_id,
+                resource_id = %operation.resource_id,
+                "port binding outcome skipped: server create intent is corrupt"
+            );
+            return;
+        };
+        for port_id in &request.network_ids {
+            let outcome = match operation.kind.as_str() {
+                "create" => {
+                    projector
+                        .project_create_outcome(
+                            &request.project_id,
+                            port_id,
+                            state == o3k_store::OperationState::Succeeded,
+                        )
+                        .await
+                }
+                "lifecycle:delete" if state == o3k_store::OperationState::Succeeded => {
+                    projector.unbind_port(&request.project_id, port_id).await
+                }
+                _ => continue,
+            };
+            if let Err(error) = outcome {
+                tracing::warn!(
+                    operation_id = %operation_id,
+                    resource_id = %operation.resource_id,
+                    port_id = %port_id,
+                    error = %error,
+                    "port binding outcome projection rejected"
+                );
+            }
+        }
+    }
+
+    /// Clears the binding of every port named by the server's durable create
+    /// intent. Used when a delete reached terminal success, including the
+    /// already-deleted shortcut, where the delete completed in a previous
+    /// run. Best-effort and idempotent like `project_terminal_binding_outcome`.
+    pub(super) async fn unbind_ports_from_intent(&self, request: &CreateInstanceRequest) {
+        let Some(projector) = self.binding_projector.as_ref() else {
+            return;
+        };
+        for port_id in &request.network_ids {
+            if let Err(error) = projector.unbind_port(&request.project_id, port_id).await {
+                tracing::warn!(
+                    resource_id = %request.o3k_server_id,
+                    port_id = %port_id,
+                    error = %error,
+                    "port unbind projection rejected"
+                );
+            }
+        }
+    }
+
+    /// Applies the same reverse-order compensation as the synchronous create
+    /// path when a create operation is terminal Failed after the API request
+    /// already returned. Compensation is idempotent: keypair detach is a
+    /// delete-if-present and the placement allocation is released only when
+    /// it is still held, so replayed deliveries and repeated convergence
+    /// triggers are safe.
+    pub(super) async fn compensate_failed_create(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<(), ComputeError> {
+        let operation = self.store.get_operation(operation_id).await?;
+        if operation.kind != "create" {
+            return Ok(());
+        }
+        let resource = self.store.get_resource(operation.resource_id).await?;
+        self.store.detach_server_keypair(resource.id).await?;
+        let request: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
+            .map_err(|_| ComputeError::InvalidRequest)?;
+        if let (Some(scheduler), Some(provider_id), Some(allocation_id)) = (
+            self.scheduler.as_ref(),
+            request.placement_provider_id.as_deref(),
+            request.placement_allocation_id.as_deref(),
+        ) && scheduler
+            .validate_allocation(provider_id, allocation_id, &resource.id.to_string())
+            .await
+            .is_ok()
+        {
+            self.release_placement_allocation(resource.id, &request)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn apply_agent_acceptance(
+        &self,
+        accepted: &o3k_provider::AgentCommandAccepted,
+    ) -> Result<o3k_store::OperationState, ComputeError> {
+        Ok(self.journal.apply_agent_acceptance(accepted).await?)
+    }
+
+    /// Applies an authenticated provider observation to the durable resource
+    /// projection. This is separate from operation progress because a command
+    /// may succeed while the provider remains stopped, deleting, or errored.
+    pub async fn apply_agent_observation(
+        &self,
+        observation: &o3k_provider::AgentObservation,
+    ) -> Result<(), ComputeError> {
+        Ok(self.journal.apply_agent_observation(observation).await?)
+    }
+
+    /// Starts the in-memory event bridge used by the control-plane binary.
+    /// The journal remains the recovery authority; this task only applies live
+    /// updates received from an authenticated agent connection.
+    pub fn spawn_agent_event_consumer(
+        &self,
+        registry: Arc<dyn AgentNodeRegistry>,
+    ) -> tokio::task::JoinHandle<()> {
+        let mut events = registry.subscribe_events();
+        let service = self.clone();
+        tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(o3k_provider::AgentEvent::Operation(update)) => {
+                        if let Err(error) = service.apply_agent_update(&update).await {
+                            tracing::warn!(error = ?error, "agent operation update rejected");
+                        }
+                    }
+                    Ok(o3k_provider::AgentEvent::CommandAccepted(accepted)) => {
+                        if let Err(error) = service.apply_agent_acceptance(&accepted).await {
+                            tracing::warn!(error = ?error, "agent command acceptance rejected");
+                        }
+                    }
+                    Ok(o3k_provider::AgentEvent::Observation(observation)) => {
+                        let current_epoch = registry
+                            .snapshot(&observation.agent_id)
+                            .await
+                            .map(|node| node.agent_epoch);
+                        if current_epoch.as_deref() != Some(observation.agent_epoch.as_str()) {
+                            tracing::warn!(
+                                agent_id = %observation.agent_id,
+                                agent_epoch = %observation.agent_epoch,
+                                current_epoch = ?current_epoch,
+                                "ignored observation from a replaced agent epoch"
+                            );
+                            continue;
+                        }
+                        if let Err(error) = service.apply_agent_observation(&observation).await {
+                            tracing::warn!(
+                                error = ?error,
+                                operation_id = %observation.operation_id,
+                                resource_id = %observation.resource_id,
+                                agent_id = %observation.agent_id,
+                                agent_epoch = %observation.agent_epoch,
+                                operation_state = ?observation.operation_state,
+                                state = ?observation.state,
+                                provider_resource_id = ?observation.provider_resource_id,
+                                observation_sequence = observation.observation_sequence,
+                                "agent resource observation rejected"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        tracing::warn!(
+                            count,
+                            "agent event consumer lagged; durable recovery required"
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::warn!("agent event stream closed");
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
+    /// Drives durable attachment recovery after restart or an unknown outcome.
+    ///
+    /// The attachment orchestrator persists every phase before executing an
+    /// external side effect. On restart, in-flight or unknown-outcome records
+    /// must converge by observing the Cinder and compute boundaries rather than
+    /// re-running mutations blindly. This bounded periodic task is the
+    /// production caller for `AttachmentOrchestrator::reconcile`.
+    pub fn spawn_attachment_reconciler(&self, interval_secs: u64) -> tokio::task::JoinHandle<()> {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Some((coordination, controller_id, controller_epoch)) = &service.coordination
+                {
+                    let work_key = "reconcile:volume_attachments";
+                    match coordination
+                        .acquire_work_lease(
+                            work_key,
+                            "reconciler",
+                            controller_id,
+                            controller_epoch,
+                            Duration::from_secs(15),
+                        )
+                        .await
+                    {
+                        Ok(o3k_store::LeaseAcquireOutcome::Acquired { lease }) => {
+                            if let Err(error) = service.attachment_orchestrator().reconcile().await
+                            {
+                                tracing::warn!(%error, "attachment reconcile pass failed");
+                            }
+                            let _ = coordination
+                                .release_work_lease(
+                                    work_key,
+                                    controller_id,
+                                    controller_epoch,
+                                    lease.fencing_token,
+                                )
+                                .await;
+                        }
+                        Ok(o3k_store::LeaseAcquireOutcome::Busy { .. }) => {
+                            tracing::debug!(
+                                "attachment reconcile is currently leased by another controller; skipping"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to acquire attachment reconcile lease");
+                        }
+                    }
+                } else if let Err(error) = service.attachment_orchestrator().reconcile().await {
+                    tracing::warn!(%error, "attachment reconcile pass failed");
+                }
+            }
+        })
+    }
+
+    /// Periodically drives create convergence for servers left in a state
+    /// that nothing else will ever advance: `Pending`, `UnknownOutcome`, or
+    /// `Running` without a provider operation identity (issue-87 S1 residue —
+    /// a crash between persisting `Running` and dispatching the create).
+    /// After a control-plane restart the lazy show path alone would leave
+    /// such a server stuck in REQUESTED (and its placement allocation leaked)
+    /// until a client polls it; this bounded periodic task is the recovery
+    /// authority. Each pass is lazy and idempotent: terminal and accepted
+    /// operations are skipped by `drive_create_convergence`, and the
+    /// reconciler reuses in-flight and terminal provider work by the
+    /// deterministic operation identity.
+    pub fn spawn_create_convergence_reconciler(
+        &self,
+        interval_secs: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                tracing::debug!("create convergence sweep tick");
+                if let Err(error) = service.drive_all_create_convergence().await {
+                    tracing::warn!(%error, "create convergence reconcile pass failed");
+                }
+            }
+        })
+    }
+
+    /// Drives create convergence for every durable compute instance, then
+    /// expires artifact transfers abandoned by operations that have already
+    /// reached a terminal state (issue #88). The per-resource drive is lazy
+    /// and bounded, so healthy servers are skipped and a stuck server
+    /// converges regardless of which project owns it.
+    pub(super) async fn drive_all_create_convergence(&self) -> Result<(), ComputeError> {
+        let resources = self
+            .store
+            .list_resources_by_kind("compute_instance")
+            .await?;
+        for resource in resources {
+            if let Some((coordination, controller_id, controller_epoch)) = &self.coordination {
+                let work_key = format!("convergence:create:{}", resource.id);
+                match coordination
+                    .acquire_work_lease(
+                        &work_key,
+                        "convergence",
+                        controller_id,
+                        controller_epoch,
+                        Duration::from_secs(15),
+                    )
+                    .await
+                {
+                    Ok(o3k_store::LeaseAcquireOutcome::Acquired { lease }) => {
+                        self.drive_create_convergence(&resource).await;
+                        let _ = coordination
+                            .release_work_lease(
+                                &work_key,
+                                controller_id,
+                                controller_epoch,
+                                lease.fencing_token,
+                            )
+                            .await;
+                    }
+                    Ok(o3k_store::LeaseAcquireOutcome::Busy { .. }) => {
+                        tracing::debug!(
+                            resource_id = %resource.id,
+                            "create convergence is currently leased by another controller; skipping"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            resource_id = %resource.id,
+                            %error,
+                            "failed to acquire create convergence lease; skipping"
+                        );
+                    }
+                }
+            } else {
+                self.drive_create_convergence(&resource).await;
+            }
+        }
+        // Issue #88: an operation can reach a terminal state while its
+        // artifact handshake rows are still `offered`/`receiving` (an agent
+        // crash can strand them, and a terminalized operation is never driven
+        // again), so no per-operation path ever advances them. This per-pass
+        // sweep expires exactly those rows. Best-effort and idempotent:
+        // repeated passes expire nothing, committed/rejected/expired rows are
+        // never touched, and a failure is a warning, not a sweep abort.
+        if let Err(error) = self.store.expire_transfers_of_terminal_operations().await {
+            tracing::warn!(%error, "artifact transfer expiry sweep failed");
+        }
+        Ok(())
+    }
+
+    /// Periodically drives lifecycle convergence for operations left in a
+    /// state that nothing else will ever advance. A lifecycle operation can
+    /// be stranded non-terminal by an unknown delete/action outcome
+    /// (issue-88 B1: the delete undefine raced a libvirtd restart, the agent
+    /// reported unknown, the API's synchronous 10s poll has long returned,
+    /// and the event stream rejects non-Succeeded observations), and no path
+    /// ever calls `reconcile_lifecycle_once` again — the resource stays
+    /// ACTIVE, the API delete retry 409s, and every owned residue (op row,
+    /// command row, allocation, config-drive media) is held. This bounded
+    /// periodic task is the recovery authority, mirroring the
+    /// create-convergence sweep. Each pass is lazy and idempotent: terminal
+    /// operations are not listed, in-flight operations are skipped, and
+    /// re-dispatches reuse the durable command row and the deterministic
+    /// `o3k-operation-{id}` idempotency key.
+    pub fn spawn_lifecycle_convergence_reconciler(
+        &self,
+        interval_secs: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(error) = service.drive_all_lifecycle_convergence().await {
+                    tracing::warn!(%error, "lifecycle convergence reconcile pass failed");
+                }
+            }
+        })
+    }
+
+    /// Drives lifecycle convergence for every non-terminal lifecycle
+    /// operation. The per-operation drive is lazy and bounded, so healthy
+    /// operations are skipped and a stranded operation converges regardless
+    /// of which project owns it.
+    pub(super) async fn drive_all_lifecycle_convergence(&self) -> Result<(), ComputeError> {
+        let operations = self.store.list_non_terminal_lifecycle_operations().await?;
+        for operation in operations {
+            // Issue #88 B1: re-drive exactly the states nothing else will
+            // ever advance — `Pending`, `UnknownOutcome` (observed, not
+            // re-dispatched: presence inspection and adoption decide),
+            // `Retryable` (the #572 retry-scheduling addition), and
+            // `Running` without a provider operation identity (a crash
+            // between persisting `Running` and dispatching). A `Running`
+            // operation WITH the identity was accepted and is in flight: the
+            // agent event stream terminalizes it, and a re-dispatch would
+            // race it on the same operation records.
+            let re_drive = matches!(
+                operation.state,
+                o3k_store::OperationState::Pending
+                    | o3k_store::OperationState::UnknownOutcome
+                    | o3k_store::OperationState::Retryable
+            ) || (operation.state == o3k_store::OperationState::Running
+                && operation.provider_operation_id.is_none());
+            if !re_drive {
+                continue;
+            }
+            if let Some((coordination, controller_id, controller_epoch)) = &self.coordination {
+                let work_key = format!("operation:{}", operation.id);
+                match coordination
+                    .acquire_work_lease(
+                        &work_key,
+                        "operation",
+                        controller_id,
+                        controller_epoch,
+                        Duration::from_secs(15),
+                    )
+                    .await
+                {
+                    Ok(o3k_store::LeaseAcquireOutcome::Acquired { lease }) => {
+                        if let Err(error) =
+                            self.journal.reconcile_lifecycle_once(operation.id).await
+                        {
+                            tracing::warn!(
+                                operation_id = %operation.id,
+                                resource_id = %operation.resource_id,
+                                error = %error,
+                                "server lifecycle convergence pass failed; server state is unchanged"
+                            );
+                        }
+                        let _ = coordination
+                            .release_work_lease(
+                                &work_key,
+                                controller_id,
+                                controller_epoch,
+                                lease.fencing_token,
+                            )
+                            .await;
+                    }
+                    Ok(o3k_store::LeaseAcquireOutcome::Busy { .. }) => {
+                        tracing::debug!(
+                            operation_id = %operation.id,
+                            "lifecycle operation is currently leased by another controller; skipping"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            operation_id = %operation.id,
+                            %error,
+                            "failed to acquire lifecycle operation lease; skipping"
+                        );
+                    }
+                }
+            } else if let Err(error) = self.journal.reconcile_lifecycle_once(operation.id).await {
+                tracing::warn!(
+                    operation_id = %operation.id,
+                    resource_id = %operation.resource_id,
+                    error = %error,
+                    "server lifecycle convergence pass failed; server state is unchanged"
+                );
+            }
+        }
+        Ok(())
+    }
+}
