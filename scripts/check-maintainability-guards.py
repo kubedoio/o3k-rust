@@ -81,9 +81,14 @@ SQL_PATTERNS = [
     r"sqlx::query!\b",
     r"sqlx::query_as!\b",
     r"sqlx::query_scalar!\b",
-    r"^\s*use\s+sqlx::(?:query|query_as|query_scalar)(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;",
-    r"^\s*use\s+sqlx::\{[^;]*\b(?:query|query_as|query_scalar)\b[^;]*\}\s*;",
 ]
+
+SQL_IMPORT_PATTERN = re.compile(
+    r"^\s*use\s+sqlx::(?:"
+    r"(?:query|query_as|query_scalar)(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?"
+    r"|\{[^;]*\b(?:query|query_as|query_scalar)\b[^;]*\})\s*;",
+    re.MULTILINE | re.DOTALL,
+)
 
 # SQL-owning implementation boundaries.  Keep this list path-aware: a path
 # such as `src/postgres-extra.rs` must not inherit `src/postgres` approval.
@@ -120,12 +125,25 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
             continue
 
         lines = path.read_text(encoding="utf-8").splitlines()
+        source = "\n".join(lines)
+
+        for match in SQL_IMPORT_PATTERN.finditer(source):
+            line_number = source.count("\n", 0, match.start()) + 1
+            errors.append(
+                f"SQL ARCHITECTURE VIOLATION: {rel}:{line_number}\n"
+                "  pattern: raw sqlx query primitive import\n"
+                f"  code: {match.group(0).strip()[:100]}\n"
+                "  SQL belongs in an explicit persistence, database diagnostic, "
+                "or upgrade boundary."
+            )
 
         for i, line in enumerate(lines, 1):
             for pat in SQL_PATTERNS:
                 if re.search(pat, line):
                     stripped = line.strip()
                     if stripped.startswith("//") or stripped.startswith("/*"):
+                        continue
+                    if stripped.startswith("use "):
                         continue
                     errors.append(
                         f"SQL ARCHITECTURE VIOLATION: {rel}:{i}\n"
@@ -151,9 +169,23 @@ HOST_CMD_PATTERNS = [
     (r'\b(?:run|output)\(\s*["\'](?:ip|nft)["\']', "raw Linux command wrapper"),
     (r'\bspawn_host_command\s*\(', "host command wrapper"),
     (r"(?<![A-Za-z0-9_])Command::new\(", "std::process::Command / tokio::process::Command"),
-    (r'^\s*use\s+(?:std|tokio)::process::Command(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;', "process Command import"),
-    (r'^\s*use\s+(?:std|tokio)::process::\{[^;]*\bCommand\b[^;]*\}\s*;', "process Command grouped import"),
-    (r'^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?:std|tokio)::process::Command\s*;', "process Command type alias"),
+]
+
+HOST_IMPORT_PATTERNS = [
+    (re.compile(
+        r"^\s*use\s+(?:std|tokio)::process::Command"
+        r"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;",
+        re.MULTILINE | re.DOTALL,
+    ), "process Command import"),
+    (re.compile(
+        r"^\s*use\s+(?:std|tokio)::process::\{[^;]*\bCommand\b[^;]*\}\s*;",
+        re.MULTILINE | re.DOTALL,
+    ), "process Command grouped import"),
+    (re.compile(
+        r"^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*"
+        r"(?:std|tokio)::process::Command\s*;",
+        re.MULTILINE | re.DOTALL,
+    ), "process Command type alias"),
 ]
 
 # Explicit execution boundaries.  Mixed application crates are narrowed to
@@ -186,6 +218,19 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
             continue
 
         lines = path.read_text(encoding="utf-8").splitlines()
+        source = "\n".join(lines)
+
+        for pattern, name in HOST_IMPORT_PATTERNS:
+            for match in pattern.finditer(source):
+                if any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS):
+                    continue
+                line_number = source.count("\n", 0, match.start()) + 1
+                errors.append(
+                    f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{line_number}\n"
+                    f"  command: {name}\n"
+                    f"  code: {match.group(0).strip()[:120]}\n"
+                    "  Host execution belongs in an explicit execution adapter."
+                )
 
         for i, line in enumerate(lines, 1):
             for pat, name in HOST_CMD_PATTERNS:
