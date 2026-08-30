@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use uuid::Uuid;
 
 fn auth(project_id: &str) -> AuthContext {
     AuthContext::new(

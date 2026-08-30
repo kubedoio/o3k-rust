@@ -1,6 +1,6 @@
 use super::helpers::Ipv4Net;
 use super::legacy_import::import_legacy_metadata;
-use super::{Inner, NetworkError, NetworkService, map_store_error, realm_delete_operation};
+use super::{Inner, NetworkError, NetworkService, map_store_error};
 use crate::{
     CanonicalPolicyService, CanonicalPolicyServiceError, PolicyApplyOutcome,
     PolicySnapshotRealizer, compile_l3_gateway_execution_plan,
@@ -19,6 +19,60 @@ use std::{
     sync::Arc,
 };
 use uuid::Uuid;
+
+fn realm_delete_operation(
+    project_id: &str,
+    realm_id: Uuid,
+) -> Result<
+    (
+        o3k_store::OperationRecord,
+        o3k_store::CanonicalOperationRecord,
+        o3k_store::IdempotencyReservationRequest,
+    ),
+    NetworkError,
+> {
+    let action =
+        ActionId::new("network", "DeleteRealm").map_err(|_| NetworkError::InvalidRequest)?;
+    let resource_type =
+        ResourceType::new("network", "address_realm").map_err(|_| NetworkError::InvalidRequest)?;
+    let operation_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:network:realm-delete:{project_id}:{realm_id}").as_bytes(),
+    );
+    let scope = OwnershipScope::project(ScopeId::new_unchecked(project_id.to_owned()), None, None);
+    let kernel = o3k_kernel::Operation::new(
+        operation_id,
+        "network",
+        action.clone(),
+        "o3k:network-service",
+        scope,
+        resource_type.clone(),
+        Some(ResourceId::new_unchecked(realm_id.to_string())),
+        None,
+    );
+    let canonical = o3k_store::CanonicalOperationRecord::from_kernel_operation(&kernel)
+        .map_err(map_store_error)?;
+    let operation = o3k_store::OperationRecord {
+        id: operation_id,
+        resource_id: realm_id,
+        kind: "lifecycle:realm-delete".to_owned(),
+        state: o3k_store::OperationState::Pending,
+        provider_operation_id: None,
+        error_category: None,
+        error_message: None,
+    };
+    let request = o3k_store::IdempotencyReservationRequest::from_semantics(
+        project_id,
+        action.to_string(),
+        format!("canonical:realm-delete:{realm_id}"),
+        &resource_type.to_string(),
+        Some(&realm_id.to_string()),
+        &serde_json::json!({"realm_id": realm_id}),
+        operation_id,
+    )
+    .map_err(map_store_error)?;
+    Ok((operation, canonical, request))
+}
 
 /// Canonical network reconstruction result. Compatibility projections and
 /// provider plans are derived from this durable graph; they are never used to

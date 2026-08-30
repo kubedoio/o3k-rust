@@ -1,7 +1,7 @@
 use super::helpers::{
     parse_security_group_direction, parse_security_group_prefix, parse_security_group_protocol,
 };
-use super::{NetworkError, NetworkService, canonical_network_projection, map_store_error};
+use super::{NetworkError, NetworkService, map_store_error};
 use crate::NetworkRecord;
 use crate::plan::{
     canonical_policy_record, policy_from_canonical_record, security_group_from_policy,
@@ -17,6 +17,15 @@ use o3k_kernel::{
     ServiceNamespace,
 };
 use uuid::Uuid;
+
+fn canonical_network_projection(network: o3k_store::CanonicalNetworkRecord) -> NetworkRecord {
+    NetworkRecord {
+        id: network.id,
+        name: network.name,
+        project_id: network.project_id,
+        status: network.state.to_ascii_uppercase(),
+    }
+}
 
 impl NetworkService {
     pub async fn create_network(
