@@ -57,6 +57,206 @@ def get_branch():
     return stdout.strip()
 
 
+class RustLexState:
+    """Small Rust-aware lexer state used for brace/item scope tracking.
+
+    This is deliberately not a Rust parser.  It only removes comments and
+    literals before counting delimiters, which keeps braces in strings and
+    nested blocks from corrupting the cfg(test) scope model.
+    """
+
+    def __init__(self):
+        self.block_comment_depth = 0
+        self.quote = None
+        self.raw_hashes = None
+
+    def code(self, line):
+        output = []
+        i = 0
+        while i < len(line):
+            if self.block_comment_depth:
+                if line.startswith("/*", i):
+                    self.block_comment_depth += 1
+                    i += 2
+                elif line.startswith("*/", i):
+                    self.block_comment_depth -= 1
+                    i += 2
+                else:
+                    i += 1
+                continue
+            if self.raw_hashes is not None:
+                terminator = '"' + ("#" * self.raw_hashes)
+                if line.startswith(terminator, i):
+                    output.append(terminator)
+                    i += len(terminator)
+                    self.raw_hashes = None
+                else:
+                    i += 1
+                continue
+            if self.quote is not None:
+                if line[i] == "\\":
+                    i += 2
+                elif line[i] == self.quote:
+                    self.quote = None
+                    i += 1
+                else:
+                    i += 1
+                continue
+            if line.startswith("//", i):
+                break
+            if line.startswith("/*", i):
+                self.block_comment_depth = 1
+                i += 2
+                continue
+            if line[i] == "'" and not re.match(r"'(?:\\.|[^'\\n])'", line[i:]):
+                # A lifetime such as `'a` or `'static` is not a character
+                # literal and must not hide the rest of the line from the
+                # delimiter scanner.
+                output.append(line[i])
+                i += 1
+                continue
+            if line[i] in ('"', "'"):
+                self.quote = line[i]
+                i += 1
+                continue
+            if line[i] == "r":
+                match = re.match(r'r(#+)?"', line[i:])
+                if match:
+                    self.raw_hashes = len(match.group(1) or "")
+                    i += len(match.group(0))
+                    continue
+            output.append(line[i])
+            i += 1
+        return "".join(output)
+
+
+def is_test_only_cfg(attribute):
+    """Whether a cfg attribute makes an item unavailable in production."""
+    inner = attribute[len("#[cfg("):-2].replace(" ", "")
+    if inner == "test":
+        return True
+    # `all(test, ...)` is test-only, while `any(test, ...)` can still be
+    # enabled by a production feature and must remain production-visible.
+    return inner.startswith("all(") and re.search(r"(?:all\(|,)test(?:,|\))", inner) is not None
+
+
+def is_test_attribute(line):
+    stripped = line.strip()
+    if not stripped.startswith("#[cfg(") or not stripped.endswith(")]"):
+        return False
+    return is_test_only_cfg(stripped)
+
+
+def classify_rust_lines(lines, dedicated_test=False):
+    """Classify each line as production or test-only Rust source.
+
+    Rust's cfg(test) has two relevant forms here: an inline module, whose
+    complete body is test-only, and an item attribute, which applies only to
+    the immediately following item.  Item/module boundaries are tracked from
+    lexical braces and semicolons rather than treating the next `}` as a
+    universal scope terminator.
+    """
+    if dedicated_test:
+        return [True] * len(lines)
+
+    lexer = RustLexState()
+    brace_depth = 0
+    test_modules = []
+    test_item = None
+    pending_test = False
+    classified = []
+
+    for line in lines:
+        code = lexer.code(line)
+        stripped = code.strip()
+        is_attribute = stripped.startswith("#[") and stripped.endswith("]")
+        if is_test_attribute(stripped):
+            pending_test = True
+            classified.append(True)
+            continue
+        if pending_test and (not stripped or is_attribute):
+            classified.append(bool(test_modules) or True)
+            continue
+
+        active_test = bool(test_modules) or test_item is not None
+        starts_item = pending_test and bool(stripped)
+        if starts_item:
+            # A module with a body gets depth-based scope; all other items
+            # receive a single-item scope ending at `;` or their body close.
+            is_module = bool(re.search(r"\bmod\b", stripped))
+            if is_module and "{" in stripped:
+                test_modules.append({"open_depth": brace_depth + 1, "opened": True})
+            else:
+                test_item = {
+                    "start_depth": brace_depth,
+                    "opened": False,
+                    "is_body": "{" in stripped,
+                }
+            active_test = True
+            pending_test = False
+        classified.append(active_test)
+
+        opens = code.count("{")
+        closes = code.count("}")
+        if test_item is not None:
+            if not test_item["opened"] and opens:
+                test_item["opened"] = True
+                test_item["body_depth"] = brace_depth + 1
+            if ";" in code and not test_item["opened"]:
+                test_item = None
+        brace_depth += opens - closes
+        if test_item is not None and test_item["opened"]:
+            if brace_depth < test_item["body_depth"]:
+                test_item = None
+        while test_modules and brace_depth < test_modules[-1]["open_depth"]:
+            test_modules.pop()
+
+    return classified
+
+
+def is_dedicated_test_file(path):
+    parts = Path(path).parts
+    return Path(path).name == "tests.rs" or "tests" in parts
+
+
+def safety_occurrences(path, lines):
+    """Return production safety occurrences for one Rust source file."""
+    occurrences = {
+        "production_unwrap": [],
+        "production_expect": [],
+        "production_panic": [],
+        "production_allow_overrides": [],
+    }
+    test_lines = classify_rust_lines(
+        lines, dedicated_test=is_dedicated_test_file(path)
+    )
+    for i, (line, is_test) in enumerate(zip(lines, test_lines), 1):
+        stripped = line.strip()
+        if is_test:
+            continue
+        if "unwrap()" in stripped and not stripped.startswith("//"):
+            if not any(
+                skip in stripped
+                for skip in [".lock().unwrap()", ".write().unwrap()", ".read().unwrap()"]
+            ):
+                occurrences["production_unwrap"].append(
+                    {"path": path, "line": i, "content": stripped[:120]}
+                )
+        if ".expect(" in stripped and not stripped.startswith("//"):
+            occurrences["production_expect"].append(
+                {"path": path, "line": i, "content": stripped[:120]}
+            )
+        if "panic!(" in stripped and not stripped.startswith("//") and "// " not in stripped:
+            occurrences["production_panic"].append(
+                {"path": path, "line": i, "content": stripped[:120]}
+            )
+        if "#[allow(" in stripped and not stripped.startswith("//"):
+            occurrences["production_allow_overrides"].append(
+                {"path": path, "line": i, "content": stripped[:120]}
+            )
+    return occurrences
+
+
 # ─── 1. Workspace inventory ───
 
 def inventory_workspace():
@@ -98,23 +298,22 @@ def inventory_workspace():
                     lines = path.read_text().splitlines()
                 except Exception:
                     continue
-                prod_loc = 0
-                test_loc = 0
-                in_test = False
-                in_test_module = False
-                for line in lines:
-                    stripped = line.strip()
-                    if stripped.startswith("#[cfg(test)]"):
-                        in_test = True
-                        continue
-                    if in_test:
-                        test_loc += 1
-                        if stripped == "}" and line.startswith("}"):
-                            in_test = False
-                        continue
-                    # Skip blank / comment-only
-                    if stripped and not stripped.startswith("//"):
-                        prod_loc += 1
+                test_lines = classify_rust_lines(
+                    lines,
+                    dedicated_test=is_dedicated_test_file(
+                        str(path.relative_to(REPO_ROOT))
+                    ),
+                )
+                prod_loc = sum(
+                    bool(line.strip()) and not line.strip().startswith("//")
+                    for line, is_test in zip(lines, test_lines)
+                    if not is_test
+                )
+                test_loc = sum(
+                    bool(line.strip()) and not line.strip().startswith("//")
+                    for line, is_test in zip(lines, test_lines)
+                    if is_test
+                )
                 source_files.append({
                     "path": str(path.relative_to(REPO_ROOT)),
                     "byte_size": stat.st_size,
@@ -286,11 +485,17 @@ def inventory_sql():
             path = Path(root) / f
             rel_path = str(path.relative_to(REPO_ROOT))
             lines = path.read_text().splitlines()
+            test_lines = classify_rust_lines(
+                lines, dedicated_test=is_dedicated_test_file(rel_path)
+            )
             for i, line in enumerate(lines, 1):
                 for pat in SQL_PATTERNS:
                     if re.search(pat, line):
-                        # Try to classify
-                        classification = classify_sql_site(rel_path)
+                        classification = (
+                            "test/conformance"
+                            if test_lines[i - 1]
+                            else classify_sql_site(rel_path)
+                        )
                         results.append({
                             "path": rel_path,
                             "line": i,
@@ -340,7 +545,7 @@ HOST_CMD_PATTERNS = [
     # Process spawning
     (r"std::process::Command::new", "std::process::Command"),
     (r"tokio::process::Command::new", "tokio::process::Command"),
-    (r"Command::new", "Command::new"),
+    (r"(?<![A-Za-z0-9_])Command::new\b", "Command::new"),
     (r'"sh"\s*,?\s*-c\s*"', "sh -c"),
     (r'"bash"\s*,?\s*-c\s*"', "bash -c"),
     (r'"sudo"', "sudo"),
@@ -393,10 +598,17 @@ def inventory_host_commands():
             path = Path(root) / f
             rel_path = str(path.relative_to(REPO_ROOT))
             lines = path.read_text().splitlines()
+            test_lines = classify_rust_lines(
+                lines, dedicated_test=is_dedicated_test_file(rel_path)
+            )
             for i, line in enumerate(lines, 1):
+                if test_lines[i - 1]:
+                    classification = "test/conformance"
+                else:
+                    classification = None
                 for pat, cmd in HOST_CMD_PATTERNS:
                     if re.search(pat, line):
-                        cls = classify_host_cmd_site(rel_path, cmd)
+                        cls = classification or classify_host_cmd_site(rel_path, cmd)
                         results.append({
                             "path": rel_path,
                             "line": i,
@@ -519,54 +731,9 @@ def inventory_safety():
             path = Path(root) / f
             rel_path = str(path.relative_to(REPO_ROOT))
             lines = path.read_text().splitlines()
-            in_test_scope = False
-            for i, line in enumerate(lines, 1):
-                stripped = line.strip()
-                if stripped.startswith("#[cfg(test)]"):
-                    in_test_scope = True
-                    continue
-                if in_test_scope:
-                    if stripped == "}" and not stripped.startswith("}"):
-                        pass
-                    if stripped == "}":
-                        in_test_scope = False
-                    continue
-
-                # Skip test modules
-                if "#[cfg(test)]" in stripped:
-                    in_test_scope = True
-                    continue
-                if in_test_scope:
-                    if stripped.startswith("}"):
-                        in_test_scope = False
-                    continue
-
-                if "unwrap()" in stripped and not stripped.startswith("//"):
-                    # Skip common safe unwraps
-                    if not any(skip in stripped for skip in [".lock().unwrap()", ".write().unwrap()", ".read().unwrap()"]):
-                        results["production_unwrap"].append({
-                            "path": rel_path,
-                            "line": i,
-                            "content": stripped[:120],
-                        })
-                if ".expect(" in stripped and not stripped.startswith("//"):
-                    results["production_expect"].append({
-                        "path": rel_path,
-                        "line": i,
-                        "content": stripped[:120],
-                    })
-                if "panic!(" in stripped and not stripped.startswith("//") and "// " not in stripped:
-                    results["production_panic"].append({
-                        "path": rel_path,
-                        "line": i,
-                        "content": stripped[:120],
-                    })
-                if "#[allow(" in stripped and not stripped.startswith("//"):
-                    results["production_allow_overrides"].append({
-                        "path": rel_path,
-                        "line": i,
-                        "content": stripped[:120],
-                    })
+            occurrences = safety_occurrences(rel_path, lines)
+            for key, values in occurrences.items():
+                results[key].extend(values)
 
     for key in ("production_unwrap", "production_expect", "production_panic", "production_allow_overrides"):
         results[key].sort(key=lambda item: (item["path"], item["line"], item["content"]))
@@ -919,7 +1086,7 @@ def main():
 """
 
     if total_unwrap + total_expect + total_panic > 0:
-        report += "\n### Key violations (top 20):\n\n"
+        report += "\n### Production safety occurrences (top 20):\n\n"
         count = 0
         for item in safety["production_unwrap"][:10]:
             report += f"- `{item['path']}:{item['line']}` — `{item['content'][:80]}`\n"
@@ -1006,7 +1173,7 @@ See `architecture-roles.md` for the full classification.
 - SQL usage sites: {len(sql)} ({sql_unexplained} unexplained)
 - Host command execution sites: {len([c for c in cmds if c['classification'] not in non_execution_classes])} production
 - Dependency cycles: {len(deps['cycles'])}
-- Lint/safety violations: {total_unwrap + total_expect + total_panic} production
+- Production safety occurrences: {total_unwrap + total_expect + total_panic}
 
 ## Production LOC by Responsibility
 

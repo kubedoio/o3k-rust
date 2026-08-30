@@ -42,6 +42,17 @@ python3 scripts/maintainability-inventory.py
 
 The script is idempotent and deterministic for the same git SHA.
 
+Rust production/test classification recognizes dedicated test files, inline
+`#[cfg(test)]` modules using lexical brace depth, and item-level
+`#[cfg(test)]` attributes (including imports and functions). Nested function
+or block braces do not end an enclosing test module, and safety occurrences in
+test-only items are excluded from production reporting. Repository-specific
+regressions are exercised by:
+
+```bash
+python3 tests/maintainability-inventory.py
+```
+
 The generated report includes production LOC by responsibility, application
 and composition roots, hotspots, SQL ownership, host-execution ownership, and
 dependency cycles. These are review signals, not arbitrary file-size or LOC
