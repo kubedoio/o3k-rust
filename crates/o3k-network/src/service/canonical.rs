@@ -1,14 +1,11 @@
 use super::helpers::Ipv4Net;
 use super::legacy_import::import_legacy_metadata;
-use super::{
-    CanonicalNetworkSnapshot, Inner, NetworkError, NetworkService, RealmCleanupObservation,
-    RealmCleanupProgress, map_store_error, realm_delete_operation,
-};
+use super::{Inner, NetworkError, NetworkService, map_store_error, realm_delete_operation};
 use crate::{
     CanonicalPolicyService, CanonicalPolicyServiceError, PolicyApplyOutcome,
     PolicySnapshotRealizer, compile_l3_gateway_execution_plan,
 };
-use o3k_domain::NetworkPlanIntent;
+use o3k_domain::{Ipv4Prefix, NetworkPlanIntent};
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
     DecisionReason, NoopAuditSink, OwnershipScope, ResourceId, ResourceTarget, ResourceType,
@@ -22,6 +19,117 @@ use std::{
     sync::Arc,
 };
 use uuid::Uuid;
+
+/// Canonical network reconstruction result. Compatibility projections and
+/// provider plans are derived from this durable graph; they are never used to
+/// recover missing canonical children.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalNetworkSnapshot {
+    pub network: o3k_store::CanonicalNetworkRecord,
+    pub realms: Vec<o3k_store::CanonicalAddressRealmRecord>,
+    pub pools: BTreeMap<Uuid, Vec<o3k_store::CanonicalAddressPoolRecord>>,
+    pub endpoints: BTreeMap<Uuid, Vec<o3k_store::CanonicalEndpointRecord>>,
+    /// Canonical L3 gateway authority relevant to this network's realms.
+    /// Provider plans are derived from this graph; it is not compatibility
+    /// state and does not redefine AddressRealm identity.
+    pub l3_gateways: Vec<(
+        o3k_store::CanonicalL3GatewayRecord,
+        Vec<o3k_store::CanonicalL3GatewayAttachmentRecord>,
+    )>,
+}
+
+/// Compiles the canonical gateway graph into the existing provider-neutral
+/// routing intents. AddressRealm remains the unit of address interpretation;
+/// this function only derives connectivity from the gateway attachments.
+pub type GatewayIntentMap = BTreeMap<
+    Uuid,
+    (
+        Vec<o3k_domain::GatewayIntent>,
+        Vec<o3k_domain::EgressIntent>,
+    ),
+>;
+
+pub fn compile_l3_gateway_intents(
+    gateway: &o3k_store::CanonicalL3GatewayRecord,
+    attachments: &[o3k_store::CanonicalL3GatewayAttachmentRecord],
+    realms: &[o3k_store::CanonicalAddressRealmRecord],
+    pools: &BTreeMap<Uuid, Vec<o3k_store::CanonicalAddressPoolRecord>>,
+) -> Result<GatewayIntentMap, NetworkError> {
+    if gateway.state != "active" || gateway.generation == 0 {
+        return Err(NetworkError::InvalidRequest);
+    }
+    let mut realm_map = BTreeMap::new();
+    for realm in realms {
+        if realm.project_id != gateway.project_id || realm.state != "active" {
+            continue;
+        }
+        let (network, prefix) = realm
+            .prefix
+            .split_once('/')
+            .ok_or(NetworkError::InvalidRequest)?;
+        let address = network.parse().map_err(|_| NetworkError::InvalidRequest)?;
+        let prefix_len = prefix.parse().map_err(|_| NetworkError::InvalidRequest)?;
+        let prefix = Ipv4Prefix::new(address, prefix_len).ok_or(NetworkError::InvalidRequest)?;
+        realm_map.insert(realm.id, prefix);
+    }
+    let attached: BTreeSet<Uuid> = attachments
+        .iter()
+        .filter(|attachment| {
+            attachment.project_id == gateway.project_id && attachment.state == "active"
+        })
+        .map(|attachment| attachment.realm_id)
+        .collect();
+    let mut result = BTreeMap::new();
+    for realm_id in &attached {
+        let local = realm_map.get(realm_id).ok_or(NetworkError::NotFound)?;
+        let local_gateway = pools
+            .get(realm_id)
+            .and_then(|items| items.iter().find_map(|pool| pool.gateway))
+            .or_else(|| u32::from(local.network).checked_add(1).map(Ipv4Addr::from))
+            .ok_or(NetworkError::InvalidRequest)?;
+        let mut routes = Vec::new();
+        for remote_id in &attached {
+            if remote_id != realm_id {
+                routes.push(o3k_domain::GatewayIntent {
+                    destination: *realm_map.get(remote_id).ok_or(NetworkError::NotFound)?,
+                    gateway: local_gateway,
+                    external: false,
+                });
+            }
+        }
+        let egress = gateway
+            .external_realm_id
+            .map(|external_realm_id| {
+                vec![o3k_domain::EgressIntent {
+                    external_realm_id,
+                    enabled: true,
+                    nat: gateway.enable_snat,
+                }]
+            })
+            .unwrap_or_default();
+        result.insert(*realm_id, (routes, egress));
+    }
+    Ok(result)
+}
+
+/// Result of observing one provider-owned Realm cleanup identity. A Realm
+/// remains canonical while the provider outcome is present or unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RealmCleanupObservation {
+    Absent(o3k_store::CanonicalRealmBindingRecord),
+    Present(o3k_store::CanonicalRealmBindingRecord),
+    Unknown {
+        binding: o3k_store::CanonicalRealmBindingRecord,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RealmCleanupProgress {
+    Deleting { operation_id: Uuid, generation: u64 },
+    AwaitingObservation { operation_id: Uuid, generation: u64 },
+    Removed { operation_id: Uuid },
+}
 
 impl NetworkService {
     /// Creates the provider-independent L3 gateway authority. This is
