@@ -1,8 +1,31 @@
-#[allow(clippy::wildcard_imports)]
-use super::*;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    fs,
+    net::Ipv4Addr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
+use o3k_domain::{
+    Ipv4Prefix, NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDefaultIntent,
+    PolicyDirection, PolicyIntent, PolicyStatefulMode, PortRange,
+};
+use o3k_kernel::{
+    ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
+    DecisionReason, LimitKey, LimitValue, NoopAuditSink, OwnershipScope, ResourceAmount,
+    ResourceId, ResourceTarget, ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
+};
+use thiserror::Error;
+use uuid::Uuid;
+
 use crate::plan::{
     canonical_policy_record, policy_from_canonical_record, security_group_from_policy,
     security_group_rule_from_policy, validate_policy_shape,
+};
+use crate::{
+    CanonicalPolicyService, CanonicalPolicyServiceError, NetworkRecord, PolicyApplyOutcome,
+    PolicySnapshotRealizer, PortRecord, SubnetRecord, compile_l3_gateway_execution_plan,
 };
 
 /// Canonical binding state of a port on its selected host.
@@ -4297,6 +4320,10 @@ fn deterministic_port_mac(port_id: Uuid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        AttachmentPlanInput, NetworkPlanError, compile_attachment_plan,
+        compile_attachment_plan_with_defaults,
+    };
     use o3k_domain::PolicyAction;
     use o3k_store::DurableStore;
 

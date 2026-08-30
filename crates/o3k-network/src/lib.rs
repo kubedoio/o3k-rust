@@ -1,25 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
-    fs, io,
-    net::Ipv4Addr,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
-
-use o3k_domain::{
-    AddressRealm, Ipv4Prefix, NamespacedRoutedFabricPlan, NetworkCapability, NetworkIntent,
-    NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDefaultIntent, PolicyDirection,
-    PolicyIntent, PolicyStatefulMode, PortRange,
-};
-use o3k_kernel::{
-    ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
-    DecisionReason, LimitKey, LimitValue, NoopAuditSink, OwnershipScope, ResourceAmount,
-    ResourceId, ResourceTarget, ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
-};
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use uuid::Uuid;
+use o3k_kernel::{ActionId, LimitKey, ResourceType, ServiceNamespace};
 
 pub mod canonical_policy;
 pub mod execution;
@@ -132,13 +111,23 @@ mod vocabulary_tests {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod p9_plan_tests {
-    use super::*;
-    use o3k_domain::{
-        EndpointIntent, EndpointLocation, FabricEndpointRoute, FabricPeer, FabricProviderKind,
-        Ipv4Prefix, NamespacedRoutedFabricPlan, NetworkPlanIntent, NetworkProtocol, PolicyAction,
-        PolicyDirection, PolicyIntent, PortRange, RealmEncapsulationBinding, RouteIntent,
+    use std::{
+        collections::{BTreeMap, HashSet},
+        net::Ipv4Addr,
     };
-    use std::net::Ipv4Addr;
+
+    use o3k_domain::{
+        AddressRealm, EndpointIntent, EndpointLocation, FabricEndpointRoute, FabricPeer,
+        FabricProviderKind, Ipv4Prefix, NamespacedRoutedFabricPlan, NetworkCapability,
+        NetworkIntent, NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDirection,
+        PolicyIntent, PortRange, RealmEncapsulationBinding, RouteIntent,
+    };
+    use uuid::Uuid;
+
+    use crate::{
+        NODE_NETWORK_PLAN_SCHEMA_VERSION, NetworkPlanError, canonical_plan_fingerprint,
+        compile_l3_gateway_intents, compile_node_network_plan, validate_plan_replay,
+    };
 
     fn prefix(value: &str, length: u8) -> Ipv4Prefix {
         Ipv4Prefix::new(value.parse().expect("test address"), length).expect("test prefix")

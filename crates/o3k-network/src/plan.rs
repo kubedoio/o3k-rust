@@ -1,8 +1,21 @@
-#[allow(clippy::wildcard_imports)]
-use super::*;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    net::Ipv4Addr,
+};
+
+use o3k_domain::{
+    AddressRealm, Ipv4Prefix, NamespacedRoutedFabricPlan, NetworkCapability, NetworkIntent,
+    NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDefaultIntent, PolicyDirection,
+    PolicyIntent, PolicyStatefulMode, PortRange,
+};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use uuid::Uuid;
+
 use crate::service::{
     parse_security_group_direction, parse_security_group_prefix, parse_security_group_protocol,
 };
+use crate::{NetworkError, gateway};
 
 /// A deterministic, provider-independent compilation of canonical network
 /// intent. It contains semantic intents only; host commands and provider

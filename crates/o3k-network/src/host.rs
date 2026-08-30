@@ -1,5 +1,18 @@
-#[allow(clippy::wildcard_imports)]
-use super::*;
+use std::{
+    collections::{BTreeMap, HashSet},
+    fs, io,
+    net::Ipv4Addr,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+use crate::linux_fabric::network_execution::{
+    NetworkCommand, NetworkCommandOutput, SystemNetworkCommand,
+};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use uuid::Uuid;
 
 /// Poll interval while waiting for a freshly created TAP address to settle.
 #[cfg(not(test))]
@@ -78,8 +91,6 @@ pub struct TapOwnership {
     pub bridge: String,
     pub created_by_o3k: bool,
 }
-
-use linux_fabric::network_execution::{NetworkCommand, NetworkCommandOutput, SystemNetworkCommand};
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
