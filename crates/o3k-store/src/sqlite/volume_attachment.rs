@@ -1,5 +1,8 @@
-use super::*;
+use super::SqliteStore;
 use async_trait::async_trait;
+use uuid::Uuid;
+
+use crate::{StoreError, VolumeAttachmentRecord, VolumeAttachmentRepository};
 
 impl SqliteStore {
     pub async fn insert_volume_attachment(

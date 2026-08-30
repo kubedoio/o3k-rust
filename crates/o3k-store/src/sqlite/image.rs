@@ -1,5 +1,8 @@
-use super::*;
+use super::{SqliteStore, helpers::image_metadata_from_row};
 use async_trait::async_trait;
+use uuid::Uuid;
+
+use crate::{ImageMetadataRecord, ImageRepository, StoreError};
 
 impl SqliteStore {
     pub async fn insert_image(&self, image: &ImageMetadataRecord) -> Result<(), StoreError> {

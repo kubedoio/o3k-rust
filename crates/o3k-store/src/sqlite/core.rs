@@ -1,5 +1,36 @@
-use super::*;
+use super::{
+    SqliteStore,
+    helpers::{
+        agent_command_from_row, ensure_image_overlay_identity, image_overlay_from_row,
+        image_overlay_identity_matches, operation_from_row, parse_uuid, resource_from_row,
+        sqlite_sequence, validate_base_identity, validate_image_overlay,
+        validate_image_overlay_identity, validate_image_overlay_transition,
+    },
+};
 use async_trait::async_trait;
+use chrono::Utc;
+use sqlx::{
+    Row,
+    sqlite::{
+        SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow, SqliteSynchronous,
+    },
+};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::{fs, path::Path, str::FromStr, sync::Arc, time::Duration};
+use uuid::Uuid;
+
+use crate::{
+    AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
+    CanonicalAcceptanceOutcome, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
+    ComputeRepository, DatabaseHealth, DurableStore, IdempotencyReservation,
+    IdempotencyReservationRequest, ImageOverlayIdentity, ImageOverlayOwnershipRecord,
+    ImageOverlayState, ImageOverlayUpdate, ObservationUpdate, OperationRecord, OperationState,
+    ProviderReference, ResourceRecord, SQLITE_BUSY_MAX_ATTEMPTS, StoreError,
+    VolumeAttachmentRecord, WalCheckpointMode, is_sqlite_busy, restrict_sqlite_sidecars,
+    validate_canonical_idempotent_operation_identity, validate_canonical_lifecycle_update,
+    validate_canonical_operation_read, validate_canonical_resource_acceptance,
+};
 
 pub(super) async fn insert_sqlite_canonical_acceptance(
     connection: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
@@ -21,6 +52,98 @@ pub(super) async fn insert_sqlite_canonical_acceptance(
         .bind(&request.owner_scope).bind(&request.action).bind(&request.key).bind(&request.fingerprint)
         .bind(request.operation_id.to_string()).execute(&mut **connection).await.map_err(StoreError::Database)?;
     Ok(())
+}
+
+pub(super) async fn update_agent_command_once_sqlite(
+    store: &SqliteStore,
+    command_id: &str,
+    state: AgentCommandState,
+    accepted_sequence: u64,
+    last_sequence: u64,
+    provider_operation_id: Option<&str>,
+    provider_resource_id: Option<&str>,
+) -> Result<AgentCommandRecord, StoreError> {
+    let _projection_guard = store.agent_command_projection_lock.lock().await;
+    let mut transaction = store.pool.begin().await.map_err(StoreError::Database)?;
+    let row = sqlx::query("SELECT command_id, idempotency_key, operation_id, resource_id, agent_id, agent_epoch, payload_fingerprint_sha256, payload, state, accepted_sequence, last_sequence, provider_operation_id, provider_resource_id FROM agent_commands WHERE command_id = ?")
+        .bind(command_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::OperationNotFound)?;
+    let current = agent_command_from_row(&row)?;
+    if last_sequence < current.last_sequence {
+        transaction.rollback().await.map_err(StoreError::Database)?;
+        return Ok(current);
+    }
+    if last_sequence == current.last_sequence {
+        if current.state == state
+            && current.accepted_sequence == accepted_sequence
+            && provider_operation_id
+                .is_none_or(|value| current.provider_operation_id.as_deref() == Some(value))
+            && provider_resource_id
+                .is_none_or(|value| current.provider_resource_id.as_deref() == Some(value))
+        {
+            transaction.rollback().await.map_err(StoreError::Database)?;
+            return Ok(current);
+        }
+        return Err(StoreError::Corrupt(
+            "conflicting agent command evidence at one sequence".to_owned(),
+        ));
+    }
+    if matches!(
+        current.state,
+        AgentCommandState::Succeeded | AgentCommandState::Failed
+    ) && current.state != state
+    {
+        return Err(StoreError::Corrupt(
+            "terminal agent command state cannot regress".to_owned(),
+        ));
+    }
+    if current.state == AgentCommandState::UnknownOutcome
+        && matches!(
+            state,
+            AgentCommandState::Accepted | AgentCommandState::Running
+        )
+    {
+        return Err(StoreError::Corrupt(
+            "unknown-outcome agent command cannot regress to in-flight".to_owned(),
+        ));
+    }
+    if provider_operation_id.is_some_and(|value| {
+        current
+            .provider_operation_id
+            .as_deref()
+            .is_some_and(|existing| existing != value)
+    }) || provider_resource_id.is_some_and(|value| {
+        current
+            .provider_resource_id
+            .as_deref()
+            .is_some_and(|existing| existing != value)
+    }) {
+        return Err(StoreError::Corrupt(
+            "agent command provider identity conflicts with durable state".to_owned(),
+        ));
+    }
+    let accepted_sequence = accepted_sequence.max(current.accepted_sequence);
+    let provider_operation_id = provider_operation_id.or(current.provider_operation_id.as_deref());
+    let provider_resource_id = provider_resource_id.or(current.provider_resource_id.as_deref());
+    let result = sqlx::query("UPDATE agent_commands SET state = ?, accepted_sequence = ?, last_sequence = ?, provider_operation_id = ?, provider_resource_id = ?, updated_at = CURRENT_TIMESTAMP WHERE command_id = ? AND last_sequence = ?")
+        .bind(state.as_str())
+        .bind(sqlite_sequence(accepted_sequence)?)
+        .bind(sqlite_sequence(last_sequence)?)
+        .bind(provider_operation_id)
+        .bind(provider_resource_id)
+        .bind(command_id)
+        .bind(sqlite_sequence(current.last_sequence)?)
+        .execute(&mut *transaction)
+        .await
+        .map_err(StoreError::Database)?;
+    if result.rows_affected() != 1 {
+        return Err(StoreError::OperationNotFound);
+    }
+    transaction.commit().await.map_err(StoreError::Database)?;
+    store.get_agent_command(command_id).await
 }
 
 impl SqliteStore {
