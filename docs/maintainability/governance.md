@@ -6,17 +6,18 @@
 |---------|--------|
 | `main` branch protection | **Active** — `main-protection` repository ruleset |
 | Repository rulesets | **Active** |
-| Required PRs | **Active** — one approval, last-push approval, thread resolution, extra approval for unattributed changes |
-| Required CI checks | **Active** — `rust`, `supply-chain`, `installer-negative`, Tempest Gate A, Mock Cinder |
+| Required PRs | **Active** — one approval, stale-review dismissal, last-push approval, thread resolution, extra approval for unattributed changes |
+| Required CI checks | **Active** — `rust`, `supply-chain`, `installer-negative`, `Tempest portable preflight (Gate A)`, `Mock Cinder Component Test (not a real Cinder deployment)` |
 | Force push protection | **Active** |
 | Deletion protection | **Active** |
 | Administrator bypass | **Disabled** — bypass is not available |
 
-## Protected merge requirements
+## Live enforced GitHub policy
 
 The active `main-protection` ruleset applies these requirements to the default
-branch. Verify the live ruleset before a protected merge; this document is a
-record of policy, not proof that GitHub is configured.
+branch. Verify the live ruleset before a protected merge; this document records
+the values last verified from GitHub and is not itself proof that GitHub is
+configured.
 
 ### Rule: `main`
 
@@ -45,6 +46,20 @@ record of policy, not proof that GitHub is configured.
 6. **Lock branch**
    - Allow force pushes: no
    - Allow deletions: no
+
+The ruleset is active (`enforcement: active`), targets the default `main`
+branch, and has no bypass actors. Non-fast-forward updates are prohibited.
+Code-owner review is not required. No protected merge queue is configured;
+strict required-status freshness is the enforced freshness mechanism.
+
+The ruleset's dismissal restriction is enabled for its configured actors; this
+does not change the stale-review-on-push requirement above.
+
+### Recommendations (not additional enforced controls)
+
+Reviewers should verify that the PR's exact head was validated and that the
+live ruleset has not changed before merging. These are operational
+recommendations, not additional GitHub rules claimed by this document.
 
 ### Verification
 
