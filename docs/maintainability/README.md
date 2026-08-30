@@ -2,6 +2,8 @@
 
 This directory contains the Issue #758 maintainability evidence and the
 permanent architecture policy established after the structural refactoring.
+The current-tree inventory is also the structural monitoring report for the
+completed R7 program.
 The immutable P13.4 baseline remains historical evidence for dependency-cycle
 regression; it is not an ongoing permission to place SQL or host execution in
 arbitrary modules.
@@ -11,8 +13,8 @@ arbitrary modules.
 | File | Description |
 |------|-------------|
 | `README.md` | This file |
-| `architecture-baseline.md` | Snapshot of key architecture metrics |
-| `architecture-roles.md` | Architectural role classification for every crate |
+| `architecture-baseline.md` | Current snapshot of architecture metrics (not the immutable baseline) |
+| `architecture-roles.md` | Current architectural role classification for every crate and binary |
 | `refactor-contract.md` | Checklist for verifying refactoring PRs preserve behavior |
 
 ## Generated Outputs
@@ -40,7 +42,13 @@ python3 scripts/maintainability-inventory.py
 
 The script is idempotent and deterministic for the same git SHA.
 
-## Baseline
+The generated report includes production LOC by responsibility, application
+and composition roots, hotspots, SQL ownership, host-execution ownership, and
+dependency cycles. These are review signals, not arbitrary file-size or LOC
+limits. The machine-readable responsibility report is written to
+`target/generated-maintainability/responsibility-inventory.json`.
+
+## Immutable historical baseline
 
 - **SHA**: `edb464ec43b1d12207faae903ea14b7824123f39`
 - **Branch**: `r0-maintainability-baseline`
@@ -59,7 +67,11 @@ named database diagnostic/upgrade tooling. In the store, this means the
 `sqlite/`, `postgres/`, and currently accepted specialized persistence
 modules. `domain/`, `port/`, `unified/`, `o3kd/src/composition/`, and service
 application code remain SQL-free. A new SQL-owning adapter requires
-architecture review and a deliberate exact path or boundary addition.
+architecture review and a deliberate exact path or boundary addition. First
+identify the persistence, diagnostic, or upgrade responsibility and record its
+ownership in the relevant issue or ADR. Then add the narrowest path-aware guard
+entry as part of that reviewed change; do not append a path merely to make CI
+green.
 
 The exact-file allowance for `crates/o3k-image/src/execution.rs` owns the
 sandboxed `run_qemu_img` qemu-img invocation and its directly related process
@@ -78,11 +90,35 @@ execution mechanism. A new host tool requires architecture review answering:
 move the implementation to the proper boundary rather than extending an
 allowlist.
 
+The same review is required for a new host-execution adapter: identify the
+provider or execution responsibility, keep canonical/application code free of
+host mutation, and approve only the exact adapter path or cohesive execution
+directory.
+
+## Final ownership map
+
+- `o3kd`: control-plane composition root; `composition/` owns service wiring,
+  storage/network/compute adapters, controller setup, and runtime helpers.
+- `o3k-compute`: Compute application/service; `bins/o3k-compute` owns host
+  runtime composition and lifecycle adapters.
+- `o3k-network`: canonical Network application/service; `linux_fabric/` owns
+  Linux realization and host mutation; `bins/o3k-network` owns process/runtime
+  composition.
+- `o3k-store`: domain vocabulary and repository ports plus explicit
+  `sqlite/` and `postgres/` persistence implementations; `unified/` owns
+  backend dispatch and remains SQL-free.
+- `o3k-image`: Image application/cache service; `execution.rs` owns the
+  bounded qemu-img execution adapter.
+
+The generated inventory identifies larger cohesive modules for review. A large
+module is not a structural violation by itself; a new split requires a real
+ownership or change-isolation problem.
+
 The focused R2b, Network, and Compute boundary scripts provide local evidence;
 the permanent Python guard is the authoritative repository-wide policy and is
 run by the protected Rust CI check.
 
-## R0 historical rules
+## Historical baseline context
 
 1. **No runtime behavior changes.** This phase is measurement and classification only.
 2. **No code moves.** Production code stays in its current crate/file.
@@ -91,4 +127,5 @@ run by the protected Rust CI check.
 5. **No API modification.**
 6. **No provider behavior modification.**
 
-All structural refactoring begins in R1.
+The R0 baseline was measurement-only. The current architecture policy above is
+the authoritative guidance for new work after the #758 convergence program.
