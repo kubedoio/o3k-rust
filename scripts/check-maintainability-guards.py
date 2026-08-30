@@ -81,6 +81,8 @@ SQL_PATTERNS = [
     r"sqlx::query!\b",
     r"sqlx::query_as!\b",
     r"sqlx::query_scalar!\b",
+    r"^\s*use\s+sqlx::(?:query|query_as|query_scalar)(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;",
+    r"^\s*use\s+sqlx::\{[^;]*\b(?:query|query_as|query_scalar)\b[^;]*\}\s*;",
 ]
 
 # SQL-owning implementation boundaries.  Keep this list path-aware: a path
@@ -125,13 +127,12 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
                     stripped = line.strip()
                     if stripped.startswith("//") or stripped.startswith("/*"):
                         continue
-                    if stripped.startswith("use "):
-                        continue
                     errors.append(
                         f"SQL ARCHITECTURE VIOLATION: {rel}:{i}\n"
                         f"  pattern: {pat}\n"
                         f"  code: {stripped[:100]}\n"
-                        f"  SQL belongs in crates/o3k-store/src/, diagnostic, or upgrade code."
+                        "  SQL belongs in an explicit persistence, database diagnostic, "
+                        "or upgrade boundary."
                     )
                     break
     return errors
@@ -150,6 +151,9 @@ HOST_CMD_PATTERNS = [
     (r'\b(?:run|output)\(\s*["\'](?:ip|nft)["\']', "raw Linux command wrapper"),
     (r'\bspawn_host_command\s*\(', "host command wrapper"),
     (r"(?<![A-Za-z0-9_])Command::new\(", "std::process::Command / tokio::process::Command"),
+    (r'^\s*use\s+(?:std|tokio)::process::Command(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;', "process Command import"),
+    (r'^\s*use\s+(?:std|tokio)::process::\{[^;]*\bCommand\b[^;]*\}\s*;', "process Command grouped import"),
+    (r'^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?:std|tokio)::process::Command\s*;', "process Command type alias"),
 ]
 
 # Explicit execution boundaries.  Mixed application crates are narrowed to
@@ -188,9 +192,6 @@ def check_host_command_boundary(files: list[Path]) -> list[str]:
                 if re.search(pat, line):
                     stripped = line.strip()
                     if stripped.startswith("//"):
-                        continue
-                    # Allow use statements for Command
-                    if stripped.startswith("use ") and "Command" in stripped:
                         continue
                     # Shell execution is forbidden even inside an otherwise
                     # approved adapter; direct argv execution remains the

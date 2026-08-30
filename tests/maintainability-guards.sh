@@ -78,50 +78,114 @@ echo "Test 7: SQL in Compute runtime -> FAIL"
 check_fixture "SQL in Compute runtime" 1 "SQL ARCHITECTURE VIOLATION" \
     'pub fn z_query() { sqlx::query("SELECT 1"); }' "bins/o3k-compute/src"
 
-echo "Test 8: SQL path-prefix collision -> FAIL"
+echo "Test 8: imported SQL query -> FAIL"
+check_fixture "imported SQL query" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'use sqlx::query;\nfn z_query() { query("SELECT 1"); }' "crates/o3k-kernel/src"
+echo "Test 9: aliased SQL query -> FAIL"
+check_fixture "aliased SQL query" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'use sqlx::query as q;\nfn z_query() { q("SELECT 1"); }' "crates/o3k-kernel/src"
+echo "Test 10: grouped SQL imports -> FAIL"
+check_fixture "grouped SQL imports" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'use sqlx::{query, query_as, query_scalar};\nfn z_query() { query("SELECT 1"); }' "crates/o3k-kernel/src"
+echo "Test 11: grouped aliased SQL imports -> FAIL"
+check_fixture "grouped aliased SQL imports" 1 "SQL ARCHITECTURE VIOLATION" \
+    $'use sqlx::{query as q, query_as as qa};\nfn z_query() { q("SELECT 1"); }' "crates/o3k-kernel/src"
+
+echo "Test 12: SQL path-prefix collision -> FAIL"
 check_fixture "SQL path-prefix collision" 1 "SQL ARCHITECTURE VIOLATION" \
     'pub fn z_query() { sqlx::query("SELECT 1"); }' "crates/o3k-store/src" "postgres-extra.rs"
 
-echo "Test 9: imported bare Command::new -> FAIL"
+echo "Test 13: forbidden architecture paths are not approved -> PASS"
+python3 - "$GUARD" <<'PY'
+import runpy
+import sys
+
+policy = runpy.run_path(sys.argv[1])
+path_is_or_below = policy["_path_is_or_below"]
+sql_paths = policy["APPROVED_SQL_PATHS"]
+host_paths = policy["APPROVED_HOST_EXECUTION_PATHS"]
+
+for path in (
+    "bins/o3kd/src/main.rs",
+    "bins/o3kd/src/composition/mod.rs",
+    "bins/o3kd/src/composition/compute.rs",
+    "crates/o3k-store/src/domain/records.rs",
+    "crates/o3k-store/src/port/durable.rs",
+    "crates/o3k-store/src/unified/mod.rs",
+):
+    assert not any(path_is_or_below(path, allowed) for allowed in sql_paths), path
+
+for path in (
+    "bins/o3kd/src/main.rs",
+    "bins/o3kd/src/composition/mod.rs",
+    "bins/o3kd/src/composition/compute.rs",
+    "bins/o3k-compute/src/main.rs",
+    "bins/o3k-compute/src/runtime.rs",
+    "crates/o3k-network/src/gateway.rs",
+    "crates/o3k-network/src/public.rs",
+    "crates/o3k-network/src/canonical_policy.rs",
+):
+    assert not any(path_is_or_below(path, allowed) for allowed in host_paths), path
+
+assert any(path_is_or_below("crates/o3k-image/src/lib.rs", allowed) for allowed in host_paths)
+print("  PASS: forbidden architecture paths remain unapproved")
+PY
+
+echo "Test 14: imported bare Command::new -> FAIL"
 check_fixture "bare Command::new" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     $'use std::process::Command;\npub fn z_run() { let _x = Command::new("ls"); }' "crates/o3k-kernel/src"
-echo "Test 10: fully qualified Command::new -> FAIL"
+echo "Test 15: std Command alias import -> FAIL"
+check_fixture "std Command alias import" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
+    $'use std::process::Command as HostCommand;\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
+echo "Test 16: std grouped Command alias import -> FAIL"
+check_fixture "std grouped Command alias import" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
+    $'use std::process::{Command as HostCommand, Stdio};\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
+echo "Test 17: std Command type alias -> FAIL"
+check_fixture "std Command type alias" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
+    'type HostCommand = std::process::Command; pub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
+echo "Test 18: tokio Command alias import -> FAIL"
+check_fixture "tokio Command alias import" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
+    $'use tokio::process::Command as HostCommand;\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
+echo "Test 19: tokio grouped Command alias import -> FAIL"
+check_fixture "tokio grouped Command alias import" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
+    $'use tokio::process::{Command as HostCommand, Stdio};\npub fn z_run() { let _x = HostCommand::new("ls"); }' "crates/o3k-kernel/src"
+echo "Test 20: fully qualified Command::new -> FAIL"
 check_fixture "fully qualified Command::new" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { let _x = std::process::Command::new("ls"); }' "crates/o3k-kernel/src"
-echo "Test 11: tokio qualified Command::new -> FAIL"
+echo "Test 21: tokio qualified Command::new -> FAIL"
 check_fixture "tokio qualified Command::new" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { let _x = tokio::process::Command::new("ls"); }' "crates/o3k-kernel/src"
-echo "Test 12: Command::new after #[cfg(test)] -> FAIL"
+echo "Test 22: Command::new after #[cfg(test)] -> FAIL"
 check_fixture "Command after cfg(test)" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     $'#[cfg(test)] mod tests {}\nfn production_after_tests() { let _ = Command::new("ls"); }' "crates/o3k-kernel/src"
-echo "Test 13: SQL after #[cfg(test)] -> FAIL"
+echo "Test 23: SQL after #[cfg(test)] -> FAIL"
 check_fixture "SQL after cfg(test)" 1 "SQL ARCHITECTURE VIOLATION" \
     $'#[cfg(test)] mod tests {}\nfn production_after_tests() { sqlx::query("SELECT 1"); }' "crates/o3k-kernel/src"
 
-echo "Test 14: raw Linux wrapper in canonical Network -> FAIL"
+echo "Test 24: raw Linux wrapper in canonical Network -> FAIL"
 check_fixture "raw Linux wrapper in canonical Network" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { run("ip", &["link"]); }' "crates/o3k-network/src"
-echo "Test 15: host command in o3kd composition -> FAIL"
+echo "Test 25: host command in o3kd composition -> FAIL"
 check_fixture "host command in o3kd composition" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { let _ = Command::new("ip"); }' "bins/o3kd/src/composition"
-echo "Test 16: host command in Compute binary source -> FAIL"
+echo "Test 26: host command in Compute binary source -> FAIL"
 check_fixture "host command in Compute binary source" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { let _ = Command::new("ip"); }' "bins/o3k-compute/src"
-echo "Test 17: shell execution -> FAIL"
+echo "Test 27: shell execution -> FAIL"
 check_fixture "shell execution" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { let _ = Command::new("sh").arg("-c").arg("true"); }' "crates/o3k-kernel/src"
 
-echo "Test 18: approved SQLite persistence -> ACCEPT"
+echo "Test 28: approved SQLite persistence -> ACCEPT"
 check_fixture "approved SQLite persistence" 0 "" \
     'pub fn z_query() { sqlx::query("SELECT 1"); }' "crates/o3k-store/src/sqlite"
-echo "Test 19: approved PostgreSQL persistence -> ACCEPT"
+echo "Test 29: approved PostgreSQL persistence -> ACCEPT"
 check_fixture "approved PostgreSQL persistence" 0 "" \
     'pub fn z_query() { sqlx::query("SELECT 1"); }' "crates/o3k-store/src/postgres"
-echo "Test 20: approved Linux Network execution -> ACCEPT"
+echo "Test 30: approved Linux Network execution -> ACCEPT"
 check_fixture "approved Linux Network execution" 0 "" \
     'pub fn z_run() { let _ = std::process::Command::new("ip"); }' "crates/o3k-network/src/linux_fabric"
 
-echo "Test 21: test-only file -> ACCEPT"
+echo "Test 31: test-only file -> ACCEPT"
 TEST_FIXTURE_DIR="$REPO_ROOT/tests/z_guard_fixtures"
 mkdir -p "$TEST_FIXTURE_DIR"
 TEST_FIXTURE="$TEST_FIXTURE_DIR/test_guard_ok.rs"
@@ -141,8 +205,8 @@ fi
 rm -f -- "$TEST_FIXTURE"
 rmdir "$TEST_FIXTURE_DIR" 2>/dev/null || true
 
-echo "Test 17: dependency cycle -> SKIP (requires isolated Cargo.toml fixture)"
-echo "Test 18: weakened safety policy -> SKIP (requires isolated Cargo.toml fixture)"
+echo "Test 32: dependency cycle -> SKIP (requires isolated Cargo.toml fixture)"
+echo "Test 33: weakened safety policy -> SKIP (requires isolated Cargo.toml fixture)"
 echo
 echo "=== Results ==="
 echo "  PASS: $PASS"

@@ -192,7 +192,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Architecture boundary check
         run: python3 scripts/check-architecture-boundaries.py
-      - name: Maintainability guardrails (immutable baseline)
+      - name: Maintainability architecture guardrails
         run: |
           python3 scripts/check-maintainability-guards.py
           bash tests/maintainability-guards.sh
