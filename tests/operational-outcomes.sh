@@ -126,7 +126,7 @@ grep -q '0600' "${repo_root}/scripts/generate-passwords.sh" || {
   echo "operational outcomes: generate-passwords.sh no longer writes mode 0600" >&2; exit 1; }
 grep -q 'flock' "${repo_root}/scripts/generate-passwords.sh" || {
   echo "operational outcomes: generate-passwords.sh no longer uses flock" >&2; exit 1; }
-grep -q 'identity is not configured' "${repo_root}/bins/o3kd/src/main.rs" || {
+grep -q 'identity is not configured' "${repo_root}/bins/o3kd/src/composition/mod.rs" || {
   echo "operational outcomes: o3kd no longer emits the identity warning marker" >&2; exit 1; }
 grep -q 'tests/operational-outcomes.sh' "${repo_root}/.github/workflows/ci.yml" || {
   echo "operational outcomes: ci.yml no longer runs tests/operational-outcomes.sh" >&2; exit 1; }

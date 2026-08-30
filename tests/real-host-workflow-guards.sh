@@ -492,7 +492,7 @@ assert pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-owned-in
 post_guard = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-post-run-guard.sh").read_text(encoding="utf-8")
 assert "compute-agent-process-mtls-result.json" in post_guard
 assert "compute_agent_process_probe_failed" in post_guard
-o3kd = pathlib.Path(sys.argv[1]).parents[2].joinpath("bins/o3kd/src/main.rs").read_text(encoding="utf-8")
+o3kd = pathlib.Path(sys.argv[1]).parents[2].joinpath("bins/o3kd/src/composition/compute.rs").read_text(encoding="utf-8")
 probe = o3kd.split("async fn run_agent_inspect_probe(", 1)[1]
 assert ".inspect_server(" in probe
 assert "registry.dispatch_command" not in probe
