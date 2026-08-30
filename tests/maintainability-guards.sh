@@ -20,8 +20,8 @@ trap cleanup EXIT
 
 check_fixture() {
     local name="$1" expected_exit="$2" expected_pattern="$3"
-    local fixture="$4" fixture_dir="$5"
-    local fixture_path="$REPO_ROOT/$fixture_dir/z_guard_test_fixture.rs"
+    local fixture="$4" fixture_dir="$5" fixture_name="${6:-z_guard_test_fixture.rs}"
+    local fixture_path="$REPO_ROOT/$fixture_dir/$fixture_name"
 
     printf '%s\n' "$fixture" > "$fixture_path"
     CLEANUP_FILES+=("$fixture_path")
@@ -74,37 +74,54 @@ check_fixture "SQL in o3kd composition" 1 "SQL ARCHITECTURE VIOLATION" \
 echo "Test 6: SQL in Network application -> FAIL"
 check_fixture "SQL in Network application" 1 "SQL ARCHITECTURE VIOLATION" \
     'pub fn z_query() { sqlx::query("SELECT 1"); }' "crates/o3k-network/src"
+echo "Test 7: SQL in Compute runtime -> FAIL"
+check_fixture "SQL in Compute runtime" 1 "SQL ARCHITECTURE VIOLATION" \
+    'pub fn z_query() { sqlx::query("SELECT 1"); }' "bins/o3k-compute/src"
 
-echo "Test 7: imported bare Command::new -> FAIL"
+echo "Test 8: SQL path-prefix collision -> FAIL"
+check_fixture "SQL path-prefix collision" 1 "SQL ARCHITECTURE VIOLATION" \
+    'pub fn z_query() { sqlx::query("SELECT 1"); }' "crates/o3k-store/src" "postgres-extra.rs"
+
+echo "Test 9: imported bare Command::new -> FAIL"
 check_fixture "bare Command::new" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     $'use std::process::Command;\npub fn z_run() { let _x = Command::new("ls"); }' "crates/o3k-kernel/src"
-echo "Test 8: fully qualified Command::new -> FAIL"
+echo "Test 10: fully qualified Command::new -> FAIL"
 check_fixture "fully qualified Command::new" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { let _x = std::process::Command::new("ls"); }' "crates/o3k-kernel/src"
-echo "Test 9: tokio qualified Command::new -> FAIL"
+echo "Test 11: tokio qualified Command::new -> FAIL"
 check_fixture "tokio qualified Command::new" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { let _x = tokio::process::Command::new("ls"); }' "crates/o3k-kernel/src"
-echo "Test 10: Command::new after #[cfg(test)] -> FAIL"
+echo "Test 12: Command::new after #[cfg(test)] -> FAIL"
 check_fixture "Command after cfg(test)" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     $'#[cfg(test)] mod tests {}\nfn production_after_tests() { let _ = Command::new("ls"); }' "crates/o3k-kernel/src"
-echo "Test 11: SQL after #[cfg(test)] -> FAIL"
+echo "Test 13: SQL after #[cfg(test)] -> FAIL"
 check_fixture "SQL after cfg(test)" 1 "SQL ARCHITECTURE VIOLATION" \
     $'#[cfg(test)] mod tests {}\nfn production_after_tests() { sqlx::query("SELECT 1"); }' "crates/o3k-kernel/src"
 
-echo "Test 12: raw Linux wrapper in canonical Network -> FAIL"
+echo "Test 14: raw Linux wrapper in canonical Network -> FAIL"
 check_fixture "raw Linux wrapper in canonical Network" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { run("ip", &["link"]); }' "crates/o3k-network/src"
-echo "Test 13: host command in o3kd composition -> FAIL"
+echo "Test 15: host command in o3kd composition -> FAIL"
 check_fixture "host command in o3kd composition" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { let _ = Command::new("ip"); }' "bins/o3kd/src/composition"
-echo "Test 14: host command in Compute binary source -> FAIL"
+echo "Test 16: host command in Compute binary source -> FAIL"
 check_fixture "host command in Compute binary source" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { let _ = Command::new("ip"); }' "bins/o3k-compute/src"
-echo "Test 15: shell execution -> FAIL"
+echo "Test 17: shell execution -> FAIL"
 check_fixture "shell execution" 1 "HOST EXECUTION ARCHITECTURE VIOLATION" \
     'pub fn z_run() { let _ = Command::new("sh").arg("-c").arg("true"); }' "crates/o3k-kernel/src"
 
-echo "Test 16: test-only file -> ACCEPT"
+echo "Test 18: approved SQLite persistence -> ACCEPT"
+check_fixture "approved SQLite persistence" 0 "" \
+    'pub fn z_query() { sqlx::query("SELECT 1"); }' "crates/o3k-store/src/sqlite"
+echo "Test 19: approved PostgreSQL persistence -> ACCEPT"
+check_fixture "approved PostgreSQL persistence" 0 "" \
+    'pub fn z_query() { sqlx::query("SELECT 1"); }' "crates/o3k-store/src/postgres"
+echo "Test 20: approved Linux Network execution -> ACCEPT"
+check_fixture "approved Linux Network execution" 0 "" \
+    'pub fn z_run() { let _ = std::process::Command::new("ip"); }' "crates/o3k-network/src/linux_fabric"
+
+echo "Test 21: test-only file -> ACCEPT"
 TEST_FIXTURE_DIR="$REPO_ROOT/tests/z_guard_fixtures"
 mkdir -p "$TEST_FIXTURE_DIR"
 TEST_FIXTURE="$TEST_FIXTURE_DIR/test_guard_ok.rs"
