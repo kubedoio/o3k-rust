@@ -1,9 +1,10 @@
 # Maintainability Program
 
-This directory contains the results of the Issue #758 repository maintainability
-program (R0 baseline). The goal is to establish a reproducible, machine-generated
-architecture and maintainability baseline **before** any structural refactoring
-begins.
+This directory contains the Issue #758 maintainability evidence and the
+permanent architecture policy established after the structural refactoring.
+The immutable P13.4 baseline remains historical evidence for dependency-cycle
+regression; it is not an ongoing permission to place SQL or host execution in
+arbitrary modules.
 
 ## Contents
 
@@ -45,7 +46,37 @@ The script is idempotent and deterministic for the same git SHA.
 - **Branch**: `r0-maintainability-baseline`
 - **Date**: 2026-08-28
 
-## R0 Rules
+## Permanent architecture policy
+
+The executable policy is `scripts/check-maintainability-guards.py`, and its
+regression matrix is `tests/maintainability-guards.sh`. A newly introduced
+path is not approved merely because it appeared in the P13.4 baseline.
+
+### SQL ownership
+
+Production SQL is allowed only in explicit persistence implementations and
+named database diagnostic/upgrade tooling. In the store, this means the
+`sqlite/`, `postgres/`, and currently accepted specialized persistence
+modules. `domain/`, `port/`, `unified/`, `o3kd/src/composition/`, and service
+application code remain SQL-free. A new SQL-owning adapter requires
+architecture review and a deliberate exact path or boundary addition.
+
+### Host-execution ownership
+
+Host subprocess execution is allowed only in explicit execution-adapter files
+or adapter crates. `o3kd` composition, Compute `main.rs` and `runtime.rs`,
+and canonical Network modules are host-command-free; Linux Network realization
+stays under `o3k-network/src/linux_fabric/`. Shell wrapping is not an approved
+execution mechanism. A new host tool requires architecture review answering:
+“Is this path itself an explicit persistence or execution boundary?” If not,
+move the implementation to the proper boundary rather than extending an
+allowlist.
+
+The focused R2b, Network, and Compute boundary scripts provide local evidence;
+the permanent Python guard is the authoritative repository-wide policy and is
+run by the protected Rust CI check.
+
+## R0 historical rules
 
 1. **No runtime behavior changes.** This phase is measurement and classification only.
 2. **No code moves.** Production code stays in its current crate/file.
