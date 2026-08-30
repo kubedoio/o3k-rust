@@ -162,7 +162,8 @@ for path in (
 ):
     assert not any(path_is_or_below(path, allowed) for allowed in host_paths), path
 
-assert any(path_is_or_below("crates/o3k-image/src/lib.rs", allowed) for allowed in host_paths)
+assert not any(path_is_or_below("crates/o3k-image/src/lib.rs", allowed) for allowed in host_paths)
+assert any(path_is_or_below("crates/o3k-image/src/execution.rs", allowed) for allowed in host_paths)
 print("  PASS: forbidden architecture paths remain unapproved")
 PY
 
