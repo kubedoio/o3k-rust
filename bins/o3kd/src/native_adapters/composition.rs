@@ -5,9 +5,7 @@ use o3k_native_api::resource::{ResourceApplication, ResourceApplicationError};
 use o3k_store::DurableStore;
 use uuid::Uuid;
 
-/// Store-backed canonical operation visibility adapter. Historical operation
-/// rows without P12.4 metadata fail closed rather than being reconstructed
-/// with fabricated ownership or action fields.
+/// Adapter for composition-resource operations exposed through the native API.
 pub struct CompositionResourceHandler {
     pub application: Arc<dyn ResourceApplication>,
     pub store: Arc<o3k_store::unified::O3kStore>,

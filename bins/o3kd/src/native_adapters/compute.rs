@@ -3,9 +3,7 @@ use std::sync::Arc;
 use o3k_native_api::{compute::ServerItem, error::NativeReadError};
 use uuid::Uuid;
 
-/// Store-backed canonical operation visibility adapter. Historical operation
-/// rows without P12.4 metadata fail closed rather than being reconstructed
-/// with fabricated ownership or action fields.
+/// Store-backed adapter for native Compute server reads.
 pub struct ServerReaderAdapter {
     pub service: Arc<o3k_compute::ComputeService>,
 }

@@ -6,9 +6,7 @@ use o3k_native_api::{
     error::ProblemDetails,
 };
 
-/// Store-backed canonical operation visibility adapter. Historical operation
-/// rows without P12.4 metadata fail closed rather than being reconstructed
-/// with fabricated ownership or action fields.
+/// Adapter for issuing native API tokens through the identity service.
 pub struct TokenIssuerAdapter {
     pub service: Arc<o3k_identity::TokenService>,
 }

@@ -13,9 +13,7 @@ use o3k_native_api::{
 use o3k_store::{DurableStore, storage::StorageRepository};
 use uuid::Uuid;
 
-/// Store-backed canonical operation visibility adapter. Historical operation
-/// rows without P12.4 metadata fail closed rather than being reconstructed
-/// with fabricated ownership or action fields.
+/// Application adapter for generic native resource reads and mutations.
 pub struct GenericResourceApplication {
     pub compute: Arc<o3k_compute::ComputeService>,
     pub network_service: Arc<o3k_network::NetworkService>,
