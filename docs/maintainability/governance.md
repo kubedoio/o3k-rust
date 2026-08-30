@@ -1,22 +1,22 @@
 # Governance and branch protection requirements
 
-## Current state (2026-08-28)
+## Current state (2026-08-30)
 
 | Control | Status |
 |---------|--------|
-| `main` branch protection | **Absent** — anyone with push access can push directly |
-| Repository rulesets | **Absent** |
-| Required PRs | **Absent** |
-| Required CI checks | **Absent** — CI runs on PR but is not a required gate |
-| Force push protection | **Absent** |
-| Deletion protection | **Absent** |
-| Administrator bypass | N/A — no protection exists to bypass |
+| `main` branch protection | **Active** — `main-protection` repository ruleset |
+| Repository rulesets | **Active** |
+| Required PRs | **Active** — one approval, last-push approval, thread resolution |
+| Required CI checks | **Active** — `rust`, `supply-chain`, `installer-negative`, Tempest Gate A, Mock Cinder |
+| Force push protection | **Active** |
+| Deletion protection | **Active** |
+| Administrator bypass | **Disabled** — bypass is not available |
 
-## Required settings before refactor merges
+## Protected merge requirements
 
-Before any #758 structural PR is merged to `main`, apply these branch
-protection rules using the GitHub UI (Settings > Branches > Add rule) or
-the `gh api` command below.
+The active `main-protection` ruleset applies these requirements to the default
+branch. Verify the live ruleset before a protected merge; this document is a
+record of policy, not proof that GitHub is configured.
 
 ### Rule: `main`
 
@@ -39,35 +39,14 @@ the `gh api` command below.
    - Allow force pushes: no
    - Allow deletions: no
 
-### Application command
+### Verification
+
+Inspect the live ruleset before each protected merge:
 
 ```bash
-gh api repos/kubedoio/o3k-rust/branches/main/protection \
-  --method PUT \
-  --input - <<'EOF'
-{
-  "required_status_checks": {
-    "strict": true,
-    "contexts": [
-      "ci / rust",
-      "maintainability-guards"
-    ]
-  },
-  "enforce_admins": true,
-  "required_pull_request_reviews": {
-    "required_approving_review_count": 1,
-    "dismiss_stale_reviews": true,
-    "require_code_owner_reviews": true
-  },
-  "restrictions": null,
-  "allow_force_pushes": false,
-  "allow_deletions": false,
-  "lock_branch": false
-}
-EOF
+gh api repos/kubedoio/o3k-rust/rulesets --jq ".[] | select(.name == \"main-protection\")"
 ```
 
-> **Note**: The `maintainability-guards` check must be registered in CI first
-> (see CI workflow), otherwise GitHub will not offer it as an option in the
-> status checks list. Apply the branch protection after at least one successful
-> CI run that includes the guard step.
+The current required-check names are the five listed in the state table above.
+The permanent architecture guard runs inside the `rust` check; it is not a
+separate historical `maintainability-guards` status context.

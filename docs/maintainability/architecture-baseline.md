@@ -1,12 +1,16 @@
-# Architecture Baseline
+# Current Architecture Snapshot
 
-Generated from workspace inventory at `edb464ec43b1d12207faae903ea14b7824123f39`.
+Generated from workspace inventory at `087bb469649e5892d9c7666478dbfade14377ff9`.
+
+This is a current-tree monitoring snapshot, not the immutable P13.4 baseline.
+That historical evidence remains under
+`docs/maintainability/baselines/p13-4/` and is never regenerated here.
 
 ## Snapshot
 
-- 185 Rust source files across 31 workspace crates
-- ~118,276 production LOC, ~52,668 test LOC
-- 71 candidate hotspot files identified
+- 271 Rust source files across 31 workspace crates
+- ~115,659 production LOC, ~54,822 test LOC
+- 101 candidate hotspot files identified
 
 ## Crate Roles
 
@@ -14,11 +18,39 @@ See `architecture-roles.md` for the full classification.
 
 ## Key Numbers
 
-- SQL usage sites: 928 (17 unexplained)
-- Host command execution sites: 599 production
+- SQL usage sites: 928 (0 unexplained)
+- Host command execution sites: 525 production
 - Dependency cycles: 0
 - Lint/safety violations: 1214 production
 
+## Production LOC by Responsibility
+
+| Responsibility | Files | Production LOC (approx) |
+|---|---:|---:|
+| Compute application | 13 | 5,806 |
+| Compute host/runtime composition | 8 | 2,619 |
+| Image application | 1 | 1,355 |
+| Image execution | 1 | 217 |
+| Network Linux execution | 18 | 4,706 |
+| Network application | 20 | 9,025 |
+| Network execution/runtime composition | 2 | 742 |
+| PostgreSQL persistence | 11 | 6,761 |
+| SQLite persistence | 9 | 7,322 |
+| o3kd control-plane composition | 6 | 2,199 |
+| o3kd native adapters | 10 | 2,034 |
+| o3kd process entry | 5 | 3,034 |
+| other workspace responsibility | 131 | 54,178 |
+| store domain | 4 | 1,067 |
+| store ports | 3 | 856 |
+| store specialized persistence | 29 | 13,738 |
+
+
+## Monitoring interpretation
+
+The inventory reports hotspots, application roots, composition roots, SQL and
+host-execution ownership, and dependency cycles for review. It does not enforce
+arbitrary file-size or LOC thresholds.
+
 ## Integrity
 
-This baseline was generated deterministically. Run `scripts/maintainability-inventory.py` to regenerate.
+Run `scripts/maintainability-inventory.py` to refresh this current snapshot.

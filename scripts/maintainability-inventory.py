@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""
-R0 maintainability baseline inventory generator for O3K Rust.
-Produces deterministic, machine-readable output about the current workspace.
+"""Generate a deterministic maintainability report for the current workspace.
+
+The committed P13.4 files are immutable historical evidence.  This script
+reports the architecture that is actually present at the checkout it inspects;
+it does not update that historical baseline.
 """
 
 import json
@@ -303,11 +305,29 @@ def inventory_sql():
 
 def classify_sql_site(path):
     """Classify a SQL use site."""
-    if "migrations" in path:
+    if "/examples/" in path or path.startswith("examples/"):
+        return "example/evidence"
+    if "/migrations/" in path or path.startswith("migrations/"):
         return "migration"
-    if "/store/" in path or "o3k-store" in path:
+    if (
+        path.startswith("crates/o3k-store/src/sqlite/")
+        or path.startswith("crates/o3k-store/src/postgres/")
+        or path in {
+            "crates/o3k-store/src/coordination.rs",
+            "crates/o3k-store/src/storage.rs",
+            "crates/o3k-store/src/quota.rs",
+            "crates/o3k-store/src/reusable_policy.rs",
+            "crates/o3k-store/src/artifact_transfer.rs",
+            "crates/o3k-store/src/server_state.rs",
+            "crates/o3k-store/src/conformance.rs",
+        }
+    ):
         return "persistence-adapter"
-    if "tests/" in path or "test" in path:
+    if path.startswith("bins/o3k/src/upgrade/"):
+        return "upgrade"
+    if path == "bins/o3k/src/db.rs":
+        return "diagnostic"
+    if "/tests/" in path or path.startswith("tests/") or "test" in path:
         return "test/conformance"
     if "diagnostic" in path or "diagnose" in path:
         return "diagnostic"
@@ -391,6 +411,20 @@ def inventory_host_commands():
 
 def classify_host_cmd_site(path, cmd):
     """Classify host command execution sites."""
+    if "/examples/" in path or path.startswith("examples/"):
+        return "example/evidence"
+    if "/tests/" in path or path.startswith("tests/") or "test" in path:
+        return "test/conformance"
+    if path == "crates/o3k-image/src/lib.rs":
+        return "application reference (not execution)"
+    if path == "bins/o3k/src/checks/libvirt.rs":
+        return "diagnostic guidance (not execution)"
+    if path == "crates/o3k-image/src/execution.rs":
+        return "Image execution adapter"
+    if path == "bins/o3k-compute/src/iscsi.rs":
+        return "Compute host lifecycle adapter"
+    if path in {"bins/o3k/src/sys.rs", "bins/o3k/src/upgrade/runner.rs"}:
+        return "diagnostic/upgrade tooling"
     # Infrastructure command adapters
     infra_adapters = [
         "o3k-compute-agent", "o3k-libvirt", "o3k-dhcp",
@@ -403,9 +437,6 @@ def classify_host_cmd_site(path, cmd):
 
     if "crates/o3k-provider" in path:
         return "domain-owned execution adapter"
-
-    if "tests/" in path or "test" in path:
-        return "test/conformance"
 
     if "scripts/" in path or "packaging/" in path:
         return "packaging"
@@ -426,6 +457,41 @@ def classify_host_cmd_site(path, cmd):
         return "candidate architectural leakage"
 
     return "candidate architectural leakage"
+
+
+def source_responsibility(path: str) -> str:
+    """Return a stable ownership bucket for non-authoritative monitoring."""
+    if path.startswith("bins/o3kd/src/composition/"):
+        return "o3kd control-plane composition"
+    if path.startswith("bins/o3kd/src/native_adapters/"):
+        return "o3kd native adapters"
+    if path.startswith("bins/o3kd/"):
+        return "o3kd process entry"
+    if path.startswith("bins/o3k-compute/src/"):
+        return "Compute host/runtime composition"
+    if path.startswith("bins/o3k-network/src/"):
+        return "Network execution/runtime composition"
+    if path.startswith("crates/o3k-store/src/domain/"):
+        return "store domain"
+    if path.startswith("crates/o3k-store/src/port/"):
+        return "store ports"
+    if path.startswith("crates/o3k-store/src/sqlite/"):
+        return "SQLite persistence"
+    if path.startswith("crates/o3k-store/src/postgres/"):
+        return "PostgreSQL persistence"
+    if path.startswith("crates/o3k-store/"):
+        return "store specialized persistence"
+    if path.startswith("crates/o3k-network/src/linux_fabric/"):
+        return "Network Linux execution"
+    if path.startswith("crates/o3k-network/"):
+        return "Network application"
+    if path.startswith("crates/o3k-compute/"):
+        return "Compute application"
+    if path.startswith("crates/o3k-image/src/execution.rs"):
+        return "Image execution"
+    if path.startswith("crates/o3k-image/"):
+        return "Image application"
+    return "other workspace responsibility"
 
 
 # ─── 5. Safety/lint exceptions inventory ───
@@ -520,7 +586,7 @@ ARCHITECTURE_ROLES = {
     "o3k-scheduler": "application/service",
     "o3k-reconciler": "reconciler/workflow",
     "o3k-cinder": "external-service client",
-    "o3k-store": "persistence port + SQLite adapter",
+    "o3k-store": "persistence ports + SQLite/PostgreSQL adapters",
     "o3k-provider": "provider port + adapters",
     "o3k-provider-contract": "provider contract/protocol",
     "o3k-api": "API / OpenStack compatibility projection",
@@ -537,6 +603,10 @@ ARCHITECTURE_ROLES = {
     "o3k-dhcp": "provider adapter / host execution",
     "o3k-storage": "provider adapter / host execution",
     "o3k-database-example": "example/evidence",
+    "o3k": "CLI/diagnostic entry point",
+    "o3k-compute-bin": "Compute host/runtime composition",
+    "o3k-network-bin": "Network execution/runtime composition",
+    "o3kd": "control-plane composition root",
 }
 
 def classify_roles():
@@ -624,8 +694,28 @@ def write_md(filename, content):
     return path
 
 
+def responsibility_totals(ws):
+    """Aggregate production LOC by stable architectural responsibility."""
+    totals = defaultdict(lambda: {"files": 0, "production_loc": 0})
+    for sources in ws["crate_to_sources"].values():
+        for source in sources:
+            responsibility = source_responsibility(source["path"])
+            totals[responsibility]["files"] += 1
+            totals[responsibility]["production_loc"] += source["prod_loc_approx"]
+    return {key: totals[key] for key in sorted(totals)}
+
+
+def selected_roots(ws, paths):
+    """Return selected root files ordered by descending production LOC."""
+    sources = [item for group in ws["crate_to_sources"].values() for item in group]
+    return sorted(
+        (item for item in sources if item["path"] in paths),
+        key=lambda item: (-item["prod_loc_approx"], item["path"]),
+    )
+
+
 def main():
-    print("O3K R0 Maintainability Baseline Inventory")
+    print("O3K Maintainability Architecture Inventory")
     print("=" * 50)
 
     ensure_dirs()
@@ -669,6 +759,11 @@ def main():
     # 7. Hotspots
     print("\n[7/7] Hotspot analysis...")
     hotspots = analyze_hotspots(ws["crate_to_sources"])
+    responsibilities = responsibility_totals(ws)
+    write_json("responsibility-inventory.json", {
+        "git_sha": ws["git_sha"],
+        "responsibilities": responsibilities,
+    })
     write_json("hotspots.json", {
         "total_hotspots": len(hotspots),
         "hotspots": hotspots[:50],
@@ -691,6 +786,13 @@ def main():
     cmd_example = sum(1 for c in cmds if c["classification"] == "example")
     cmd_diag = sum(1 for c in cmds if c["classification"] == "diagnostic/doctor")
     cmd_leakage = sum(1 for c in cmds if c["classification"] == "candidate architectural leakage")
+    non_execution_classes = {
+        "test/conformance",
+        "packaging",
+        "example/evidence",
+        "application reference (not execution)",
+        "diagnostic guidance (not execution)",
+    }
 
     # Count unsafe items
     total_unwrap = len(safety["production_unwrap"])
@@ -703,9 +805,9 @@ def main():
     total_prod = ws["source_files"]["total_prod_loc"]
     total_test = ws["source_files"]["total_test_loc"]
 
-    report = f"""# R0 Maintainability Baseline Report
+    report = f"""# Current Maintainability Architecture Report
 
-## Baseline
+## Report snapshot
 
 - **SHA**: `{ws['git_sha']}`
 - **Branch**: `{ws['branch']}`
@@ -760,7 +862,7 @@ def main():
     report += f"""
 ## Host Command Execution Inventory
 
-- **Total production execution sites**: {len([c for c in cmds if c['classification'] not in ('test/conformance', 'packaging', 'example')])}
+- **Total production execution sites**: {len([c for c in cmds if c['classification'] not in non_execution_classes])}
 - **Execution adapter locations**: {cmd_adapter}
 - **Mutating commands**: {sum(1 for c in cmds if c['command'] in ('sudo', 'mount', 'umount', 'lvcreate', 'lvremove', 'lvchange', 'pvcreate', 'vgcreate', 'dd', 'virsh', 'systemctl', 'ip', 'bridge', 'nft', 'rbd', 'ceph'))}
 - **Read-only commands**: {sum(1 for c in cmds if c['command'] in ('lvs', 'vgs', 'pvs', 'df', 'lsblk', 'blkid', 'losetup'))}
@@ -773,6 +875,36 @@ def main():
         for c in cmds:
             if c["classification"] == "candidate architectural leakage":
                 report += f"- `{c['path']}:{c['line']}` — `{c['command']}`\n"
+
+    report += "\n## Production LOC by Architectural Responsibility\n\n"
+    report += "| Responsibility | Files | Production LOC (approx) |\n|---|---:|---:|\n"
+    for responsibility, totals in responsibilities.items():
+        report += f"| {responsibility} | {totals['files']} | {totals['production_loc']:,} |\n"
+
+    application_roots = selected_roots(ws, {
+        "crates/o3k-identity/src/lib.rs",
+        "crates/o3k-image/src/lib.rs",
+        "crates/o3k-compute/src/lib.rs",
+        "crates/o3k-network/src/lib.rs",
+        "crates/o3k-placement/src/lib.rs",
+        "crates/o3k-scheduler/src/lib.rs",
+        "crates/o3k-reconciler/src/lib.rs",
+    })
+    report += "\n## Largest Application Roots\n\n"
+    report += "| File | Production LOC (approx) |\n|---|---:|\n"
+    for item in application_roots:
+        report += f"| `{item['path']}` | {item['prod_loc_approx']:,} |\n"
+
+    composition_roots = selected_roots(ws, {
+        "bins/o3kd/src/composition/mod.rs",
+        "bins/o3kd/src/native_adapters/mod.rs",
+        "bins/o3k-compute/src/main.rs",
+        "bins/o3k-network/src/main.rs",
+    })
+    report += "\n## Composition Roots\n\n"
+    report += "| File | Production LOC (approx) |\n|---|---:|\n"
+    for item in composition_roots:
+        report += f"| `{item['path']}` | {item['prod_loc_approx']:,} |\n"
 
     report += f"""
 ## Safety / Lint Exceptions
@@ -829,9 +961,13 @@ def main():
         report += f"| `{h['path']}` | {h['crate']} | {h['prod_loc_approx']} | {h['score']} | {', '.join(h['reasons'])} |\n"
 
     report += """
-## Behavior Changes
+## Interpretation
 
-**NONE** — This is a measurement-only baseline. No source code was modified.
+This is a current-tree monitoring report, not an immutable baseline and not a
+style gate. Size and hotspot metrics identify review surfaces; they do not
+impose arbitrary file or LOC limits. The immutable P13.4 baseline remains
+under `docs/maintainability/baselines/p13-4/` for dependency-regression
+evidence only.
 
 ## Validation Status
 
@@ -847,9 +983,13 @@ def main():
     print(f"\n  wrote {OUTPUT_DIR / 'summary.md'}")
 
     # Also write the docs/maintainability architecture-baseline.md
-    arch_baseline = f"""# Architecture Baseline
+    arch_baseline = f"""# Current Architecture Snapshot
 
 Generated from workspace inventory at `{ws['git_sha']}`.
+
+This is a current-tree monitoring snapshot, not the immutable P13.4 baseline.
+That historical evidence remains under
+`docs/maintainability/baselines/p13-4/` and is never regenerated here.
 
 ## Snapshot
 
@@ -864,25 +1004,40 @@ See `architecture-roles.md` for the full classification.
 ## Key Numbers
 
 - SQL usage sites: {len(sql)} ({sql_unexplained} unexplained)
-- Host command execution sites: {len([c for c in cmds if c['classification'] not in ('test/conformance', 'packaging', 'example')])} production
+- Host command execution sites: {len([c for c in cmds if c['classification'] not in non_execution_classes])} production
 - Dependency cycles: {len(deps['cycles'])}
 - Lint/safety violations: {total_unwrap + total_expect + total_panic} production
 
+## Production LOC by Responsibility
+
+| Responsibility | Files | Production LOC (approx) |
+|---|---:|---:|
+"""
+    for responsibility, totals in responsibilities.items():
+        arch_baseline += f"| {responsibility} | {totals['files']} | {totals['production_loc']:,} |\n"
+    arch_baseline += """
+
+## Monitoring interpretation
+
+The inventory reports hotspots, application roots, composition roots, SQL and
+host-execution ownership, and dependency cycles for review. It does not enforce
+arbitrary file-size or LOC thresholds.
+
 ## Integrity
 
-This baseline was generated deterministically. Run `scripts/maintainability-inventory.py` to regenerate.
+Run `scripts/maintainability-inventory.py` to refresh this current snapshot.
 """
     write_md("architecture-baseline.md", arch_baseline)
 
     # Write architecture roles doc
-    roles_md = "# Architecture Role Classification\n\n"
-    roles_md += "Role mapping for each workspace crate.\n\n"
+    roles_md = "# Current Architecture Role Classification\n\n"
+    roles_md += "Role mapping for each workspace crate and binary.\n\n"
     roles_md += "| Crate | Role | Description |\n|-------|------|-------------|\n"
     role_desc = {
         "contracts/kernel/domain": "Canonical domain types, lifecycle state machines, invariants",
         "application/service": "Application service implementing use cases above domain ports",
         "reconciler/workflow": "Reconciliation and compensation orchestration",
-        "persistence port + SQLite adapter": "Repository ports + SQLite implementation",
+        "persistence ports + SQLite/PostgreSQL adapters": "Repository ports, SQLite/PostgreSQL implementations, and unified dispatch",
         "provider port + adapters": "Provider/external-service port definitions + adapters",
         "provider contract/protocol": "Provider wire protocol contracts (protobuf)",
         "API / OpenStack compatibility projection": "HTTP API routers, OpenStack request/response adapters",
@@ -893,6 +1048,10 @@ This baseline was generated deterministically. Run `scripts/maintainability-inve
         "provider adapter / host execution": "Privileged host execution adapters (libvirt, LVM, nftables, etc.)",
         "external-service client": "External OpenStack service client adapters",
         "example/evidence": "Examples, evidence artifacts",
+        "control-plane composition root": "o3kd composition, service wiring, and process lifecycle",
+        "Compute host/runtime composition": "Compute binary startup and host-runtime composition",
+        "Network execution/runtime composition": "Network binary startup and execution-runtime composition",
+        "CLI/diagnostic entry point": "O3K CLI and operational entry point",
     }
     for name, info in sorted(roles.items()):
         desc = role_desc.get(info["role"], "")
