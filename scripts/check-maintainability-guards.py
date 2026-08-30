@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""R0 maintainability guardrails for O3K Rust.
+"""Permanent maintainability guardrails for O3K Rust.
 
-Prevents new structural debt relative to the P13.4 immutable baseline.
-
-Guard 1: SQL boundary — new production sqlx::query outside approved locations
-Guard 2: Host-command boundary — new Command::new / subprocess outside approved locations
-Guard 3: Dependency regression — new crate dependency cycles
+Guard 1: SQL architecture boundary
+Guard 2: Host-execution architecture boundary
+Guard 3: Dependency regression against the immutable P13.4 baseline
 Guard 4: Safety policy — workspace Cargo.toml policy not weakened
 
 The immutable baseline lives under docs/maintainability/baselines/p13-4/ and
@@ -20,7 +18,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 from collections import defaultdict
 
@@ -75,98 +72,112 @@ def _load_baseline(name: str) -> dict | None:
     return json.loads(path.read_text())
 
 
-# ─── Guard 1: SQL boundary ───
+# ─── Guard 1: SQL architecture boundary ───
+
+SQL_API_NAMES = (
+    r"(?:"
+    r"query(?:_as|_scalar)?(?:_with|_unchecked)?"
+    r"|query_file(?:_(?:as|scalar))?(?:_unchecked)?"
+    r"|raw_sql"
+    r"|QueryBuilder"
+    r")"
+)
+SQL_CAPABILITY_NAMES = r"(?:Executor|Execute|AnyExecutor)"
 
 SQL_PATTERNS = [
-    r"sqlx::query\b",
-    r"sqlx::query_as\b",
-    r"sqlx::query_scalar\b",
-    r"sqlx::query!\b",
-    r"sqlx::query_as!\b",
-    r"sqlx::query_scalar!\b",
+    rf"sqlx::{SQL_API_NAMES}(?:!|\b)",
+    r"sqlx::query_builder::QueryBuilder\b",
+    rf"sqlx::(?:prelude::)?{SQL_CAPABILITY_NAMES}\b",
 ]
 
-# Approved architectural SQL locations.
-# SQL belongs behind the store port; only the persistence adapter,
-# diagnostic tools, and upgrade code may contain it.
-APPROVED_SQL_PATHS_ALLOWLIST = {
-    "crates/o3k-store/src/lib.rs",
+SQL_IMPORT_PATTERN = re.compile(
+    r"^\s*use\s+sqlx::(?:"
+    + rf"(?:{SQL_API_NAMES}|{SQL_CAPABILITY_NAMES})"
+    + r"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?"
+    + r"|\{[^;]*\b"
+    + rf"(?:{SQL_API_NAMES}|{SQL_CAPABILITY_NAMES})"
+    + r"\b[^;]*\})\s*;",
+    re.MULTILINE | re.DOTALL,
+)
+
+SQL_NESTED_IMPORT_PATTERN = re.compile(
+    r"^\s*use\s+sqlx::(?:"
+    r"query_builder::QueryBuilder"
+    r"|prelude::(?:Executor|Execute|AnyExecutor)"
+    r")(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;"
+    r"|^\s*use\s+sqlx::prelude::\*\s*;"
+    r"|^\s*use\s+sqlx::\*\s*;",
+    re.MULTILINE | re.DOTALL,
+)
+
+# SQL-owning implementation boundaries.  Keep this list path-aware: a path
+# such as `src/postgres-extra.rs` must not inherit `src/postgres` approval.
+APPROVED_SQL_PATHS = {
     "crates/o3k-store/src/sqlite",
     "crates/o3k-store/src/postgres",
-    "crates/o3k-store/src/unified",
-    "crates/o3k-store/src/coordination",
-    "crates/o3k-store/src/storage",
-    "crates/o3k-store/src/quota",
-    "crates/o3k-store/src/reusable_policy",
-    "crates/o3k-store/src/artifact_transfer",
-    "crates/o3k-store/src/server_state",
-    "crates/o3k-store/src/conformance",
+    "crates/o3k-store/src/coordination.rs",
+    "crates/o3k-store/src/storage.rs",
+    "crates/o3k-store/src/quota.rs",
+    "crates/o3k-store/src/reusable_policy.rs",
+    "crates/o3k-store/src/artifact_transfer.rs",
+    "crates/o3k-store/src/server_state.rs",
+    "crates/o3k-store/src/conformance.rs",
     "bins/o3k/src/db.rs",
     "bins/o3k/src/upgrade/runner.rs",
 }
 
-# Known operational SQL sites outside the persistence adapter,
-# loaded from the immutable baseline.  Keyed by (path, line).
-KNOWN_SQL_EXCEPTIONS: dict[str, str] = {}
-
-def _load_sql_exceptions() -> dict[str, str]:
-    """Load SQL exceptions from the immutable baseline."""
-    bl = _load_baseline("sql-inventory.json")
-    if not bl:
-        return {}
-    exc = {}
-    for site in bl.get("sites", []):
-        cls = site.get("classification", "")
-        if cls in ("persistence-adapter", "migration"):
-            continue
-        key = f"{site['path']}:{site['line']}"
-        exc[key] = site.get("content", "")
-    return exc
+def _path_is_or_below(path: str, approved: str) -> bool:
+    """Return whether *path* is exactly *approved* or below its directory."""
+    return path == approved or path.startswith(approved.rstrip("/") + "/")
 
 
 def check_sql_boundary(files: list[Path]) -> list[str]:
-    """Check for new production SQL outside approved locations.
-
-    Uses the immutable P13.4 baseline for known exceptions.
-    Does NOT regenerate the baseline from current HEAD.
-    """
+    """Reject production SQL outside explicit persistence/tooling boundaries."""
     errors: list[str] = []
-    exceptions = _load_sql_exceptions()
 
     for path in files:
         rel = str(path.relative_to(REPO_ROOT))
         if is_test_or_example(rel):
             continue
 
-        # Approved architectural locations pass without line-level checking.
-        approved = any(rel.startswith(p) for p in APPROVED_SQL_PATHS_ALLOWLIST)
+        approved = any(_path_is_or_below(rel, p) for p in APPROVED_SQL_PATHS)
         if approved:
             continue
 
         lines = path.read_text(encoding="utf-8").splitlines()
+        source = "\n".join(lines)
+
+        for import_pattern in (SQL_IMPORT_PATTERN, SQL_NESTED_IMPORT_PATTERN):
+            for match in import_pattern.finditer(source):
+                line_number = source.count("\n", 0, match.start()) + 1
+                errors.append(
+                    f"SQL ARCHITECTURE VIOLATION: {rel}:{line_number}\n"
+                    "  pattern: raw sqlx query/execution capability import\n"
+                    f"  code: {match.group(0).strip()[:100]}\n"
+                    "  SQL belongs in an explicit persistence, database diagnostic, "
+                    "or upgrade boundary."
+                )
 
         for i, line in enumerate(lines, 1):
             for pat in SQL_PATTERNS:
                 if re.search(pat, line):
-                    key = f"{rel}:{i}"
-                    if key in exceptions:
-                        continue
                     stripped = line.strip()
                     if stripped.startswith("//") or stripped.startswith("/*"):
                         continue
                     if stripped.startswith("use "):
                         continue
                     errors.append(
-                        f"NEW SQL call site outside approved location: {rel}:{i}\n"
+                        f"SQL ARCHITECTURE VIOLATION: {rel}:{i}\n"
                         f"  pattern: {pat}\n"
                         f"  code: {stripped[:100]}\n"
-                        f"  SQL belongs in crates/o3k-store/src/, diagnostic, or upgrade code."
+                        "  SQL belongs in an explicit persistence, database diagnostic, "
+                        "or upgrade boundary."
                     )
                     break
     return errors
 
 
-# ─── Guard 2: Host-command boundary ───
+# ─── Guard 2: Host-execution architecture boundary ───
 
 # Patterns that detect host-execution intent.
 # The bare Command::new pattern catches imported usage:
@@ -174,76 +185,144 @@ def check_sql_boundary(files: list[Path]) -> list[str]:
 #   Command::new("...")
 # as well as inline use.
 HOST_CMD_PATTERNS = [
+    (r'Command::new\(\s*["\'](?:sh|bash)["\']', "shell command (forbidden)"),
+    (r'["\'](?:sh|bash)["\']\s*,\s*["\']-c["\']', "shell -c (forbidden)"),
+    (r'\b(?:run|output)\(\s*["\'](?:ip|nft)["\']', "raw Linux command wrapper"),
+    (r'\bspawn_host_command\s*\(', "host command wrapper"),
     (r"(?<![A-Za-z0-9_])Command::new\(", "std::process::Command / tokio::process::Command"),
-    (r'"sh"\s*,?\s*-c\s*"', "sh -c (dangerous)"),
-    (r'"bash"\s*,?\s*-c\s*"', "bash -c (dangerous)"),
 ]
 
-# Directories where host execution is architecturally approved.
-APPROVED_HOST_CMD_PREFIXES = {
-    "crates/o3k-compute-agent/src",
-    "crates/o3k-libvirt/src",
-    "crates/o3k-dhcp/src",
-    "crates/o3k-storage/src",
-    "crates/o3k-cellhv/src",
-    "crates/o3k-config-drive/src",
-    "crates/o3k-console/src",
-    "crates/o3k-network/src/linux_fabric",
-    "crates/o3k-image/src/qemu_img.rs",
-    "crates/o3k-provider/src",
+HOST_IMPORT_PATTERNS = [
+    (re.compile(
+        r"^\s*use\s+(?:std|tokio)::process::Command"
+        r"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;",
+        re.MULTILINE | re.DOTALL,
+    ), "process Command import"),
+    (re.compile(
+        r"^\s*use\s+(?:std|tokio)::process::\{[^;]*\bCommand\b[^;]*\}\s*;",
+        re.MULTILINE | re.DOTALL,
+    ), "process Command grouped import"),
+    (re.compile(
+        r"^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*"
+        r"(?:std|tokio)::process::Command\s*;",
+        re.MULTILINE | re.DOTALL,
+    ), "process Command type alias"),
+]
+
+HOST_COMMAND_ALIAS_PATTERN = re.compile(
+    r"use\s+(?:std|tokio)::process::Command"
+    r"(?:\s+as\s+(?P<alias>[A-Za-z_][A-Za-z0-9_]*))?\s*;"
+)
+HOST_COMMAND_GROUP_PATTERN = re.compile(
+    r"use\s+(?:std|tokio)::process::\{(?P<body>[^;]*)\}\s*;",
+    re.DOTALL,
+)
+HOST_COMMAND_TYPE_ALIAS_PATTERN = re.compile(
+    r"type\s+(?P<alias>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+    r"(?:std|tokio)::process::Command\s*;"
+)
+
+
+def _host_command_aliases(source: str) -> set[str]:
+    aliases = {
+        match.group("alias") or "Command"
+        for match in HOST_COMMAND_ALIAS_PATTERN.finditer(source)
+    }
+    for match in HOST_COMMAND_GROUP_PATTERN.finditer(source):
+        for item in match.group("body").split(","):
+            item = item.strip()
+            if not re.match(r"Command(?:\s+as\s+)?", item):
+                continue
+            alias_match = re.search(r"\bas\s+([A-Za-z_][A-Za-z0-9_]*)", item)
+            aliases.add(alias_match.group(1) if alias_match else "Command")
+    aliases.update(
+        match.group("alias")
+        for match in HOST_COMMAND_TYPE_ALIAS_PATTERN.finditer(source)
+    )
+    return aliases
+
+# Explicit execution boundaries.  Mixed application crates are narrowed to
+# the files that currently own host-tool invocation.
+APPROVED_HOST_EXECUTION_PATHS = {
     "bins/o3k/src/sys.rs",
-    "bins/o3k/src/checks",
-    "bins/o3k/src/upgrade",
-    "bins/o3k-compute/src",
+    "bins/o3k/src/upgrade/runner.rs",
+    "bins/o3k-compute/src/iscsi.rs",
+    "crates/o3k-config-drive/src/lib.rs",
+    "crates/o3k-dhcp/src/lib.rs",
+    "crates/o3k-image/src/lib.rs",
+    "crates/o3k-network/src/linux_fabric",
+    "crates/o3k-storage/src/ceph.rs",
+    "crates/o3k-storage/src/lib.rs",
+    # These crates are themselves explicit provider/host-execution adapters.
+    "crates/o3k-cellhv/src",
+    "crates/o3k-libvirt/src",
+    "crates/o3k-compute-agent/src",
+    "crates/o3k-console/src",
 }
 
 
 def check_host_command_boundary(files: list[Path]) -> list[str]:
-    """Check for new production host-command execution outside approved locations.
-
-    Detects bare `Command::new(` to catch imported usage.
-    Known exceptions from the immutable P13.4 baseline pass silently.
-    """
+    """Reject host execution outside explicit adapter boundaries."""
     errors: list[str] = []
-    bl = _load_baseline("host-command-inventory.json")
-    baseline_exceptions: set[str] = set()
-    if bl:
-        for site in bl.get("sites", []):
-            cls = site.get("classification", "")
-            if cls == "domain-owned execution adapter":
-                continue
-            baseline_exceptions.add(f"{site['path']}:{site['line']}")
 
     for path in files:
         rel = str(path.relative_to(REPO_ROOT))
         if is_test_or_example(rel):
             continue
 
-        approved = any(rel.startswith(p) or rel == p for p in APPROVED_HOST_CMD_PREFIXES)
-        if approved:
-            continue
-
         lines = path.read_text(encoding="utf-8").splitlines()
+        source = "\n".join(lines)
+        command_aliases = _host_command_aliases(source)
+
+        for pattern, name in HOST_IMPORT_PATTERNS:
+            for match in pattern.finditer(source):
+                if any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS):
+                    continue
+                line_number = source.count("\n", 0, match.start()) + 1
+                errors.append(
+                    f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{line_number}\n"
+                    f"  command: {name}\n"
+                    f"  code: {match.group(0).strip()[:120]}\n"
+                    "  Host execution belongs in an explicit execution adapter."
+                )
 
         for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if not stripped.startswith("//"):
+                for alias in command_aliases - {"Command"}:
+                    shell_alias = re.search(
+                        rf"\b{re.escape(alias)}\s*::new\(\s*[\"'](?:sh|bash)[\"']",
+                        line,
+                    )
+                    if shell_alias:
+                        errors.append(
+                            f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{i}\n"
+                            "  command: aliased shell command (forbidden)\n"
+                            f"  code: {stripped[:120]}"
+                        )
+                        break
             for pat, name in HOST_CMD_PATTERNS:
                 if re.search(pat, line):
-                    key = f"{rel}:{i}"
-                    if key in baseline_exceptions:
-                        continue
                     stripped = line.strip()
                     if stripped.startswith("//"):
                         continue
-                    # Allow use statements for Command
-                    if stripped.startswith("use ") and "Command" in stripped:
-                        continue
-                    severity = "HOST COMMAND LEAKAGE" if "sh -c" in name else "candidate architectural leakage"
-                    errors.append(
-                        f"{severity}: {rel}:{i}\n"
-                        f"  command: {name}\n"
-                        f"  code: {stripped[:120]}\n"
-                        f"  Host execution belongs behind a domain-owned adapter crate."
-                    )
+                    # Shell execution is forbidden even inside an otherwise
+                    # approved adapter; direct argv execution remains the
+                    # required boundary.
+                    if "shell" in name:
+                        errors.append(
+                            f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{i}\n"
+                            f"  command: {name}\n"
+                            f"  code: {stripped[:120]}"
+                        )
+                        break
+                    if not any(_path_is_or_below(rel, p) for p in APPROVED_HOST_EXECUTION_PATHS):
+                        errors.append(
+                            f"HOST EXECUTION ARCHITECTURE VIOLATION: {rel}:{i}\n"
+                            f"  command: {name}\n"
+                            f"  code: {stripped[:120]}\n"
+                            "  Host execution belongs in an explicit execution adapter."
+                        )
                     break
     return errors
 
@@ -402,7 +481,7 @@ def main() -> int:
     print("\n[1/4] SQL boundary guard...")
     sql_errors = check_sql_boundary(prod_files)
     if sql_errors:
-        print(f"  FAILED: {len(sql_errors)} new SQL violations")
+        print(f"  FAILED: {len(sql_errors)} SQL architecture violations")
         errors.extend(sql_errors)
     else:
         print("  PASS")
@@ -411,7 +490,7 @@ def main() -> int:
     print("\n[2/4] Host-command boundary guard...")
     cmd_errors = check_host_command_boundary(prod_files)
     if cmd_errors:
-        print(f"  FAILED: {len(cmd_errors)} new host-command violations")
+        print(f"  FAILED: {len(cmd_errors)} host-execution architecture violations")
         errors.extend(cmd_errors)
     else:
         print("  PASS")
@@ -439,10 +518,10 @@ def main() -> int:
         print(f"GUARDRAIL CHECK FAILED — {len(errors)} issue(s):")
         for err in errors:
             print(f"\n  ! {err}")
-        print("\nNew violations were detected. Do not widen debt exceptions.")
+        print("\nArchitecture violations were detected. Do not widen approved boundaries.")
         return 1
     else:
-        print("GUARDRAIL CHECK PASSED — no new violations detected.")
+        print("GUARDRAIL CHECK PASSED — permanent architecture policy holds.")
         return 0
 
 
