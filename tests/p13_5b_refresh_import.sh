@@ -12,6 +12,9 @@ tofu_archive="${O3K_P13_TOFU_ARCHIVE:?O3K_P13_TOFU_ARCHIVE is required}"
 provider_sha="${O3K_P13_PROVIDER_SHA256:?O3K_P13_PROVIDER_SHA256 is required}"
 o3kd="${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}"
 output="${O3K_P13_5B_EVIDENCE_OUTPUT:-$root_dir/target/p13-5b/refresh-import-evidence.json}"
+if [[ "$output" != /* ]]; then
+  output="$root_dir/$output"
+fi
 baseline_result="${P13_5B_BASELINE_RESULT:-blocked}"
 password="${O3K_P13_PASSWORD:-p13-5b-refresh-import-password}"
 project_id="eba29e2d-53de-461d-ae91-ede7402713cb"
