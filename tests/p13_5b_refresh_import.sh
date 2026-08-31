@@ -916,6 +916,7 @@ resource "openstack_compute_instance_v2" "imported" {
     ignore_changes = [force_delete, stop_before_destroy]
   }
   metadata = {}
+  tags = []
   network { uuid = "$server_import_network_id" }
 }
 EOF
