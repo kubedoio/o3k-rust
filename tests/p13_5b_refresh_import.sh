@@ -285,7 +285,7 @@ for resource, reason in unrun.items():
     for kind in ("stable-read", "import"):
         scenarios.append({
             "resource": resource, "scenario": kind, "canonical_id": "", "owner_scope": project,
-            "provider_import_id": "", "first_read_route": "", "plan_actions": [],
+            "provider_import_id": "", "provider_state_id": None, "first_read_route": "", "plan_actions": [],
             "refresh_plan_actions": [], "final_plan_noop": False, "canonical_duplicate_count": None,
             "canonical_resource_count": None,
             "normal_plan_actions": [],
