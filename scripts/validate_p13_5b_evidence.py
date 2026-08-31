@@ -37,6 +37,7 @@ REQUIRED = {
     "canonical_id",
     "owner_scope",
     "provider_import_id",
+    "provider_state_id",
     "first_read_route",
     "plan_actions",
     "final_plan_noop",
@@ -105,6 +106,7 @@ def validate(document: dict) -> None:
             assert scenario["final_plan_noop"] is True
             assert scenario["canonical_id"]
             assert scenario["owner_scope"]
+            assert scenario["provider_state_id"] == scenario["canonical_id"]
             assert scenario["canonical_duplicate_count"] == 0
             assert scenario["canonical_resource_count"] == 1
             assert scenario["cleanup_result"] == "passed"
@@ -119,9 +121,11 @@ def validate(document: dict) -> None:
                 assert len(scenario["normal_plan_actions"]) >= 2
             else:
                 assert scenario["provider_import_id"]
+                assert scenario["provider_import_id"] == scenario["canonical_id"]
                 assert len(scenario["normal_plan_actions"]) >= 1
         else:
             assert scenario["result"] != "passed"
+            assert scenario.get("reason"), "non-passed scenarios require a classification reason"
     assert document["status"] in {"passed", "blocked"}
     if document["status"] == "passed":
         assert document["execution_mode"] == "gated"
@@ -147,6 +151,7 @@ def self_test() -> None:
             "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
             "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
             "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+            "provider_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
             "provider_modified": False,
         },
         "scenarios": [
@@ -156,7 +161,7 @@ def self_test() -> None:
                 "canonical_id": "keypair-name",
                 "owner_scope": "project-a",
                 "provider_import_id": "keypair-name",
-                "first_read_route": "GET /v2.1/{project_id}/os-keypairs/{name}",
+                "first_read_route": "GET /v2.1/project/os-keypairs/keypair-name",
                 "plan_actions": ["no-op"],
                 "refresh_plan_actions": [],
                 "normal_plan_actions": [["no-op"]],
@@ -166,8 +171,9 @@ def self_test() -> None:
                 "cleanup_result": "passed",
                 "backend": "sqlite",
                 "head_sha": "0" * 40,
+                "provider_state_id": "keypair-name",
                 "trace_observation": {"provider_read_routes": [{"method": "GET", "path": "/v2.1/project/os-keypairs/keypair-name"}]},
-                "canonical_identity_observation": {"resource_id": "keypair-name"},
+                "canonical_identity_observation": {"resource_id": "keypair-name", "owner_scope": "project-a", "observed_owner_scope": "project-a"},
                 "result": "passed",
             }
         ],
@@ -183,6 +189,7 @@ def self_test() -> None:
                     "canonical_id": "",
                     "owner_scope": "project-a",
                     "provider_import_id": "",
+                    "provider_state_id": None,
                     "first_read_route": "",
                     "plan_actions": [],
                     "refresh_plan_actions": [],
@@ -196,6 +203,7 @@ def self_test() -> None:
                     "trace_observation": {"provider_read_routes": [], "trace_start_ordinal": None},
                     "canonical_identity_observation": {"resource_id": None},
                     "result": "blocked",
+                    "reason": "fixture blocked for validator self-test",
                 }
             )
     validate(base)

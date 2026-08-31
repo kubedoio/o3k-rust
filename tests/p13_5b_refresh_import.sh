@@ -186,7 +186,7 @@ def actions(path):
 def cleanup_result(status):
     return "passed" if status == "404" else "blocked"
 
-def provider_read_routes(start, resource):
+def provider_read_routes(start, resource, identity):
     expected = {
         "openstack_compute_keypair_v2": "/os-keypairs/",
         "openstack_networking_network_v2": "/networks/",
@@ -201,7 +201,7 @@ def provider_read_routes(start, resource):
         user_agent = headers.get("user-agent", "")
         method = record.get("method") or record.get("request_method")
         path = record.get("path") or record.get("request_path")
-        if "Terraform Provider OpenStack/3.4.0" in user_agent and method == "GET" and path and expected in path:
+        if "Terraform Provider OpenStack/3.4.0" in user_agent and method == "GET" and path and expected in path and identity in path:
             routes.append({"method": method, "path": path, "ordinal": ordinal})
     return routes
 
@@ -215,7 +215,7 @@ def projection(path, resource):
 
 def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, cleanup, duplicate_count=0, result="passed", reason=None, trace_start=0, projection_file=None):
     normal = actions(normal_files[-1]) if normal_files else []
-    trace_routes = provider_read_routes(trace_start, resource)
+    trace_routes = provider_read_routes(trace_start, resource, canonical)
     observed = projection(projection_file, resource) if projection_file else None
     minimum_routes = 2 if kind == "stable-read" else 1
     if result == "passed" and len(trace_routes) < minimum_routes:
@@ -239,6 +239,7 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
         "canonical_id": canonical,
         "owner_scope": project,
         "provider_import_id": import_id,
+        "provider_state_id": canonical if result == "passed" else None,
         "first_read_route": trace_routes[0]["method"] + " " + trace_routes[0]["path"] if trace_routes else "",
         "trace_observation": {"provider_read_routes": trace_routes, "trace_start_ordinal": int(trace_start)},
         "canonical_identity_observation": {
