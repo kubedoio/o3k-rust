@@ -212,14 +212,66 @@ curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets/$subnet
 "$tofu" destroy -input=false -auto-approve >/dev/null
 subnet_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets/$subnet_import_id")"
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$subnet_import_network_id" >/dev/null
+rm -f subnet.tf
 
-python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" <<'PY'
+cat >port.tf <<EOF
+resource "openstack_networking_network_v2" "parent" { name = "p13-5b-port-network" }
+resource "openstack_networking_subnet_v2" "parent" {
+  network_id = openstack_networking_network_v2.parent.id
+  cidr = "198.51.142.0/24"
+  ip_version = 4
+  enable_dhcp = false
+}
+resource "openstack_networking_port_v2" "managed" {
+  name = "p13-5b-port"
+  network_id = openstack_networking_network_v2.parent.id
+  fixed_ip { subnet_id = openstack_networking_subnet_v2.parent.id }
+}
+EOF
+"$tofu" apply -input=false -auto-approve >/dev/null
+port_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_port_v2.managed"))')"
+port_network_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_network_v2.parent"))')"
+plan port-read-1
+plan port-read-2
+port_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["ports"] if x["id"] == wanted))' "$port_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$port_id" >"$work_dir/port-stable-projection.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+port_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$port_id")"
+rm -f port.tf
+
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-port-import-network"}}' >"$work_dir/port-import-network.json"
+port_import_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$work_dir/port-import-network.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/subnets" --data "{\"subnet\":{\"network_id\":\"$port_import_network_id\",\"cidr\":\"198.51.143.0/24\",\"ip_version\":4,\"enable_dhcp\":false}}" >"$work_dir/port-import-subnet.json"
+port_import_subnet_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["subnet"]["id"])' "$work_dir/port-import-subnet.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/ports" --data "{\"port\":{\"name\":\"p13-5b-port-import\",\"network_id\":\"$port_import_network_id\",\"fixed_ips\":[{\"subnet_id\":\"$port_import_subnet_id\",\"ip_address\":\"198.51.143.10\"}]}}" >"$work_dir/port-import.json"
+port_import_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"]["id"])' "$work_dir/port-import.json")"
+cat >port.tf <<EOF
+resource "openstack_networking_port_v2" "imported" {
+  name = "p13-5b-port-import"
+  network_id = "$port_import_network_id"
+}
+EOF
+port_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+"$tofu" import -input=false openstack_networking_port_v2.imported "$port_import_id" >/dev/null
+"$tofu" plan -input=false -out="$work_dir/port-import-normal.tfplan" >/dev/null
+"$tofu" show -json "$work_dir/port-import-normal.tfplan" >"$work_dir/port-import-normal.json"
+port_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["ports"] if x["id"] == wanted))' "$port_import_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$port_import_id" >"$work_dir/port-import-projection.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+port_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$port_import_id")"
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$port_import_subnet_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$port_import_network_id" >/dev/null
+
+python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" "$port_id" "$port_import_id" "$port_stable_count" "$port_count" "$port_stable_cleanup" "$port_import_cleanup" "$port_trace_start" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start = sys.argv[1:]
+root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start, port_id, port_import_id, port_stable_count, port_count, port_stable_cleanup, port_import_cleanup, port_trace_start = sys.argv[1:]
 work = pathlib.Path(work)
 
 def digest(path):
@@ -241,6 +293,7 @@ def provider_read_routes(start, resource, identity):
         "openstack_compute_keypair_v2": "/os-keypairs/",
         "openstack_networking_network_v2": "/networks/",
         "openstack_networking_subnet_v2": "/subnets/",
+        "openstack_networking_port_v2": "/ports/",
     }[resource]
     routes = []
     records = (work / "trace.jsonl").read_text().splitlines()
@@ -263,6 +316,9 @@ def projection(path, resource):
         return {"id": item["name"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
     if resource == "openstack_networking_subnet_v2":
         item = document["subnet"]
+        return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
+    if resource == "openstack_networking_port_v2":
+        item = document["port"]
         return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
     item = document["network"]
     return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id"))}
@@ -324,9 +380,10 @@ scenarios = [
     scenario("openstack_networking_network_v2", "import", import_network_id, import_network_id, [], ["network-import-normal.json"], cleanup_result(network_import_cleanup), network_count, trace_start=network_trace_start, projection_file="network-import-projection.json"),
     scenario("openstack_networking_subnet_v2", "stable-read", subnet_id, "", ["subnet-read-1-refresh.json", "subnet-read-2-refresh.json"], ["subnet-read-1-normal.json", "subnet-read-2-normal.json"], cleanup_result(subnet_stable_cleanup), subnet_stable_count, trace_start=0, projection_file="subnet-stable-projection.json"),
     scenario("openstack_networking_subnet_v2", "import", subnet_import_id, subnet_import_id, [], ["subnet-import-normal.json"], cleanup_result(subnet_import_cleanup), subnet_count, trace_start=subnet_trace_start, projection_file="subnet-import-projection.json"),
+    scenario("openstack_networking_port_v2", "stable-read", port_id, "", ["port-read-1-refresh.json", "port-read-2-refresh.json"], ["port-read-1-normal.json", "port-read-2-normal.json"], cleanup_result(port_stable_cleanup), port_stable_count, trace_start=0, projection_file="port-stable-projection.json"),
+    scenario("openstack_networking_port_v2", "import", port_import_id, port_import_id, [], ["port-import-normal.json"], cleanup_result(port_import_cleanup), port_count, trace_start=port_trace_start, projection_file="port-import-projection.json"),
 ]
 unrun = {
-    "openstack_networking_port_v2": "provider 3.4.0 supports passthrough import, but does not reconstruct configurable fixed_ip/security_group_ids; the bounded configuration-specific import case is blocked by a non-no-op plan",
     "openstack_compute_instance_v2": "requires image/compute fixture and attachment inspection",
     "openstack_networking_secgroup_v2": "requires policy fixture and default-rule observation",
     "openstack_networking_secgroup_rule_v2": "requires policy-parent fixture",
@@ -397,6 +454,10 @@ document = {
 pathlib.Path(output).parent.mkdir(parents=True, exist_ok=True)
 pathlib.Path(output).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
 PY
-python3 "$root_dir/scripts/validate_p13_5b_evidence.py" "$output"
+if [[ "${P13_5B_EXPLORATORY:-0}" == 1 ]]; then
+  python3 "$root_dir/scripts/validate_p13_5b_evidence.py" --allow-incomplete "$output"
+else
+  python3 "$root_dir/scripts/validate_p13_5b_evidence.py" "$output"
+fi
 echo "P13.5B evidence written: $output"
 [[ "$(jq -r .status "$output")" == passed ]] || { echo "P13.5B run blocked: inspect $output" >&2; exit 2; }

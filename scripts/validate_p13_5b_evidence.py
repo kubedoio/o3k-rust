@@ -51,7 +51,7 @@ REQUIRED = {
 }
 
 
-def validate(document: dict) -> None:
+def validate(document: dict, *, allow_incomplete: bool = False) -> None:
     assert document["artifact_type"] == "o3k-p13-5b-refresh-import-evidence"
     assert document["schema_version"] == 1
     assert document["phase"] == "P13.5B"
@@ -160,6 +160,8 @@ def validate(document: dict) -> None:
             assert scenario["result"] != "passed"
             assert scenario.get("reason"), "non-passed scenarios require a classification reason"
     assert document["status"] in {"passed", "blocked"}
+    if not allow_incomplete:
+        assert document["status"] == "passed", "strict validation rejects incomplete evidence"
     if document["status"] == "passed":
         assert document["execution_mode"] == "gated"
         assert document["existing_p13_baseline"]["status"] == "verified"
@@ -240,7 +242,7 @@ def self_test() -> None:
                     "reason": "fixture blocked for validator self-test",
                 }
             )
-    validate(base)
+    validate(base, allow_incomplete=True)
     negative = json.loads(json.dumps(base))
     negative["scenarios"][0]["plan_actions"] = ["update"]
     try:
@@ -256,6 +258,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("evidence", nargs="?")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="accept blocked exploratory evidence; never use for completion gates",
+    )
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -263,7 +270,7 @@ def main() -> None:
     if not args.evidence:
         parser.error("evidence is required unless --self-test is used")
     document = json.loads(Path(args.evidence).read_text())
-    validate(document)
+    validate(document, allow_incomplete=args.allow_incomplete)
     print("P13.5B evidence structure: PASS")
 
 
