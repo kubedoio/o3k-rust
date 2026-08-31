@@ -193,6 +193,7 @@ def validate_verified_baseline(baseline: object, tested_sha: str) -> None:
     """Require an executed, commit-bound record for every accepted baseline gate."""
 
     require(isinstance(baseline, dict) and baseline.get("status") == "verified", "passed evidence needs a verified baseline")
+    require(baseline.get("artifact_type") == "o3k-p13-2-4-baseline-gate-manifest", "baseline artifact type is invalid")
     require(isinstance(baseline.get("run_id"), str) and baseline["run_id"], "baseline evidence needs a run_id")
     require(baseline.get("source_commit") == tested_sha, "baseline evidence is not bound to tested_o3k_head_sha")
     gates = baseline.get("gates")
@@ -206,13 +207,15 @@ def validate_verified_baseline(baseline: object, tested_sha: str) -> None:
         and isinstance(gate.get("path"), str)
         and gate.get("result") == "passed"
         and gate.get("head_sha") == tested_sha
+        and gate.get("exit_code") == 0
         for gate in gates
     ), "baseline gate evidence is incomplete or not bound to the tested commit")
-    require(
-        isinstance(baseline.get("evidence_sha256"), str)
-        and re.fullmatch(r"[0-9a-f]{64}", baseline["evidence_sha256"]),
-        "baseline evidence needs a valid digest binding",
-    )
+    supplied_digest = baseline.get("evidence_sha256")
+    require(isinstance(supplied_digest, str) and re.fullmatch(r"[0-9a-f]{64}", supplied_digest), "baseline evidence needs a valid digest binding")
+    unsigned = dict(baseline)
+    unsigned.pop("evidence_sha256", None)
+    expected_digest = __import__("hashlib").sha256((__import__("json").dumps(unsigned, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest()
+    require(supplied_digest == expected_digest, "baseline evidence digest does not match its contents")
 
 
 class EvidenceValidationError(ValueError):

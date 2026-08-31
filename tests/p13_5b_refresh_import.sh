@@ -294,7 +294,7 @@ resource "openstack_compute_keypair_v2" "imported" {
 EOF
 keypair_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_compute_keypair_v2.imported p13-5b-import-keypair >/dev/null
-"$tofu" plan -input=false -out="$work_dir/keypair-import-normal.tfplan" >/dev/null
+plan keypair-import
 "$tofu" show -json "$work_dir/keypair-import-normal.tfplan" >"$work_dir/keypair-import-normal.json"
 "$tofu" show -json >"$work_dir/keypair-import-state.json"
 keypair_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs" | python3 -c 'import json,sys; print(sum(1 for x in json.load(sys.stdin)["keypairs"] if x["keypair"]["name"] == "p13-5b-import-keypair"))')"
@@ -333,7 +333,7 @@ resource "openstack_networking_network_v2" "imported" { name = "p13-5b-import-ne
 EOF
 network_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_network_v2.imported "$import_network_id" >/dev/null
-"$tofu" plan -input=false -out="$work_dir/network-import-normal.tfplan" >/dev/null
+plan network-import
 "$tofu" show -json "$work_dir/network-import-normal.tfplan" >"$work_dir/network-import-normal.json"
 "$tofu" show -json >"$work_dir/network-import-state.json"
 network_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["networks"] if x["id"] == wanted))' "$import_network_id")"
@@ -387,7 +387,7 @@ resource "openstack_networking_subnet_v2" "imported" {
 EOF
 subnet_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_subnet_v2.imported "$subnet_import_id" >/dev/null
-"$tofu" plan -input=false -out="$work_dir/subnet-import-normal.tfplan" >/dev/null
+plan subnet-import
 "$tofu" show -json "$work_dir/subnet-import-normal.tfplan" >"$work_dir/subnet-import-normal.json"
 "$tofu" show -json >"$work_dir/subnet-import-state.json"
 subnet_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["subnets"] if x["id"] == wanted))' "$subnet_import_id")"
@@ -473,7 +473,7 @@ resource "openstack_networking_port_v2" "imported" {
 EOF
 port_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_port_v2.imported "$port_import_id" >/dev/null
-"$tofu" plan -input=false -out="$work_dir/port-import-normal.tfplan" >/dev/null
+plan port-import
 "$tofu" show -json "$work_dir/port-import-normal.tfplan" >"$work_dir/port-import-normal.json"
 "$tofu" show -json >"$work_dir/port-import-state.json"
 port_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["ports"] if x["id"] == wanted))' "$port_import_id")"
@@ -744,7 +744,7 @@ resource "openstack_networking_secgroup_v2" "imported" {
 EOF
 security_group_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_secgroup_v2.imported "$security_group_import_id" >/dev/null
-"$tofu" plan -input=false -out="$work_dir/security-group-import-normal.tfplan" >/dev/null
+plan security-group-import
 "$tofu" show -json "$work_dir/security-group-import-normal.tfplan" >"$work_dir/security-group-import-normal.json"
 "$tofu" show -json >"$work_dir/security-group-import-state.json"
 security_group_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-groups" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["security_groups"] if x["id"] == wanted))' "$security_group_import_id")"
@@ -807,7 +807,7 @@ resource "openstack_networking_secgroup_rule_v2" "imported" {
 EOF
 rule_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_secgroup_rule_v2.imported "$rule_import_id" >/dev/null
-"$tofu" plan -input=false -out="$work_dir/security-group-rule-import-normal.tfplan" >/dev/null
+plan security-group-rule-import
 "$tofu" show -json "$work_dir/security-group-rule-import-normal.tfplan" >"$work_dir/security-group-rule-import-normal.json"
 "$tofu" show -json >"$work_dir/security-group-rule-import-state.json"
 rule_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-group-rules?security_group_id=$rule_import_parent_id" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["security_group_rules"] if x["id"] == wanted))' "$rule_import_id")"
@@ -923,7 +923,9 @@ server_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$server_import_id" >"$work_dir/server-import-projection.json"
 canonical_capture openstack_compute_instance_v2 "$server_import_id" "$work_dir/server-import-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
-server_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$server_import_id")"
+server_import_cleanup_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$server_import_id")"
+server_import_cleanup="blocked"
+[[ "$server_import_cleanup_status" == 404 ]] && server_import_cleanup="passed"
 canonical_capture openstack_compute_instance_v2 "$server_import_id" "$work_dir/server-import-canonical-after-cleanup.json"
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$server_import_subnet_id" >/dev/null
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$server_import_network_id" >/dev/null
@@ -1084,7 +1086,7 @@ resource "openstack_networking_router_v2" "imported" {
 EOF
 router_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_router_v2.imported "$router_import_id" >/dev/null
-"$tofu" plan -input=false -out="$work_dir/router-import-normal.tfplan" >/dev/null
+plan router-import
 "$tofu" show -json "$work_dir/router-import-normal.tfplan" >"$work_dir/router-import-normal.json"
 router_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["routers"] if x["id"] == wanted))' "$router_import_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers/$router_import_id" >"$work_dir/router-import-projection.json"
@@ -1402,7 +1404,9 @@ def canonical_snapshot(resource, kind, phase):
 def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, cleanup, duplicate_count=0, result="passed", reason=None, trace_start=0, projection_file=None, canonical_count_after=None, parent_file=None):
     plan_documents = {"refresh-only": [plan_document(name) for name in refresh_files], "normal": [plan_document(name) for name in normal_files]}
     windows = [plan_window(name) for name in refresh_files + normal_files]
-    trace_start = min((window["start_ordinal"] for window in windows), default=int(trace_start))
+    # The import itself performs the first provider Read. Keep the caller's
+    # pre-import boundary so that this read is part of the evidence window.
+    trace_start = int(trace_start) if kind == "import" else min((window["start_ordinal"] for window in windows), default=int(trace_start))
     trace_end = max((window["end_ordinal"] for window in windows), default=trace_start + 1)
     normal = actions(normal_files[-1]) if normal_files else []
     refresh = [actions(name) for name in refresh_files]
