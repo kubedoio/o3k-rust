@@ -54,7 +54,7 @@
       "cleanup_result": "passed",
       "final_plan_noop": true,
       "first_read_route": "GET /v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-keypair",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [
         [
           "no-op"
@@ -68,6 +68,7 @@
         "no-op"
       ],
       "provider_import_id": "",
+      "provider_state_id": "p13-5b-keypair",
       "refresh_plan_actions": [
         [],
         []
@@ -106,26 +107,10 @@
             "method": "GET",
             "ordinal": 15,
             "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-keypair"
-          },
-          {
-            "method": "GET",
-            "ordinal": 21,
-            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-import-keypair"
-          },
-          {
-            "method": "GET",
-            "ordinal": 23,
-            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-import-keypair"
-          },
-          {
-            "method": "GET",
-            "ordinal": 27,
-            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-import-keypair"
           }
         ],
         "trace_start_ordinal": 0
-      },
-      "provider_state_id": "p13-5b-keypair"
+      }
     },
     {
       "backend": "sqlite",
@@ -141,7 +126,7 @@
       "cleanup_result": "passed",
       "final_plan_noop": true,
       "first_read_route": "GET /v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-import-keypair",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [
         [
           "no-op"
@@ -152,6 +137,7 @@
         "no-op"
       ],
       "provider_import_id": "p13-5b-import-keypair",
+      "provider_state_id": "p13-5b-import-keypair",
       "refresh_plan_actions": [],
       "resource": "openstack_compute_keypair_v2",
       "result": "passed",
@@ -175,24 +161,23 @@
           }
         ],
         "trace_start_ordinal": 20
-      },
-      "provider_state_id": "p13-5b-import-keypair"
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": 0,
-      "canonical_id": "01a057d4-f68a-71f3-b6a4-07968f901d08",
+      "canonical_id": "01a0580c-218f-7de1-8493-0cd76ff14bb7",
       "canonical_identity_observation": {
         "observed_owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
         "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
-        "resource_id": "01a057d4-f68a-71f3-b6a4-07968f901d08",
+        "resource_id": "01a0580c-218f-7de1-8493-0cd76ff14bb7",
         "source": "compatibility_projection_read"
       },
       "canonical_resource_count": 1,
       "cleanup_result": "passed",
       "final_plan_noop": true,
-      "first_read_route": "GET /v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "first_read_route": "GET /v2.0/networks/01a0580c-218f-7de1-8493-0cd76ff14bb7",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [
         [
           "no-op"
@@ -206,6 +191,7 @@
         "no-op"
       ],
       "provider_import_id": "",
+      "provider_state_id": "01a0580c-218f-7de1-8493-0cd76ff14bb7",
       "refresh_plan_actions": [
         [],
         []
@@ -218,83 +204,62 @@
           {
             "method": "GET",
             "ordinal": 33,
-            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+            "path": "/v2.0/networks/01a0580c-218f-7de1-8493-0cd76ff14bb7"
           },
           {
             "method": "GET",
             "ordinal": 34,
-            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+            "path": "/v2.0/networks/01a0580c-218f-7de1-8493-0cd76ff14bb7"
           },
           {
             "method": "GET",
             "ordinal": 36,
-            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+            "path": "/v2.0/networks/01a0580c-218f-7de1-8493-0cd76ff14bb7"
           },
           {
             "method": "GET",
             "ordinal": 38,
-            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+            "path": "/v2.0/networks/01a0580c-218f-7de1-8493-0cd76ff14bb7"
           },
           {
             "method": "GET",
             "ordinal": 40,
-            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+            "path": "/v2.0/networks/01a0580c-218f-7de1-8493-0cd76ff14bb7"
           },
           {
             "method": "GET",
             "ordinal": 42,
-            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+            "path": "/v2.0/networks/01a0580c-218f-7de1-8493-0cd76ff14bb7"
           },
           {
             "method": "GET",
             "ordinal": 46,
-            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+            "path": "/v2.0/networks/01a0580c-218f-7de1-8493-0cd76ff14bb7"
           },
           {
             "method": "GET",
             "ordinal": 49,
-            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
-          },
-          {
-            "method": "GET",
-            "ordinal": 53,
-            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
-          },
-          {
-            "method": "GET",
-            "ordinal": 55,
-            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
-          },
-          {
-            "method": "GET",
-            "ordinal": 59,
-            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
-          },
-          {
-            "method": "GET",
-            "ordinal": 62,
-            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
+            "path": "/v2.0/networks/01a0580c-218f-7de1-8493-0cd76ff14bb7"
           }
         ],
         "trace_start_ordinal": 0
-      },
-      "provider_state_id": "01a057d4-f68a-71f3-b6a4-07968f901d08"
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": 0,
-      "canonical_id": "01a057d5-453c-7c93-8d1f-b66522cc97ef",
+      "canonical_id": "01a0580c-703b-7ae1-8122-c0d3f236531f",
       "canonical_identity_observation": {
         "observed_owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
         "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
-        "resource_id": "01a057d5-453c-7c93-8d1f-b66522cc97ef",
+        "resource_id": "01a0580c-703b-7ae1-8122-c0d3f236531f",
         "source": "compatibility_projection_read"
       },
       "canonical_resource_count": 1,
       "cleanup_result": "passed",
       "final_plan_noop": true,
-      "first_read_route": "GET /v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "first_read_route": "GET /v2.0/networks/01a0580c-703b-7ae1-8122-c0d3f236531f",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [
         [
           "no-op"
@@ -304,7 +269,8 @@
       "plan_actions": [
         "no-op"
       ],
-      "provider_import_id": "01a057d5-453c-7c93-8d1f-b66522cc97ef",
+      "provider_import_id": "01a0580c-703b-7ae1-8122-c0d3f236531f",
+      "provider_state_id": "01a0580c-703b-7ae1-8122-c0d3f236531f",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_network_v2",
       "result": "passed",
@@ -314,27 +280,26 @@
           {
             "method": "GET",
             "ordinal": 53,
-            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
+            "path": "/v2.0/networks/01a0580c-703b-7ae1-8122-c0d3f236531f"
           },
           {
             "method": "GET",
             "ordinal": 55,
-            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
+            "path": "/v2.0/networks/01a0580c-703b-7ae1-8122-c0d3f236531f"
           },
           {
             "method": "GET",
             "ordinal": 59,
-            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
+            "path": "/v2.0/networks/01a0580c-703b-7ae1-8122-c0d3f236531f"
           },
           {
             "method": "GET",
             "ordinal": 62,
-            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
+            "path": "/v2.0/networks/01a0580c-703b-7ae1-8122-c0d3f236531f"
           }
         ],
         "trace_start_ordinal": 52
-      },
-      "provider_state_id": "01a057d5-453c-7c93-8d1f-b66522cc97ef"
+      }
     },
     {
       "backend": "sqlite",
@@ -349,11 +314,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "requires relationship fixture and is not part of this portable core runner",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_subnet_v2",
@@ -362,8 +328,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -378,11 +343,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "requires relationship fixture and is not part of this portable core runner",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_subnet_v2",
@@ -391,8 +357,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -407,11 +372,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "provider 3.4.0 supports passthrough import, but does not reconstruct configurable fixed_ip/security_group_ids; the bounded configuration-specific import case is blocked by a non-no-op plan",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_port_v2",
@@ -420,8 +386,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -436,11 +401,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "provider 3.4.0 supports passthrough import, but does not reconstruct configurable fixed_ip/security_group_ids; the bounded configuration-specific import case is blocked by a non-no-op plan",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_port_v2",
@@ -449,8 +415,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -465,11 +430,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "requires image/compute fixture and attachment inspection",
       "refresh_plan_actions": [],
       "resource": "openstack_compute_instance_v2",
@@ -478,8 +444,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -494,11 +459,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "requires image/compute fixture and attachment inspection",
       "refresh_plan_actions": [],
       "resource": "openstack_compute_instance_v2",
@@ -507,8 +473,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -523,11 +488,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "requires policy fixture and default-rule observation",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_secgroup_v2",
@@ -536,8 +502,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -552,11 +517,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "requires policy fixture and default-rule observation",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_secgroup_v2",
@@ -565,8 +531,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -581,11 +546,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "requires policy-parent fixture",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_secgroup_rule_v2",
@@ -594,8 +560,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -610,11 +575,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "requires policy-parent fixture",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_secgroup_rule_v2",
@@ -623,8 +589,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -639,12 +604,13 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
-      "reason": "existing router gate requires rerun with its password environment set",
+      "provider_state_id": null,
+      "reason": "router stable/import cases are not part of this portable runner; the corrected upstream provider lifecycle gate passed in the baseline rerun",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_router_v2",
       "result": "blocked",
@@ -652,8 +618,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -668,12 +633,13 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
-      "reason": "existing router gate requires rerun with its password environment set",
+      "provider_state_id": null,
+      "reason": "router stable/import cases are not part of this portable runner; the corrected upstream provider lifecycle gate passed in the baseline rerun",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_router_v2",
       "result": "blocked",
@@ -681,8 +647,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -697,11 +662,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "relationship fixture and parent-retention proof not yet available",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_router_interface_v2",
@@ -710,8 +676,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -726,11 +691,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "relationship fixture and parent-retention proof not yet available",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_router_interface_v2",
@@ -739,8 +705,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -755,11 +720,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "requires public-address pool/binding fixture",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_floatingip_v2",
@@ -768,8 +734,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -784,11 +749,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "requires public-address pool/binding fixture",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_floatingip_v2",
@@ -797,8 +763,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -813,11 +778,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "native volume service unavailable without configured storage backend",
       "refresh_plan_actions": [],
       "resource": "openstack_blockstorage_volume_v3",
@@ -826,8 +792,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -842,11 +807,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "native volume service unavailable without configured storage backend",
       "refresh_plan_actions": [],
       "resource": "openstack_blockstorage_volume_v3",
@@ -855,8 +821,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -871,11 +836,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "requires disposable LVM backend and parent fixture",
       "refresh_plan_actions": [],
       "resource": "openstack_compute_volume_attach_v2",
@@ -884,8 +850,7 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     },
     {
       "backend": "sqlite",
@@ -900,11 +865,12 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+      "head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
+      "provider_state_id": null,
       "reason": "requires disposable LVM backend and parent fixture",
       "refresh_plan_actions": [],
       "resource": "openstack_compute_volume_attach_v2",
@@ -913,14 +879,13 @@
       "trace_observation": {
         "provider_read_routes": [],
         "trace_start_ordinal": null
-      },
-      "provider_state_id": null
+      }
     }
   ],
   "schema_version": 1,
   "starting_main_sha": "971748b7e7db2382ee2ac3431b8a7cef672b5508",
   "status": "blocked",
-  "tested_o3k_head_sha": "a4f379b29b86ba70ab982dcae4790840d614ed9b",
+  "tested_o3k_head_sha": "bdbb9fcc5f6f7b656946105b1a2f011bb65e16c8",
   "toolchain": {
     "opentofu": "1.12.6",
     "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
