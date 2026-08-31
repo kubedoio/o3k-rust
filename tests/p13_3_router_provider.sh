@@ -83,5 +83,6 @@ if [[ "$plan_status" -ne 0 ]]; then
   exit "$plan_status"
 fi
 $tofu destroy -target=openstack_networking_router_interface_v2.interface -auto-approve
+sleep 5
 $tofu destroy -parallelism=1 -auto-approve
 echo "P13.3 Router provider lifecycle passed"
