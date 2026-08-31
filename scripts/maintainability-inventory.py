@@ -175,7 +175,7 @@ def classify_rust_lines(lines, dedicated_test=False):
             classified.append(True)
             continue
         if pending_test and (not stripped or is_attribute):
-            classified.append(bool(test_modules) or True)
+            classified.append(True)
             continue
 
         active_test = bool(test_modules) or test_item is not None
@@ -188,9 +188,7 @@ def classify_rust_lines(lines, dedicated_test=False):
                 test_modules.append({"open_depth": brace_depth + 1, "opened": True})
             else:
                 test_item = {
-                    "start_depth": brace_depth,
                     "opened": False,
-                    "is_body": "{" in stripped,
                 }
             active_test = True
             pending_test = False
