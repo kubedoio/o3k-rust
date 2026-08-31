@@ -727,8 +727,8 @@ pub(crate) async fn remove_router_interface(
             // With no execution boundary there is no external realization to
             // observe. Finalize the canonical relationship immediately; an
             // available boundary still requires a successful observation.
-            let no_execution_boundary = state.network_dispatcher.is_none()
-                || state.network_controller.is_none();
+            let no_execution_boundary =
+                state.network_dispatcher.is_none() || state.network_controller.is_none();
             if (provider_dispatched || no_execution_boundary)
                 && let Err(error) = service
                     .finalize_l3_gateway_realm_detachment_for_project(
