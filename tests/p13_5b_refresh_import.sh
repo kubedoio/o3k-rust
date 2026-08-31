@@ -121,6 +121,25 @@ plan() {
   "$tofu" show -json "$work_dir/$label-normal.tfplan" >"$work_dir/$label-normal.json"
 }
 
+canonical_attachment_count() {
+  python3 - "$work_dir/data/o3k.sqlite" "$project_id" "$1" "$2" <<'PY'
+import sqlite3
+import sys
+
+database, project, gateway, realm = sys.argv[1:]
+connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+count = connection.execute(
+    """
+    SELECT COUNT(*)
+    FROM canonical_l3_gateway_attachments
+    WHERE project_id = ? AND gateway_id = ? AND realm_id = ? AND state = 'active'
+    """,
+    (project, gateway, realm),
+).fetchone()[0]
+print(count)
+PY
+}
+
 cat >keypair.tf <<'EOF'
 resource "openstack_compute_keypair_v2" "managed" {
   name = "p13-5b-keypair"
@@ -583,13 +602,129 @@ router_external_subnet_id="$(python3 -c 'import json,sys; print(json.load(open(s
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_external_subnet_id" >/dev/null
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_external_network_id" >/dev/null
 
-python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" "$port_id" "$port_import_id" "$port_stable_count" "$port_count" "$port_stable_cleanup" "$port_import_cleanup" "$port_trace_start" "$security_group_id" "$security_group_import_id" "$security_group_stable_count" "$security_group_count" "$security_group_stable_cleanup" "$security_group_import_cleanup" "$security_group_trace_start" "$security_group_rule_id" "$rule_import_id" "$security_group_rule_stable_count" "$rule_count" "$security_group_rule_stable_cleanup" "$rule_import_cleanup" "$rule_trace_start" "$router_id" "$router_import_id" "$router_stable_count" "$router_count" "$router_stable_cleanup" "$router_import_cleanup" "$router_trace_start" <<'PY'
+# RouterInterface is a relationship projection over the canonical gateway and
+# realm.  Keep this fixture independent from the Router rows above so that
+# importing the relationship cannot accidentally rely on Terraform-managed
+# parent state.
+cat >router-interface.tf <<'EOF'
+resource "openstack_networking_network_v2" "parent" {
+  name = "p13-5b-router-interface-network"
+}
+
+resource "openstack_networking_subnet_v2" "parent" {
+  network_id = openstack_networking_network_v2.parent.id
+  cidr = "198.51.147.0/24"
+  ip_version = 4
+  enable_dhcp = false
+}
+
+resource "openstack_networking_router_v2" "parent" {
+  name = "p13-5b-router-interface-router"
+  enable_snat = false
+}
+
+resource "openstack_networking_router_interface_v2" "managed" {
+  router_id = openstack_networking_router_v2.parent.id
+  subnet_id = openstack_networking_subnet_v2.parent.id
+}
+EOF
+"$tofu" apply -input=false -auto-approve >/dev/null
+router_interface_stable_router_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_router_v2.parent"))')"
+router_interface_stable_subnet_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_subnet_v2.parent"))')"
+router_interface_stable_network_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_network_v2.parent"))')"
+router_interface_stable_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_router_interface_v2.managed"))')"
+router_interface_stable_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+plan router-interface-read-1
+plan router-interface-read-2
+router_interface_stable_count="$(canonical_attachment_count "$router_interface_stable_router_id" "$router_interface_stable_subnet_id")"
+[[ "$router_interface_stable_count" == 1 ]] || { echo "P13.5B RouterInterface stable fixture did not create exactly one canonical attachment" >&2; exit 1; }
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$router_interface_stable_id" >"$work_dir/router-interface-stable-projection.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+router_interface_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$router_interface_stable_id")"
+router_interface_stable_count_after="$(canonical_attachment_count "$router_interface_stable_router_id" "$router_interface_stable_subnet_id")"
+[[ "$router_interface_stable_cleanup" == 404 && "$router_interface_stable_count_after" == 0 ]] || { echo "P13.5B RouterInterface stable cleanup did not remove the canonical attachment" >&2; exit 1; }
+cat >"$work_dir/router-interface-stable-parent.json" <<EOF
+{"parent_retention":"not_applicable","canonical_active_count_before":$router_interface_stable_count,"canonical_active_count_after":$router_interface_stable_count_after,"cleanup_order":["interface","router","subnet","network"],"network_id":"$router_interface_stable_network_id"}
+EOF
+rm -f router-interface.tf
+
+router_interface_import_project="$work_dir/router-interface-import-project"
+mkdir -p "$router_interface_import_project"
+cp "$project_dir/provider.tf" "$router_interface_import_project/provider.tf"
+(cd "$router_interface_import_project" && "$tofu" init -input=false -upgrade=false >/dev/null)
+cd "$router_interface_import_project"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-router-interface-import-network"}}' >"$work_dir/router-interface-import-network.json"
+router_interface_import_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$work_dir/router-interface-import-network.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/subnets" \
+  --data "{\"subnet\":{\"network_id\":\"$router_interface_import_network_id\",\"cidr\":\"198.51.150.0/24\",\"ip_version\":4,\"enable_dhcp\":false}}" >"$work_dir/router-interface-import-subnet.json"
+router_interface_import_subnet_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["subnet"]["id"])' "$work_dir/router-interface-import-subnet.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/routers" --data '{"router":{"name":"p13-5b-router-interface-import-router","enable_snat":false}}' >"$work_dir/router-interface-import-router.json"
+router_interface_import_router_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["router"]["id"])' "$work_dir/router-interface-import-router.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X PUT \
+  "http://127.0.0.1:$port/v2.0/routers/$router_interface_import_router_id/add_router_interface" \
+  --data "{\"subnet_id\":\"$router_interface_import_subnet_id\"}" >"$work_dir/router-interface-import-attachment.json"
+router_interface_import_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port_id"])' "$work_dir/router-interface-import-attachment.json")"
+
+# Keep an unrelated attachment on the same canonical router.  Import cleanup
+# must remove only the target relationship and retain this parent graph.
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-router-interface-unrelated-network"}}' >"$work_dir/router-interface-unrelated-network.json"
+router_interface_unrelated_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$work_dir/router-interface-unrelated-network.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/subnets" \
+  --data "{\"subnet\":{\"network_id\":\"$router_interface_unrelated_network_id\",\"cidr\":\"198.51.151.0/24\",\"ip_version\":4,\"enable_dhcp\":false}}" >"$work_dir/router-interface-unrelated-subnet.json"
+router_interface_unrelated_subnet_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["subnet"]["id"])' "$work_dir/router-interface-unrelated-subnet.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X PUT \
+  "http://127.0.0.1:$port/v2.0/routers/$router_interface_import_router_id/add_router_interface" \
+  --data "{\"subnet_id\":\"$router_interface_unrelated_subnet_id\"}" >"$work_dir/router-interface-unrelated-attachment.json"
+router_interface_unrelated_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port_id"])' "$work_dir/router-interface-unrelated-attachment.json")"
+router_interface_import_count="$(canonical_attachment_count "$router_interface_import_router_id" "$router_interface_import_subnet_id")"
+[[ "$router_interface_import_count" == 1 ]] || { echo "P13.5B RouterInterface import fixture did not create exactly one target canonical attachment" >&2; exit 1; }
+cat >router-interface.tf <<EOF
+resource "openstack_networking_router_interface_v2" "imported" {
+  router_id = "$router_interface_import_router_id"
+  subnet_id = "$router_interface_import_subnet_id"
+}
+EOF
+router_interface_import_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+"$tofu" import -input=false openstack_networking_router_interface_v2.imported "$router_interface_import_id" >/dev/null
+plan router-interface-import-read-1
+plan router-interface-import-read-2
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$router_interface_import_id" >"$work_dir/router-interface-import-projection.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+router_interface_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$router_interface_import_id")"
+router_interface_import_count_after="$(canonical_attachment_count "$router_interface_import_router_id" "$router_interface_import_subnet_id")"
+router_interface_import_router_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers/$router_interface_import_router_id")"
+router_interface_import_subnet_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets/$router_interface_import_subnet_id")"
+router_interface_import_network_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$router_interface_import_network_id")"
+router_interface_unrelated_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$router_interface_unrelated_id")"
+router_interface_unrelated_count_after="$(canonical_attachment_count "$router_interface_import_router_id" "$router_interface_unrelated_subnet_id")"
+[[ "$router_interface_import_cleanup" == 404 && "$router_interface_import_count_after" == 0 ]] || { echo "P13.5B RouterInterface import cleanup did not remove only the target attachment" >&2; exit 1; }
+[[ "$router_interface_import_router_status" == 200 && "$router_interface_import_subnet_status" == 200 && "$router_interface_import_network_status" == 200 && "$router_interface_unrelated_status" == 200 && "$router_interface_unrelated_count_after" == 1 ]] || { echo "P13.5B RouterInterface import did not retain canonical parents/unrelated attachment" >&2; exit 1; }
+cat >"$work_dir/router-interface-import-parent.json" <<EOF
+{"parent_retention":"passed","router_status":$router_interface_import_router_status,"target_subnet_status":$router_interface_import_subnet_status,"target_network_status":$router_interface_import_network_status,"unrelated_attachment_status":$router_interface_unrelated_status,"target_active_count_before":$router_interface_import_count,"target_active_count_after":$router_interface_import_count_after,"unrelated_active_count_after":$router_interface_unrelated_count_after,"cleanup_order":["target-interface","unrelated-interface","router","subnets","networks"]}
+EOF
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X PUT \
+  "http://127.0.0.1:$port/v2.0/routers/$router_interface_import_router_id/remove_router_interface" \
+  --data "{\"port_id\":\"$router_interface_unrelated_id\"}" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/routers/$router_interface_import_router_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_interface_import_subnet_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_interface_unrelated_subnet_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_interface_import_network_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_interface_unrelated_network_id" >/dev/null
+rm -f router-interface.tf
+cd "$project_dir"
+
+python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" "$port_id" "$port_import_id" "$port_stable_count" "$port_count" "$port_stable_cleanup" "$port_import_cleanup" "$port_trace_start" "$security_group_id" "$security_group_import_id" "$security_group_stable_count" "$security_group_count" "$security_group_stable_cleanup" "$security_group_import_cleanup" "$security_group_trace_start" "$security_group_rule_id" "$rule_import_id" "$security_group_rule_stable_count" "$rule_count" "$security_group_rule_stable_cleanup" "$rule_import_cleanup" "$rule_trace_start" "$router_id" "$router_import_id" "$router_stable_count" "$router_count" "$router_stable_cleanup" "$router_import_cleanup" "$router_trace_start" "$router_interface_stable_id" "$router_interface_import_id" "$router_interface_stable_count" "$router_interface_import_count" "$router_interface_stable_count_after" "$router_interface_import_count_after" "$router_interface_stable_cleanup" "$router_interface_import_cleanup" "$router_interface_stable_trace_start" "$router_interface_import_trace_start" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start, port_id, port_import_id, port_stable_count, port_count, port_stable_cleanup, port_import_cleanup, port_trace_start, security_group_id, security_group_import_id, security_group_stable_count, security_group_count, security_group_stable_cleanup, security_group_import_cleanup, security_group_trace_start, security_group_rule_id, rule_import_id, security_group_rule_stable_count, rule_count, security_group_rule_stable_cleanup, rule_import_cleanup, rule_trace_start, router_id, router_import_id, router_stable_count, router_count, router_stable_cleanup, router_import_cleanup, router_trace_start = sys.argv[1:]
+root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start, port_id, port_import_id, port_stable_count, port_count, port_stable_cleanup, port_import_cleanup, port_trace_start, security_group_id, security_group_import_id, security_group_stable_count, security_group_count, security_group_stable_cleanup, security_group_import_cleanup, security_group_trace_start, security_group_rule_id, rule_import_id, security_group_rule_stable_count, rule_count, security_group_rule_stable_cleanup, rule_import_cleanup, rule_trace_start, router_id, router_import_id, router_stable_count, router_count, router_stable_cleanup, router_import_cleanup, router_trace_start, router_interface_stable_id, router_interface_import_id, router_interface_stable_count, router_interface_import_count, router_interface_stable_count_after, router_interface_import_count_after, router_interface_stable_cleanup, router_interface_import_cleanup, router_interface_stable_trace_start, router_interface_import_trace_start = sys.argv[1:]
 work = pathlib.Path(work)
 
 def digest(path):
@@ -615,6 +750,7 @@ def provider_read_routes(start, resource, identity):
         "openstack_networking_secgroup_v2": "/security-groups/",
         "openstack_networking_secgroup_rule_v2": "/security-group-rules/",
         "openstack_networking_router_v2": "/routers/",
+        "openstack_networking_router_interface_v2": "/ports/",
         "openstack_compute_instance_v2": "/servers/",
     }[resource]
     routes = []
@@ -651,16 +787,20 @@ def projection(path, resource):
     if resource == "openstack_networking_router_v2":
         item = document["router"]
         return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
+    if resource == "openstack_networking_router_interface_v2":
+        item = document["port"]
+        return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
     if resource == "openstack_compute_instance_v2":
         item = document["server"]
         return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
     item = document["network"]
     return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id"))}
 
-def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, cleanup, duplicate_count=0, result="passed", reason=None, trace_start=0, projection_file=None):
+def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, cleanup, duplicate_count=0, result="passed", reason=None, trace_start=0, projection_file=None, canonical_count_after=None, parent_file=None):
     normal = actions(normal_files[-1]) if normal_files else []
     trace_routes = provider_read_routes(trace_start, resource, canonical)
     observed = projection(projection_file, resource) if projection_file else None
+    parent_observation = json.loads((work / parent_file).read_text()) if parent_file else None
     minimum_routes = 2 if kind == "stable-read" else 1
     if result == "passed" and len(trace_routes) < minimum_routes:
         result = "blocked"
@@ -668,6 +808,9 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
     if result == "passed" and int(duplicate_count) != 1:
         result = "blocked"
         reason = f"canonical compatibility projection count was {duplicate_count}, expected exactly one"
+    if result == "passed" and canonical_count_after is not None and int(canonical_count_after) != 0:
+        result = "blocked"
+        reason = f"canonical compatibility projection cleanup count was {canonical_count_after}, expected zero"
     cleanup_allowed = cleanup == "passed" or (resource == "openstack_compute_instance_v2" and kind == "import" and cleanup == "retained")
     if result == "passed" and not cleanup_allowed:
         result = "blocked"
@@ -678,6 +821,11 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
     if result == "passed" and kind == "import" and not import_id:
         result = "blocked"
         reason = "provider import identifier was empty"
+    if result == "passed" and kind == "import" and (
+        not parent_observation or parent_observation.get("parent_retention") != "passed"
+    ):
+        result = "blocked"
+        reason = "import did not provide a passing canonical parent-retention observation"
     item = {
         "resource": resource,
         "scenario": kind,
@@ -699,6 +847,8 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
         "final_plan_noop": result == "passed" and not normal,
         "canonical_duplicate_count": max(int(duplicate_count) - 1, 0) if result == "passed" else None,
         "canonical_resource_count": int(duplicate_count) if result == "passed" else None,
+        "canonical_resource_count_after_cleanup": int(canonical_count_after) if canonical_count_after is not None and result == "passed" else None,
+        "canonical_parent_observation": parent_observation,
         "cleanup_result": cleanup,
         "backend": "sqlite",
         "head_sha": __import__("subprocess").check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip(),
@@ -723,11 +873,12 @@ scenarios = [
     scenario("openstack_networking_secgroup_rule_v2", "import", rule_import_id, rule_import_id, [], ["security-group-rule-import-normal.json"], cleanup_result(rule_import_cleanup), rule_count, trace_start=rule_trace_start, projection_file="security-group-rule-import-projection.json"),
     scenario("openstack_networking_router_v2", "stable-read", router_id, "", ["router-read-1-refresh.json", "router-read-2-refresh.json"], ["router-read-1-normal.json", "router-read-2-normal.json"], cleanup_result(router_stable_cleanup), router_stable_count, trace_start=0, projection_file="router-stable-projection.json"),
     scenario("openstack_networking_router_v2", "import", router_import_id, router_import_id, [], ["router-import-normal.json"], cleanup_result(router_import_cleanup), router_count, trace_start=router_trace_start, projection_file="router-import-projection.json"),
+    scenario("openstack_networking_router_interface_v2", "stable-read", router_interface_stable_id, "", ["router-interface-read-1-refresh.json", "router-interface-read-2-refresh.json"], ["router-interface-read-1-normal.json", "router-interface-read-2-normal.json"], cleanup_result(router_interface_stable_cleanup), router_interface_stable_count, trace_start=router_interface_stable_trace_start, projection_file="router-interface-stable-projection.json", canonical_count_after=router_interface_stable_count_after, parent_file="router-interface-stable-parent.json"),
+    scenario("openstack_networking_router_interface_v2", "import", router_interface_import_id, router_interface_import_id, ["router-interface-import-read-1-refresh.json", "router-interface-import-read-2-refresh.json"], ["router-interface-import-read-1-normal.json", "router-interface-import-read-2-normal.json"], cleanup_result(router_interface_import_cleanup), router_interface_import_count, trace_start=router_interface_import_trace_start, projection_file="router-interface-import-projection.json", canonical_count_after=router_interface_import_count_after, parent_file="router-interface-import-parent.json"),
     scenario("openstack_compute_instance_v2", "stable-read", server_id, "", ["server-read-1-refresh.json", "server-read-2-refresh.json"], ["server-read-1-normal.json", "server-read-2-normal.json"], cleanup_result(server_stable_cleanup), server_stable_count, trace_start=server_stable_trace_start, projection_file="server-stable-projection.json"),
     scenario("openstack_compute_instance_v2", "import", server_import_id, server_import_id, ["server-import-read-1-refresh.json", "server-import-read-2-refresh.json"], ["server-import-read-1-normal.json", "server-import-read-2-normal.json"], server_import_cleanup, server_count, trace_start=server_import_trace_start, projection_file="server-import-projection.json"),
 ]
 unrun = {
-    "openstack_networking_router_interface_v2": "relationship fixture and parent-retention proof not yet available",
     "openstack_networking_floatingip_v2": "requires public-address pool/binding fixture",
     "openstack_blockstorage_volume_v3": "native volume stable/import fixture is not part of this reusable runner; the host-backed P13.4 volume gates passed",
     "openstack_compute_volume_attach_v2": "relationship fixture and parent-retention proof are not part of this reusable runner; the host-backed P13.4 attachment gate passed",
