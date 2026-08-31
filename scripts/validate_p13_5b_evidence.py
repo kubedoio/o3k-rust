@@ -90,7 +90,7 @@ def validate(document: dict) -> None:
             ["git", "-C", str(repository), "diff", "--name-only", tested_sha, current_sha],
             text=True,
         ).splitlines()
-        assert changed == ["docs/compatibility/p13-5/p13-5b-refresh-import-evidence.json"]
+        assert changed in ([], ["docs/compatibility/p13-5/p13-5b-refresh-import-evidence.json"])
     contract_path = Path(__file__).resolve().parents[1] / "docs/compatibility/p13-5/p13-5a-convergence-contract.json"
     contract = json.loads(contract_path.read_text())
     assert set(contract["resources"][i]["resource"] for i in range(len(contract["resources"]))) == RESOURCES

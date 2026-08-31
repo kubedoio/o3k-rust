@@ -407,7 +407,7 @@ pub(crate) async fn delete_router(
             Ok(snapshot) => snapshot,
             Err(error) => return network_error(error),
         };
-        let _dispatched = match dispatch_l3_gateway_snapshot(
+        let dispatched = match dispatch_l3_gateway_snapshot(
             &state,
             project,
             snapshot,
@@ -419,17 +419,13 @@ pub(crate) async fn delete_router(
             Ok(value) => value,
             Err(response) => return response,
         };
-        if let Err(error) = service
-            .finalize_l3_gateway_deletion_for_project(project, &id, deleting.generation)
-            .await
+        if dispatched
+            && let Err(error) = service
+                .finalize_l3_gateway_deletion_for_project(project, &id, deleting.generation)
+                .await
         {
             return network_error(error);
         }
-    } else if let Err(error) = service
-        .finalize_l3_gateway_deletion_for_project(project, &id, deleting.generation)
-        .await
-    {
-        return network_error(error);
     }
     // A successful dispatch means the network executor completed its
     // provider mutation and observation workflow; without an execution
@@ -723,9 +719,7 @@ pub(crate) async fn remove_router_interface(
                 }
                 provider_dispatched = true;
             }
-            if (provider_dispatched
-                || state.network_dispatcher.is_none()
-                || state.network_controller.is_none())
+            if provider_dispatched
                 && let Err(error) = service
                     .finalize_l3_gateway_realm_detachment_for_project(
                         project,
