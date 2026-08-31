@@ -1,6 +1,7 @@
 {
   "artifact_type": "o3k-p13-5b-refresh-import-evidence",
   "canonical_authority": "o3k",
+  "execution_mode": "exploratory_blocked_baseline",
   "existing_p13_baseline": {
     "backend_limitations": [
       "native volume service unavailable",
@@ -40,11 +41,17 @@
       "backend": "sqlite",
       "canonical_duplicate_count": 0,
       "canonical_id": "p13-5b-keypair",
+      "canonical_identity_observation": {
+        "observed_owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": "p13-5b-keypair",
+        "source": "compatibility_projection_read"
+      },
       "canonical_resource_count": 1,
       "cleanup_result": "passed",
       "final_plan_noop": true,
-      "first_read_route": "GET /v2.1/{project_id}/os-keypairs/{name}",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "first_read_route": "GET /v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-keypair",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [
         [
           "no-op"
@@ -64,17 +71,73 @@
       ],
       "resource": "openstack_compute_keypair_v2",
       "result": "passed",
-      "scenario": "stable-read"
+      "scenario": "stable-read",
+      "trace_observation": {
+        "provider_read_routes": [
+          {
+            "method": "GET",
+            "ordinal": 3,
+            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-keypair"
+          },
+          {
+            "method": "GET",
+            "ordinal": 5,
+            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-keypair"
+          },
+          {
+            "method": "GET",
+            "ordinal": 7,
+            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-keypair"
+          },
+          {
+            "method": "GET",
+            "ordinal": 9,
+            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-keypair"
+          },
+          {
+            "method": "GET",
+            "ordinal": 11,
+            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-keypair"
+          },
+          {
+            "method": "GET",
+            "ordinal": 15,
+            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-keypair"
+          },
+          {
+            "method": "GET",
+            "ordinal": 21,
+            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-import-keypair"
+          },
+          {
+            "method": "GET",
+            "ordinal": 23,
+            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-import-keypair"
+          },
+          {
+            "method": "GET",
+            "ordinal": 27,
+            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-import-keypair"
+          }
+        ],
+        "trace_start_ordinal": 0
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": 0,
       "canonical_id": "p13-5b-import-keypair",
+      "canonical_identity_observation": {
+        "observed_owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": "p13-5b-import-keypair",
+        "source": "compatibility_projection_read"
+      },
       "canonical_resource_count": 1,
       "cleanup_result": "passed",
       "final_plan_noop": true,
-      "first_read_route": "GET /v2.1/{project_id}/os-keypairs/{name}",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "first_read_route": "GET /v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-import-keypair",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [
         [
           "no-op"
@@ -88,17 +151,43 @@
       "refresh_plan_actions": [],
       "resource": "openstack_compute_keypair_v2",
       "result": "passed",
-      "scenario": "import"
+      "scenario": "import",
+      "trace_observation": {
+        "provider_read_routes": [
+          {
+            "method": "GET",
+            "ordinal": 21,
+            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-import-keypair"
+          },
+          {
+            "method": "GET",
+            "ordinal": 23,
+            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-import-keypair"
+          },
+          {
+            "method": "GET",
+            "ordinal": 27,
+            "path": "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-import-keypair"
+          }
+        ],
+        "trace_start_ordinal": 20
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": 0,
-      "canonical_id": "01a057c5-c181-79d1-bb88-3d5adff112f3",
+      "canonical_id": "01a057d4-f68a-71f3-b6a4-07968f901d08",
+      "canonical_identity_observation": {
+        "observed_owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": "01a057d4-f68a-71f3-b6a4-07968f901d08",
+        "source": "compatibility_projection_read"
+      },
       "canonical_resource_count": 1,
       "cleanup_result": "passed",
       "final_plan_noop": true,
-      "first_read_route": "GET /v2.0/networks/{id}",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "first_read_route": "GET /v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [
         [
           "no-op"
@@ -118,17 +207,88 @@
       ],
       "resource": "openstack_networking_network_v2",
       "result": "passed",
-      "scenario": "stable-read"
+      "scenario": "stable-read",
+      "trace_observation": {
+        "provider_read_routes": [
+          {
+            "method": "GET",
+            "ordinal": 33,
+            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+          },
+          {
+            "method": "GET",
+            "ordinal": 34,
+            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+          },
+          {
+            "method": "GET",
+            "ordinal": 36,
+            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+          },
+          {
+            "method": "GET",
+            "ordinal": 38,
+            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+          },
+          {
+            "method": "GET",
+            "ordinal": 40,
+            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+          },
+          {
+            "method": "GET",
+            "ordinal": 42,
+            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+          },
+          {
+            "method": "GET",
+            "ordinal": 46,
+            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+          },
+          {
+            "method": "GET",
+            "ordinal": 49,
+            "path": "/v2.0/networks/01a057d4-f68a-71f3-b6a4-07968f901d08"
+          },
+          {
+            "method": "GET",
+            "ordinal": 53,
+            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
+          },
+          {
+            "method": "GET",
+            "ordinal": 55,
+            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
+          },
+          {
+            "method": "GET",
+            "ordinal": 59,
+            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
+          },
+          {
+            "method": "GET",
+            "ordinal": 62,
+            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
+          }
+        ],
+        "trace_start_ordinal": 0
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": 0,
-      "canonical_id": "01a057c6-0f53-7502-9798-c1b33a86efd0",
+      "canonical_id": "01a057d5-453c-7c93-8d1f-b66522cc97ef",
+      "canonical_identity_observation": {
+        "observed_owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": "01a057d5-453c-7c93-8d1f-b66522cc97ef",
+        "source": "compatibility_projection_read"
+      },
       "canonical_resource_count": 1,
       "cleanup_result": "passed",
       "final_plan_noop": true,
-      "first_read_route": "GET /v2.0/networks/{id}",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "first_read_route": "GET /v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [
         [
           "no-op"
@@ -138,21 +298,51 @@
       "plan_actions": [
         "no-op"
       ],
-      "provider_import_id": "01a057c6-0f53-7502-9798-c1b33a86efd0",
+      "provider_import_id": "01a057d5-453c-7c93-8d1f-b66522cc97ef",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_network_v2",
       "result": "passed",
-      "scenario": "import"
+      "scenario": "import",
+      "trace_observation": {
+        "provider_read_routes": [
+          {
+            "method": "GET",
+            "ordinal": 53,
+            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
+          },
+          {
+            "method": "GET",
+            "ordinal": 55,
+            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
+          },
+          {
+            "method": "GET",
+            "ordinal": 59,
+            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
+          },
+          {
+            "method": "GET",
+            "ordinal": 62,
+            "path": "/v2.0/networks/01a057d5-453c-7c93-8d1f-b66522cc97ef"
+          }
+        ],
+        "trace_start_ordinal": 52
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -161,17 +351,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_networking_subnet_v2",
       "result": "blocked",
-      "scenario": "stable-read"
+      "scenario": "stable-read",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -180,55 +379,82 @@
       "refresh_plan_actions": [],
       "resource": "openstack_networking_subnet_v2",
       "result": "blocked",
-      "scenario": "import"
+      "scenario": "import",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
-      "reason": "provider 3.4.0 does not reconstruct configurable fixed_ip/security_group_ids on import; existing gate proves a non-no-op plan",
+      "reason": "provider 3.4.0 supports passthrough import, but does not reconstruct configurable fixed_ip/security_group_ids; the bounded configuration-specific import case is blocked by a non-no-op plan",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_port_v2",
       "result": "blocked",
-      "scenario": "stable-read"
+      "scenario": "stable-read",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
-      "reason": "provider 3.4.0 does not reconstruct configurable fixed_ip/security_group_ids on import; existing gate proves a non-no-op plan",
+      "reason": "provider 3.4.0 supports passthrough import, but does not reconstruct configurable fixed_ip/security_group_ids; the bounded configuration-specific import case is blocked by a non-no-op plan",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_port_v2",
-      "result": "upstream_provider_unsupported",
-      "scenario": "import"
+      "result": "blocked",
+      "scenario": "import",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -237,17 +463,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_compute_instance_v2",
       "result": "blocked",
-      "scenario": "stable-read"
+      "scenario": "stable-read",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -256,17 +491,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_compute_instance_v2",
       "result": "blocked",
-      "scenario": "import"
+      "scenario": "import",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -275,17 +519,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_networking_secgroup_v2",
       "result": "blocked",
-      "scenario": "stable-read"
+      "scenario": "stable-read",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -294,17 +547,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_networking_secgroup_v2",
       "result": "blocked",
-      "scenario": "import"
+      "scenario": "import",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -313,17 +575,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_networking_secgroup_rule_v2",
       "result": "blocked",
-      "scenario": "stable-read"
+      "scenario": "stable-read",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -332,17 +603,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_networking_secgroup_rule_v2",
       "result": "blocked",
-      "scenario": "import"
+      "scenario": "import",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -351,17 +631,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_networking_router_v2",
       "result": "blocked",
-      "scenario": "stable-read"
+      "scenario": "stable-read",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -370,17 +659,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_networking_router_v2",
       "result": "blocked",
-      "scenario": "import"
+      "scenario": "import",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -389,17 +687,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_networking_router_interface_v2",
       "result": "blocked",
-      "scenario": "stable-read"
+      "scenario": "stable-read",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -408,17 +715,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_networking_router_interface_v2",
       "result": "blocked",
-      "scenario": "import"
+      "scenario": "import",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -427,17 +743,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_networking_floatingip_v2",
       "result": "blocked",
-      "scenario": "stable-read"
+      "scenario": "stable-read",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -446,17 +771,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_networking_floatingip_v2",
       "result": "blocked",
-      "scenario": "import"
+      "scenario": "import",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -465,17 +799,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_blockstorage_volume_v3",
       "result": "blocked",
-      "scenario": "stable-read"
+      "scenario": "stable-read",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -484,17 +827,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_blockstorage_volume_v3",
       "result": "blocked",
-      "scenario": "import"
+      "scenario": "import",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -503,17 +855,26 @@
       "refresh_plan_actions": [],
       "resource": "openstack_compute_volume_attach_v2",
       "result": "blocked",
-      "scenario": "stable-read"
+      "scenario": "stable-read",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     },
     {
       "backend": "sqlite",
       "canonical_duplicate_count": null,
       "canonical_id": "",
+      "canonical_identity_observation": {
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "resource_id": null,
+        "source": "not_run"
+      },
       "canonical_resource_count": null,
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "af9503dbab51c9ac21283137a9c6ae5e603341db",
+      "head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -522,12 +883,17 @@
       "refresh_plan_actions": [],
       "resource": "openstack_compute_volume_attach_v2",
       "result": "blocked",
-      "scenario": "import"
+      "scenario": "import",
+      "trace_observation": {
+        "provider_read_routes": [],
+        "trace_start_ordinal": null
+      }
     }
   ],
   "schema_version": 1,
   "starting_main_sha": "971748b7e7db2382ee2ac3431b8a7cef672b5508",
   "status": "blocked",
+  "tested_o3k_head_sha": "29119fcac961ec34d7b9a304781204688880ebcc",
   "toolchain": {
     "opentofu": "1.12.6",
     "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
