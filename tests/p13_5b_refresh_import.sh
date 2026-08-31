@@ -18,6 +18,11 @@ fi
 baseline_result="${P13_5B_BASELINE_RESULT:-blocked}"
 password="${O3K_P13_PASSWORD:-p13-5b-refresh-import-password}"
 project_id="eba29e2d-53de-461d-ae91-ede7402713cb"
+external_pool_name="p13-5b-public-pool"
+external_pool_cidr="198.51.104.0/29"
+external_pool_first="198.51.104.2"
+external_pool_last="198.51.104.6"
+external_realm_id=""
 port="${O3K_P13_PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
 work_dir="$(mktemp -d /var/tmp/o3k-p13-5b.XXXXXX)"
 pid=""
@@ -79,6 +84,10 @@ restart_daemon() {
   pid=""
   O3K_BOOTSTRAP_PASSWORD="$password" \
   O3K_TOKEN_SIGNING_KEY="p13-5b-token-signing-key-012345678901234567890123" \
+  O3K_NETWORK_EXTERNAL_REALM_ID="$external_realm_id" \
+  O3K_PUBLIC_POOL_CIDR="$external_pool_cidr" \
+  O3K_PUBLIC_POOL_FIRST="$external_pool_first" \
+  O3K_PUBLIC_POOL_LAST="$external_pool_last" \
   O3K_COMPATIBILITY_TRACE_PATH="$work_dir/trace.jsonl" \
     "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
   pid=$!
@@ -93,6 +102,14 @@ restart_daemon() {
   token="$(awk 'tolower($1)=="x-subject-token:" {print $2}' "$work_dir/auth.headers" | tr -d '\r')"
   [[ -n "$token" ]] || { echo "P13.5B BLOCKED: re-authentication after daemon restart failed" >&2; exit 2; }
 }
+
+# Create the native external realm first, then restart with the public pool
+# configuration so the allocator is reconstructed against that canonical ID.
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/networks" \
+  --data "{\"network\":{\"name\":\"$external_pool_name\"}}" >"$work_dir/external-pool-network.json"
+external_realm_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$work_dir/external-pool-network.json")"
+restart_daemon
 
 export TF_CLI_CONFIG_FILE="$work_dir/tofu.tfrc" TF_IN_AUTOMATION=1
 project_dir="$work_dir/project"
@@ -335,6 +352,88 @@ port_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token:
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$port_import_subnet_id" >/dev/null
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$port_import_network_id" >/dev/null
 cd "$project_dir"
+
+cat >floating-ip.tf <<EOF
+resource "openstack_networking_network_v2" "private" { name = "p13-5b-floating-ip-network" }
+resource "openstack_networking_subnet_v2" "private" {
+  network_id = openstack_networking_network_v2.private.id
+  cidr = "198.51.148.0/24"
+  ip_version = 4
+  enable_dhcp = false
+}
+resource "openstack_networking_port_v2" "private" {
+  name = "p13-5b-floating-ip-port"
+  network_id = openstack_networking_network_v2.private.id
+  fixed_ip { subnet_id = openstack_networking_subnet_v2.private.id }
+}
+resource "openstack_networking_floatingip_v2" "managed" {
+  pool = "$external_pool_name"
+  port_id = openstack_networking_port_v2.private.id
+}
+EOF
+"$tofu" apply -input=false -auto-approve >/dev/null
+fip_stable_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_floatingip_v2.managed"))')"
+fip_stable_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+plan floating-ip-read-1
+plan floating-ip-read-2
+fip_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["floatingips"] if x["id"] == wanted))' "$fip_stable_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips/$fip_stable_id" >"$work_dir/floating-ip-stable-projection.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+fip_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips/$fip_stable_id")"
+fip_stable_count_after="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["floatingips"] if x["id"] == wanted))' "$fip_stable_id")"
+[[ "$fip_stable_cleanup" == 404 && "$fip_stable_count_after" == 0 ]] || { echo "P13.5B FloatingIP stable cleanup did not disassociate and release the allocation" >&2; exit 1; }
+rm -f floating-ip.tf
+
+fip_import_project="$work_dir/floating-ip-import-project"
+mkdir -p "$fip_import_project"
+cp "$project_dir/provider.tf" "$fip_import_project/provider.tf"
+(cd "$fip_import_project" && "$tofu" init -input=false -upgrade=false >/dev/null)
+cd "$fip_import_project"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-floating-ip-import-network"}}' >"$work_dir/floating-ip-import-network.json"
+fip_import_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$work_dir/floating-ip-import-network.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/subnets" \
+  --data "{\"subnet\":{\"network_id\":\"$fip_import_network_id\",\"cidr\":\"198.51.149.0/24\",\"ip_version\":4,\"enable_dhcp\":false}}" >"$work_dir/floating-ip-import-subnet.json"
+fip_import_subnet_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["subnet"]["id"])' "$work_dir/floating-ip-import-subnet.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/ports" \
+  --data "{\"port\":{\"name\":\"p13-5b-floating-ip-import-port\",\"network_id\":\"$fip_import_network_id\",\"fixed_ips\":[{\"subnet_id\":\"$fip_import_subnet_id\",\"ip_address\":\"198.51.149.10\"}]}}" >"$work_dir/floating-ip-import-port.json"
+fip_import_port_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"]["id"])' "$work_dir/floating-ip-import-port.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/floatingips" \
+  --data "{\"floatingip\":{\"floating_network_id\":\"$external_realm_id\",\"port_id\":\"$fip_import_port_id\"}}" >"$work_dir/floating-ip-import.json"
+fip_import_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["floatingip"]["id"])' "$work_dir/floating-ip-import.json")"
+fip_import_count_before="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["floatingips"] if x["id"] == wanted))' "$fip_import_id")"
+cat >floating-ip.tf <<EOF
+resource "openstack_networking_floatingip_v2" "imported" {
+  pool = "$external_pool_name"
+  port_id = "$fip_import_port_id"
+}
+EOF
+fip_import_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+"$tofu" import -input=false openstack_networking_floatingip_v2.imported "$fip_import_id" >/dev/null
+plan floating-ip-import-read-1
+plan floating-ip-import-read-2
+fip_import_count_after_read="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["floatingips"] if x["id"] == wanted))' "$fip_import_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips/$fip_import_id" >"$work_dir/floating-ip-import-projection.json"
+[[ "$fip_import_count_before" == 1 && "$fip_import_count_after_read" == 1 ]] || { echo "P13.5B FloatingIP import changed allocator/list identity" >&2; exit 1; }
+
+# Exercise the provider's disassociate path before destroy exercises release.
+sed -i "s/port_id = \"$fip_import_port_id\"/port_id = null/" floating-ip.tf
+"$tofu" apply -input=false -auto-approve >/dev/null
+fip_import_disassociated_port="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips/$fip_import_id" | python3 -c 'import json,sys; print(json.load(sys.stdin)["floatingip"].get("port_id") or "")')"
+[[ -z "$fip_import_disassociated_port" ]] || { echo "P13.5B FloatingIP import cleanup did not disassociate the port" >&2; exit 1; }
+"$tofu" destroy -input=false -auto-approve >/dev/null
+fip_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips/$fip_import_id")"
+fip_import_count_after_cleanup="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["floatingips"] if x["id"] == wanted))' "$fip_import_id")"
+[[ "$fip_import_cleanup" == 404 && "$fip_import_count_after_cleanup" == 0 ]] || { echo "P13.5B FloatingIP import cleanup did not release the allocation" >&2; exit 1; }
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/ports/$fip_import_port_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$fip_import_subnet_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$fip_import_network_id" >/dev/null
+rm -f floating-ip.tf
+cd "$project_dir"
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$external_realm_id" >/dev/null
 
 cat >security-group.tf <<'EOF'
 resource "openstack_networking_secgroup_v2" "managed" {
@@ -718,13 +817,13 @@ curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/netwo
 rm -f router-interface.tf
 cd "$project_dir"
 
-python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" "$port_id" "$port_import_id" "$port_stable_count" "$port_count" "$port_stable_cleanup" "$port_import_cleanup" "$port_trace_start" "$security_group_id" "$security_group_import_id" "$security_group_stable_count" "$security_group_count" "$security_group_stable_cleanup" "$security_group_import_cleanup" "$security_group_trace_start" "$security_group_rule_id" "$rule_import_id" "$security_group_rule_stable_count" "$rule_count" "$security_group_rule_stable_cleanup" "$rule_import_cleanup" "$rule_trace_start" "$router_id" "$router_import_id" "$router_stable_count" "$router_count" "$router_stable_cleanup" "$router_import_cleanup" "$router_trace_start" "$router_interface_stable_id" "$router_interface_import_id" "$router_interface_stable_count" "$router_interface_import_count" "$router_interface_stable_count_after" "$router_interface_import_count_after" "$router_interface_stable_cleanup" "$router_interface_import_cleanup" "$router_interface_stable_trace_start" "$router_interface_import_trace_start" <<'PY'
+python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" "$port_id" "$port_import_id" "$port_stable_count" "$port_count" "$port_stable_cleanup" "$port_import_cleanup" "$port_trace_start" "$security_group_id" "$security_group_import_id" "$security_group_stable_count" "$security_group_count" "$security_group_stable_cleanup" "$security_group_import_cleanup" "$security_group_trace_start" "$security_group_rule_id" "$rule_import_id" "$security_group_rule_stable_count" "$rule_count" "$security_group_rule_stable_cleanup" "$rule_import_cleanup" "$rule_trace_start" "$router_id" "$router_import_id" "$router_stable_count" "$router_count" "$router_stable_cleanup" "$router_import_cleanup" "$router_trace_start" "$router_interface_stable_id" "$router_interface_import_id" "$router_interface_stable_count" "$router_interface_import_count" "$router_interface_stable_count_after" "$router_interface_import_count_after" "$router_interface_stable_cleanup" "$router_interface_import_cleanup" "$router_interface_stable_trace_start" "$router_interface_import_trace_start" "$fip_stable_id" "$fip_import_id" "$fip_stable_count" "$fip_import_count_before" "$fip_import_count_after_read" "$fip_stable_count_after" "$fip_import_count_after_cleanup" "$fip_stable_cleanup" "$fip_import_cleanup" "$fip_stable_trace_start" "$fip_import_trace_start" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start, port_id, port_import_id, port_stable_count, port_count, port_stable_cleanup, port_import_cleanup, port_trace_start, security_group_id, security_group_import_id, security_group_stable_count, security_group_count, security_group_stable_cleanup, security_group_import_cleanup, security_group_trace_start, security_group_rule_id, rule_import_id, security_group_rule_stable_count, rule_count, security_group_rule_stable_cleanup, rule_import_cleanup, rule_trace_start, router_id, router_import_id, router_stable_count, router_count, router_stable_cleanup, router_import_cleanup, router_trace_start, router_interface_stable_id, router_interface_import_id, router_interface_stable_count, router_interface_import_count, router_interface_stable_count_after, router_interface_import_count_after, router_interface_stable_cleanup, router_interface_import_cleanup, router_interface_stable_trace_start, router_interface_import_trace_start = sys.argv[1:]
+root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start, port_id, port_import_id, port_stable_count, port_count, port_stable_cleanup, port_import_cleanup, port_trace_start, security_group_id, security_group_import_id, security_group_stable_count, security_group_count, security_group_stable_cleanup, security_group_import_cleanup, security_group_trace_start, security_group_rule_id, rule_import_id, security_group_rule_stable_count, rule_count, security_group_rule_stable_cleanup, rule_import_cleanup, rule_trace_start, router_id, router_import_id, router_stable_count, router_count, router_stable_cleanup, router_import_cleanup, router_trace_start, router_interface_stable_id, router_interface_import_id, router_interface_stable_count, router_interface_import_count, router_interface_stable_count_after, router_interface_import_count_after, router_interface_stable_cleanup, router_interface_import_cleanup, router_interface_stable_trace_start, router_interface_import_trace_start, fip_stable_id, fip_import_id, fip_stable_count, fip_import_count_before, fip_import_count_after_read, fip_stable_count_after, fip_import_count_after_cleanup, fip_stable_cleanup, fip_import_cleanup, fip_stable_trace_start, fip_import_trace_start = sys.argv[1:]
 work = pathlib.Path(work)
 
 def digest(path):
@@ -752,6 +851,7 @@ def provider_read_routes(start, resource, identity):
         "openstack_networking_router_v2": "/routers/",
         "openstack_networking_router_interface_v2": "/ports/",
         "openstack_compute_instance_v2": "/servers/",
+        "openstack_networking_floatingip_v2": "/floatingips/",
     }[resource]
     routes = []
     records = (work / "trace.jsonl").read_text().splitlines()
@@ -764,6 +864,33 @@ def provider_read_routes(start, resource, identity):
         method = record.get("method") or record.get("request_method")
         path = record.get("path") or record.get("request_path")
         if "Terraform Provider OpenStack/3.4.0" in user_agent and method == "GET" and path and expected in path and identity in path:
+            routes.append({"method": method, "path": path, "ordinal": ordinal})
+    return routes
+
+def provider_mutation_routes(start, resource):
+    expected = {
+        "openstack_compute_keypair_v2": "/os-keypairs",
+        "openstack_networking_network_v2": "/networks",
+        "openstack_networking_subnet_v2": "/subnets",
+        "openstack_networking_port_v2": "/ports",
+        "openstack_networking_secgroup_v2": "/security-groups",
+        "openstack_networking_secgroup_rule_v2": "/security-group-rules",
+        "openstack_networking_router_v2": "/routers",
+        "openstack_networking_router_interface_v2": "/ports",
+        "openstack_compute_instance_v2": "/servers",
+        "openstack_networking_floatingip_v2": "/floatingips",
+    }[resource]
+    routes = []
+    records = (work / "trace.jsonl").read_text().splitlines()
+    for ordinal, line in enumerate(records):
+        if ordinal < int(start):
+            continue
+        record = json.loads(line)
+        headers = record.get("request_headers", {})
+        user_agent = headers.get("user-agent", "")
+        method = record.get("method") or record.get("request_method")
+        path = record.get("path") or record.get("request_path")
+        if "Terraform Provider OpenStack/3.4.0" in user_agent and method in {"POST", "PUT", "PATCH", "DELETE"} and path and expected in path:
             routes.append({"method": method, "path": path, "ordinal": ordinal})
     return routes
 
@@ -793,18 +920,29 @@ def projection(path, resource):
     if resource == "openstack_compute_instance_v2":
         item = document["server"]
         return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
+    if resource == "openstack_networking_floatingip_v2":
+        item = document["floatingip"]
+        return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
     item = document["network"]
     return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id"))}
 
 def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, cleanup, duplicate_count=0, result="passed", reason=None, trace_start=0, projection_file=None, canonical_count_after=None, parent_file=None):
     normal = actions(normal_files[-1]) if normal_files else []
+    refresh = [actions(name) for name in refresh_files]
     trace_routes = provider_read_routes(trace_start, resource, canonical)
+    mutation_routes = provider_mutation_routes(trace_start, resource)
     observed = projection(projection_file, resource) if projection_file else None
     parent_observation = json.loads((work / parent_file).read_text()) if parent_file else None
     minimum_routes = 2 if kind == "stable-read" else 1
     if result == "passed" and len(trace_routes) < minimum_routes:
         result = "blocked"
         reason = f"structured compatibility trace has {len(trace_routes)} provider reads; expected at least {minimum_routes}"
+    if result == "passed" and any(refresh):
+        result = "blocked"
+        reason = f"refresh-only plan was not a no-op: {refresh}"
+    if result == "passed" and kind == "import" and mutation_routes:
+        result = "blocked"
+        reason = f"provider import/refresh issued mutation requests: {mutation_routes}"
     if result == "passed" and int(duplicate_count) != 1:
         result = "blocked"
         reason = f"canonical compatibility projection count was {duplicate_count}, expected exactly one"
@@ -842,8 +980,9 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
             "observed_owner_scope": observed["owner_scope"] if observed else None,
         },
         "plan_actions": normal,
-        "refresh_plan_actions": [actions(name) for name in refresh_files],
+        "refresh_plan_actions": refresh,
         "normal_plan_actions": [actions(name) for name in normal_files],
+        "provider_mutation_routes": mutation_routes,
         "final_plan_noop": result == "passed" and not normal,
         "canonical_duplicate_count": max(int(duplicate_count) - 1, 0) if result == "passed" else None,
         "canonical_resource_count": int(duplicate_count) if result == "passed" else None,
@@ -877,9 +1016,10 @@ scenarios = [
     scenario("openstack_networking_router_interface_v2", "import", router_interface_import_id, router_interface_import_id, ["router-interface-import-read-1-refresh.json", "router-interface-import-read-2-refresh.json"], ["router-interface-import-read-1-normal.json", "router-interface-import-read-2-normal.json"], cleanup_result(router_interface_import_cleanup), router_interface_import_count, trace_start=router_interface_import_trace_start, projection_file="router-interface-import-projection.json", canonical_count_after=router_interface_import_count_after, parent_file="router-interface-import-parent.json"),
     scenario("openstack_compute_instance_v2", "stable-read", server_id, "", ["server-read-1-refresh.json", "server-read-2-refresh.json"], ["server-read-1-normal.json", "server-read-2-normal.json"], cleanup_result(server_stable_cleanup), server_stable_count, trace_start=server_stable_trace_start, projection_file="server-stable-projection.json"),
     scenario("openstack_compute_instance_v2", "import", server_import_id, server_import_id, ["server-import-read-1-refresh.json", "server-import-read-2-refresh.json"], ["server-import-read-1-normal.json", "server-import-read-2-normal.json"], server_import_cleanup, server_count, trace_start=server_import_trace_start, projection_file="server-import-projection.json"),
+    scenario("openstack_networking_floatingip_v2", "stable-read", fip_stable_id, "", ["floating-ip-read-1-refresh.json", "floating-ip-read-2-refresh.json"], ["floating-ip-read-1-normal.json", "floating-ip-read-2-normal.json"], cleanup_result(fip_stable_cleanup), fip_stable_count, trace_start=fip_stable_trace_start, projection_file="floating-ip-stable-projection.json", canonical_count_after=fip_stable_count_after),
+    scenario("openstack_networking_floatingip_v2", "import", fip_import_id, fip_import_id, ["floating-ip-import-read-1-refresh.json", "floating-ip-import-read-2-refresh.json"], ["floating-ip-import-read-1-normal.json", "floating-ip-import-read-2-normal.json"], cleanup_result(fip_import_cleanup), fip_import_count_after_read, trace_start=fip_import_trace_start, projection_file="floating-ip-import-projection.json", canonical_count_after=fip_import_count_after_cleanup),
 ]
 unrun = {
-    "openstack_networking_floatingip_v2": "requires public-address pool/binding fixture",
     "openstack_blockstorage_volume_v3": "native volume stable/import fixture is not part of this reusable runner; the host-backed P13.4 volume gates passed",
     "openstack_compute_volume_attach_v2": "relationship fixture and parent-retention proof are not part of this reusable runner; the host-backed P13.4 attachment gate passed",
 }
