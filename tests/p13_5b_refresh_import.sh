@@ -305,6 +305,7 @@ document = {
     "profile": "p13-iac-compatibility-v1",
     "status": "passed" if all(s["result"] == "passed" for s in scenarios) else "blocked",
     "execution_mode": "gated" if baseline_result == "verified" else "exploratory_blocked_baseline",
+    "evidence_binding": {"mode": "source_commit_run_bound", "evidence_only_followup": True},
     "tested_o3k_head_sha": scenarios[0]["head_sha"],
     "starting_main_sha": __import__("subprocess").check_output(["git", "-C", root, "merge-base", "HEAD", "origin/main"], text=True).strip(),
     "existing_p13_baseline": {

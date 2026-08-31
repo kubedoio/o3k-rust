@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -63,6 +64,11 @@ def validate(document: dict) -> None:
     assert document["manual_state_edits"] is False
     assert document["canonical_authority"] == "o3k"
     assert document["execution_mode"] in {"gated", "exploratory_blocked_baseline"}
+    binding = document["evidence_binding"]
+    assert binding == {
+        "mode": "source_commit_run_bound",
+        "evidence_only_followup": True,
+    }
     scenarios = document["scenarios"]
     assert isinstance(scenarios, list) and scenarios
     expected_pairs = {(resource, scenario) for resource in RESOURCES for scenario in SCENARIOS}
@@ -70,6 +76,21 @@ def validate(document: dict) -> None:
     assert actual_pairs == expected_pairs
     assert len(actual_pairs) == len(scenarios)
     assert re.fullmatch(r"[0-9a-f]{40}", document["tested_o3k_head_sha"])
+    repository = Path(__file__).resolve().parents[1]
+    tested_sha = document["tested_o3k_head_sha"]
+    current_sha = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    if tested_sha != "0" * 40:
+        assert subprocess.run(
+            ["git", "-C", str(repository), "merge-base", "--is-ancestor", tested_sha, current_sha],
+            check=False,
+        ).returncode == 0
+        changed = subprocess.check_output(
+            ["git", "-C", str(repository), "diff", "--name-only", tested_sha, current_sha],
+            text=True,
+        ).splitlines()
+        assert changed == ["docs/compatibility/p13-5/p13-5b-refresh-import-evidence.json"]
     contract_path = Path(__file__).resolve().parents[1] / "docs/compatibility/p13-5/p13-5a-convergence-contract.json"
     contract = json.loads(contract_path.read_text())
     assert set(contract["resources"][i]["resource"] for i in range(len(contract["resources"]))) == RESOURCES
@@ -113,6 +134,16 @@ def validate(document: dict) -> None:
             assert scenario["cleanup_result"] == "passed"
             routes = scenario["trace_observation"]["provider_read_routes"]
             assert routes
+            assert isinstance(scenario["trace_observation"]["trace_start_ordinal"], int)
+            assert all(
+                isinstance(route, dict)
+                and route["method"] == "GET"
+                and isinstance(route["path"], str)
+                and route["path"].startswith("/v2.")
+                and isinstance(route["ordinal"], int)
+                and route["ordinal"] >= scenario["trace_observation"]["trace_start_ordinal"]
+                for route in routes
+            )
             assert scenario["first_read_route"] == f'{routes[0]["method"]} {routes[0]["path"]}'
             assert scenario["canonical_identity_observation"]["resource_id"] == scenario["canonical_id"]
             assert scenario["canonical_identity_observation"]["owner_scope"] == scenario["owner_scope"]
@@ -144,6 +175,7 @@ def self_test() -> None:
         "status": "blocked",
         "tested_o3k_head_sha": "0" * 40,
         "execution_mode": "exploratory_blocked_baseline",
+        "evidence_binding": {"mode": "source_commit_run_bound", "evidence_only_followup": True},
         "existing_p13_baseline": {"status": "blocked"},
         "manual_state_edits": False,
         "canonical_authority": "o3k",
@@ -174,7 +206,7 @@ def self_test() -> None:
                 "backend": "sqlite",
                 "head_sha": "0" * 40,
                 "provider_state_id": "keypair-name",
-                "trace_observation": {"provider_read_routes": [{"method": "GET", "path": "/v2.1/project/os-keypairs/keypair-name"}]},
+                "trace_observation": {"trace_start_ordinal": 0, "provider_read_routes": [{"method": "GET", "path": "/v2.1/project/os-keypairs/keypair-name", "ordinal": 0}]},
                 "canonical_identity_observation": {"resource_id": "keypair-name", "owner_scope": "project-a", "observed_owner_scope": "project-a"},
                 "result": "passed",
             }
