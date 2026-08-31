@@ -73,6 +73,27 @@ curl -fsS -D "$work_dir/auth.headers" -o /dev/null -H 'Content-Type: application
 token="$(awk 'tolower($1)=="x-subject-token:" {print $2}' "$work_dir/auth.headers" | tr -d '\r')"
 [[ -n "$token" ]] || { echo "P13.5B BLOCKED: authentication did not return a token" >&2; exit 2; }
 
+restart_daemon() {
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pid=""
+  O3K_BOOTSTRAP_PASSWORD="$password" \
+  O3K_TOKEN_SIGNING_KEY="p13-5b-token-signing-key-012345678901234567890123" \
+  O3K_COMPATIBILITY_TRACE_PATH="$work_dir/trace.jsonl" \
+    "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
+  pid=$!
+  for _ in $(seq 1 120); do
+    curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+  curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null
+  curl -fsS -D "$work_dir/auth.headers" -o /dev/null -H 'Content-Type: application/json' \
+    -X POST "http://127.0.0.1:$port/v3/auth/tokens" \
+    --data "{\"auth\":{\"identity\":{\"methods\":[\"password\"],\"password\":{\"user\":{\"name\":\"admin\",\"password\":\"$password\"}}},\"scope\":{\"project\":{\"name\":\"admin\"}}}}"
+  token="$(awk 'tolower($1)=="x-subject-token:" {print $2}' "$work_dir/auth.headers" | tr -d '\r')"
+  [[ -n "$token" ]] || { echo "P13.5B BLOCKED: re-authentication after daemon restart failed" >&2; exit 2; }
+}
+
 export TF_CLI_CONFIG_FILE="$work_dir/tofu.tfrc" TF_IN_AUTOMATION=1
 project_dir="$work_dir/project"
 mkdir -p "$project_dir"
@@ -112,6 +133,7 @@ plan keypair-read-2
 keypair_id="p13-5b-keypair"
 keypair_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs" | python3 -c 'import json,sys; print(sum(1 for x in json.load(sys.stdin)["keypairs"] if x["keypair"]["name"] == "p13-5b-keypair"))')"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs/p13-5b-keypair" >"$work_dir/keypair-stable-projection.json"
+restart_daemon
 "$tofu" destroy -input=false -auto-approve >/dev/null
 keypair_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs/p13-5b-keypair")"
 
@@ -261,6 +283,12 @@ curl -fsS -D "$work_dir/auth.headers" -o /dev/null -H 'Content-Type: application
 token="$(awk 'tolower($1)=="x-subject-token:" {print $2}' "$work_dir/auth.headers" | tr -d '\r')"
 [[ -n "$token" ]] || { echo "P13.5B BLOCKED: re-authentication after daemon restart failed" >&2; exit 2; }
 
+port_import_project="$work_dir/port-import-project"
+mkdir -p "$port_import_project"
+cp "$project_dir/provider.tf" "$port_import_project/provider.tf"
+(cd "$port_import_project" && "$tofu" init -input=false -upgrade=false >/dev/null)
+cd "$port_import_project"
+
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
   "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-port-import-network"}}' >"$work_dir/port-import-network.json"
 port_import_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$work_dir/port-import-network.json")"
@@ -286,14 +314,69 @@ curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$port_imp
 port_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$port_import_id")"
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$port_import_subnet_id" >/dev/null
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$port_import_network_id" >/dev/null
+cd "$project_dir"
 
-python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" "$port_id" "$port_import_id" "$port_stable_count" "$port_count" "$port_stable_cleanup" "$port_import_cleanup" "$port_trace_start" <<'PY'
+cat >security-group.tf <<'EOF'
+resource "openstack_networking_secgroup_v2" "managed" {
+  name = "p13-5b-security-group"
+  description = "bounded canonical policy"
+  delete_default_rules = false
+}
+EOF
+"$tofu" apply -input=false -auto-approve >/dev/null
+security_group_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_secgroup_v2.managed"))')"
+plan security-group-read-1
+plan security-group-read-2
+security_group_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-groups" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["security_groups"] if x["id"] == wanted))' "$security_group_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-groups/$security_group_id" >"$work_dir/security-group-stable-projection.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+security_group_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-groups/$security_group_id")"
+rm -f security-group.tf
+
+kill "$pid" 2>/dev/null || true
+wait "$pid" 2>/dev/null || true
+pid=""
+O3K_BOOTSTRAP_PASSWORD="$password" O3K_TOKEN_SIGNING_KEY="p13-5b-token-signing-key-012345678901234567890123" O3K_COMPATIBILITY_TRACE_PATH="$work_dir/trace.jsonl" \
+  "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
+pid=$!
+for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1 && break; sleep 0.1; done
+curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null
+curl -fsS -D "$work_dir/auth.headers" -o /dev/null -H 'Content-Type: application/json' -X POST "http://127.0.0.1:$port/v3/auth/tokens" \
+  --data "{\"auth\":{\"identity\":{\"methods\":[\"password\"],\"password\":{\"user\":{\"name\":\"admin\",\"password\":\"$password\"}}},\"scope\":{\"project\":{\"name\":\"admin\"}}}}"
+token="$(awk 'tolower($1)=="x-subject-token:" {print $2}' "$work_dir/auth.headers" | tr -d '\r')"
+[[ -n "$token" ]] || { echo "P13.5B BLOCKED: security-group re-authentication failed" >&2; exit 2; }
+security_group_import_project="$work_dir/security-group-import-project"
+mkdir -p "$security_group_import_project"
+cp "$project_dir/provider.tf" "$security_group_import_project/provider.tf"
+(cd "$security_group_import_project" && "$tofu" init -input=false -upgrade=false >/dev/null)
+cd "$security_group_import_project"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/security-groups" --data '{"security_group":{"name":"p13-5b-security-group-import","description":"bounded canonical policy"}}' >"$work_dir/security-group-import.json"
+security_group_import_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["security_group"]["id"])' "$work_dir/security-group-import.json")"
+cat >security-group.tf <<'EOF'
+resource "openstack_networking_secgroup_v2" "imported" {
+  name = "p13-5b-security-group-import"
+  description = "bounded canonical policy"
+  delete_default_rules = false
+}
+EOF
+security_group_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+"$tofu" import -input=false openstack_networking_secgroup_v2.imported "$security_group_import_id" >/dev/null
+"$tofu" plan -input=false -out="$work_dir/security-group-import-normal.tfplan" >/dev/null
+"$tofu" show -json "$work_dir/security-group-import-normal.tfplan" >"$work_dir/security-group-import-normal.json"
+security_group_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-groups" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["security_groups"] if x["id"] == wanted))' "$security_group_import_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-groups/$security_group_import_id" >"$work_dir/security-group-import-projection.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+security_group_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-groups/$security_group_import_id")"
+rm -f security-group.tf
+
+python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" "$port_id" "$port_import_id" "$port_stable_count" "$port_count" "$port_stable_cleanup" "$port_import_cleanup" "$port_trace_start" "$security_group_id" "$security_group_import_id" "$security_group_stable_count" "$security_group_count" "$security_group_stable_cleanup" "$security_group_import_cleanup" "$security_group_trace_start" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start, port_id, port_import_id, port_stable_count, port_count, port_stable_cleanup, port_import_cleanup, port_trace_start = sys.argv[1:]
+root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start, port_id, port_import_id, port_stable_count, port_count, port_stable_cleanup, port_import_cleanup, port_trace_start, security_group_id, security_group_import_id, security_group_stable_count, security_group_count, security_group_stable_cleanup, security_group_import_cleanup, security_group_trace_start = sys.argv[1:]
 work = pathlib.Path(work)
 
 def digest(path):
@@ -316,6 +399,7 @@ def provider_read_routes(start, resource, identity):
         "openstack_networking_network_v2": "/networks/",
         "openstack_networking_subnet_v2": "/subnets/",
         "openstack_networking_port_v2": "/ports/",
+        "openstack_networking_secgroup_v2": "/security-groups/",
     }[resource]
     routes = []
     records = (work / "trace.jsonl").read_text().splitlines()
@@ -341,6 +425,9 @@ def projection(path, resource):
         return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
     if resource == "openstack_networking_port_v2":
         item = document["port"]
+        return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
+    if resource == "openstack_networking_secgroup_v2":
+        item = document["security_group"]
         return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
     item = document["network"]
     return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id"))}
@@ -404,10 +491,11 @@ scenarios = [
     scenario("openstack_networking_subnet_v2", "import", subnet_import_id, subnet_import_id, [], ["subnet-import-normal.json"], cleanup_result(subnet_import_cleanup), subnet_count, trace_start=subnet_trace_start, projection_file="subnet-import-projection.json"),
     scenario("openstack_networking_port_v2", "stable-read", port_id, "", ["port-read-1-refresh.json", "port-read-2-refresh.json"], ["port-read-1-normal.json", "port-read-2-normal.json"], cleanup_result(port_stable_cleanup), port_stable_count, trace_start=0, projection_file="port-stable-projection.json"),
     scenario("openstack_networking_port_v2", "import", port_import_id, port_import_id, [], ["port-import-normal.json"], cleanup_result(port_import_cleanup), port_count, trace_start=port_trace_start, projection_file="port-import-projection.json"),
+    scenario("openstack_networking_secgroup_v2", "stable-read", security_group_id, "", ["security-group-read-1-refresh.json", "security-group-read-2-refresh.json"], ["security-group-read-1-normal.json", "security-group-read-2-normal.json"], cleanup_result(security_group_stable_cleanup), security_group_stable_count, trace_start=0, projection_file="security-group-stable-projection.json"),
+    scenario("openstack_networking_secgroup_v2", "import", security_group_import_id, security_group_import_id, [], ["security-group-import-normal.json"], cleanup_result(security_group_import_cleanup), security_group_count, trace_start=security_group_trace_start, projection_file="security-group-import-projection.json"),
 ]
 unrun = {
     "openstack_compute_instance_v2": "requires image/compute fixture and attachment inspection",
-    "openstack_networking_secgroup_v2": "requires policy fixture and default-rule observation",
     "openstack_networking_secgroup_rule_v2": "requires policy-parent fixture",
     "openstack_networking_router_v2": "router stable/import cases are not part of this portable runner; the corrected upstream provider lifecycle gate passed in the baseline rerun",
     "openstack_networking_router_interface_v2": "relationship fixture and parent-retention proof not yet available",
