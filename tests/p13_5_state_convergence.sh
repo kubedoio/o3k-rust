@@ -3,6 +3,10 @@ set -euo pipefail
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 contract="$root_dir/docs/compatibility/p13-5/p13-5a-convergence-contract.json"
 tofu="${O3K_P13_TOFU:-}"
+tofu_archive="${O3K_P13_TOFU_ARCHIVE:-}"
+provider_archive="${O3K_P13_PROVIDER_ARCHIVE:-}"
+provider_binary="${O3K_P13_PROVIDER_BINARY:-}"
+provider_sha="${O3K_P13_PROVIDER_SHA256:-}"
 python3 - "$contract" <<'PY'
 import json, pathlib, sys
 d=json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -16,8 +20,8 @@ assert d["toolchain"]["provider_modified"] is False
 assert d["architecture"]["p13_6_boundary_preserved"] is True
 print("P13.5A contract structure: PASS")
 PY
-if [[ -z "$tofu" || -z "${O3K_P13_PROVIDER_ARCHIVE:-}" || -z "${O3K_P13_PROVIDER_BINARY:-}" ]]; then
-  echo "P13.5A baseline: BLOCKED (set pinned O3K_P13 tool variables)" >&2
+if [[ -z "$tofu" || -z "$tofu_archive" || -z "$provider_archive" || -z "$provider_binary" || -z "$provider_sha" ]]; then
+  echo "P13.5A baseline: BLOCKED (set O3K_P13_TOFU, O3K_P13_TOFU_ARCHIVE, O3K_P13_PROVIDER_ARCHIVE, O3K_P13_PROVIDER_BINARY, and O3K_P13_PROVIDER_SHA256)" >&2
   exit 2
 fi
 export O3K_P13_TOFU="$tofu"
