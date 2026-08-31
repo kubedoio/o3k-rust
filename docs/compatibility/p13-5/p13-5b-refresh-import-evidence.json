@@ -5,13 +5,10 @@
     "evidence_only_followup": true,
     "mode": "source_commit_run_bound"
   },
-  "execution_mode": "exploratory_blocked_baseline",
+  "execution_mode": "gated",
   "existing_p13_baseline": {
-    "backend_limitations": [
-      "native volume service unavailable",
-      "VolumeAttachment requires disposable LVM"
-    ],
-    "classification": "environment_and_existing_gate_limitations",
+    "backend_limitations": [],
+    "classification": "none",
     "completed_before_block": [
       "tests/p13_2_core_lifecycle.sh",
       "tests/p13_2b_subnet_lifecycle.sh",
@@ -20,10 +17,13 @@
       "tests/p13_3_security_group_provider.sh",
       "tests/p13_3_security_group_port_provider.sh",
       "tests/p13_3_router_provider.sh",
-      "tests/p13_3_floating_ip_provider.sh"
+      "tests/p13_3_floating_ip_provider.sh",
+      "tests/p13_4_provider_volume_smoke.sh",
+      "tests/p13_4_provider_volume_attachment_smoke.sh",
+      "tests/p13_4_storage_lifecycle.sh"
     ],
-    "failed_gate": "tests/p13_4_provider_volume_smoke.sh",
-    "failure": "native volume service unavailable",
+    "failed_gate": null,
+    "failure": null,
     "provider_import_limitation": "port fixed_ip/security_group_ids are computed all_* observations in upstream 3.4.0 and are not reconstructed as configurable state; the baseline uses the supported identity/name/network import subset",
     "required_gates": [
       "tests/p13_2_core_lifecycle.sh",
@@ -38,7 +38,7 @@
       "tests/p13_4_provider_volume_attachment_smoke.sh",
       "tests/p13_4_storage_lifecycle.sh"
     ],
-    "status": "blocked"
+    "status": "verified"
   },
   "manual_state_edits": false,
   "phase": "P13.5B",
@@ -58,7 +58,7 @@
       "cleanup_result": "passed",
       "final_plan_noop": true,
       "first_read_route": "GET /v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-keypair",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [
         [
           "no-op"
@@ -130,7 +130,7 @@
       "cleanup_result": "passed",
       "final_plan_noop": true,
       "first_read_route": "GET /v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/p13-5b-import-keypair",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [
         [
           "no-op"
@@ -170,18 +170,18 @@
     {
       "backend": "sqlite",
       "canonical_duplicate_count": 0,
-      "canonical_id": "01a05816-15e4-7e92-8ee6-5c10012bd8e0",
+      "canonical_id": "01a05839-a6d0-7dd2-95f9-966d790bc742",
       "canonical_identity_observation": {
         "observed_owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
         "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
-        "resource_id": "01a05816-15e4-7e92-8ee6-5c10012bd8e0",
+        "resource_id": "01a05839-a6d0-7dd2-95f9-966d790bc742",
         "source": "compatibility_projection_read"
       },
       "canonical_resource_count": 1,
       "cleanup_result": "passed",
       "final_plan_noop": true,
-      "first_read_route": "GET /v2.0/networks/01a05816-15e4-7e92-8ee6-5c10012bd8e0",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "first_read_route": "GET /v2.0/networks/01a05839-a6d0-7dd2-95f9-966d790bc742",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [
         [
           "no-op"
@@ -195,7 +195,7 @@
         "no-op"
       ],
       "provider_import_id": "",
-      "provider_state_id": "01a05816-15e4-7e92-8ee6-5c10012bd8e0",
+      "provider_state_id": "01a05839-a6d0-7dd2-95f9-966d790bc742",
       "refresh_plan_actions": [
         [],
         []
@@ -208,42 +208,42 @@
           {
             "method": "GET",
             "ordinal": 33,
-            "path": "/v2.0/networks/01a05816-15e4-7e92-8ee6-5c10012bd8e0"
+            "path": "/v2.0/networks/01a05839-a6d0-7dd2-95f9-966d790bc742"
           },
           {
             "method": "GET",
             "ordinal": 34,
-            "path": "/v2.0/networks/01a05816-15e4-7e92-8ee6-5c10012bd8e0"
+            "path": "/v2.0/networks/01a05839-a6d0-7dd2-95f9-966d790bc742"
           },
           {
             "method": "GET",
             "ordinal": 36,
-            "path": "/v2.0/networks/01a05816-15e4-7e92-8ee6-5c10012bd8e0"
+            "path": "/v2.0/networks/01a05839-a6d0-7dd2-95f9-966d790bc742"
           },
           {
             "method": "GET",
             "ordinal": 38,
-            "path": "/v2.0/networks/01a05816-15e4-7e92-8ee6-5c10012bd8e0"
+            "path": "/v2.0/networks/01a05839-a6d0-7dd2-95f9-966d790bc742"
           },
           {
             "method": "GET",
             "ordinal": 40,
-            "path": "/v2.0/networks/01a05816-15e4-7e92-8ee6-5c10012bd8e0"
+            "path": "/v2.0/networks/01a05839-a6d0-7dd2-95f9-966d790bc742"
           },
           {
             "method": "GET",
             "ordinal": 42,
-            "path": "/v2.0/networks/01a05816-15e4-7e92-8ee6-5c10012bd8e0"
+            "path": "/v2.0/networks/01a05839-a6d0-7dd2-95f9-966d790bc742"
           },
           {
             "method": "GET",
             "ordinal": 46,
-            "path": "/v2.0/networks/01a05816-15e4-7e92-8ee6-5c10012bd8e0"
+            "path": "/v2.0/networks/01a05839-a6d0-7dd2-95f9-966d790bc742"
           },
           {
             "method": "GET",
             "ordinal": 49,
-            "path": "/v2.0/networks/01a05816-15e4-7e92-8ee6-5c10012bd8e0"
+            "path": "/v2.0/networks/01a05839-a6d0-7dd2-95f9-966d790bc742"
           }
         ],
         "trace_start_ordinal": 0
@@ -252,18 +252,18 @@
     {
       "backend": "sqlite",
       "canonical_duplicate_count": 0,
-      "canonical_id": "01a05816-64ac-78d3-9835-1a8944d5689f",
+      "canonical_id": "01a05839-f8c1-7310-8591-29c42321a611",
       "canonical_identity_observation": {
         "observed_owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
         "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
-        "resource_id": "01a05816-64ac-78d3-9835-1a8944d5689f",
+        "resource_id": "01a05839-f8c1-7310-8591-29c42321a611",
         "source": "compatibility_projection_read"
       },
       "canonical_resource_count": 1,
       "cleanup_result": "passed",
       "final_plan_noop": true,
-      "first_read_route": "GET /v2.0/networks/01a05816-64ac-78d3-9835-1a8944d5689f",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "first_read_route": "GET /v2.0/networks/01a05839-f8c1-7310-8591-29c42321a611",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [
         [
           "no-op"
@@ -273,8 +273,8 @@
       "plan_actions": [
         "no-op"
       ],
-      "provider_import_id": "01a05816-64ac-78d3-9835-1a8944d5689f",
-      "provider_state_id": "01a05816-64ac-78d3-9835-1a8944d5689f",
+      "provider_import_id": "01a05839-f8c1-7310-8591-29c42321a611",
+      "provider_state_id": "01a05839-f8c1-7310-8591-29c42321a611",
       "refresh_plan_actions": [],
       "resource": "openstack_networking_network_v2",
       "result": "passed",
@@ -284,22 +284,22 @@
           {
             "method": "GET",
             "ordinal": 53,
-            "path": "/v2.0/networks/01a05816-64ac-78d3-9835-1a8944d5689f"
+            "path": "/v2.0/networks/01a05839-f8c1-7310-8591-29c42321a611"
           },
           {
             "method": "GET",
             "ordinal": 55,
-            "path": "/v2.0/networks/01a05816-64ac-78d3-9835-1a8944d5689f"
+            "path": "/v2.0/networks/01a05839-f8c1-7310-8591-29c42321a611"
           },
           {
             "method": "GET",
             "ordinal": 59,
-            "path": "/v2.0/networks/01a05816-64ac-78d3-9835-1a8944d5689f"
+            "path": "/v2.0/networks/01a05839-f8c1-7310-8591-29c42321a611"
           },
           {
             "method": "GET",
             "ordinal": 62,
-            "path": "/v2.0/networks/01a05816-64ac-78d3-9835-1a8944d5689f"
+            "path": "/v2.0/networks/01a05839-f8c1-7310-8591-29c42321a611"
           }
         ],
         "trace_start_ordinal": 52
@@ -318,7 +318,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -347,7 +347,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -376,7 +376,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -405,7 +405,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -434,7 +434,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -463,7 +463,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -492,7 +492,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -521,7 +521,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -550,7 +550,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -579,7 +579,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -608,7 +608,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -637,7 +637,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -666,7 +666,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -695,7 +695,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -724,7 +724,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -753,7 +753,7 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
@@ -782,13 +782,13 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
       "provider_state_id": null,
-      "reason": "native volume service unavailable without configured storage backend",
+      "reason": "native volume stable/import fixture is not part of this reusable runner; the host-backed P13.4 volume gates passed",
       "refresh_plan_actions": [],
       "resource": "openstack_blockstorage_volume_v3",
       "result": "blocked",
@@ -811,13 +811,13 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
       "provider_state_id": null,
-      "reason": "native volume service unavailable without configured storage backend",
+      "reason": "native volume stable/import fixture is not part of this reusable runner; the host-backed P13.4 volume gates passed",
       "refresh_plan_actions": [],
       "resource": "openstack_blockstorage_volume_v3",
       "result": "blocked",
@@ -840,13 +840,13 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
       "provider_state_id": null,
-      "reason": "requires disposable LVM backend and parent fixture",
+      "reason": "relationship fixture and parent-retention proof are not part of this reusable runner; the host-backed P13.4 attachment gate passed",
       "refresh_plan_actions": [],
       "resource": "openstack_compute_volume_attach_v2",
       "result": "blocked",
@@ -869,13 +869,13 @@
       "cleanup_result": "not_run",
       "final_plan_noop": false,
       "first_read_route": "",
-      "head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+      "head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
       "normal_plan_actions": [],
       "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
       "plan_actions": [],
       "provider_import_id": "",
       "provider_state_id": null,
-      "reason": "requires disposable LVM backend and parent fixture",
+      "reason": "relationship fixture and parent-retention proof are not part of this reusable runner; the host-backed P13.4 attachment gate passed",
       "refresh_plan_actions": [],
       "resource": "openstack_compute_volume_attach_v2",
       "result": "blocked",
@@ -889,7 +889,7 @@
   "schema_version": 1,
   "starting_main_sha": "971748b7e7db2382ee2ac3431b8a7cef672b5508",
   "status": "blocked",
-  "tested_o3k_head_sha": "2a29682c4a3cf94a4cb43771518e4d9a08ffdae9",
+  "tested_o3k_head_sha": "808658f8fb0b5ab4547869c935587a81a26b268e",
   "toolchain": {
     "opentofu": "1.12.6",
     "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
