@@ -433,9 +433,9 @@ pub(crate) async fn delete_router(
         return network_error(error);
     }
     // A successful dispatch means the network executor completed its
-    // provider mutation and observation workflow; without an execution
-    // boundary the durable deleting reservation remains for restart-safe
-    // reconciliation.
+    // provider mutation and observation workflow. Without an execution
+    // boundary, canonical deletion was finalized above because there is no
+    // external realization that requires observation.
     StatusCode::ACCEPTED.into_response()
 }
 
