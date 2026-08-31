@@ -366,6 +366,11 @@ curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subne
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$port_import_network_id" >/dev/null
 cd "$project_dir"
 
+# Re-assert the public allocator boundary immediately before the FIP cases.
+# This mirrors the accepted P13.3 two-boot fixture after the earlier keypair
+# restart and ensures the provider observes the configured canonical pool.
+restart_daemon
+
 cat >floating-ip.tf <<EOF
 resource "openstack_networking_network_v2" "private" { name = "p13-5b-floating-ip-network" }
 resource "openstack_networking_subnet_v2" "private" {
