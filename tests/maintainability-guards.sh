@@ -46,6 +46,10 @@ check_fixture() {
 
 echo "=== Maintainability Guard Regression Suite ==="
 echo
+echo "Test 0: maintainability inventory cfg(test) scope regression -> PASS"
+python3 "$REPO_ROOT/tests/maintainability-inventory.py"
+PASS=$((PASS + 1))
+
 echo "Test 1: clean repository and approved boundaries -> PASS"
 rc=0
 output=$(python3 "$GUARD" 2>&1) || rc=$?

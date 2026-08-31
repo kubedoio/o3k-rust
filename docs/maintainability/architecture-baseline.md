@@ -1,6 +1,6 @@
 # Current Architecture Snapshot
 
-Generated from workspace inventory at `087bb469649e5892d9c7666478dbfade14377ff9`.
+Generated from workspace inventory at `fca0551098eefc5c166c83b392daec2ec7a3908c`.
 
 This is a current-tree monitoring snapshot, not the immutable P13.4 baseline.
 That historical evidence remains under
@@ -8,9 +8,9 @@ That historical evidence remains under
 
 ## Snapshot
 
-- 271 Rust source files across 31 workspace crates
-- ~115,659 production LOC, ~54,822 test LOC
-- 101 candidate hotspot files identified
+- 278 Rust source files across 31 workspace crates
+- ~105,442 production LOC, ~60,314 test LOC
+- 100 candidate hotspot files identified
 
 ## Crate Roles
 
@@ -19,30 +19,30 @@ See `architecture-roles.md` for the full classification.
 ## Key Numbers
 
 - SQL usage sites: 928 (0 unexplained)
-- Host command execution sites: 525 production
+- Host command execution sites: 417 production
 - Dependency cycles: 0
-- Lint/safety violations: 1214 production
+- Production safety occurrences: 182
 
 ## Production LOC by Responsibility
 
 | Responsibility | Files | Production LOC (approx) |
 |---|---:|---:|
-| Compute application | 13 | 5,806 |
+| Compute application | 13 | 4,803 |
 | Compute host/runtime composition | 8 | 2,619 |
-| Image application | 1 | 1,355 |
-| Image execution | 1 | 217 |
-| Network Linux execution | 18 | 4,706 |
-| Network application | 20 | 9,025 |
+| Image application | 1 | 1,371 |
+| Image execution | 1 | 223 |
+| Network Linux execution | 18 | 6,765 |
+| Network application | 27 | 9,272 |
 | Network execution/runtime composition | 2 | 742 |
 | PostgreSQL persistence | 11 | 6,761 |
 | SQLite persistence | 9 | 7,322 |
 | o3kd control-plane composition | 6 | 2,199 |
-| o3kd native adapters | 10 | 2,034 |
-| o3kd process entry | 5 | 3,034 |
-| other workspace responsibility | 131 | 54,178 |
+| o3kd native adapters | 10 | 2,038 |
+| o3kd process entry | 5 | 34 |
+| other workspace responsibility | 131 | 48,421 |
 | store domain | 4 | 1,067 |
 | store ports | 3 | 856 |
-| store specialized persistence | 29 | 13,738 |
+| store specialized persistence | 29 | 10,949 |
 
 
 ## Monitoring interpretation
