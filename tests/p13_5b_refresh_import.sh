@@ -1497,6 +1497,9 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
         "head_sha": __import__("subprocess").check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip(),
         "result": result,
     }
+    if resource == "openstack_compute_volume_attach_v2" and kind == "import":
+        server_id, attachment_id = import_id.split("/", 1)
+        item["provider_import_components"] = {"server_id": server_id, "attachment_id": attachment_id}
     if reason:
         item["reason"] = reason
     return item
