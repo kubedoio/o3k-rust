@@ -19,6 +19,7 @@ if [[ "$output" != /* ]]; then
   output="$root_dir/$output"
 fi
 baseline_result="${P13_5B_BASELINE_RESULT:-blocked}"
+baseline_manifest="${P13_5B_BASELINE_MANIFEST:-}"
 password="${O3K_P13_PASSWORD:-p13-5b-refresh-import-password}"
 project_id="eba29e2d-53de-461d-ae91-ede7402713cb"
 external_pool_name="p13-5b-public-pool"
@@ -179,6 +180,89 @@ print(count)
 PY
 }
 
+# Capture canonical identity, ownership, and cardinality without going through
+# the compatibility projection. The provider-facing resources are projections;
+# these observations must come from the O3K-owned run store while the fixture is
+# still present. Floating addresses are the one bounded resource whose canonical
+# allocator is intentionally file-backed rather than a SQLite table; it still
+# uses the same canonical_store evidence shape and is never inferred from the
+# provider response.
+canonical_store_snapshot() {
+  local resource="$1"
+  local identity="$2"
+  local output_path="$3"
+  python3 - "$work_dir/data/o3k.sqlite" "$work_dir/data/public-addresses/public-addresses.json" "$project_id" "$resource" "$identity" >"$output_path" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+database, public_state, project, resource, identity = sys.argv[1:]
+
+table_specs = {
+    "openstack_compute_keypair_v2": ("keypairs", "name", "project_id", None),
+    "openstack_networking_network_v2": ("canonical_networks", "id", "project_id", "state <> 'deleted'"),
+    "openstack_networking_subnet_v2": ("canonical_address_realms", "id", "project_id", "state <> 'deleted'"),
+    "openstack_networking_port_v2": ("canonical_endpoints", "id", "project_id", "state <> 'deleted'"),
+    "openstack_networking_secgroup_v2": ("canonical_reusable_network_policies", "id", "project_id", "state <> 'deleted'"),
+    "openstack_networking_secgroup_rule_v2": ("canonical_network_policy_rules", "id", "project_id", "state <> 'deleted'"),
+    "openstack_networking_router_v2": ("canonical_l3_gateways", "id", "project_id", "state <> 'deleted'"),
+    "openstack_networking_router_interface_v2": ("canonical_l3_gateway_attachments", "id", "project_id", "state <> 'deleted'"),
+    "openstack_compute_instance_v2": ("resources", "id", "project_id", "kind = 'compute_instance' AND UPPER(observed_state) <> 'DELETED'"),
+    "openstack_blockstorage_volume_v3": ("native_volumes", "id", "project_id", "state <> 'deleted'"),
+    "openstack_compute_volume_attach_v2": ("native_volume_attachments", "id", "project_id", "state <> 'deleted'"),
+}
+
+if resource == "openstack_networking_floatingip_v2":
+    state_path = Path(public_state)
+    allocations = []
+    if state_path.exists():
+        document = json.loads(state_path.read_text())
+        allocations = document.get("allocations", [])
+    records = [
+        {"resource_id": item.get("allocation_id"), "owner_scope": item.get("project_id")}
+        for item in allocations
+        if item.get("allocation_id") == identity and item.get("project_id") == project
+    ]
+    source_detail = "canonical_store:public_address_allocator"
+else:
+    try:
+        table, id_column, owner_column, predicate = table_specs[resource]
+    except KeyError as error:
+        raise SystemExit(f"no canonical SQLite mapping for {resource}") from error
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    where = f"{id_column} = ? AND {owner_column} = ?"
+    if predicate:
+        where += f" AND {predicate}"
+    rows = connection.execute(
+        f"SELECT {id_column}, {owner_column} FROM {table} WHERE {where}",
+        (identity, project),
+    ).fetchall()
+    records = [{"resource_id": row[0], "owner_scope": row[1]} for row in rows]
+    source_detail = f"canonical_store:sqlite:{table}"
+    connection.close()
+
+owners = {item["owner_scope"] for item in records}
+if len(owners) > 1:
+    raise SystemExit(f"canonical {resource} observation has multiple owners: {owners}")
+print(json.dumps({
+    "source": "canonical_store",
+    "count_source": "canonical_store",
+    "store": source_detail,
+    "resource": resource,
+    "requested_id": identity,
+    "resource_id": records[0]["resource_id"] if records else identity,
+    "owner_scope": records[0]["owner_scope"] if records else None,
+    "count": len(records),
+    "records": records,
+}, sort_keys=True))
+PY
+}
+
+canonical_capture() {
+  canonical_store_snapshot "$1" "$2" "$3"
+}
+
 cat >keypair.tf <<'EOF'
 resource "openstack_compute_keypair_v2" "managed" {
   name = "p13-5b-keypair"
@@ -191,10 +275,13 @@ plan keypair-read-2
 keypair_id="p13-5b-keypair"
 keypair_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs" | python3 -c 'import json,sys; print(sum(1 for x in json.load(sys.stdin)["keypairs"] if x["keypair"]["name"] == "p13-5b-keypair"))')"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs/p13-5b-keypair" >"$work_dir/keypair-stable-projection.json"
+canonical_capture openstack_compute_keypair_v2 p13-5b-keypair "$work_dir/keypair-stable-canonical-before.json"
+canonical_capture openstack_compute_keypair_v2 p13-5b-keypair "$work_dir/keypair-stable-canonical-after-read.json"
 sleep 1
 restart_daemon
 "$tofu" destroy -input=false -auto-approve >/dev/null
 keypair_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs/p13-5b-keypair")"
+canonical_capture openstack_compute_keypair_v2 p13-5b-keypair "$work_dir/keypair-stable-canonical-after-cleanup.json"
 
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
   "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs" \
@@ -209,10 +296,14 @@ keypair_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_compute_keypair_v2.imported p13-5b-import-keypair >/dev/null
 "$tofu" plan -input=false -out="$work_dir/keypair-import-normal.tfplan" >/dev/null
 "$tofu" show -json "$work_dir/keypair-import-normal.tfplan" >"$work_dir/keypair-import-normal.json"
+"$tofu" show -json >"$work_dir/keypair-import-state.json"
 keypair_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs" | python3 -c 'import json,sys; print(sum(1 for x in json.load(sys.stdin)["keypairs"] if x["keypair"]["name"] == "p13-5b-import-keypair"))')"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs/p13-5b-import-keypair" >"$work_dir/keypair-import-projection.json"
+canonical_capture openstack_compute_keypair_v2 p13-5b-import-keypair "$work_dir/keypair-import-canonical-before.json"
+canonical_capture openstack_compute_keypair_v2 p13-5b-import-keypair "$work_dir/keypair-import-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 keypair_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs/p13-5b-import-keypair")"
+canonical_capture openstack_compute_keypair_v2 p13-5b-import-keypair "$work_dir/keypair-import-canonical-after-cleanup.json"
 rm -f keypair.tf
 
 cat >network.tf <<'EOF'
@@ -227,8 +318,11 @@ plan network-read-1
 plan network-read-2
 network_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks" | python3 -c 'import json,sys; print(sum(1 for x in json.load(sys.stdin)["networks"] if x["name"] == "p13-5b-network"))')"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$network_id" >"$work_dir/network-stable-projection.json"
+canonical_capture openstack_networking_network_v2 "$network_id" "$work_dir/network-stable-canonical-before.json"
+canonical_capture openstack_networking_network_v2 "$network_id" "$work_dir/network-stable-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 network_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$network_id")"
+canonical_capture openstack_networking_network_v2 "$network_id" "$work_dir/network-stable-canonical-after-cleanup.json"
 
 network_response="$work_dir/import-network.json"
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
@@ -241,11 +335,15 @@ network_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_network_v2.imported "$import_network_id" >/dev/null
 "$tofu" plan -input=false -out="$work_dir/network-import-normal.tfplan" >/dev/null
 "$tofu" show -json "$work_dir/network-import-normal.tfplan" >"$work_dir/network-import-normal.json"
+"$tofu" show -json >"$work_dir/network-import-state.json"
 network_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["networks"] if x["id"] == wanted))' "$import_network_id")"
 network_projection="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$import_network_id")"
 printf '%s\n' "$network_projection" >"$work_dir/network-import-projection.json"
+canonical_capture openstack_networking_network_v2 "$import_network_id" "$work_dir/network-import-canonical-before.json"
+canonical_capture openstack_networking_network_v2 "$import_network_id" "$work_dir/network-import-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 network_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$import_network_id")"
+canonical_capture openstack_networking_network_v2 "$import_network_id" "$work_dir/network-import-canonical-after-cleanup.json"
 
 cat >subnet.tf <<EOF
 resource "openstack_networking_network_v2" "parent" { name = "p13-5b-subnet-network" }
@@ -264,8 +362,11 @@ plan subnet-read-1
 plan subnet-read-2
 subnet_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["subnets"] if x["id"] == wanted))' "$subnet_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets/$subnet_id" >"$work_dir/subnet-stable-projection.json"
+canonical_capture openstack_networking_subnet_v2 "$subnet_id" "$work_dir/subnet-stable-canonical-before.json"
+canonical_capture openstack_networking_subnet_v2 "$subnet_id" "$work_dir/subnet-stable-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 subnet_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets/$subnet_id")"
+canonical_capture openstack_networking_subnet_v2 "$subnet_id" "$work_dir/subnet-stable-canonical-after-cleanup.json"
 rm -f network.tf
 
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
@@ -288,10 +389,14 @@ subnet_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_subnet_v2.imported "$subnet_import_id" >/dev/null
 "$tofu" plan -input=false -out="$work_dir/subnet-import-normal.tfplan" >/dev/null
 "$tofu" show -json "$work_dir/subnet-import-normal.tfplan" >"$work_dir/subnet-import-normal.json"
+"$tofu" show -json >"$work_dir/subnet-import-state.json"
 subnet_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["subnets"] if x["id"] == wanted))' "$subnet_import_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets/$subnet_import_id" >"$work_dir/subnet-import-projection.json"
+canonical_capture openstack_networking_subnet_v2 "$subnet_import_id" "$work_dir/subnet-import-canonical-before.json"
+canonical_capture openstack_networking_subnet_v2 "$subnet_import_id" "$work_dir/subnet-import-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 subnet_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets/$subnet_import_id")"
+canonical_capture openstack_networking_subnet_v2 "$subnet_import_id" "$work_dir/subnet-import-canonical-after-cleanup.json"
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$subnet_import_network_id" >/dev/null
 rm -f subnet.tf
 
@@ -316,8 +421,11 @@ plan port-read-1
 plan port-read-2
 port_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["ports"] if x["id"] == wanted))' "$port_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$port_id" >"$work_dir/port-stable-projection.json"
+canonical_capture openstack_networking_port_v2 "$port_id" "$work_dir/port-stable-canonical-before.json"
+canonical_capture openstack_networking_port_v2 "$port_id" "$work_dir/port-stable-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 port_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$port_id")"
+canonical_capture openstack_networking_port_v2 "$port_id" "$work_dir/port-stable-canonical-after-cleanup.json"
 rm -f port.tf
 
 # Match the accepted P13.2C lifecycle boundary.  The daemon's in-memory
@@ -367,10 +475,14 @@ port_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_port_v2.imported "$port_import_id" >/dev/null
 "$tofu" plan -input=false -out="$work_dir/port-import-normal.tfplan" >/dev/null
 "$tofu" show -json "$work_dir/port-import-normal.tfplan" >"$work_dir/port-import-normal.json"
+"$tofu" show -json >"$work_dir/port-import-state.json"
 port_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["ports"] if x["id"] == wanted))' "$port_import_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$port_import_id" >"$work_dir/port-import-projection.json"
+canonical_capture openstack_networking_port_v2 "$port_import_id" "$work_dir/port-import-canonical-before.json"
+canonical_capture openstack_networking_port_v2 "$port_import_id" "$work_dir/port-import-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 port_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$port_import_id")"
+canonical_capture openstack_networking_port_v2 "$port_import_id" "$work_dir/port-import-canonical-after-cleanup.json"
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$port_import_subnet_id" >/dev/null
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$port_import_network_id" >/dev/null
 cd "$project_dir"
@@ -405,6 +517,8 @@ plan floating-ip-read-1
 plan floating-ip-read-2
 fip_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["floatingips"] if x["id"] == wanted))' "$fip_stable_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips/$fip_stable_id" >"$work_dir/floating-ip-stable-projection.json"
+canonical_capture openstack_networking_floatingip_v2 "$fip_stable_id" "$work_dir/floating-ip-stable-canonical-before.json"
+canonical_capture openstack_networking_floatingip_v2 "$fip_stable_id" "$work_dir/floating-ip-stable-canonical-after-read.json"
 sed -i 's/port_id = openstack_networking_port_v2.private.id/port_id = null/' floating-ip.tf
 "$tofu" apply -input=false -auto-approve >/dev/null
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X PUT \
@@ -413,6 +527,7 @@ curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X PUT \
 "$tofu" destroy -input=false -auto-approve >/dev/null
 fip_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips/$fip_stable_id")"
 fip_stable_count_after="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["floatingips"] if x["id"] == wanted))' "$fip_stable_id")"
+canonical_capture openstack_networking_floatingip_v2 "$fip_stable_id" "$work_dir/floating-ip-stable-canonical-after-cleanup.json"
 [[ "$fip_stable_cleanup" == 404 && "$fip_stable_count_after" == 0 ]] || { echo "P13.5B FloatingIP stable cleanup did not disassociate and release the allocation" >&2; exit 1; }
 rm -f floating-ip.tf
 
@@ -437,6 +552,7 @@ curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST 
   --data "{\"floatingip\":{\"floating_network_id\":\"$external_realm_id\",\"port_id\":\"$fip_import_port_id\"}}" >"$work_dir/floating-ip-import.json"
 fip_import_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["floatingip"]["id"])' "$work_dir/floating-ip-import.json")"
 fip_import_count_before="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["floatingips"] if x["id"] == wanted))' "$fip_import_id")"
+canonical_capture openstack_networking_floatingip_v2 "$fip_import_id" "$work_dir/floating-ip-import-canonical-before.json"
 cat >floating-ip.tf <<EOF
 resource "openstack_networking_floatingip_v2" "imported" {
   pool = "$external_pool_name"
@@ -449,6 +565,7 @@ plan floating-ip-import-read-1
 plan floating-ip-import-read-2
 fip_import_count_after_read="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["floatingips"] if x["id"] == wanted))' "$fip_import_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips/$fip_import_id" >"$work_dir/floating-ip-import-projection.json"
+canonical_capture openstack_networking_floatingip_v2 "$fip_import_id" "$work_dir/floating-ip-import-canonical-after-read.json"
 [[ "$fip_import_count_before" == 1 && "$fip_import_count_after_read" == 1 ]] || { echo "P13.5B FloatingIP import changed allocator/list identity" >&2; exit 1; }
 
 # Exercise the provider's disassociate path before destroy exercises release.
@@ -462,6 +579,7 @@ fip_import_disassociated_port="$(curl -fsS -H "X-Auth-Token: $token" "http://127
 "$tofu" destroy -input=false -auto-approve >/dev/null
 fip_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips/$fip_import_id")"
 fip_import_count_after_cleanup="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["floatingips"] if x["id"] == wanted))' "$fip_import_id")"
+canonical_capture openstack_networking_floatingip_v2 "$fip_import_id" "$work_dir/floating-ip-import-canonical-after-cleanup.json"
 [[ "$fip_import_cleanup" == 404 && "$fip_import_count_after_cleanup" == 0 ]] || { echo "P13.5B FloatingIP import cleanup did not release the allocation" >&2; exit 1; }
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/ports/$fip_import_port_id" >/dev/null
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$fip_import_subnet_id" >/dev/null
@@ -528,9 +646,12 @@ volume_assert_projection "$work_dir/volume-stable-projection.json"
 volume_assert_same_projection "$work_dir/volume-read-1-projection.json" "$work_dir/volume-read-2-projection.json"
 volume_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumes"] if x["id"] == wanted))' "$volume_stable_id")"
 [[ "$volume_stable_count" == 1 ]] || { echo "P13.5B volume stable fixture did not create exactly one canonical volume" >&2; exit 1; }
+canonical_capture openstack_blockstorage_volume_v3 "$volume_stable_id" "$work_dir/volume-stable-canonical-before.json"
+canonical_capture openstack_blockstorage_volume_v3 "$volume_stable_id" "$work_dir/volume-stable-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 volume_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_stable_id")"
 volume_stable_count_after="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumes"] if x["id"] == wanted))' "$volume_stable_id")"
+canonical_capture openstack_blockstorage_volume_v3 "$volume_stable_id" "$work_dir/volume-stable-canonical-after-cleanup.json"
 [[ "$volume_stable_cleanup" == 404 && "$volume_stable_count_after" == 0 ]] || { echo "P13.5B volume stable cleanup did not remove the canonical volume" >&2; exit 1; }
 rm -f volume.tf
 
@@ -544,6 +665,7 @@ curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST 
   --data '{"volume":{"size":1,"name":"p13-5b-volume","description":"bounded canonical volume","metadata":{}}}' >"$work_dir/volume-import.json"
 volume_import_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["volume"]["id"])' "$work_dir/volume-import.json")"
 volume_import_count_before="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumes"] if x["id"] == wanted))' "$volume_import_id")"
+canonical_capture openstack_blockstorage_volume_v3 "$volume_import_id" "$work_dir/volume-import-canonical-before.json"
 cat >volume.tf <<EOF
 resource "openstack_blockstorage_volume_v3" "imported" {
   name = "p13-5b-volume"
@@ -562,10 +684,12 @@ cp "$work_dir/volume-import-read-2-projection.json" "$work_dir/volume-import-pro
 volume_assert_projection "$work_dir/volume-import-projection.json"
 volume_assert_same_projection "$work_dir/volume-import-read-1-projection.json" "$work_dir/volume-import-read-2-projection.json"
 volume_import_count_after_read="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumes"] if x["id"] == wanted))' "$volume_import_id")"
+canonical_capture openstack_blockstorage_volume_v3 "$volume_import_id" "$work_dir/volume-import-canonical-after-read.json"
 [[ "$volume_import_count_before" == 1 && "$volume_import_count_after_read" == 1 ]] || { echo "P13.5B volume import changed canonical identity/count" >&2; exit 1; }
 "$tofu" destroy -input=false -auto-approve >/dev/null
 volume_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_import_id")"
 volume_import_count_after_cleanup="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumes"] if x["id"] == wanted))' "$volume_import_id")"
+canonical_capture openstack_blockstorage_volume_v3 "$volume_import_id" "$work_dir/volume-import-canonical-after-cleanup.json"
 [[ "$volume_import_cleanup" == 404 && "$volume_import_count_after_cleanup" == 0 ]] || { echo "P13.5B volume import cleanup did not remove the canonical volume" >&2; exit 1; }
 rm -f volume.tf
 cd "$project_dir"
@@ -583,8 +707,11 @@ plan security-group-read-1
 plan security-group-read-2
 security_group_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-groups" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["security_groups"] if x["id"] == wanted))' "$security_group_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-groups/$security_group_id" >"$work_dir/security-group-stable-projection.json"
+canonical_capture openstack_networking_secgroup_v2 "$security_group_id" "$work_dir/security-group-stable-canonical-before.json"
+canonical_capture openstack_networking_secgroup_v2 "$security_group_id" "$work_dir/security-group-stable-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 security_group_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-groups/$security_group_id")"
+canonical_capture openstack_networking_secgroup_v2 "$security_group_id" "$work_dir/security-group-stable-canonical-after-cleanup.json"
 rm -f security-group.tf
 
 kill "$pid" 2>/dev/null || true
@@ -619,10 +746,14 @@ security_group_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_secgroup_v2.imported "$security_group_import_id" >/dev/null
 "$tofu" plan -input=false -out="$work_dir/security-group-import-normal.tfplan" >/dev/null
 "$tofu" show -json "$work_dir/security-group-import-normal.tfplan" >"$work_dir/security-group-import-normal.json"
+"$tofu" show -json >"$work_dir/security-group-import-state.json"
 security_group_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-groups" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["security_groups"] if x["id"] == wanted))' "$security_group_import_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-groups/$security_group_import_id" >"$work_dir/security-group-import-projection.json"
+canonical_capture openstack_networking_secgroup_v2 "$security_group_import_id" "$work_dir/security-group-import-canonical-before.json"
+canonical_capture openstack_networking_secgroup_v2 "$security_group_import_id" "$work_dir/security-group-import-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 security_group_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-groups/$security_group_import_id")"
+canonical_capture openstack_networking_secgroup_v2 "$security_group_import_id" "$work_dir/security-group-import-canonical-after-cleanup.json"
 rm -f security-group.tf
 cd "$project_dir"
 
@@ -645,8 +776,11 @@ plan security-group-rule-read-1
 plan security-group-rule-read-2
 security_group_rule_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-group-rules?security_group_id=$security_group_rule_parent_id" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["security_group_rules"] if x["id"] == wanted))' "$security_group_rule_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-group-rules/$security_group_rule_id" >"$work_dir/security-group-rule-stable-projection.json"
+canonical_capture openstack_networking_secgroup_rule_v2 "$security_group_rule_id" "$work_dir/security-group-rule-stable-canonical-before.json"
+canonical_capture openstack_networking_secgroup_rule_v2 "$security_group_rule_id" "$work_dir/security-group-rule-stable-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 security_group_rule_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-group-rules/$security_group_rule_id")"
+canonical_capture openstack_networking_secgroup_rule_v2 "$security_group_rule_id" "$work_dir/security-group-rule-stable-canonical-after-cleanup.json"
 rm -f security-group-rule.tf
 
 rule_import_project="$work_dir/security-group-rule-import-project"
@@ -675,10 +809,14 @@ rule_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_secgroup_rule_v2.imported "$rule_import_id" >/dev/null
 "$tofu" plan -input=false -out="$work_dir/security-group-rule-import-normal.tfplan" >/dev/null
 "$tofu" show -json "$work_dir/security-group-rule-import-normal.tfplan" >"$work_dir/security-group-rule-import-normal.json"
+"$tofu" show -json >"$work_dir/security-group-rule-import-state.json"
 rule_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-group-rules?security_group_id=$rule_import_parent_id" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["security_group_rules"] if x["id"] == wanted))' "$rule_import_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-group-rules/$rule_import_id" >"$work_dir/security-group-rule-import-projection.json"
+canonical_capture openstack_networking_secgroup_rule_v2 "$rule_import_id" "$work_dir/security-group-rule-import-canonical-before.json"
+canonical_capture openstack_networking_secgroup_rule_v2 "$rule_import_id" "$work_dir/security-group-rule-import-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 rule_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-group-rules/$rule_import_id")"
+canonical_capture openstack_networking_secgroup_rule_v2 "$rule_import_id" "$work_dir/security-group-rule-import-canonical-after-cleanup.json"
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/security-groups/$rule_import_parent_id" >/dev/null
 rm -f security-group-rule.tf
 cd "$project_dir"
@@ -725,8 +863,11 @@ plan server-read-1
 plan server-read-2
 server_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["servers"] if x["id"] == wanted))' "$server_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$server_id" >"$work_dir/server-stable-projection.json"
+canonical_capture openstack_compute_instance_v2 "$server_id" "$work_dir/server-stable-canonical-before.json"
+canonical_capture openstack_compute_instance_v2 "$server_id" "$work_dir/server-stable-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 server_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$server_id")"
+canonical_capture openstack_compute_instance_v2 "$server_id" "$work_dir/server-stable-canonical-after-cleanup.json"
 rm -f server.tf
 
 server_import_project="$work_dir/server-import-project"
@@ -752,6 +893,7 @@ for _ in $(seq 1 120); do
   sleep 0.1
 done
 [[ "$server_import_status" == "ACTIVE" ]] || { echo "P13.5B server import fixture did not become ACTIVE" >&2; exit 1; }
+canonical_capture openstack_compute_instance_v2 "$server_import_id" "$work_dir/server-import-canonical-before.json"
 cat >server.tf <<EOF
 data "openstack_images_image_v2" "image" { name = "p13-5b-server-image" }
 data "openstack_compute_flavor_v2" "flavor" { name = "test.small" }
@@ -760,6 +902,8 @@ resource "openstack_compute_instance_v2" "imported" {
   image_id = data.openstack_images_image_v2.image.id
   flavor_id = data.openstack_compute_flavor_v2.flavor.id
   power_state = "active"
+  force_delete = false
+  stop_before_destroy = false
   metadata = {}
   network { uuid = "$server_import_network_id" }
 }
@@ -777,7 +921,10 @@ if changes:
 PY
 server_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["servers"] if x["id"] == wanted))' "$server_import_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$server_import_id" >"$work_dir/server-import-projection.json"
-server_import_cleanup="retained"
+canonical_capture openstack_compute_instance_v2 "$server_import_id" "$work_dir/server-import-canonical-after-read.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+server_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$server_import_id")"
+canonical_capture openstack_compute_instance_v2 "$server_import_id" "$work_dir/server-import-canonical-after-cleanup.json"
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$server_import_subnet_id" >/dev/null
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$server_import_network_id" >/dev/null
 rm -f server.tf
@@ -823,8 +970,11 @@ plan volume-attachment-read-1
 plan volume-attachment-read-2
 volume_attachment_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_server_id/os-volume_attachments" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumeAttachments"] if x["attachment_id"] == wanted))' "$volume_attachment_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_server_id/os-volume_attachments/$volume_attachment_id" >"$work_dir/volume-attachment-stable-projection.json"
+canonical_capture openstack_compute_volume_attach_v2 "$volume_attachment_id" "$work_dir/volume-attachment-stable-canonical-before.json"
+canonical_capture openstack_compute_volume_attach_v2 "$volume_attachment_id" "$work_dir/volume-attachment-stable-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 volume_attachment_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_server_id/os-volume_attachments/$volume_attachment_id")"
+canonical_capture openstack_compute_volume_attach_v2 "$volume_attachment_id" "$work_dir/volume-attachment-stable-canonical-after-cleanup.json"
 [[ "$volume_attachment_stable_count" == 1 && "$volume_attachment_stable_cleanup" == 404 ]] || { echo "P13.5B VolumeAttachment stable fixture did not converge/clean up" >&2; exit 1; }
 rm -f volume-attachment.tf
 
@@ -853,6 +1003,7 @@ curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST 
   --data "{\"volumeAttachment\":{\"volumeId\":\"$volume_attachment_import_volume_id\",\"device\":\"/dev/vdb\"}}" >"$work_dir/volume-attachment-import-attachment.json"
 volume_attachment_import_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["volumeAttachment"]["attachment_id"])' "$work_dir/volume-attachment-import-attachment.json")"
 volume_attachment_import_count_before="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id/os-volume_attachments" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumeAttachments"] if x["attachment_id"] == wanted))' "$volume_attachment_import_id")"
+canonical_capture openstack_compute_volume_attach_v2 "$volume_attachment_import_id" "$work_dir/volume-attachment-import-canonical-before.json"
 cat >volume-attachment.tf <<EOF
 resource "openstack_compute_volume_attach_v2" "imported" {
   instance_id = "$volume_attachment_import_server_id"
@@ -867,6 +1018,7 @@ plan volume-attachment-import-read-1
 plan volume-attachment-import-read-2
 volume_attachment_import_count_after_read="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id/os-volume_attachments" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumeAttachments"] if x["attachment_id"] == wanted))' "$volume_attachment_import_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id/os-volume_attachments/$volume_attachment_import_id" >"$work_dir/volume-attachment-import-projection.json"
+canonical_capture openstack_compute_volume_attach_v2 "$volume_attachment_import_id" "$work_dir/volume-attachment-import-canonical-after-read.json"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id" >"$work_dir/volume-attachment-import-server-parent.json"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_attachment_import_volume_id" >"$work_dir/volume-attachment-import-volume-parent.json"
 [[ "$volume_attachment_import_count_before" == 1 && "$volume_attachment_import_count_after_read" == 1 ]] || { echo "P13.5B VolumeAttachment import duplicated or changed the relation" >&2; exit 1; }
@@ -875,6 +1027,7 @@ cat >"$work_dir/volume-attachment-import-parents.json" <<EOF
 EOF
 "$tofu" destroy -input=false -auto-approve >/dev/null
 volume_attachment_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id/os-volume_attachments/$volume_attachment_import_id")"
+canonical_capture openstack_compute_volume_attach_v2 "$volume_attachment_import_id" "$work_dir/volume-attachment-import-canonical-after-cleanup.json"
 volume_attachment_import_server_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id")"
 volume_attachment_import_volume_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_attachment_import_volume_id")"
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id" >/dev/null
@@ -906,8 +1059,11 @@ plan router-read-1
 plan router-read-2
 router_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["routers"] if x["id"] == wanted))' "$router_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers/$router_id" >"$work_dir/router-stable-projection.json"
+canonical_capture openstack_networking_router_v2 "$router_id" "$work_dir/router-stable-canonical-before.json"
+canonical_capture openstack_networking_router_v2 "$router_id" "$work_dir/router-stable-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 router_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers/$router_id")"
+canonical_capture openstack_networking_router_v2 "$router_id" "$work_dir/router-stable-canonical-after-cleanup.json"
 rm -f router.tf
 
 router_import_project="$work_dir/router-import-project"
@@ -932,8 +1088,11 @@ router_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" show -json "$work_dir/router-import-normal.tfplan" >"$work_dir/router-import-normal.json"
 router_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["routers"] if x["id"] == wanted))' "$router_import_id")"
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers/$router_import_id" >"$work_dir/router-import-projection.json"
+canonical_capture openstack_networking_router_v2 "$router_import_id" "$work_dir/router-import-canonical-before.json"
+canonical_capture openstack_networking_router_v2 "$router_import_id" "$work_dir/router-import-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 router_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers/$router_import_id")"
+canonical_capture openstack_networking_router_v2 "$router_import_id" "$work_dir/router-import-canonical-after-cleanup.json"
 rm -f router.tf
 router_external_subnet_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["subnet"]["id"])' "$work_dir/router-external-subnet.json")"
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_external_subnet_id" >/dev/null
@@ -977,9 +1136,12 @@ plan router-interface-read-2
 router_interface_stable_count="$(canonical_attachment_count "$router_interface_stable_router_id" "$router_interface_stable_subnet_id")"
 [[ "$router_interface_stable_count" == 1 ]] || { echo "P13.5B RouterInterface stable fixture did not create exactly one canonical attachment" >&2; exit 1; }
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$router_interface_stable_id" >"$work_dir/router-interface-stable-projection.json"
+canonical_capture openstack_networking_router_interface_v2 "$router_interface_stable_id" "$work_dir/router-interface-stable-canonical-before.json"
+canonical_capture openstack_networking_router_interface_v2 "$router_interface_stable_id" "$work_dir/router-interface-stable-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 router_interface_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$router_interface_stable_id")"
 router_interface_stable_count_after="$(canonical_attachment_count "$router_interface_stable_router_id" "$router_interface_stable_subnet_id")"
+canonical_capture openstack_networking_router_interface_v2 "$router_interface_stable_id" "$work_dir/router-interface-stable-canonical-after-cleanup.json"
 [[ "$router_interface_stable_cleanup" == 404 && "$router_interface_stable_count_after" == 0 ]] || { echo "P13.5B RouterInterface stable cleanup did not remove the canonical attachment" >&2; exit 1; }
 cat >"$work_dir/router-interface-stable-parent.json" <<EOF
 {"parent_retention":"not_applicable","canonical_active_count_before":$router_interface_stable_count,"canonical_active_count_after":$router_interface_stable_count_after,"cleanup_order":["interface","router","subnet","network"],"network_id":"$router_interface_stable_network_id"}
@@ -1021,6 +1183,7 @@ curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X PUT \
 router_interface_unrelated_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port_id"])' "$work_dir/router-interface-unrelated-attachment.json")"
 router_interface_import_count="$(canonical_attachment_count "$router_interface_import_router_id" "$router_interface_import_subnet_id")"
 [[ "$router_interface_import_count" == 1 ]] || { echo "P13.5B RouterInterface import fixture did not create exactly one target canonical attachment" >&2; exit 1; }
+canonical_capture openstack_networking_router_interface_v2 "$router_interface_import_id" "$work_dir/router-interface-import-canonical-before.json"
 cat >router-interface.tf <<EOF
 resource "openstack_networking_router_interface_v2" "imported" {
   router_id = "$router_interface_import_router_id"
@@ -1032,9 +1195,11 @@ router_interface_import_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 plan router-interface-import-read-1
 plan router-interface-import-read-2
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$router_interface_import_id" >"$work_dir/router-interface-import-projection.json"
+canonical_capture openstack_networking_router_interface_v2 "$router_interface_import_id" "$work_dir/router-interface-import-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 router_interface_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$router_interface_import_id")"
 router_interface_import_count_after="$(canonical_attachment_count "$router_interface_import_router_id" "$router_interface_import_subnet_id")"
+canonical_capture openstack_networking_router_interface_v2 "$router_interface_import_id" "$work_dir/router-interface-import-canonical-after-cleanup.json"
 router_interface_import_router_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers/$router_interface_import_router_id")"
 router_interface_import_subnet_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets/$router_interface_import_subnet_id")"
 router_interface_import_network_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$router_interface_import_network_id")"
@@ -1076,6 +1241,7 @@ volume_attachment_trace_start = os.environ["P13_5B_ATTACHMENT_TRACE_START"]
 volume_attachment_import_trace_start = os.environ["P13_5B_ATTACHMENT_IMPORT_TRACE_START"]
 volume_attachment_import_state_id = os.environ["P13_5B_ATTACHMENT_IMPORT_STATE_ID"]
 work = pathlib.Path(work)
+baseline_document = json.loads(pathlib.Path(os.environ["P13_5B_BASELINE_MANIFEST"]).read_text()) if os.environ.get("P13_5B_BASELINE_MANIFEST") else {"status": baseline_result}
 
 def digest(path):
     h = hashlib.sha256()
@@ -1210,6 +1376,29 @@ def projection(path, resource):
     item = document["network"]
     return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id"))}
 
+CANONICAL_SLUGS = {
+    "openstack_compute_keypair_v2": "keypair",
+    "openstack_networking_network_v2": "network",
+    "openstack_networking_subnet_v2": "subnet",
+    "openstack_networking_port_v2": "port",
+    "openstack_compute_instance_v2": "server",
+    "openstack_networking_secgroup_v2": "security-group",
+    "openstack_networking_secgroup_rule_v2": "security-group-rule",
+    "openstack_networking_router_v2": "router",
+    "openstack_networking_router_interface_v2": "router-interface",
+    "openstack_networking_floatingip_v2": "floating-ip",
+    "openstack_blockstorage_volume_v3": "volume",
+    "openstack_compute_volume_attach_v2": "volume-attachment",
+}
+
+def canonical_snapshot(resource, kind, phase):
+    scenario_slug = "stable" if kind == "stable-read" else "import"
+    path = work / f"{CANONICAL_SLUGS[resource]}-{scenario_slug}-canonical-{phase}.json"
+    document = json.loads(path.read_text())
+    if document.get("source") != "canonical_store" or document.get("count_source") != "canonical_store":
+        raise ValueError(f"canonical observation is not store-backed: {path}")
+    return document
+
 def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, cleanup, duplicate_count=0, result="passed", reason=None, trace_start=0, projection_file=None, canonical_count_after=None, parent_file=None):
     plan_documents = {"refresh-only": [plan_document(name) for name in refresh_files], "normal": [plan_document(name) for name in normal_files]}
     windows = [plan_window(name) for name in refresh_files + normal_files]
@@ -1221,6 +1410,9 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
     mutation_routes = provider_mutation_routes(trace_start, trace_end, resource)
     observed_state_id = state_id(normal_files[-1], resource)
     observed = projection(projection_file, resource) if projection_file else None
+    canonical_before = canonical_snapshot(resource, kind, "before")
+    canonical_after_read = canonical_snapshot(resource, kind, "after-read")
+    canonical_after_cleanup = canonical_snapshot(resource, kind, "after-cleanup")
     parent_observation = json.loads((work / parent_file).read_text()) if parent_file else None
     minimum_routes = 2 if kind == "stable-read" else 1
     if result == "passed" and len(trace_routes) < minimum_routes:
@@ -1232,19 +1424,30 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
     if result == "passed" and kind == "import" and mutation_routes:
         result = "blocked"
         reason = f"provider import/refresh issued mutation requests: {mutation_routes}"
-    if result == "passed" and int(duplicate_count) != 1:
+    canonical_before_count = int(canonical_before.get("count", -1))
+    canonical_after_read_count = int(canonical_after_read.get("count", -1))
+    canonical_after_cleanup_count = int(canonical_after_cleanup.get("count", -1))
+    if result == "passed" and canonical_before_count != 1:
         result = "blocked"
-        reason = f"canonical compatibility projection count was {duplicate_count}, expected exactly one"
-    if result == "passed" and canonical_count_after is not None and int(canonical_count_after) != 0:
+        reason = f"canonical store count before observation was {canonical_before_count}, expected exactly one"
+    if result == "passed" and canonical_after_read_count != 1:
         result = "blocked"
-        reason = f"canonical compatibility projection cleanup count was {canonical_count_after}, expected zero"
-    cleanup_allowed = cleanup == "passed" or (resource == "openstack_compute_instance_v2" and kind == "import" and cleanup == "retained")
+        reason = f"canonical store count after provider read was {canonical_after_read_count}, expected exactly one"
+    if result == "passed" and canonical_after_cleanup_count != 0:
+        result = "blocked"
+        reason = f"canonical store count after cleanup was {canonical_after_cleanup_count}, expected zero"
+    cleanup_allowed = cleanup == "passed"
     if result == "passed" and not cleanup_allowed:
         result = "blocked"
-        reason = "canonical compatibility projection did not return 404 after cleanup"
-    if result == "passed" and observed and (observed.get("id") != canonical or observed.get("owner_scope") != project):
+        reason = "canonical compatibility resource did not return 404 after cleanup"
+    if result == "passed" and (
+        canonical_before.get("requested_id") != canonical
+        or canonical_before.get("owner_scope") != project
+        or canonical_after_read.get("requested_id") != canonical
+        or canonical_after_read.get("owner_scope") != project
+    ):
         result = "blocked"
-        reason = f"canonical projection identity mismatch: {observed}"
+        reason = f"canonical store identity/ownership mismatch: before={canonical_before}, after_read={canonical_after_read}"
     if result == "passed" and kind == "import" and not import_id:
         result = "blocked"
         reason = "provider import identifier was empty"
@@ -1265,10 +1468,14 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
         "plan_observation": plan_documents,
         "provider_state_observation": {"observed": True, "source": "tofu_show_json_state", "state_id": observed_state_id},
         "canonical_identity_observation": {
-            "source": "compatibility_projection_read",
-            "owner_scope": project,
-            "resource_id": observed["id"] if observed else None,
-            "observed_owner_scope": observed["owner_scope"] if observed else None,
+            "source": "canonical_store",
+            "count_source": "canonical_store",
+            "owner_scope": canonical_before.get("owner_scope"),
+            "resource_id": canonical_before.get("resource_id"),
+            "observed_owner_scope": canonical_after_read.get("owner_scope"),
+            "before": canonical_before,
+            "after_read": canonical_after_read,
+            "after_cleanup": canonical_after_cleanup,
             "provider_observed": {
                 key: observed.get(key)
                 for key in ("instance_id", "volume_id", "device")
@@ -1280,9 +1487,10 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
         "normal_plan_actions": [actions(name) for name in normal_files],
         "provider_mutation_routes": mutation_routes,
         "final_plan_noop": result == "passed" and not normal,
-        "canonical_duplicate_count": max(int(duplicate_count) - 1, 0) if result == "passed" else None,
-        "canonical_resource_count": int(duplicate_count) if result == "passed" else None,
-        "canonical_resource_count_after_cleanup": int(canonical_count_after) if canonical_count_after is not None and result == "passed" else None,
+        "canonical_duplicate_count": max(canonical_before_count - 1, 0) if result == "passed" else None,
+        "canonical_resource_count": canonical_before_count if result == "passed" else None,
+        "canonical_resource_count_after_read": canonical_after_read_count if result == "passed" else None,
+        "canonical_resource_count_after_cleanup": canonical_after_cleanup_count if result == "passed" else None,
         "canonical_parent_observation": parent_observation,
         "cleanup_result": cleanup,
         "backend": "sqlite",
@@ -1338,7 +1546,7 @@ document = {
     "tested_o3k_head_sha": scenarios[0]["head_sha"],
     "starting_main_sha": __import__("subprocess").check_output(["git", "-C", root, "merge-base", "HEAD", "origin/main"], text=True).strip(),
     "existing_p13_baseline": {
-        "status": baseline_result,
+        **baseline_document,
         "classification": "none" if baseline_result == "verified" else "environment_and_existing_gate_limitations",
         "required_gates": required_gates,
         "completed_before_block": required_gates if baseline_result == "verified" else [

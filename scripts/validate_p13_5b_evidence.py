@@ -65,7 +65,7 @@ IMPORT_ID_SHAPES = {
     "openstack_compute_volume_attach_v2": "server_uuid/attachment_uuid",
 }
 
-UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
+UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-7][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
 BASELINE_GATES = {
     "tests/p13_2_core_lifecycle.sh",
     "tests/p13_2b_subnet_lifecycle.sh",
@@ -356,15 +356,7 @@ def validate(document: dict, *, allow_incomplete: bool = False) -> None:
             validate_state_identity(scenario)
             require(scenario["canonical_duplicate_count"] == 0, "passed scenario has duplicate canonical resources")
             require(scenario["canonical_resource_count"] == 1, "passed scenario must observe one canonical resource")
-            require(
-                scenario["cleanup_result"] == "passed"
-                or (
-                    scenario["resource"] == "openstack_compute_instance_v2"
-                    and scenario["scenario"] == "import"
-                    and scenario["cleanup_result"] == "retained"
-                ),
-                "passed scenario has unsuccessful cleanup",
-            )
+            require(scenario["cleanup_result"] == "passed", "passed scenario has unsuccessful cleanup")
             validate_plan_observation(scenario)
             validate_trace_observation(scenario)
             routes = scenario["trace_observation"]["provider_read_routes"]
@@ -375,14 +367,34 @@ def validate(document: dict, *, allow_incomplete: bool = False) -> None:
             require(IMPORT_ROUTES[scenario["resource"]].fullmatch(scenario["first_read_route"]), "first_read_route does not match the frozen contract route")
             identity = scenario.get("canonical_identity_observation")
             require(isinstance(identity, dict), "canonical_identity_observation must be an object")
-            require(identity.get("source") in {"canonical_api", "canonical_store"}, "canonical identity is not independently observed")
-            require(identity.get("count_source") in {"canonical_api", "canonical_store"}, "canonical count is not independently observed")
+            require(identity.get("source") == "canonical_store", "canonical identity is not store-observed")
+            require(identity.get("count_source") == "canonical_store", "canonical count is not store-observed")
             require(identity.get("resource_id") == scenario["canonical_id"], "canonical identity ID mismatch")
             require(identity.get("owner_scope") == scenario["owner_scope"], "canonical owner scope mismatch")
             require(
                 identity.get("observed_owner_scope") == scenario["owner_scope"],
                 "observed canonical owner scope mismatch",
             )
+            observations = {
+                phase: identity.get(phase)
+                for phase in ("before", "after_read", "after_cleanup")
+            }
+            require(
+                all(isinstance(observation, dict) for observation in observations.values()),
+                "canonical store observations must include before/read/cleanup snapshots",
+            )
+            require(
+                all(observation.get("source") == "canonical_store" and observation.get("count_source") == "canonical_store"
+                    for observation in observations.values()),
+                "canonical snapshots must be store-backed",
+            )
+            require(observations["before"].get("requested_id") == scenario["canonical_id"], "canonical before ID mismatch")
+            require(observations["after_read"].get("requested_id") == scenario["canonical_id"], "canonical read ID mismatch")
+            require(observations["before"].get("count") == 1, "canonical before count must be exactly one")
+            require(observations["after_read"].get("count") == 1, "canonical read count must be exactly one")
+            require(observations["after_cleanup"].get("count") == 0, "canonical cleanup count must be zero")
+            require(scenario.get("canonical_resource_count_after_read") == 1, "canonical read count is not emitted")
+            require(scenario.get("canonical_resource_count_after_cleanup") == 0, "canonical cleanup count is not emitted")
             if scenario["scenario"] == "stable-read":
                 require(len(scenario["refresh_plan_actions"]) >= 2, "stable-read requires repeated refresh plans")
                 require(len(scenario["normal_plan_actions"]) >= 2, "stable-read requires repeated normal plans")
@@ -455,7 +467,15 @@ def self_test() -> None:
                     "refresh_only_windows": [{"start_ordinal": 0, "end_ordinal": 3, "mutation_routes": []}],
                     "normal_plan_windows": [{"start_ordinal": 3, "end_ordinal": 10, "mutation_routes": []}],
                 },
-                "canonical_identity_observation": {"resource_id": "keypair-name", "owner_scope": "project-a", "observed_owner_scope": "project-a", "source": "canonical_api", "count_source": "canonical_api"},
+                "canonical_identity_observation": {
+                    "resource_id": "keypair-name", "owner_scope": "project-a", "observed_owner_scope": "project-a",
+                    "source": "canonical_store", "count_source": "canonical_store",
+                    "before": {"source": "canonical_store", "count_source": "canonical_store", "requested_id": "keypair-name", "count": 1},
+                    "after_read": {"source": "canonical_store", "count_source": "canonical_store", "requested_id": "keypair-name", "count": 1},
+                    "after_cleanup": {"source": "canonical_store", "count_source": "canonical_store", "requested_id": "keypair-name", "count": 0},
+                },
+                "canonical_resource_count_after_read": 1,
+                "canonical_resource_count_after_cleanup": 0,
                 "result": "passed",
             }
         ],

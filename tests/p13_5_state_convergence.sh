@@ -54,12 +54,14 @@ if [[ "${P13_5A_RUN_BASELINE:-0}" != 1 ]]; then
 fi
 export O3K_P13_O3KD="${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}"
 export O3K_P13_PASSWORD="${O3K_P13_PASSWORD:-p13-5-baseline-password}"
-for gate in tests/p13_2_core_lifecycle.sh tests/p13_2b_subnet_lifecycle.sh tests/p13_2c_port_lifecycle.sh tests/p13_2d_server_lifecycle.sh tests/p13_3_security_group_provider.sh tests/p13_3_security_group_port_provider.sh tests/p13_3_router_provider.sh tests/p13_3_floating_ip_provider.sh tests/p13_4_provider_volume_smoke.sh tests/p13_4_provider_volume_attachment_smoke.sh tests/p13_4_storage_lifecycle.sh; do
-  echo "== baseline $gate"
-  bash "$root_dir/$gate"
-done
+baseline_manifest="${P13_5B_BASELINE_MANIFEST:-$(mktemp /var/tmp/o3k-p13-5b-baseline.XXXXXX.json)}"
+if ! python3 "$root_dir/scripts/p13_baseline_gate_manifest.py" --output "$baseline_manifest"; then
+  echo "P13.2-P13.4 baseline: BLOCKED (see $baseline_manifest and per-gate logs)" >&2
+  exit 2
+fi
 if [[ "${P13_5B_RUN:-0}" == 1 ]]; then
   export P13_5B_BASELINE_RESULT=verified
+  export P13_5B_BASELINE_MANIFEST="$baseline_manifest"
   bash "$root_dir/tests/p13_5b_refresh_import.sh"
   exit $?
 fi
