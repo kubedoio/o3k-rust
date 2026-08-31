@@ -69,7 +69,8 @@ def validate(document: dict) -> None:
     assert actual_pairs == expected_pairs
     assert len(actual_pairs) == len(scenarios)
     assert re.fullmatch(r"[0-9a-f]{40}", document["tested_o3k_head_sha"])
-    contract = json.loads(Path("docs/compatibility/p13-5/p13-5a-convergence-contract.json").read_text())
+    contract_path = Path(__file__).resolve().parents[1] / "docs/compatibility/p13-5/p13-5a-convergence-contract.json"
+    contract = json.loads(contract_path.read_text())
     assert set(contract["resources"][i]["resource"] for i in range(len(contract["resources"]))) == RESOURCES
     assert document["toolchain"]["opentofu_archive_sha256"] == contract["toolchain"]["opentofu_archive_sha256"]
     assert document["toolchain"]["provider_archive_sha256"] == contract["toolchain"]["provider_archive_sha256"]
