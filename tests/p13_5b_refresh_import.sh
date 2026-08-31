@@ -757,6 +757,108 @@ curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/netwo
 rm -f server.tf
 cd "$project_dir"
 
+# VolumeAttachment is a native relationship projection.  The import fixture is
+# deliberately created through the canonical image/network/server/volume
+# paths, then attached through Nova's native POST route.  No external Cinder
+# endpoint is configured; the run-owned LVM provider is the storage authority.
+cat >volume-attachment.tf <<'EOF'
+resource "openstack_blockstorage_volume_v3" "volume" {
+  name = "p13-5b-attachment-volume"
+  size = 1
+}
+resource "openstack_networking_network_v2" "network" {
+  name = "p13-5b-attachment-network"
+}
+resource "openstack_networking_subnet_v2" "subnet" {
+  network_id = openstack_networking_network_v2.network.id
+  cidr = "198.51.150.0/24"
+  ip_version = 4
+  enable_dhcp = false
+}
+resource "openstack_compute_instance_v2" "server" {
+  name = "p13-5b-attachment-server"
+  image_id = "SERVER_IMAGE_ID"
+  flavor_id = "00000000-0000-0000-0000-000000000001"
+  network { uuid = openstack_networking_network_v2.network.id }
+}
+resource "openstack_compute_volume_attach_v2" "managed" {
+  instance_id = openstack_compute_instance_v2.server.id
+  volume_id = openstack_blockstorage_volume_v3.volume.id
+  device = "/dev/vdb"
+}
+EOF
+sed -i "s/SERVER_IMAGE_ID/$server_image_id/" volume-attachment.tf
+"$tofu" apply -input=false -auto-approve >/dev/null
+volume_attachment_server_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_compute_instance_v2.server"))')"
+volume_attachment_volume_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_blockstorage_volume_v3.volume"))')"
+volume_attachment_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_compute_volume_attach_v2.managed"))')"
+volume_attachment_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+plan volume-attachment-read-1
+plan volume-attachment-read-2
+volume_attachment_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_server_id/os-volume_attachments" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumeAttachments"] if x["attachment_id"] == wanted))' "$volume_attachment_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_server_id/os-volume_attachments/$volume_attachment_id" >"$work_dir/volume-attachment-stable-projection.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+volume_attachment_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_server_id/os-volume_attachments/$volume_attachment_id")"
+[[ "$volume_attachment_stable_count" == 1 && "$volume_attachment_stable_cleanup" == 404 ]] || { echo "P13.5B VolumeAttachment stable fixture did not converge/clean up" >&2; exit 1; }
+rm -f volume-attachment.tf
+
+volume_attachment_import_project="$work_dir/volume-attachment-import-project"
+mkdir -p "$volume_attachment_import_project"
+cp "$project_dir/provider.tf" "$volume_attachment_import_project/provider.tf"
+(cd "$volume_attachment_import_project" && "$tofu" init -input=false -upgrade=false >/dev/null)
+cd "$volume_attachment_import_project"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-attachment-import-network"}}' >"$work_dir/volume-attachment-import-network.json"
+volume_attachment_import_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$work_dir/volume-attachment-import-network.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/subnets" \
+  --data "{\"subnet\":{\"network_id\":\"$volume_attachment_import_network_id\",\"cidr\":\"198.51.151.0/24\",\"ip_version\":4,\"enable_dhcp\":false}}" >"$work_dir/volume-attachment-import-subnet.json"
+volume_attachment_import_subnet_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["subnet"]["id"])' "$work_dir/volume-attachment-import-subnet.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.1/$project_id/servers" \
+  --data "{\"server\":{\"name\":\"p13-5b-attachment-import-server\",\"image\":{\"id\":\"$server_image_id\"},\"flavor\":{\"id\":\"00000000-0000-0000-0000-000000000001\"},\"networks\":[{\"uuid\":\"$volume_attachment_import_network_id\"}]}}" >"$work_dir/volume-attachment-import-server.json"
+volume_attachment_import_server_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["server"]["id"])' "$work_dir/volume-attachment-import-server.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v3/$project_id/volumes" \
+  --data '{"volume":{"size":1,"name":"p13-5b-attachment-import-volume"}}' >"$work_dir/volume-attachment-import-volume.json"
+volume_attachment_import_volume_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["volume"]["id"])' "$work_dir/volume-attachment-import-volume.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id/os-volume_attachments" \
+  --data "{\"volumeAttachment\":{\"volumeId\":\"$volume_attachment_import_volume_id\",\"device\":\"/dev/vdb\"}}" >"$work_dir/volume-attachment-import-attachment.json"
+volume_attachment_import_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["volumeAttachment"]["attachment_id"])' "$work_dir/volume-attachment-import-attachment.json")"
+volume_attachment_import_count_before="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id/os-volume_attachments" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumeAttachments"] if x["attachment_id"] == wanted))' "$volume_attachment_import_id")"
+cat >volume-attachment.tf <<EOF
+resource "openstack_compute_volume_attach_v2" "imported" {
+  instance_id = "$volume_attachment_import_server_id"
+  volume_id = "$volume_attachment_import_volume_id"
+  device = "/dev/vdb"
+}
+EOF
+volume_attachment_import_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+volume_attachment_import_state_id="$volume_attachment_import_server_id/$volume_attachment_import_id"
+"$tofu" import -input=false openstack_compute_volume_attach_v2.imported "$volume_attachment_import_state_id" >/dev/null
+plan volume-attachment-import-read-1
+plan volume-attachment-import-read-2
+volume_attachment_import_count_after_read="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id/os-volume_attachments" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumeAttachments"] if x["attachment_id"] == wanted))' "$volume_attachment_import_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id/os-volume_attachments/$volume_attachment_import_id" >"$work_dir/volume-attachment-import-projection.json"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id" >"$work_dir/volume-attachment-import-server-parent.json"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_attachment_import_volume_id" >"$work_dir/volume-attachment-import-volume-parent.json"
+[[ "$volume_attachment_import_count_before" == 1 && "$volume_attachment_import_count_after_read" == 1 ]] || { echo "P13.5B VolumeAttachment import duplicated or changed the relation" >&2; exit 1; }
+cat >"$work_dir/volume-attachment-import-parents.json" <<EOF
+{"parent_retention":"passed","server_status":200,"volume_status":200,"relationship_count_before":$volume_attachment_import_count_before,"relationship_count_after_read":$volume_attachment_import_count_after_read}
+EOF
+"$tofu" destroy -input=false -auto-approve >/dev/null
+volume_attachment_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id/os-volume_attachments/$volume_attachment_import_id")"
+volume_attachment_import_server_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id")"
+volume_attachment_import_volume_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_attachment_import_volume_id")"
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_attachment_import_volume_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$volume_attachment_import_subnet_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$volume_attachment_import_network_id" >/dev/null
+[[ "$volume_attachment_import_cleanup" == 404 && "$volume_attachment_import_server_status" == 200 && "$volume_attachment_import_volume_status" == 200 ]] || { echo "P13.5B VolumeAttachment import did not retain parents before cleanup" >&2; exit 1; }
+rm -f volume-attachment.tf
+cd "$project_dir"
+
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
   "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-router-external"}}' >"$work_dir/router-external-network.json"
 router_external_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$work_dir/router-external-network.json")"
@@ -965,6 +1067,7 @@ def provider_read_routes(start, resource, identity):
         "openstack_compute_instance_v2": "/servers/",
         "openstack_networking_floatingip_v2": "/floatingips/",
         "openstack_blockstorage_volume_v3": "/volumes/",
+        "openstack_compute_volume_attach_v2": "/os-volume_attachments/",
     }[resource]
     routes = []
     records = (work / "trace.jsonl").read_text().splitlines()
@@ -993,6 +1096,7 @@ def provider_mutation_routes(start, resource):
         "openstack_compute_instance_v2": "/servers",
         "openstack_networking_floatingip_v2": "/floatingips",
         "openstack_blockstorage_volume_v3": "/volumes",
+        "openstack_compute_volume_attach_v2": "/os-volume_attachments",
     }[resource]
     routes = []
     records = (work / "trace.jsonl").read_text().splitlines()
@@ -1040,6 +1144,9 @@ def projection(path, resource):
     if resource == "openstack_blockstorage_volume_v3":
         item = document["volume"]
         return {"id": item["id"], "owner_scope": item.get("os-vol-tenant-attr:tenant_id", item.get("project_id", item.get("tenant_id", project)))}
+    if resource == "openstack_compute_volume_attach_v2":
+        item = document["volumeAttachment"]
+        return {"id": item["attachment_id"], "owner_scope": project}
     item = document["network"]
     return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id"))}
 
@@ -1137,24 +1244,9 @@ scenarios = [
     scenario("openstack_networking_floatingip_v2", "import", fip_import_id, fip_import_id, ["floating-ip-import-read-1-refresh.json", "floating-ip-import-read-2-refresh.json"], ["floating-ip-import-read-1-normal.json", "floating-ip-import-read-2-normal.json"], cleanup_result(fip_import_cleanup), fip_import_count_after_read, trace_start=fip_import_trace_start, projection_file="floating-ip-import-projection.json", canonical_count_after=fip_import_count_after_cleanup),
     scenario("openstack_blockstorage_volume_v3", "stable-read", volume_stable_id, "", ["volume-read-1-refresh.json", "volume-read-2-refresh.json"], ["volume-read-1-normal.json", "volume-read-2-normal.json"], cleanup_result(volume_stable_cleanup), volume_stable_count, trace_start=volume_stable_trace_start, projection_file="volume-stable-projection.json", canonical_count_after=volume_stable_count_after),
     scenario("openstack_blockstorage_volume_v3", "import", volume_import_id, volume_import_id, ["volume-import-read-1-refresh.json", "volume-import-read-2-refresh.json"], ["volume-import-read-1-normal.json", "volume-import-read-2-normal.json"], cleanup_result(volume_import_cleanup), volume_import_count_after_read, trace_start=volume_import_trace_start, projection_file="volume-import-projection.json", canonical_count_after=volume_import_count_after_cleanup),
+    scenario("openstack_compute_volume_attach_v2", "stable-read", volume_attachment_id, "", ["volume-attachment-read-1-refresh.json", "volume-attachment-read-2-refresh.json"], ["volume-attachment-read-1-normal.json", "volume-attachment-read-2-normal.json"], cleanup_result(volume_attachment_stable_cleanup), volume_attachment_stable_count, trace_start=volume_attachment_trace_start, projection_file="volume-attachment-stable-projection.json"),
+    scenario("openstack_compute_volume_attach_v2", "import", volume_attachment_import_id, volume_attachment_import_state_id, ["volume-attachment-import-read-1-refresh.json", "volume-attachment-import-read-2-refresh.json"], ["volume-attachment-import-read-1-normal.json", "volume-attachment-import-read-2-normal.json"], cleanup_result(volume_attachment_import_cleanup), volume_attachment_import_count_after_read, trace_start=volume_attachment_import_trace_start, projection_file="volume-attachment-import-projection.json", parent_file="volume-attachment-import-parents.json"),
 ]
-unrun = {
-    "openstack_compute_volume_attach_v2": "relationship fixture and parent-retention proof are not part of this reusable runner; the host-backed P13.4 attachment gate passed",
-}
-for resource, reason in unrun.items():
-    for kind in ("stable-read", "import"):
-        scenarios.append({
-            "resource": resource, "scenario": kind, "canonical_id": "", "owner_scope": project,
-            "provider_import_id": "", "provider_state_id": None, "first_read_route": "", "plan_actions": [],
-            "refresh_plan_actions": [], "final_plan_noop": False, "canonical_duplicate_count": None,
-            "canonical_resource_count": None,
-            "normal_plan_actions": [],
-            "trace_observation": {"provider_read_routes": [], "trace_start_ordinal": None},
-            "canonical_identity_observation": {"source": "not_run", "owner_scope": project, "resource_id": None},
-            "cleanup_result": "not_run", "backend": "sqlite", "head_sha": scenarios[0]["head_sha"],
-            "result": "blocked",
-            "reason": reason,
-        })
 required_gates = [
     "tests/p13_2_core_lifecycle.sh", "tests/p13_2b_subnet_lifecycle.sh",
     "tests/p13_2c_port_lifecycle.sh", "tests/p13_2d_server_lifecycle.sh",
