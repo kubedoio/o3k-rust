@@ -10,6 +10,9 @@ provider_binary="${O3K_P13_PROVIDER_BINARY:?O3K_P13_PROVIDER_BINARY is required}
 provider_archive="${O3K_P13_PROVIDER_ARCHIVE:?O3K_P13_PROVIDER_ARCHIVE is required}"
 tofu_archive="${O3K_P13_TOFU_ARCHIVE:?O3K_P13_TOFU_ARCHIVE is required}"
 provider_sha="${O3K_P13_PROVIDER_SHA256:?O3K_P13_PROVIDER_SHA256 is required}"
+: "${O3K_LVM_VOLUME_GROUP:?O3K_LVM_VOLUME_GROUP is required for the native volume gate}"
+: "${O3K_LVM_THIN_POOL:?O3K_LVM_THIN_POOL is required for the native volume gate}"
+: "${O3K_LVM_PROVIDER_NAMESPACE:?O3K_LVM_PROVIDER_NAMESPACE is required for the native volume gate}"
 o3kd="${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}"
 output="${O3K_P13_5B_EVIDENCE_OUTPUT:-$root_dir/target/p13-5b/refresh-import-evidence.json}"
 if [[ "$output" != /* ]]; then
@@ -64,6 +67,9 @@ EOF
 
 O3K_BOOTSTRAP_PASSWORD="$password" \
 O3K_TOKEN_SIGNING_KEY="p13-5b-token-signing-key-012345678901234567890123" \
+O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" \
+O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" \
+O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
 O3K_COMPATIBILITY_TRACE_PATH="$work_dir/trace.jsonl" \
   "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
 pid=$!
@@ -88,6 +94,9 @@ restart_daemon() {
   O3K_PUBLIC_POOL_CIDR="$external_pool_cidr" \
   O3K_PUBLIC_POOL_FIRST="$external_pool_first" \
   O3K_PUBLIC_POOL_LAST="$external_pool_last" \
+  O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" \
+  O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" \
+  O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
   O3K_COMPATIBILITY_TRACE_PATH="$work_dir/trace.jsonl" \
     "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
   pid=$!
@@ -435,6 +444,106 @@ rm -f floating-ip.tf
 cd "$project_dir"
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$external_realm_id" >/dev/null
 
+# Volume is created through the canonical Cinder-compatible API and observed
+# through the unmodified provider.  The fixture is deliberately attachment-
+# free; VolumeAttachment owns relationship behavior in its separate row.
+volume_assert_projection() {
+  local path="$1"
+  python3 - "$path" <<'PY'
+import json
+import sys
+
+document = json.load(open(sys.argv[1]))
+volume = document["volume"]
+expected = {
+    "status": "available",
+    "size": 1,
+    "name": "p13-5b-volume",
+    "description": "bounded canonical volume",
+    "metadata": {},
+    "attachments": [],
+}
+for field, value in expected.items():
+    if volume.get(field) != value:
+        raise SystemExit(f"volume projection changed for {field}: {volume.get(field)!r} != {value!r}")
+PY
+}
+
+volume_assert_same_projection() {
+  python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+fields = ("status", "size", "name", "description", "metadata", "attachments")
+left = json.load(open(sys.argv[1]))["volume"]
+right = json.load(open(sys.argv[2]))["volume"]
+if {field: left.get(field) for field in fields} != {field: right.get(field) for field in fields}:
+    raise SystemExit("volume projection changed between repeated reads")
+PY
+}
+
+cat >volume.tf <<'EOF'
+resource "openstack_blockstorage_volume_v3" "managed" {
+  name = "p13-5b-volume"
+  description = "bounded canonical volume"
+  size = 1
+  metadata = {}
+}
+EOF
+"$tofu" apply -input=false -auto-approve >/dev/null
+volume_stable_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_blockstorage_volume_v3.managed"))')"
+volume_stable_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+plan volume-read-1
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_stable_id" >"$work_dir/volume-read-1-projection.json"
+plan volume-read-2
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_stable_id" >"$work_dir/volume-read-2-projection.json"
+cp "$work_dir/volume-read-2-projection.json" "$work_dir/volume-stable-projection.json"
+volume_assert_projection "$work_dir/volume-stable-projection.json"
+volume_assert_same_projection "$work_dir/volume-read-1-projection.json" "$work_dir/volume-read-2-projection.json"
+volume_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumes"] if x["id"] == wanted))' "$volume_stable_id")"
+[[ "$volume_stable_count" == 1 ]] || { echo "P13.5B volume stable fixture did not create exactly one canonical volume" >&2; exit 1; }
+"$tofu" destroy -input=false -auto-approve >/dev/null
+volume_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_stable_id")"
+volume_stable_count_after="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumes"] if x["id"] == wanted))' "$volume_stable_id")"
+[[ "$volume_stable_cleanup" == 404 && "$volume_stable_count_after" == 0 ]] || { echo "P13.5B volume stable cleanup did not remove the canonical volume" >&2; exit 1; }
+rm -f volume.tf
+
+volume_import_project="$work_dir/volume-import-project"
+mkdir -p "$volume_import_project"
+cp "$project_dir/provider.tf" "$volume_import_project/provider.tf"
+(cd "$volume_import_project" && "$tofu" init -input=false -upgrade=false >/dev/null)
+cd "$volume_import_project"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v3/$project_id/volumes" \
+  --data '{"volume":{"size":1,"name":"p13-5b-volume","description":"bounded canonical volume","metadata":{}}}' >"$work_dir/volume-import.json"
+volume_import_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["volume"]["id"])' "$work_dir/volume-import.json")"
+volume_import_count_before="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumes"] if x["id"] == wanted))' "$volume_import_id")"
+cat >volume.tf <<EOF
+resource "openstack_blockstorage_volume_v3" "imported" {
+  name = "p13-5b-volume"
+  description = "bounded canonical volume"
+  size = 1
+  metadata = {}
+}
+EOF
+volume_import_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+"$tofu" import -input=false openstack_blockstorage_volume_v3.imported "$volume_import_id" >/dev/null
+plan volume-import-read-1
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_import_id" >"$work_dir/volume-import-read-1-projection.json"
+plan volume-import-read-2
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_import_id" >"$work_dir/volume-import-read-2-projection.json"
+cp "$work_dir/volume-import-read-2-projection.json" "$work_dir/volume-import-projection.json"
+volume_assert_projection "$work_dir/volume-import-projection.json"
+volume_assert_same_projection "$work_dir/volume-import-read-1-projection.json" "$work_dir/volume-import-read-2-projection.json"
+volume_import_count_after_read="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumes"] if x["id"] == wanted))' "$volume_import_id")"
+[[ "$volume_import_count_before" == 1 && "$volume_import_count_after_read" == 1 ]] || { echo "P13.5B volume import changed canonical identity/count" >&2; exit 1; }
+"$tofu" destroy -input=false -auto-approve >/dev/null
+volume_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_import_id")"
+volume_import_count_after_cleanup="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumes"] if x["id"] == wanted))' "$volume_import_id")"
+[[ "$volume_import_cleanup" == 404 && "$volume_import_count_after_cleanup" == 0 ]] || { echo "P13.5B volume import cleanup did not remove the canonical volume" >&2; exit 1; }
+rm -f volume.tf
+cd "$project_dir"
+
 cat >security-group.tf <<'EOF'
 resource "openstack_networking_secgroup_v2" "managed" {
   name = "p13-5b-security-group"
@@ -456,6 +565,7 @@ kill "$pid" 2>/dev/null || true
 wait "$pid" 2>/dev/null || true
 pid=""
 O3K_BOOTSTRAP_PASSWORD="$password" O3K_TOKEN_SIGNING_KEY="p13-5b-token-signing-key-012345678901234567890123" O3K_COMPATIBILITY_TRACE_PATH="$work_dir/trace.jsonl" \
+  O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
   "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
 pid=$!
 for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1 && break; sleep 0.1; done
@@ -705,7 +815,7 @@ curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/netwo
 # realm.  Keep this fixture independent from the Router rows above so that
 # importing the relationship cannot accidentally rely on Terraform-managed
 # parent state.
-cat >router-interface.tf <<'EOF'
+cat >router-interface.tf <<EOF
 resource "openstack_networking_network_v2" "parent" {
   name = "p13-5b-router-interface-network"
 }
@@ -719,6 +829,7 @@ resource "openstack_networking_subnet_v2" "parent" {
 
 resource "openstack_networking_router_v2" "parent" {
   name = "p13-5b-router-interface-router"
+  external_network_id = "$external_realm_id"
   enable_snat = false
 }
 
@@ -817,13 +928,14 @@ curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/netwo
 rm -f router-interface.tf
 cd "$project_dir"
 
-python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" "$port_id" "$port_import_id" "$port_stable_count" "$port_count" "$port_stable_cleanup" "$port_import_cleanup" "$port_trace_start" "$security_group_id" "$security_group_import_id" "$security_group_stable_count" "$security_group_count" "$security_group_stable_cleanup" "$security_group_import_cleanup" "$security_group_trace_start" "$security_group_rule_id" "$rule_import_id" "$security_group_rule_stable_count" "$rule_count" "$security_group_rule_stable_cleanup" "$rule_import_cleanup" "$rule_trace_start" "$router_id" "$router_import_id" "$router_stable_count" "$router_count" "$router_stable_cleanup" "$router_import_cleanup" "$router_trace_start" "$router_interface_stable_id" "$router_interface_import_id" "$router_interface_stable_count" "$router_interface_import_count" "$router_interface_stable_count_after" "$router_interface_import_count_after" "$router_interface_stable_cleanup" "$router_interface_import_cleanup" "$router_interface_stable_trace_start" "$router_interface_import_trace_start" "$fip_stable_id" "$fip_import_id" "$fip_stable_count" "$fip_import_count_before" "$fip_import_count_after_read" "$fip_stable_count_after" "$fip_import_count_after_cleanup" "$fip_stable_cleanup" "$fip_import_cleanup" "$fip_stable_trace_start" "$fip_import_trace_start" <<'PY'
+python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" "$port_id" "$port_import_id" "$port_stable_count" "$port_count" "$port_stable_cleanup" "$port_import_cleanup" "$port_trace_start" "$security_group_id" "$security_group_import_id" "$security_group_stable_count" "$security_group_count" "$security_group_stable_cleanup" "$security_group_import_cleanup" "$security_group_trace_start" "$security_group_rule_id" "$rule_import_id" "$security_group_rule_stable_count" "$rule_count" "$security_group_rule_stable_cleanup" "$rule_import_cleanup" "$rule_trace_start" "$router_id" "$router_import_id" "$router_stable_count" "$router_count" "$router_stable_cleanup" "$router_import_cleanup" "$router_trace_start" "$router_interface_stable_id" "$router_interface_import_id" "$router_interface_stable_count" "$router_interface_import_count" "$router_interface_stable_count_after" "$router_interface_import_count_after" "$router_interface_stable_cleanup" "$router_interface_import_cleanup" "$router_interface_stable_trace_start" "$router_interface_import_trace_start" "$fip_stable_id" "$fip_import_id" "$fip_stable_count" "$fip_import_count_before" "$fip_import_count_after_read" "$fip_stable_count_after" "$fip_import_count_after_cleanup" "$fip_stable_cleanup" "$fip_import_cleanup" "$fip_stable_trace_start" "$fip_import_trace_start" "$volume_stable_id" "$volume_import_id" "$volume_stable_count" "$volume_import_count_before" "$volume_import_count_after_read" "$volume_stable_count_after" "$volume_import_count_after_cleanup" "$volume_stable_cleanup" "$volume_import_cleanup" "$volume_stable_trace_start" "$volume_import_trace_start" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start, port_id, port_import_id, port_stable_count, port_count, port_stable_cleanup, port_import_cleanup, port_trace_start, security_group_id, security_group_import_id, security_group_stable_count, security_group_count, security_group_stable_cleanup, security_group_import_cleanup, security_group_trace_start, security_group_rule_id, rule_import_id, security_group_rule_stable_count, rule_count, security_group_rule_stable_cleanup, rule_import_cleanup, rule_trace_start, router_id, router_import_id, router_stable_count, router_count, router_stable_cleanup, router_import_cleanup, router_trace_start, router_interface_stable_id, router_interface_import_id, router_interface_stable_count, router_interface_import_count, router_interface_stable_count_after, router_interface_import_count_after, router_interface_stable_cleanup, router_interface_import_cleanup, router_interface_stable_trace_start, router_interface_import_trace_start, fip_stable_id, fip_import_id, fip_stable_count, fip_import_count_before, fip_import_count_after_read, fip_stable_count_after, fip_import_count_after_cleanup, fip_stable_cleanup, fip_import_cleanup, fip_stable_trace_start, fip_import_trace_start = sys.argv[1:]
+root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start, port_id, port_import_id, port_stable_count, port_count, port_stable_cleanup, port_import_cleanup, port_trace_start, security_group_id, security_group_import_id, security_group_stable_count, security_group_count, security_group_stable_cleanup, security_group_import_cleanup, security_group_trace_start, security_group_rule_id, rule_import_id, security_group_rule_stable_count, rule_count, security_group_rule_stable_cleanup, rule_import_cleanup, rule_trace_start, router_id, router_import_id, router_stable_count, router_count, router_stable_cleanup, router_import_cleanup, router_trace_start, router_interface_stable_id, router_interface_import_id, router_interface_stable_count, router_interface_import_count, router_interface_stable_count_after, router_interface_import_count_after, router_interface_stable_cleanup, router_interface_import_cleanup, router_interface_stable_trace_start, router_interface_import_trace_start, fip_stable_id, fip_import_id, fip_stable_count, fip_import_count_before, fip_import_count_after_read, fip_stable_count_after, fip_import_count_after_cleanup, fip_stable_cleanup, fip_import_cleanup, fip_stable_trace_start, fip_import_trace_start = sys.argv[1:-11]
+volume_stable_id, volume_import_id, volume_stable_count, volume_import_count_before, volume_import_count_after_read, volume_stable_count_after, volume_import_count_after_cleanup, volume_stable_cleanup, volume_import_cleanup, volume_stable_trace_start, volume_import_trace_start = sys.argv[-11:]
 work = pathlib.Path(work)
 
 def digest(path):
@@ -852,6 +964,7 @@ def provider_read_routes(start, resource, identity):
         "openstack_networking_router_interface_v2": "/ports/",
         "openstack_compute_instance_v2": "/servers/",
         "openstack_networking_floatingip_v2": "/floatingips/",
+        "openstack_blockstorage_volume_v3": "/volumes/",
     }[resource]
     routes = []
     records = (work / "trace.jsonl").read_text().splitlines()
@@ -879,6 +992,7 @@ def provider_mutation_routes(start, resource):
         "openstack_networking_router_interface_v2": "/ports",
         "openstack_compute_instance_v2": "/servers",
         "openstack_networking_floatingip_v2": "/floatingips",
+        "openstack_blockstorage_volume_v3": "/volumes",
     }[resource]
     routes = []
     records = (work / "trace.jsonl").read_text().splitlines()
@@ -923,6 +1037,9 @@ def projection(path, resource):
     if resource == "openstack_networking_floatingip_v2":
         item = document["floatingip"]
         return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
+    if resource == "openstack_blockstorage_volume_v3":
+        item = document["volume"]
+        return {"id": item["id"], "owner_scope": item.get("os-vol-tenant-attr:tenant_id", item.get("project_id", item.get("tenant_id", project)))}
     item = document["network"]
     return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id"))}
 
@@ -1018,9 +1135,10 @@ scenarios = [
     scenario("openstack_compute_instance_v2", "import", server_import_id, server_import_id, ["server-import-read-1-refresh.json", "server-import-read-2-refresh.json"], ["server-import-read-1-normal.json", "server-import-read-2-normal.json"], server_import_cleanup, server_count, trace_start=server_import_trace_start, projection_file="server-import-projection.json"),
     scenario("openstack_networking_floatingip_v2", "stable-read", fip_stable_id, "", ["floating-ip-read-1-refresh.json", "floating-ip-read-2-refresh.json"], ["floating-ip-read-1-normal.json", "floating-ip-read-2-normal.json"], cleanup_result(fip_stable_cleanup), fip_stable_count, trace_start=fip_stable_trace_start, projection_file="floating-ip-stable-projection.json", canonical_count_after=fip_stable_count_after),
     scenario("openstack_networking_floatingip_v2", "import", fip_import_id, fip_import_id, ["floating-ip-import-read-1-refresh.json", "floating-ip-import-read-2-refresh.json"], ["floating-ip-import-read-1-normal.json", "floating-ip-import-read-2-normal.json"], cleanup_result(fip_import_cleanup), fip_import_count_after_read, trace_start=fip_import_trace_start, projection_file="floating-ip-import-projection.json", canonical_count_after=fip_import_count_after_cleanup),
+    scenario("openstack_blockstorage_volume_v3", "stable-read", volume_stable_id, "", ["volume-read-1-refresh.json", "volume-read-2-refresh.json"], ["volume-read-1-normal.json", "volume-read-2-normal.json"], cleanup_result(volume_stable_cleanup), volume_stable_count, trace_start=volume_stable_trace_start, projection_file="volume-stable-projection.json", canonical_count_after=volume_stable_count_after),
+    scenario("openstack_blockstorage_volume_v3", "import", volume_import_id, volume_import_id, ["volume-import-read-1-refresh.json", "volume-import-read-2-refresh.json"], ["volume-import-read-1-normal.json", "volume-import-read-2-normal.json"], cleanup_result(volume_import_cleanup), volume_import_count_after_read, trace_start=volume_import_trace_start, projection_file="volume-import-projection.json", canonical_count_after=volume_import_count_after_cleanup),
 ]
 unrun = {
-    "openstack_blockstorage_volume_v3": "native volume stable/import fixture is not part of this reusable runner; the host-backed P13.4 volume gates passed",
     "openstack_compute_volume_attach_v2": "relationship fixture and parent-retention proof are not part of this reusable runner; the host-backed P13.4 attachment gate passed",
 }
 for resource, reason in unrun.items():
