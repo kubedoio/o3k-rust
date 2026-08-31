@@ -15,6 +15,10 @@ assert len(d["resources"]) == 12
 required={"resource","canonical_o3k_mapping","import","import_identifier_shape","first_import_read","refresh_read_routes","remote_absence_behavior","mutable_attributes","replacement_attributes","relationship_parents","native_drift_cases","replacement_cases","retry_cases","backend_evidence_requirement","known_bounded_deviations","provenance"}
 assert {r["resource"] for r in d["resources"]}.__len__() == 12
 assert all(required <= set(r) for r in d["resources"])
+computed=d["computed_defaulted_normalized_attributes"]
+assert all(isinstance(r.get("computed_defaulted_normalized_attributes", computed.get(r["resource"])), list) for r in d["resources"])
+assert d["starting_protected_main_sha"] == d["o3k_head_sha"]
+assert d["status"] in {"contract_frozen_baseline_blocked", "baseline_verified"}
 assert all(r["import"] in {"required","supported","unsupported","not_applicable"} for r in d["resources"])
 assert d["toolchain"]["provider_modified"] is False
 assert d["architecture"]["p13_6_boundary_preserved"] is True
@@ -25,8 +29,14 @@ if [[ -z "$tofu" || -z "$tofu_archive" || -z "$provider_archive" || -z "$provide
   exit 2
 fi
 export O3K_P13_TOFU="$tofu"
-python3 "$root_dir/scripts/p13_provider_contract.py" --verify-tools
-version="$($tofu version | head -n 1)"
+if ! python3 "$root_dir/scripts/p13_provider_contract.py" --verify-tools; then
+  echo "P13.5A baseline: BLOCKED (tool provenance verification failed)" >&2
+  exit 2
+fi
+if ! version="$("$tofu" version | head -n 1)"; then
+  echo "P13.5A baseline: BLOCKED (OpenTofu executable could not be run)" >&2
+  exit 2
+fi
 [[ "$version" == *"OpenTofu v1.12.6"* ]] || { echo "wrong OpenTofu: $version" >&2; exit 2; }
 if [[ "${P13_5A_RUN_BASELINE:-0}" != 1 ]]; then
   echo "P13.5A discovery harness: PASS (baseline execution opt-in)"
