@@ -145,10 +145,15 @@ cd "$project_dir"
 
 plan() {
   local label="$1"
+  wc -l <"$work_dir/trace.jsonl" >"$work_dir/$label-refresh-start"
   "$tofu" plan -input=false -refresh-only -out="$work_dir/$label-refresh.tfplan" >/dev/null
   "$tofu" show -json "$work_dir/$label-refresh.tfplan" >"$work_dir/$label-refresh.json"
+  wc -l <"$work_dir/trace.jsonl" >"$work_dir/$label-refresh-end"
+  wc -l <"$work_dir/trace.jsonl" >"$work_dir/$label-normal-start"
   "$tofu" plan -input=false -out="$work_dir/$label-normal.tfplan" >/dev/null
   "$tofu" show -json "$work_dir/$label-normal.tfplan" >"$work_dir/$label-normal.json"
+  wc -l <"$work_dir/trace.jsonl" >"$work_dir/$label-normal-end"
+  "$tofu" show -json >"$work_dir/$label-state.json"
 }
 
 canonical_attachment_count() {
@@ -1077,12 +1082,35 @@ def digest(path):
 
 def actions(path):
     plan = json.loads((work / path).read_text())
-    return [action for change in plan.get("resource_changes", []) for action in change["change"]["actions"]]
+    if not isinstance(plan.get("resource_changes"), list):
+        raise ValueError(f"structured plan is missing resource_changes: {path}")
+    return [action for change in plan["resource_changes"] for action in change["change"]["actions"]]
+
+def plan_document(path):
+    document = json.loads((work / path).read_text())
+    if not isinstance(document.get("format_version"), str) or "resource_changes" not in document:
+        raise ValueError(f"incomplete structured plan: {path}")
+    if "planned_values" not in document or "prior_state" not in document:
+        raise ValueError(f"incomplete structured plan state: {path}")
+    return document
+
+def plan_window(path):
+    label = path.removesuffix(".json")
+    return {"start_ordinal": int((work / f"{label}-start").read_text()), "end_ordinal": int((work / f"{label}-end").read_text()), "mutation_routes": []}
+
+def state_id(path, resource):
+    document = json.loads((work / path.replace("-normal.json", "-state.json")).read_text())
+    resources = document.get("values", {}).get("root_module", {}).get("resources", [])
+    matches = [item.get("values", {}).get("id") for item in resources if item.get("type") == resource]
+    matches = [value for value in matches if value]
+    if len(matches) != 1:
+        raise ValueError(f"expected one provider state ID for {resource} in {path}, got {matches}")
+    return matches[0]
 
 def cleanup_result(status):
     return "passed" if status == "404" else "blocked"
 
-def provider_read_routes(start, resource, identity):
+def provider_read_routes(start, end, resource, identity):
     expected = {
         "openstack_compute_keypair_v2": "/os-keypairs/",
         "openstack_networking_network_v2": "/networks/",
@@ -1100,7 +1128,7 @@ def provider_read_routes(start, resource, identity):
     routes = []
     records = (work / "trace.jsonl").read_text().splitlines()
     for ordinal, line in enumerate(records):
-        if ordinal < int(start):
+        if ordinal < int(start) or ordinal >= int(end):
             continue
         record = json.loads(line)
         headers = record.get("request_headers", {})
@@ -1111,7 +1139,7 @@ def provider_read_routes(start, resource, identity):
             routes.append({"method": method, "path": path, "ordinal": ordinal})
     return routes
 
-def provider_mutation_routes(start, resource):
+def provider_mutation_routes(start, end, resource):
     expected = {
         "openstack_compute_keypair_v2": "/os-keypairs",
         "openstack_networking_network_v2": "/networks",
@@ -1129,7 +1157,7 @@ def provider_mutation_routes(start, resource):
     routes = []
     records = (work / "trace.jsonl").read_text().splitlines()
     for ordinal, line in enumerate(records):
-        if ordinal < int(start):
+        if ordinal < int(start) or ordinal >= int(end):
             continue
         record = json.loads(line)
         headers = record.get("request_headers", {})
@@ -1179,10 +1207,15 @@ def projection(path, resource):
     return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id"))}
 
 def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, cleanup, duplicate_count=0, result="passed", reason=None, trace_start=0, projection_file=None, canonical_count_after=None, parent_file=None):
+    plan_documents = {"refresh-only": [plan_document(name) for name in refresh_files], "normal": [plan_document(name) for name in normal_files]}
+    windows = [plan_window(name) for name in refresh_files + normal_files]
+    trace_start = min((window["start_ordinal"] for window in windows), default=int(trace_start))
+    trace_end = max((window["end_ordinal"] for window in windows), default=trace_start + 1)
     normal = actions(normal_files[-1]) if normal_files else []
     refresh = [actions(name) for name in refresh_files]
-    trace_routes = provider_read_routes(trace_start, resource, canonical)
-    mutation_routes = provider_mutation_routes(trace_start, resource)
+    trace_routes = provider_read_routes(trace_start, trace_end, resource, canonical)
+    mutation_routes = provider_mutation_routes(trace_start, trace_end, resource)
+    observed_state_id = state_id(normal_files[-1], resource)
     observed = projection(projection_file, resource) if projection_file else None
     parent_observation = json.loads((work / parent_file).read_text()) if parent_file else None
     minimum_routes = 2 if kind == "stable-read" else 1
@@ -1211,7 +1244,7 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
     if result == "passed" and kind == "import" and not import_id:
         result = "blocked"
         reason = "provider import identifier was empty"
-    if result == "passed" and kind == "import" and (
+    if result == "passed" and kind == "import" and resource in {"openstack_networking_router_interface_v2", "openstack_compute_volume_attach_v2"} and (
         not parent_observation or parent_observation.get("parent_retention") != "passed"
     ):
         result = "blocked"
@@ -1222,9 +1255,11 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
         "canonical_id": canonical,
         "owner_scope": project,
         "provider_import_id": import_id,
-        "provider_state_id": canonical if result == "passed" else None,
+        "provider_state_id": observed_state_id if result == "passed" else None,
         "first_read_route": trace_routes[0]["method"] + " " + trace_routes[0]["path"] if trace_routes else "",
-        "trace_observation": {"provider_read_routes": trace_routes, "trace_start_ordinal": int(trace_start)},
+        "trace_observation": {"provider_read_routes": trace_routes, "trace_start_ordinal": int(trace_start), "trace_end_ordinal": int(trace_end), "provider_mutation_routes": mutation_routes, "refresh_only_windows": windows[:len(refresh_files)], "normal_plan_windows": windows[len(refresh_files):]},
+        "plan_observation": plan_documents,
+        "provider_state_observation": {"observed": True, "source": "tofu_show_json_state", "state_id": observed_state_id},
         "canonical_identity_observation": {
             "source": "compatibility_projection_read",
             "owner_scope": project,

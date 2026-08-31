@@ -50,6 +50,170 @@ REQUIRED = {
     "result",
 }
 
+IMPORT_ID_SHAPES = {
+    "openstack_compute_keypair_v2": "name",
+    "openstack_networking_network_v2": "uuid",
+    "openstack_networking_subnet_v2": "uuid",
+    "openstack_networking_port_v2": "uuid",
+    "openstack_compute_instance_v2": "uuid",
+    "openstack_networking_secgroup_v2": "uuid",
+    "openstack_networking_secgroup_rule_v2": "uuid",
+    "openstack_networking_router_v2": "uuid",
+    "openstack_networking_router_interface_v2": "uuid",
+    "openstack_networking_floatingip_v2": "uuid",
+    "openstack_blockstorage_volume_v3": "uuid",
+    "openstack_compute_volume_attach_v2": "server_uuid/attachment_uuid",
+}
+
+UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
+BASELINE_GATES = {
+    "tests/p13_2_core_lifecycle.sh",
+    "tests/p13_2b_subnet_lifecycle.sh",
+    "tests/p13_2c_port_lifecycle.sh",
+    "tests/p13_2d_server_lifecycle.sh",
+    "tests/p13_3_security_group_provider.sh",
+    "tests/p13_3_security_group_port_provider.sh",
+    "tests/p13_3_router_provider.sh",
+    "tests/p13_3_floating_ip_provider.sh",
+    "tests/p13_4_provider_volume_smoke.sh",
+    "tests/p13_4_provider_volume_attachment_smoke.sh",
+    "tests/p13_4_storage_lifecycle.sh",
+}
+
+IMPORT_ROUTES = {
+    "openstack_compute_keypair_v2": re.compile(r"^GET /v2\.1/[^/]+/os-keypairs/[^/]+$"),
+    "openstack_networking_network_v2": re.compile(r"^GET /v2\.0/networks/" + UUID_RE + r"$"),
+    "openstack_networking_subnet_v2": re.compile(r"^GET /v2\.0/subnets/" + UUID_RE + r"$"),
+    "openstack_networking_port_v2": re.compile(r"^GET /v2\.0/ports/" + UUID_RE + r"$"),
+    "openstack_compute_instance_v2": re.compile(r"^GET /v2\.1/[^/]+/servers/" + UUID_RE + r"$"),
+    "openstack_networking_secgroup_v2": re.compile(r"^GET /v2\.0/security-groups/" + UUID_RE + r"$"),
+    "openstack_networking_secgroup_rule_v2": re.compile(r"^GET /v2\.0/security-group-rules/" + UUID_RE + r"$"),
+    "openstack_networking_router_v2": re.compile(r"^GET /v2\.0/routers/" + UUID_RE + r"$"),
+    "openstack_networking_router_interface_v2": re.compile(r"^GET /v2\.0/ports/" + UUID_RE + r"$"),
+    "openstack_networking_floatingip_v2": re.compile(r"^GET /v2\.0/floatingips/" + UUID_RE + r"$"),
+    "openstack_blockstorage_volume_v3": re.compile(r"^GET /v3/[^/]+/volumes/" + UUID_RE + r"$"),
+    "openstack_compute_volume_attach_v2": re.compile(
+        r"^GET /v2\.1/[^/]+/servers/" + UUID_RE + r"/os-volume_attachments/" + UUID_RE + r"$"
+    ),
+}
+
+
+def validate_plan_observation(scenario: dict) -> None:
+    """Require complete structured plan documents, not an inferred empty list."""
+
+    observation = scenario.get("plan_observation")
+    require(isinstance(observation, dict), "passed scenario needs plan_observation")
+    for kind in ("refresh-only", "normal"):
+        documents = observation.get(kind)
+        require(isinstance(documents, list), f"missing structured {kind} plan documents")
+        if kind == "normal":
+            require(documents, "missing structured normal plan documents")
+        for plan in documents:
+            require(isinstance(plan, dict), f"{kind} plan document must be an object")
+            require("resource_changes" in plan, f"{kind} plan is missing resource_changes")
+            require(isinstance(plan["resource_changes"], list), f"{kind} resource_changes must be a list")
+            require(isinstance(plan.get("format_version"), str), f"{kind} plan is missing format_version")
+            require("planned_values" in plan, f"{kind} plan is missing planned_values")
+            require("prior_state" in plan, f"{kind} plan is missing prior_state")
+            for change in plan["resource_changes"]:
+                require(isinstance(change, dict), f"{kind} resource change must be an object")
+                actions = change.get("change", {}).get("actions")
+                require(isinstance(actions, list), f"{kind} resource change is missing actions")
+                require(all(action in {"no-op", "create", "read", "update", "delete"} for action in actions), "invalid structured plan action")
+
+
+def validate_trace_observation(scenario: dict) -> None:
+    trace = scenario.get("trace_observation")
+    require(isinstance(trace, dict), "trace_observation must be an object")
+    start = trace.get("trace_start_ordinal")
+    end = trace.get("trace_end_ordinal")
+    require(isinstance(start, int) and isinstance(end, int) and 0 <= start < end, "trace window must be bounded")
+    routes = trace.get("provider_read_routes")
+    require(isinstance(routes, list) and routes, "passed scenario has no provider read routes")
+    require(all(
+        isinstance(route, dict)
+        and route.get("method") == "GET"
+        and isinstance(route.get("path"), str)
+        and isinstance(route.get("ordinal"), int)
+        and start <= route["ordinal"] < end
+        for route in routes
+    ), "provider read trace is outside its bounded window or is not a GET")
+    require(all(
+        isinstance(route, dict)
+        and isinstance(route.get("method"), str)
+        and isinstance(route.get("path"), str)
+        and isinstance(route.get("ordinal"), int)
+        and start <= route["ordinal"] < end
+        for route in trace.get("provider_mutation_routes", [])
+    ), "provider mutation trace is malformed or outside its bounded window")
+    require(trace.get("provider_mutation_routes", []) == [], "refresh/import observation contains provider mutation")
+    for window_name in ("refresh_only_windows", "normal_plan_windows"):
+        windows = trace.get(window_name)
+        require(isinstance(windows, list), f"missing {window_name}")
+        if window_name == "normal_plan_windows":
+            require(windows, "missing normal plan window")
+        for window in windows:
+            require(
+                isinstance(window, dict)
+                and isinstance(window.get("start_ordinal"), int)
+                and isinstance(window.get("end_ordinal"), int)
+                and window["start_ordinal"] < window["end_ordinal"]
+                and start <= window["start_ordinal"] < window["end_ordinal"] <= end
+                and window.get("mutation_routes") == [],
+                f"invalid or mutating {window_name} observation",
+            )
+
+
+def validate_import_id(scenario: dict) -> None:
+    value = scenario["provider_import_id"]
+    resource = scenario["resource"]
+    shape = IMPORT_ID_SHAPES[resource]
+    if shape == "name":
+        require(value == scenario["canonical_id"] and bool(re.fullmatch(r"[^/]+", value)), "import ID is not the canonical name")
+    elif shape == "uuid":
+        require(bool(re.fullmatch(UUID_RE, value)), "import ID is not a UUID")
+        require(value.lower() == scenario["canonical_id"].lower(), "UUID import ID does not match canonical ID")
+    else:
+        require(bool(re.fullmatch(UUID_RE + "/" + UUID_RE, value)), "relationship import ID is not server/attachment UUID")
+        expected = scenario.get("provider_import_components")
+        require(isinstance(expected, dict), "composite import ID needs provider_import_components")
+        require(value == f'{expected.get("server_id")}/{expected.get("attachment_id")}', "composite import ID components do not match state")
+
+
+def validate_state_identity(scenario: dict) -> None:
+    observation = scenario.get("provider_state_observation")
+    require(isinstance(observation, dict), "passed scenario needs provider_state_observation")
+    require(observation.get("observed") is True, "provider state identity was not observed")
+    require(observation.get("source") in {"tofu_show_json_state", "tofu_state_json"}, "invalid provider state identity source")
+    require(observation.get("state_id") == scenario["provider_state_id"], "provider_state_id is not bound to observed state")
+    require(scenario["provider_state_id"], "provider state ID is missing")
+
+
+def validate_verified_baseline(baseline: object, tested_sha: str) -> None:
+    """Require an executed, commit-bound record for every accepted baseline gate."""
+
+    require(isinstance(baseline, dict) and baseline.get("status") == "verified", "passed evidence needs a verified baseline")
+    require(isinstance(baseline.get("run_id"), str) and baseline["run_id"], "baseline evidence needs a run_id")
+    require(baseline.get("source_commit") == tested_sha, "baseline evidence is not bound to tested_o3k_head_sha")
+    gates = baseline.get("gates")
+    require(isinstance(gates, list) and gates, "baseline evidence needs gate results")
+    require(
+        {gate.get("path") for gate in gates if isinstance(gate, dict)} == BASELINE_GATES,
+        "baseline evidence does not cover the complete P13.2-P13.4 gate set",
+    )
+    require(all(
+        isinstance(gate, dict)
+        and isinstance(gate.get("path"), str)
+        and gate.get("result") == "passed"
+        and gate.get("head_sha") == tested_sha
+        for gate in gates
+    ), "baseline gate evidence is incomplete or not bound to the tested commit")
+    require(
+        isinstance(baseline.get("evidence_sha256"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", baseline["evidence_sha256"]),
+        "baseline evidence needs a valid digest binding",
+    )
+
 
 class EvidenceValidationError(ValueError):
     """Raised when an evidence document violates the P13.5B contract."""
@@ -140,7 +304,6 @@ def validate(document: dict, *, allow_incomplete: bool = False) -> None:
         "provider_sha256 must match the contract provider binary hash",
     )
     contract_imports = {item["resource"]: item["import"] for item in contract["resources"]}
-    single_id_resources = {"openstack_compute_keypair_v2", "openstack_networking_network_v2"}
     for scenario in scenarios:
         require(isinstance(scenario, dict), "each scenario must be an object")
         require(REQUIRED <= scenario.keys(), "scenario is missing required fields")
@@ -190,10 +353,7 @@ def validate(document: dict, *, allow_incomplete: bool = False) -> None:
             require(scenario["final_plan_noop"] is True, "passed scenario is not marked no-op")
             require(scenario["canonical_id"], "passed scenario is missing canonical_id")
             require(scenario["owner_scope"], "passed scenario is missing owner_scope")
-            require(
-                scenario["provider_state_id"] == scenario["canonical_id"],
-                "provider state ID does not match canonical ID",
-            )
+            validate_state_identity(scenario)
             require(scenario["canonical_duplicate_count"] == 0, "passed scenario has duplicate canonical resources")
             require(scenario["canonical_resource_count"] == 1, "passed scenario must observe one canonical resource")
             require(
@@ -205,29 +365,18 @@ def validate(document: dict, *, allow_incomplete: bool = False) -> None:
                 ),
                 "passed scenario has unsuccessful cleanup",
             )
-            trace_observation = scenario.get("trace_observation")
-            require(isinstance(trace_observation, dict), "trace_observation must be an object")
-            routes = trace_observation.get("provider_read_routes")
-            require(routes, "passed scenario has no provider read routes")
-            require(
-                isinstance(trace_observation.get("trace_start_ordinal"), int),
-                "trace_start_ordinal must be an integer",
-            )
-            require(all(
-                isinstance(route, dict)
-                and route["method"] == "GET"
-                and isinstance(route["path"], str)
-                and route["path"].startswith("/v2.")
-                and isinstance(route["ordinal"], int)
-                and route["ordinal"] >= trace_observation["trace_start_ordinal"]
-                for route in routes
-            ), "provider read trace contains an invalid route")
+            validate_plan_observation(scenario)
+            validate_trace_observation(scenario)
+            routes = scenario["trace_observation"]["provider_read_routes"]
             require(
                 scenario["first_read_route"] == f'{routes[0]["method"]} {routes[0]["path"]}',
                 "first_read_route does not match the trace",
             )
+            require(IMPORT_ROUTES[scenario["resource"]].fullmatch(scenario["first_read_route"]), "first_read_route does not match the frozen contract route")
             identity = scenario.get("canonical_identity_observation")
             require(isinstance(identity, dict), "canonical_identity_observation must be an object")
+            require(identity.get("source") in {"canonical_api", "canonical_store"}, "canonical identity is not independently observed")
+            require(identity.get("count_source") in {"canonical_api", "canonical_store"}, "canonical count is not independently observed")
             require(identity.get("resource_id") == scenario["canonical_id"], "canonical identity ID mismatch")
             require(identity.get("owner_scope") == scenario["owner_scope"], "canonical owner scope mismatch")
             require(
@@ -239,11 +388,7 @@ def validate(document: dict, *, allow_incomplete: bool = False) -> None:
                 require(len(scenario["normal_plan_actions"]) >= 2, "stable-read requires repeated normal plans")
             else:
                 require(scenario["provider_import_id"], "import scenario is missing provider_import_id")
-                if scenario["resource"] in single_id_resources:
-                    require(
-                        scenario["provider_import_id"] == scenario["canonical_id"],
-                        "single-ID import does not use the canonical ID",
-                    )
+                validate_import_id(scenario)
                 require(len(scenario["normal_plan_actions"]) >= 1, "import requires a normal plan")
         else:
             require(scenario["result"] != "passed", "non-passed scenario has passed result")
@@ -253,8 +398,7 @@ def validate(document: dict, *, allow_incomplete: bool = False) -> None:
         require(document.get("status") == "passed", "strict validation rejects incomplete evidence")
     if document["status"] == "passed":
         require(document["execution_mode"] == "gated", "passed evidence must use gated execution")
-        baseline = document.get("existing_p13_baseline")
-        require(isinstance(baseline, dict) and baseline.get("status") == "verified", "passed evidence needs a verified baseline")
+        validate_verified_baseline(document.get("existing_p13_baseline"), tested_sha)
         require(all(s["result"] == "passed" for s in scenarios), "passed evidence cannot contain incomplete scenarios")
 
 
@@ -298,8 +442,20 @@ def self_test() -> None:
                 "backend": "sqlite",
                 "head_sha": "0" * 40,
                 "provider_state_id": "keypair-name",
-                "trace_observation": {"trace_start_ordinal": 0, "provider_read_routes": [{"method": "GET", "path": "/v2.1/project/os-keypairs/keypair-name", "ordinal": 0}]},
-                "canonical_identity_observation": {"resource_id": "keypair-name", "owner_scope": "project-a", "observed_owner_scope": "project-a"},
+                "provider_state_observation": {"observed": True, "source": "tofu_show_json_state", "state_id": "keypair-name"},
+                "plan_observation": {
+                    "refresh-only": [{"format_version": "1.0", "resource_changes": [], "planned_values": {}, "prior_state": {}}],
+                    "normal": [{"format_version": "1.0", "resource_changes": [], "planned_values": {}, "prior_state": {}}],
+                },
+                "trace_observation": {
+                    "trace_start_ordinal": 0,
+                    "trace_end_ordinal": 10,
+                    "provider_read_routes": [{"method": "GET", "path": "/v2.1/project/os-keypairs/keypair-name", "ordinal": 1}],
+                    "provider_mutation_routes": [],
+                    "refresh_only_windows": [{"start_ordinal": 0, "end_ordinal": 3, "mutation_routes": []}],
+                    "normal_plan_windows": [{"start_ordinal": 3, "end_ordinal": 10, "mutation_routes": []}],
+                },
+                "canonical_identity_observation": {"resource_id": "keypair-name", "owner_scope": "project-a", "observed_owner_scope": "project-a", "source": "canonical_api", "count_source": "canonical_api"},
                 "result": "passed",
             }
         ],
@@ -333,14 +489,28 @@ def self_test() -> None:
                 }
             )
     validate(base, allow_incomplete=True)
-    negative = json.loads(json.dumps(base))
-    negative["scenarios"][0]["plan_actions"] = ["update"]
+    def expect_rejected(mutator, label: str) -> None:
+        negative = json.loads(json.dumps(base))
+        mutator(negative["scenarios"][0])
+        try:
+            validate(negative, allow_incomplete=True)
+        except EvidenceValidationError:
+            return
+        raise EvidenceValidationError(f"self-test accepted {label}")
+
+    expect_rejected(lambda scenario: scenario.update(plan_actions=["update"]), "non-no-op plan")
+    expect_rejected(lambda scenario: scenario["plan_observation"]["normal"][0].pop("resource_changes"), "vacuous plan JSON")
+    expect_rejected(lambda scenario: scenario["provider_state_observation"].update(observed=False), "fabricated provider state")
+    expect_rejected(lambda scenario: scenario["trace_observation"].update(trace_end_ordinal=0), "unbounded trace")
+    expect_rejected(lambda scenario: scenario["trace_observation"].update(provider_mutation_routes=[{"method": "DELETE", "path": "/v2.1/project/os-keypairs/keypair-name", "ordinal": 2}]), "provider mutation")
+    expect_rejected(lambda scenario: scenario["canonical_identity_observation"].update(source="compatibility_projection_read"), "circular canonical observation")
+    expect_rejected(lambda scenario: scenario.update(provider_import_id="not-the-canonical-name"), "wrong import identifier")
     try:
-        validate(negative)
+        validate_verified_baseline({"status": "verified"}, "0" * 40)
     except EvidenceValidationError:
         pass
     else:
-        raise EvidenceValidationError("non-no-op passed scenario was accepted")
+        raise EvidenceValidationError("self-test accepted an unbound baseline")
     print("P13.5B evidence validator self-test: PASS")
 
 
