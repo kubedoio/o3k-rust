@@ -101,6 +101,13 @@ pub(crate) struct RouterInterfaceResponse {
     router_id: String,
     subnet_id: String,
 }
+#[derive(serde::Serialize)]
+pub(crate) struct RouterInterfaceRemovalResponse {
+    subnet_id: String,
+    tenant_id: String,
+    port_id: String,
+    id: String,
+}
 async fn router_response(
     service: &NetworkService,
     project: &str,
@@ -400,7 +407,7 @@ pub(crate) async fn delete_router(
             Ok(snapshot) => snapshot,
             Err(error) => return network_error(error),
         };
-        let dispatched = match dispatch_l3_gateway_snapshot(
+        let _dispatched = match dispatch_l3_gateway_snapshot(
             &state,
             project,
             snapshot,
@@ -412,13 +419,17 @@ pub(crate) async fn delete_router(
             Ok(value) => value,
             Err(response) => return response,
         };
-        if dispatched
-            && let Err(error) = service
-                .finalize_l3_gateway_deletion_for_project(project, &id, deleting.generation)
-                .await
+        if let Err(error) = service
+            .finalize_l3_gateway_deletion_for_project(project, &id, deleting.generation)
+            .await
         {
             return network_error(error);
         }
+    } else if let Err(error) = service
+        .finalize_l3_gateway_deletion_for_project(project, &id, deleting.generation)
+        .await
+    {
+        return network_error(error);
     }
     // A successful dispatch means the network executor completed its
     // provider mutation and observation workflow; without an execution
@@ -713,22 +724,34 @@ pub(crate) async fn remove_router_interface(
                 provider_dispatched = true;
             }
             if provider_dispatched
-                && let Err(error) = service
+                || state.network_dispatcher.is_none()
+                || state.network_controller.is_none()
+            {
+                if let Err(error) = service
                     .finalize_l3_gateway_realm_detachment_for_project(
                         project,
                         &deleting.id,
                         deleting.generation,
                     )
                     .await
-            {
-                return network_error(error);
+                {
+                    return network_error(error);
+                }
             }
-            // Router Interface removal is synchronous at the compatibility
-            // boundary: the pinned OpenStack provider expects the successful
-            // remove operation to return 200, just like the corresponding
-            // create/read path.  The canonical attachment lifecycle remains
-            // durable and is finalized only after reconciliation.
-            StatusCode::OK.into_response()
+            // The pinned provider extracts the successful response as an
+            // InterfaceInfo.  Returning the canonical relationship fields is
+            // therefore required even though the mutation itself is already
+            // finalized at this compatibility boundary.
+            (
+                StatusCode::OK,
+                Json(RouterInterfaceRemovalResponse {
+                    subnet_id: body.subnet_id.unwrap_or(a.realm_id).to_string(),
+                    tenant_id: project.to_owned(),
+                    port_id: a.id.to_string(),
+                    id: a.id.to_string(),
+                }),
+            )
+                .into_response()
         }
         Err(error) => network_error(error),
     }
@@ -930,7 +953,6 @@ pub async fn recover_l3_gateway_operations(state: &AppState) {
             }
         }
     }
-
     // Policy child deletion reservations use the same startup owner and the
     // same endpoint execution boundary.  The canonical rows are deliberately
     // finalized only after every affected endpoint has been dispatched; a

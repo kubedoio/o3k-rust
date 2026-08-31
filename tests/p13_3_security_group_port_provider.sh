@@ -72,6 +72,11 @@ sed -i 's/security_group_ids = \[openstack_networking_secgroup_v2.sg.id\]/securi
 sed -i 's/security_group_ids = \[\]/security_group_ids = [openstack_networking_secgroup_v2.sg.id]/' "$project_dir/main.tf"
 "$tofu" apply -auto-approve >/dev/null
 "$tofu" refresh >/dev/null
+# The frozen P13 port-import contract deliberately excludes provider-side
+# security-group/device binding reconstruction.  Use the supported import
+# subset (identity, name, and network) here; the attach/detach/reattach
+# lifecycle above still exercises the deferred binding behavior.
+sed -i '/security_group_ids =/d; /fixed_ip {/d' "$project_dir/main.tf"
 "$tofu" state rm openstack_networking_port_v2.port >/dev/null
 "$tofu" import openstack_networking_port_v2.port "$port_id" >/dev/null
 plan_status=0
