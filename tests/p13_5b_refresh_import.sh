@@ -67,6 +67,8 @@ EOF
 
 O3K_BOOTSTRAP_PASSWORD="$password" \
 O3K_TOKEN_SIGNING_KEY="p13-5b-token-signing-key-012345678901234567890123" \
+O3K_CINDER_PASSWORD="$password" \
+O3K_CINDER_ENDPOINT="http://127.0.0.1:$port" \
 O3K_NETWORK_EXTERNAL_REALM_ID="00000000-0000-0000-0000-000000000009" \
 O3K_PUBLIC_POOL_CIDR="$external_pool_cidr" \
 O3K_PUBLIC_POOL_FIRST="$external_pool_first" \
@@ -94,6 +96,8 @@ restart_daemon() {
   pid=""
   O3K_BOOTSTRAP_PASSWORD="$password" \
   O3K_TOKEN_SIGNING_KEY="p13-5b-token-signing-key-012345678901234567890123" \
+  O3K_CINDER_PASSWORD="$password" \
+  O3K_CINDER_ENDPOINT="http://127.0.0.1:$port" \
   O3K_NETWORK_EXTERNAL_REALM_ID="$external_realm_id" \
   O3K_PUBLIC_POOL_CIDR="$external_pool_cidr" \
   O3K_PUBLIC_POOL_FIRST="$external_pool_first" \
