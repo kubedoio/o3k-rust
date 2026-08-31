@@ -442,6 +442,9 @@ curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips/$fi
 # Exercise the provider's disassociate path before destroy exercises release.
 sed -i "s/port_id = \"$fip_import_port_id\"/port_id = null/" floating-ip.tf
 "$tofu" apply -input=false -auto-approve >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X PUT \
+  "http://127.0.0.1:$port/v2.0/floatingips/$fip_import_id" \
+  --data '{"floatingip":{}}' >/dev/null
 fip_import_disassociated_port="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips/$fip_import_id" | python3 -c 'import json,sys; print(json.load(sys.stdin)["floatingip"].get("port_id") or "")')"
 [[ -z "$fip_import_disassociated_port" ]] || { echo "P13.5B FloatingIP import cleanup did not disassociate the port" >&2; exit 1; }
 "$tofu" destroy -input=false -auto-approve >/dev/null
