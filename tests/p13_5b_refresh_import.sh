@@ -166,13 +166,60 @@ printf '%s\n' "$network_projection" >"$work_dir/network-import-projection.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
 network_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$import_network_id")"
 
-python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" <<'PY'
+cat >subnet.tf <<EOF
+resource "openstack_networking_network_v2" "parent" { name = "p13-5b-subnet-network" }
+resource "openstack_networking_subnet_v2" "managed" {
+  network_id = openstack_networking_network_v2.parent.id
+  name = "p13-5b-subnet"
+  cidr = "198.51.140.0/24"
+  ip_version = 4
+  enable_dhcp = false
+}
+EOF
+"$tofu" apply -input=false -auto-approve >/dev/null
+subnet_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_subnet_v2.managed"))')"
+subnet_network_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_network_v2.parent"))')"
+plan subnet-read-1
+plan subnet-read-2
+subnet_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["subnets"] if x["id"] == wanted))' "$subnet_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets/$subnet_id" >"$work_dir/subnet-stable-projection.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+subnet_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets/$subnet_id")"
+rm -f network.tf
+
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-subnet-import-network"}}' >"$work_dir/subnet-import-network.json"
+subnet_import_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$work_dir/subnet-import-network.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/subnets" \
+  --data "{\"subnet\":{\"network_id\":\"$subnet_import_network_id\",\"name\":\"p13-5b-subnet-import\",\"cidr\":\"198.51.141.0/24\",\"ip_version\":4,\"enable_dhcp\":false}}" >"$work_dir/subnet-import.json"
+subnet_import_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["subnet"]["id"])' "$work_dir/subnet-import.json")"
+cat >subnet.tf <<EOF
+resource "openstack_networking_subnet_v2" "imported" {
+  network_id = "$subnet_import_network_id"
+  name = "p13-5b-subnet-import"
+  cidr = "198.51.141.0/24"
+  ip_version = 4
+  enable_dhcp = false
+}
+EOF
+subnet_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+"$tofu" import -input=false openstack_networking_subnet_v2.imported "$subnet_import_id" >/dev/null
+"$tofu" plan -input=false -out="$work_dir/subnet-import-normal.tfplan" >/dev/null
+"$tofu" show -json "$work_dir/subnet-import-normal.tfplan" >"$work_dir/subnet-import-normal.json"
+subnet_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["subnets"] if x["id"] == wanted))' "$subnet_import_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets/$subnet_import_id" >"$work_dir/subnet-import-projection.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+subnet_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets/$subnet_import_id")"
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$subnet_import_network_id" >/dev/null
+
+python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result = sys.argv[1:]
+root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start = sys.argv[1:]
 work = pathlib.Path(work)
 
 def digest(path):
@@ -193,6 +240,7 @@ def provider_read_routes(start, resource, identity):
     expected = {
         "openstack_compute_keypair_v2": "/os-keypairs/",
         "openstack_networking_network_v2": "/networks/",
+        "openstack_networking_subnet_v2": "/subnets/",
     }[resource]
     routes = []
     records = (work / "trace.jsonl").read_text().splitlines()
@@ -213,6 +261,9 @@ def projection(path, resource):
     if resource == "openstack_compute_keypair_v2":
         item = document["keypair"]
         return {"id": item["name"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
+    if resource == "openstack_networking_subnet_v2":
+        item = document["subnet"]
+        return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
     item = document["network"]
     return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id"))}
 
@@ -271,9 +322,10 @@ scenarios = [
     scenario("openstack_compute_keypair_v2", "import", "p13-5b-import-keypair", "p13-5b-import-keypair", [], ["keypair-import-normal.json"], cleanup_result(keypair_import_cleanup), keypair_count, trace_start=keypair_trace_start, projection_file="keypair-import-projection.json"),
     scenario("openstack_networking_network_v2", "stable-read", network_id, "", ["network-read-1-refresh.json", "network-read-2-refresh.json"], ["network-read-1-normal.json", "network-read-2-normal.json"], cleanup_result(network_stable_cleanup), network_stable_count, trace_start=0, projection_file="network-stable-projection.json"),
     scenario("openstack_networking_network_v2", "import", import_network_id, import_network_id, [], ["network-import-normal.json"], cleanup_result(network_import_cleanup), network_count, trace_start=network_trace_start, projection_file="network-import-projection.json"),
+    scenario("openstack_networking_subnet_v2", "stable-read", subnet_id, "", ["subnet-read-1-refresh.json", "subnet-read-2-refresh.json"], ["subnet-read-1-normal.json", "subnet-read-2-normal.json"], cleanup_result(subnet_stable_cleanup), subnet_stable_count, trace_start=0, projection_file="subnet-stable-projection.json"),
+    scenario("openstack_networking_subnet_v2", "import", subnet_import_id, subnet_import_id, [], ["subnet-import-normal.json"], cleanup_result(subnet_import_cleanup), subnet_count, trace_start=subnet_trace_start, projection_file="subnet-import-projection.json"),
 ]
 unrun = {
-    "openstack_networking_subnet_v2": "requires relationship fixture and is not part of this portable core runner",
     "openstack_networking_port_v2": "provider 3.4.0 supports passthrough import, but does not reconstruct configurable fixed_ip/security_group_ids; the bounded configuration-specific import case is blocked by a non-no-op plan",
     "openstack_compute_instance_v2": "requires image/compute fixture and attachment inspection",
     "openstack_networking_secgroup_v2": "requires policy fixture and default-rule observation",

@@ -121,10 +121,10 @@ def validate(document: dict) -> None:
             # OpenTofu omits resource_changes for a no-op plan, so the
             # structured action list is empty.  Keep this as [] rather than
             # inferring a no-op from CLI text.
-            assert scenario["plan_actions"] in ([], ["no-op"])
+            assert all(action == "no-op" for action in scenario["plan_actions"])
             for field in ("refresh_plan_actions", "normal_plan_actions"):
                 if field in scenario:
-                    assert all(actions in ([], ["no-op"]) for actions in scenario[field])
+                    assert all(all(action == "no-op" for action in actions) for actions in scenario[field])
             assert scenario["final_plan_noop"] is True
             assert scenario["canonical_id"]
             assert scenario["owner_scope"]
