@@ -1,6 +1,6 @@
 # Current Architecture Snapshot
 
-Generated from workspace inventory at `343452bb68fea5b8a9e4126ac9888af2f426522c`.
+Generated from workspace inventory at `fca0551098eefc5c166c83b392daec2ec7a3908c`.
 
 This is a current-tree monitoring snapshot, not the immutable P13.4 baseline.
 That historical evidence remains under
