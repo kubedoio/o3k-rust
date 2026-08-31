@@ -330,7 +330,10 @@ curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST 
   "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-import-network"}}' >"$network_response"
 import_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$network_response")"
 cat >network.tf <<EOF
-resource "openstack_networking_network_v2" "imported" { name = "p13-5b-import-network" tags = [] }
+resource "openstack_networking_network_v2" "imported" {
+  name = "p13-5b-import-network"
+  tags = []
+}
 EOF
 network_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_network_v2.imported "$import_network_id" >/dev/null
