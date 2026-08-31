@@ -166,6 +166,7 @@ def blocked_record(gate_path: str, source_commit: str, log_path: Path, reason: s
 def build_manifest(root: Path, output: Path, timeout_seconds: int | None) -> dict[str, object]:
     run_id = str(uuid.uuid4())
     source_commit = git(root, "rev-parse", "HEAD")
+    working_tree_clean_before = not bool(git(root, "status", "--porcelain"))
     log_dir = output.parent / f"{output.stem}.gates.{run_id}"
     gates: list[dict[str, object]] = []
     head_changed = False
@@ -198,7 +199,8 @@ def build_manifest(root: Path, output: Path, timeout_seconds: int | None) -> dic
             "provider_modified": False,
         },
         "execution": {
-            "working_tree_clean": not bool(git(root, "status", "--porcelain")),
+            "working_tree_clean_before": working_tree_clean_before,
+            "working_tree_clean_after": not bool(git(root, "status", "--porcelain")),
             "head_after_run": current_commit,
             "environment_inherited": True,
             "timeout_seconds": timeout_seconds,

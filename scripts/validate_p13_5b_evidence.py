@@ -110,12 +110,13 @@ def validate_plan_observation(scenario: dict) -> None:
             require(documents, "missing structured normal plan documents")
         for plan in documents:
             require(isinstance(plan, dict), f"{kind} plan document must be an object")
-            require("resource_changes" in plan, f"{kind} plan is missing resource_changes")
-            require(isinstance(plan["resource_changes"], list), f"{kind} resource_changes must be a list")
+            changes_key = "resource_drift" if kind == "refresh-only" else "resource_changes"
+            require(changes_key in plan, f"{kind} plan is missing {changes_key}")
+            require(isinstance(plan[changes_key], list), f"{kind} {changes_key} must be a list")
             require(isinstance(plan.get("format_version"), str), f"{kind} plan is missing format_version")
             require("planned_values" in plan, f"{kind} plan is missing planned_values")
             require("prior_state" in plan, f"{kind} plan is missing prior_state")
-            for change in plan["resource_changes"]:
+            for change in plan[changes_key]:
                 require(isinstance(change, dict), f"{kind} resource change must be an object")
                 actions = change.get("change", {}).get("actions")
                 require(isinstance(actions, list), f"{kind} resource change is missing actions")
@@ -197,11 +198,14 @@ def validate_verified_baseline(baseline: object, tested_sha: str) -> None:
     require(isinstance(baseline.get("run_id"), str) and baseline["run_id"], "baseline evidence needs a run_id")
     require(baseline.get("source_commit") == tested_sha, "baseline evidence is not bound to tested_o3k_head_sha")
     gates = baseline.get("gates")
-    require(isinstance(gates, list) and gates, "baseline evidence needs gate results")
+    require(isinstance(gates, list) and len(gates) == len(BASELINE_GATES), "baseline evidence needs exactly 11 gate results")
+    require(baseline.get("gate_count") == len(BASELINE_GATES), "baseline gate_count is invalid")
+    require(baseline.get("execution", {}).get("working_tree_clean_before") is True, "baseline did not start from a clean worktree")
     require(
         {gate.get("path") for gate in gates if isinstance(gate, dict)} == BASELINE_GATES,
         "baseline evidence does not cover the complete P13.2-P13.4 gate set",
     )
+    require(len({gate.get("path") for gate in gates if isinstance(gate, dict)}) == len(BASELINE_GATES), "baseline gate paths are not unique")
     require(all(
         isinstance(gate, dict)
         and isinstance(gate.get("path"), str)
@@ -459,7 +463,7 @@ def self_test() -> None:
                 "provider_state_id": "keypair-name",
                 "provider_state_observation": {"observed": True, "source": "tofu_show_json_state", "state_id": "keypair-name"},
                 "plan_observation": {
-                    "refresh-only": [{"format_version": "1.0", "resource_changes": [], "planned_values": {}, "prior_state": {}}],
+                    "refresh-only": [{"format_version": "1.0", "resource_drift": [], "planned_values": {}, "prior_state": {}}],
                     "normal": [{"format_version": "1.0", "resource_changes": [], "planned_values": {}, "prior_state": {}}],
                 },
                 "trace_observation": {

@@ -310,6 +310,7 @@ cat >network.tf <<'EOF'
 resource "openstack_networking_network_v2" "managed" {
   name = "p13-5b-network"
   admin_state_up = true
+  tags = []
 }
 EOF
 "$tofu" apply -input=false -auto-approve >/dev/null
@@ -329,7 +330,7 @@ curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST 
   "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-import-network"}}' >"$network_response"
 import_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$network_response")"
 cat >network.tf <<EOF
-resource "openstack_networking_network_v2" "imported" { name = "p13-5b-import-network" }
+resource "openstack_networking_network_v2" "imported" { name = "p13-5b-import-network" tags = [] }
 EOF
 network_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_network_v2.imported "$import_network_id" >/dev/null
@@ -346,13 +347,15 @@ network_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Tok
 canonical_capture openstack_networking_network_v2 "$import_network_id" "$work_dir/network-import-canonical-after-cleanup.json"
 
 cat >subnet.tf <<EOF
-resource "openstack_networking_network_v2" "parent" { name = "p13-5b-subnet-network" }
+resource "openstack_networking_network_v2" "parent" { name = "p13-5b-subnet-network" tags = [] }
 resource "openstack_networking_subnet_v2" "managed" {
   network_id = openstack_networking_network_v2.parent.id
   name = "p13-5b-subnet"
   cidr = "198.51.140.0/24"
   ip_version = 4
   enable_dhcp = false
+  dns_nameservers = []
+  tags = []
 }
 EOF
 "$tofu" apply -input=false -auto-approve >/dev/null
@@ -383,6 +386,8 @@ resource "openstack_networking_subnet_v2" "imported" {
   cidr = "198.51.141.0/24"
   ip_version = 4
   enable_dhcp = false
+  dns_nameservers = []
+  tags = []
 }
 EOF
 subnet_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
@@ -901,6 +906,9 @@ resource "openstack_compute_instance_v2" "imported" {
   name = "p13-5b-server-import"
   image_id = data.openstack_images_image_v2.image.id
   flavor_id = data.openstack_compute_flavor_v2.flavor.id
+  lifecycle {
+    ignore_changes = [force_delete, stop_before_destroy]
+  }
   metadata = {}
   network { uuid = "$server_import_network_id" }
 }
@@ -1251,13 +1259,16 @@ def digest(path):
 
 def actions(path):
     plan = json.loads((work / path).read_text())
-    if not isinstance(plan.get("resource_changes"), list):
-        raise ValueError(f"structured plan is missing resource_changes: {path}")
-    return [action for change in plan["resource_changes"] for action in change["change"]["actions"]]
+    changes = plan.get("resource_changes")
+    if not isinstance(changes, list):
+        changes = plan.get("resource_drift")
+    if not isinstance(changes, list):
+        raise ValueError(f"structured plan is missing resource_changes/resource_drift: {path}")
+    return [action for change in changes for action in change["change"]["actions"]]
 
 def plan_document(path):
     document = json.loads((work / path).read_text())
-    if not isinstance(document.get("format_version"), str) or "resource_changes" not in document:
+    if not isinstance(document.get("format_version"), str) or not any(isinstance(document.get(key), list) for key in ("resource_changes", "resource_drift")):
         raise ValueError(f"incomplete structured plan: {path}")
     if "planned_values" not in document or "prior_state" not in document:
         raise ValueError(f"incomplete structured plan state: {path}")
@@ -1265,7 +1276,7 @@ def plan_document(path):
 
 def plan_window(path):
     label = path.removesuffix(".json")
-    return {"start_ordinal": int((work / f"{label}-start").read_text()), "end_ordinal": int((work / f"{label}-end").read_text()), "mutation_routes": []}
+    return {"start_ordinal": int((work / f"{label}-start").read_text()), "end_ordinal": int((work / f"{label}-end").read_text())}
 
 def state_id(path, resource):
     document = json.loads((work / path.replace("-normal.json", "-state.json")).read_text())
@@ -1308,21 +1319,7 @@ def provider_read_routes(start, end, resource, identity):
             routes.append({"method": method, "path": path, "ordinal": ordinal})
     return routes
 
-def provider_mutation_routes(start, end, resource):
-    expected = {
-        "openstack_compute_keypair_v2": "/os-keypairs",
-        "openstack_networking_network_v2": "/networks",
-        "openstack_networking_subnet_v2": "/subnets",
-        "openstack_networking_port_v2": "/ports",
-        "openstack_networking_secgroup_v2": "/security-groups",
-        "openstack_networking_secgroup_rule_v2": "/security-group-rules",
-        "openstack_networking_router_v2": "/routers",
-        "openstack_networking_router_interface_v2": "/ports",
-        "openstack_compute_instance_v2": "/servers",
-        "openstack_networking_floatingip_v2": "/floatingips",
-        "openstack_blockstorage_volume_v3": "/volumes",
-        "openstack_compute_volume_attach_v2": "/os-volume_attachments",
-    }[resource]
+def provider_mutation_routes(start, end, resource=None):
     routes = []
     records = (work / "trace.jsonl").read_text().splitlines()
     for ordinal, line in enumerate(records):
@@ -1333,7 +1330,7 @@ def provider_mutation_routes(start, end, resource):
         user_agent = headers.get("user-agent", "")
         method = record.get("method") or record.get("request_method")
         path = record.get("path") or record.get("request_path")
-        if "Terraform Provider OpenStack/3.4.0" in user_agent and method in {"POST", "PUT", "PATCH", "DELETE"} and path and expected in path:
+        if "Terraform Provider OpenStack/3.4.0" in user_agent and method in {"POST", "PUT", "PATCH", "DELETE"} and path:
             routes.append({"method": method, "path": path, "ordinal": ordinal})
     return routes
 
@@ -1401,6 +1398,8 @@ def canonical_snapshot(resource, kind, phase):
 def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, cleanup, duplicate_count=0, result="passed", reason=None, trace_start=0, projection_file=None, canonical_count_after=None, parent_file=None):
     plan_documents = {"refresh-only": [plan_document(name) for name in refresh_files], "normal": [plan_document(name) for name in normal_files]}
     windows = [plan_window(name) for name in refresh_files + normal_files]
+    for window in windows:
+        window["mutation_routes"] = provider_mutation_routes(window["start_ordinal"], window["end_ordinal"])
     # The import itself performs the first provider Read. Keep the caller's
     # pre-import boundary so that this read is part of the evidence window.
     trace_start = int(trace_start) if kind == "import" else min((window["start_ordinal"] for window in windows), default=int(trace_start))
@@ -1422,9 +1421,9 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
     if result == "passed" and any(refresh):
         result = "blocked"
         reason = f"refresh-only plan was not a no-op: {refresh}"
-    if result == "passed" and kind == "import" and mutation_routes:
+    if result == "passed" and mutation_routes:
         result = "blocked"
-        reason = f"provider import/refresh issued mutation requests: {mutation_routes}"
+        reason = f"provider read/plan issued mutation requests: {mutation_routes}"
     canonical_before_count = int(canonical_before.get("count", -1))
     canonical_after_read_count = int(canonical_after_read.get("count", -1))
     canonical_after_cleanup_count = int(canonical_after_cleanup.get("count", -1))
