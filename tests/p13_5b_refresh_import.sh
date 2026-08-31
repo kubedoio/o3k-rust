@@ -239,6 +239,28 @@ curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$port_id"
 port_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$port_id")"
 rm -f port.tf
 
+# Match the accepted P13.2C lifecycle boundary.  The daemon's in-memory
+# provider/read model must be reconstructed before a native import fixture is
+# created; otherwise the first provider read can observe a stale network view.
+kill "$pid" 2>/dev/null || true
+wait "$pid" 2>/dev/null || true
+pid=""
+O3K_BOOTSTRAP_PASSWORD="$password" \
+O3K_TOKEN_SIGNING_KEY="p13-5b-token-signing-key-012345678901234567890123" \
+O3K_COMPATIBILITY_TRACE_PATH="$work_dir/trace.jsonl" \
+  "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
+pid=$!
+for _ in $(seq 1 120); do
+  curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1 && break
+  sleep 0.1
+done
+curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null
+curl -fsS -D "$work_dir/auth.headers" -o /dev/null -H 'Content-Type: application/json' \
+  -X POST "http://127.0.0.1:$port/v3/auth/tokens" \
+  --data "{\"auth\":{\"identity\":{\"methods\":[\"password\"],\"password\":{\"user\":{\"name\":\"admin\",\"password\":\"$password\"}}},\"scope\":{\"project\":{\"name\":\"admin\"}}}}"
+token="$(awk 'tolower($1)=="x-subject-token:" {print $2}' "$work_dir/auth.headers" | tr -d '\r')"
+[[ -n "$token" ]] || { echo "P13.5B BLOCKED: re-authentication after daemon restart failed" >&2; exit 2; }
+
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
   "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-port-import-network"}}' >"$work_dir/port-import-network.json"
 port_import_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$work_dir/port-import-network.json")"
