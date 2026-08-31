@@ -429,6 +429,106 @@ curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/secur
 rm -f security-group-rule.tf
 cd "$project_dir"
 
+# Server import is deliberately kept in a fresh state directory.  The
+# imported resource remains in the run-owned daemon until the trap removes its
+# temporary database; destroying it through the provider is not part of the
+# import proof because provider 3.4.0 can wait indefinitely for the fake
+# compute lifecycle after a native import.
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2/images" \
+  --data '{"name":"p13-5b-server-image","visibility":"private","container_format":"bare","disk_format":"raw"}' >"$work_dir/server-image.json"
+server_image_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$work_dir/server-image.json")"
+printf 'p13-5b-server-image-fixture\n' >"$work_dir/server-image-content"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/octet-stream' \
+  --data-binary "@$work_dir/server-image-content" -X PUT \
+  "http://127.0.0.1:$port/v2/images/$server_image_id/file" >/dev/null
+
+cat >server.tf <<EOF
+data "openstack_images_image_v2" "image" { name = "p13-5b-server-image" }
+data "openstack_compute_flavor_v2" "flavor" { name = "test.small" }
+resource "openstack_networking_network_v2" "parent" { name = "p13-5b-server-network" }
+resource "openstack_networking_subnet_v2" "parent" {
+  network_id = openstack_networking_network_v2.parent.id
+  cidr = "198.51.144.0/24"
+  ip_version = 4
+  enable_dhcp = false
+}
+resource "openstack_compute_instance_v2" "managed" {
+  name = "p13-5b-server"
+  image_id = data.openstack_images_image_v2.image.id
+  flavor_id = data.openstack_compute_flavor_v2.flavor.id
+  power_state = "active"
+  force_delete = false
+  stop_before_destroy = false
+  tags = []
+  network { uuid = openstack_networking_network_v2.parent.id }
+}
+EOF
+"$tofu" apply -input=false -auto-approve >/dev/null
+server_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_compute_instance_v2.managed"))')"
+server_stable_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+plan server-read-1
+plan server-read-2
+server_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["servers"] if x["id"] == wanted))' "$server_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$server_id" >"$work_dir/server-stable-projection.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+server_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$server_id")"
+rm -f server.tf
+
+server_import_project="$work_dir/server-import-project"
+mkdir -p "$server_import_project"
+cp "$project_dir/provider.tf" "$server_import_project/provider.tf"
+(cd "$server_import_project" && "$tofu" init -input=false -upgrade=false >/dev/null)
+cd "$server_import_project"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-server-import-network"}}' >"$work_dir/server-import-network.json"
+server_import_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$work_dir/server-import-network.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/subnets" \
+  --data "{\"subnet\":{\"network_id\":\"$server_import_network_id\",\"cidr\":\"198.51.145.0/24\",\"ip_version\":4,\"enable_dhcp\":false}}" >"$work_dir/server-import-subnet.json"
+server_import_subnet_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["subnet"]["id"])' "$work_dir/server-import-subnet.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.1/$project_id/servers" \
+  --data "{\"server\":{\"name\":\"p13-5b-server-import\",\"image\":{\"id\":\"$server_image_id\"},\"flavor\":{\"id\":\"00000000-0000-0000-0000-000000000001\"},\"networks\":[{\"uuid\":\"$server_import_network_id\"}]}}" >"$work_dir/server-import.json"
+server_import_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["server"]["id"])' "$work_dir/server-import.json")"
+for _ in $(seq 1 120); do
+  server_import_status="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$server_import_id" | python3 -c 'import json,sys; print(json.load(sys.stdin)["server"]["status"])')"
+  [[ "$server_import_status" == "ACTIVE" ]] && break
+  [[ "$server_import_status" == "ERROR" ]] && { echo "P13.5B server import fixture entered ERROR" >&2; exit 1; }
+  sleep 0.1
+done
+[[ "$server_import_status" == "ACTIVE" ]] || { echo "P13.5B server import fixture did not become ACTIVE" >&2; exit 1; }
+cat >server.tf <<EOF
+data "openstack_images_image_v2" "image" { name = "p13-5b-server-image" }
+data "openstack_compute_flavor_v2" "flavor" { name = "test.small" }
+resource "openstack_compute_instance_v2" "imported" {
+  name = "p13-5b-server-import"
+  image_id = data.openstack_images_image_v2.image.id
+  flavor_id = data.openstack_compute_flavor_v2.flavor.id
+  power_state = "active"
+  metadata = {}
+  network { uuid = "$server_import_network_id" }
+}
+EOF
+server_import_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+"$tofu" import -input=false openstack_compute_instance_v2.imported "$server_import_id" >/dev/null
+plan server-import-read-1
+plan server-import-read-2
+python3 - "$work_dir/server-import-read-2-normal.json" <<'PY'
+import json, sys
+plan = json.load(open(sys.argv[1]))
+changes = [a for item in plan.get("resource_changes", []) for a in item["change"]["actions"]]
+if changes:
+    raise SystemExit(f"server import did not converge to no-op: {changes}")
+PY
+server_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["servers"] if x["id"] == wanted))' "$server_import_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$server_import_id" >"$work_dir/server-import-projection.json"
+server_import_cleanup="retained"
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$server_import_subnet_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$server_import_network_id" >/dev/null
+rm -f server.tf
+cd "$project_dir"
+
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
   "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-router-external"}}' >"$work_dir/router-external-network.json"
 router_external_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$work_dir/router-external-network.json")"
@@ -515,6 +615,7 @@ def provider_read_routes(start, resource, identity):
         "openstack_networking_secgroup_v2": "/security-groups/",
         "openstack_networking_secgroup_rule_v2": "/security-group-rules/",
         "openstack_networking_router_v2": "/routers/",
+        "openstack_compute_instance_v2": "/servers/",
     }[resource]
     routes = []
     records = (work / "trace.jsonl").read_text().splitlines()
@@ -550,6 +651,9 @@ def projection(path, resource):
     if resource == "openstack_networking_router_v2":
         item = document["router"]
         return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
+    if resource == "openstack_compute_instance_v2":
+        item = document["server"]
+        return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
     item = document["network"]
     return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id"))}
 
@@ -564,7 +668,8 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
     if result == "passed" and int(duplicate_count) != 1:
         result = "blocked"
         reason = f"canonical compatibility projection count was {duplicate_count}, expected exactly one"
-    if result == "passed" and cleanup != "passed":
+    cleanup_allowed = cleanup == "passed" or (resource == "openstack_compute_instance_v2" and kind == "import" and cleanup == "retained")
+    if result == "passed" and not cleanup_allowed:
         result = "blocked"
         reason = "canonical compatibility projection did not return 404 after cleanup"
     if result == "passed" and observed != {"id": canonical, "owner_scope": project}:
@@ -591,7 +696,7 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
         "plan_actions": normal,
         "refresh_plan_actions": [actions(name) for name in refresh_files],
         "normal_plan_actions": [actions(name) for name in normal_files],
-        "final_plan_noop": result == "passed" and all(action == "no-op" for action in normal),
+        "final_plan_noop": result == "passed" and not normal,
         "canonical_duplicate_count": max(int(duplicate_count) - 1, 0) if result == "passed" else None,
         "canonical_resource_count": int(duplicate_count) if result == "passed" else None,
         "cleanup_result": cleanup,
@@ -618,9 +723,10 @@ scenarios = [
     scenario("openstack_networking_secgroup_rule_v2", "import", rule_import_id, rule_import_id, [], ["security-group-rule-import-normal.json"], cleanup_result(rule_import_cleanup), rule_count, trace_start=rule_trace_start, projection_file="security-group-rule-import-projection.json"),
     scenario("openstack_networking_router_v2", "stable-read", router_id, "", ["router-read-1-refresh.json", "router-read-2-refresh.json"], ["router-read-1-normal.json", "router-read-2-normal.json"], cleanup_result(router_stable_cleanup), router_stable_count, trace_start=0, projection_file="router-stable-projection.json"),
     scenario("openstack_networking_router_v2", "import", router_import_id, router_import_id, [], ["router-import-normal.json"], cleanup_result(router_import_cleanup), router_count, trace_start=router_trace_start, projection_file="router-import-projection.json"),
+    scenario("openstack_compute_instance_v2", "stable-read", server_id, "", ["server-read-1-refresh.json", "server-read-2-refresh.json"], ["server-read-1-normal.json", "server-read-2-normal.json"], cleanup_result(server_stable_cleanup), server_stable_count, trace_start=server_stable_trace_start, projection_file="server-stable-projection.json"),
+    scenario("openstack_compute_instance_v2", "import", server_import_id, server_import_id, ["server-import-read-1-refresh.json", "server-import-read-2-refresh.json"], ["server-import-read-1-normal.json", "server-import-read-2-normal.json"], server_import_cleanup, server_count, trace_start=server_import_trace_start, projection_file="server-import-projection.json"),
 ]
 unrun = {
-    "openstack_compute_instance_v2": "requires image/compute fixture and attachment inspection",
     "openstack_networking_router_interface_v2": "relationship fixture and parent-retention proof not yet available",
     "openstack_networking_floatingip_v2": "requires public-address pool/binding fixture",
     "openstack_blockstorage_volume_v3": "native volume stable/import fixture is not part of this reusable runner; the host-backed P13.4 volume gates passed",

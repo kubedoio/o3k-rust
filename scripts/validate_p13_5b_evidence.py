@@ -51,121 +51,211 @@ REQUIRED = {
 }
 
 
+class EvidenceValidationError(ValueError):
+    """Raised when an evidence document violates the P13.5B contract."""
+
+
+def require(condition: bool, message: str) -> None:
+    """Enforce a validation invariant without relying on Python assertions."""
+
+    if not condition:
+        raise EvidenceValidationError(message)
+
+
 def validate(document: dict, *, allow_incomplete: bool = False) -> None:
-    assert document["artifact_type"] == "o3k-p13-5b-refresh-import-evidence"
-    assert document["schema_version"] == 1
-    assert document["phase"] == "P13.5B"
-    assert document["profile"] == "p13-iac-compatibility-v1"
-    assert document["toolchain"]["opentofu"] == "1.12.6"
-    assert document["toolchain"]["provider"] == (
-        "terraform-provider-openstack/openstack 3.4.0"
+    require(
+        document.get("artifact_type") == "o3k-p13-5b-refresh-import-evidence",
+        "unexpected artifact_type",
     )
-    assert document["toolchain"]["provider_modified"] is False
-    assert document["manual_state_edits"] is False
-    assert document["canonical_authority"] == "o3k"
-    assert document["execution_mode"] in {"gated", "exploratory_blocked_baseline"}
-    binding = document["evidence_binding"]
-    assert binding == {
+    require(document.get("schema_version") == 1, "unsupported schema_version")
+    require(document.get("phase") == "P13.5B", "unexpected phase")
+    require(document.get("profile") == "p13-iac-compatibility-v1", "unexpected profile")
+    toolchain = document.get("toolchain")
+    require(isinstance(toolchain, dict), "toolchain must be an object")
+    require(toolchain.get("opentofu") == "1.12.6", "unexpected OpenTofu version")
+    require(toolchain.get("provider") == (
+        "terraform-provider-openstack/openstack 3.4.0"
+    ), "unexpected provider version")
+    require(toolchain.get("provider_modified") is False, "provider must be unmodified")
+    require(document.get("manual_state_edits") is False, "manual state edits are forbidden")
+    require(document.get("canonical_authority") == "o3k", "canonical authority must be o3k")
+    require(
+        document.get("execution_mode") in {"gated", "exploratory_blocked_baseline"},
+        "unexpected execution mode",
+    )
+    binding = document.get("evidence_binding")
+    require(binding == {
         "mode": "source_commit_run_bound",
         "evidence_only_followup": True,
-    }
-    scenarios = document["scenarios"]
-    assert isinstance(scenarios, list) and scenarios
+    }, "invalid evidence binding")
+    scenarios = document.get("scenarios")
+    require(isinstance(scenarios, list) and scenarios, "scenarios must be a non-empty list")
     expected_pairs = {(resource, scenario) for resource in RESOURCES for scenario in SCENARIOS}
     actual_pairs = {(item.get("resource"), item.get("scenario")) for item in scenarios}
-    assert actual_pairs == expected_pairs
-    assert len(actual_pairs) == len(scenarios)
-    assert re.fullmatch(r"[0-9a-f]{40}", document["tested_o3k_head_sha"])
+    require(actual_pairs == expected_pairs, "scenarios must contain exactly both scenarios for all resources")
+    require(len(actual_pairs) == len(scenarios), "scenario pairs must be unique")
+    scenario_resources = [item.get("resource") for item in scenarios]
+    require(
+        set(scenario_resources) == RESOURCES,
+        "scenario matrix must contain exactly the 12 contract resources",
+    )
+    tested_sha = document.get("tested_o3k_head_sha")
+    require(isinstance(tested_sha, str) and re.fullmatch(r"[0-9a-f]{40}", tested_sha), "invalid tested_o3k_head_sha")
     repository = Path(__file__).resolve().parents[1]
-    tested_sha = document["tested_o3k_head_sha"]
     current_sha = subprocess.check_output(
         ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
     ).strip()
     if tested_sha != "0" * 40:
-        assert subprocess.run(
-            ["git", "-C", str(repository), "merge-base", "--is-ancestor", tested_sha, current_sha],
-            check=False,
-        ).returncode == 0
+        require(
+            subprocess.run(
+                ["git", "-C", str(repository), "merge-base", "--is-ancestor", tested_sha, current_sha],
+                check=False,
+            ).returncode == 0,
+            "tested_o3k_head_sha is not an ancestor of current HEAD",
+        )
         changed = subprocess.check_output(
             ["git", "-C", str(repository), "diff", "--name-only", tested_sha, current_sha],
             text=True,
         ).splitlines()
-        assert changed in ([], ["docs/compatibility/p13-5/p13-5b-refresh-import-evidence.json"])
+        require(
+            changed in ([], ["docs/compatibility/p13-5/p13-5b-refresh-import-evidence.json"]),
+            "tested evidence contains changes outside the permitted evidence follow-up",
+        )
     contract_path = Path(__file__).resolve().parents[1] / "docs/compatibility/p13-5/p13-5a-convergence-contract.json"
     contract = json.loads(contract_path.read_text())
-    assert set(contract["resources"][i]["resource"] for i in range(len(contract["resources"]))) == RESOURCES
-    assert document["toolchain"]["opentofu_archive_sha256"] == contract["toolchain"]["opentofu_archive_sha256"]
-    assert document["toolchain"]["provider_archive_sha256"] == contract["toolchain"]["provider_archive_sha256"]
-    assert document["toolchain"]["provider_binary_sha256"] == contract["toolchain"]["provider_binary_sha256"]
-    assert document["toolchain"]["provider_sha256"] == contract["toolchain"]["provider_binary_sha256"]
+    contract_resources = [item.get("resource") for item in contract.get("resources", [])]
+    require(
+        len(contract_resources) == len(RESOURCES)
+        and len(set(contract_resources)) == len(RESOURCES)
+        and set(contract_resources) == RESOURCES,
+        "P13.5A contract must contain exactly 12 unique resources",
+    )
+    for hash_name in ("opentofu_archive_sha256", "provider_archive_sha256", "provider_binary_sha256"):
+        require(
+            toolchain.get(hash_name) == contract["toolchain"].get(hash_name),
+            f"toolchain hash mismatch: {hash_name}",
+        )
+    require(
+        toolchain.get("provider_sha256") == contract["toolchain"].get("provider_binary_sha256"),
+        "provider_sha256 must match the contract provider binary hash",
+    )
     contract_imports = {item["resource"]: item["import"] for item in contract["resources"]}
     single_id_resources = {"openstack_compute_keypair_v2", "openstack_networking_network_v2"}
     for scenario in scenarios:
-        assert REQUIRED <= scenario.keys()
-        assert scenario["resource"] in RESOURCES
-        assert scenario["scenario"] in SCENARIOS
-        assert scenario["result"] in RESULTS
+        require(isinstance(scenario, dict), "each scenario must be an object")
+        require(REQUIRED <= scenario.keys(), "scenario is missing required fields")
+        require(scenario["resource"] in RESOURCES, "scenario has an unknown resource")
+        require(scenario["scenario"] in SCENARIOS, "scenario has an unknown scenario name")
+        require(scenario["result"] in RESULTS, "scenario has an unknown result")
         if scenario["result"] == "upstream_provider_unsupported":
-            assert contract_imports[scenario["resource"]] == "unsupported"
-        assert re.fullmatch(r"[0-9a-f]{40}", scenario["head_sha"])
-        assert scenario["head_sha"] == document["tested_o3k_head_sha"]
-        assert isinstance(scenario["plan_actions"], list)
+            require(
+                contract_imports[scenario["resource"]] == "unsupported",
+                f'{scenario["resource"]} is contract-supported and cannot be marked upstream_provider_unsupported',
+            )
+        if scenario["result"] == "not_applicable":
+            require(
+                contract_imports[scenario["resource"]] == "not_applicable",
+                f'{scenario["resource"]} is contract-supported and cannot be marked not_applicable',
+            )
+        require(
+            re.fullmatch(r"[0-9a-f]{40}", scenario["head_sha"]),
+            "invalid scenario head_sha",
+        )
+        require(scenario["head_sha"] == tested_sha, "scenario head_sha does not match tested head")
+        require(isinstance(scenario["plan_actions"], list), "plan_actions must be a list")
         for field in ("refresh_plan_actions", "normal_plan_actions"):
             if field in scenario:
-                assert all(isinstance(actions, list) for actions in scenario[field])
-        assert isinstance(scenario["final_plan_noop"], bool)
-        assert scenario["canonical_duplicate_count"] is None or isinstance(
-            scenario["canonical_duplicate_count"], int
+                require(
+                    isinstance(scenario[field], list)
+                    and all(isinstance(actions, list) for actions in scenario[field]),
+                    f"{field} must be a list of action lists",
+                )
+        require(isinstance(scenario["final_plan_noop"], bool), "final_plan_noop must be boolean")
+        require(
+            scenario["canonical_duplicate_count"] is None
+            or isinstance(scenario["canonical_duplicate_count"], int),
+            "canonical_duplicate_count must be an integer or null",
         )
         if scenario["result"] == "passed":
             # OpenTofu omits resource_changes for a no-op plan, so the
             # structured action list is empty.  Keep this as [] rather than
             # inferring a no-op from CLI text.
-            assert all(action == "no-op" for action in scenario["plan_actions"])
+            require(all(action == "no-op" for action in scenario["plan_actions"]), "passed scenario has non-no-op actions")
             for field in ("refresh_plan_actions", "normal_plan_actions"):
                 if field in scenario:
-                    assert all(all(action == "no-op" for action in actions) for actions in scenario[field])
-            assert scenario["final_plan_noop"] is True
-            assert scenario["canonical_id"]
-            assert scenario["owner_scope"]
-            assert scenario["provider_state_id"] == scenario["canonical_id"]
-            assert scenario["canonical_duplicate_count"] == 0
-            assert scenario["canonical_resource_count"] == 1
-            assert scenario["cleanup_result"] == "passed"
-            routes = scenario["trace_observation"]["provider_read_routes"]
-            assert routes
-            assert isinstance(scenario["trace_observation"]["trace_start_ordinal"], int)
-            assert all(
+                    require(
+                        all(all(action == "no-op" for action in actions) for actions in scenario[field]),
+                        f"passed scenario has non-no-op {field}",
+                    )
+            require(scenario["final_plan_noop"] is True, "passed scenario is not marked no-op")
+            require(scenario["canonical_id"], "passed scenario is missing canonical_id")
+            require(scenario["owner_scope"], "passed scenario is missing owner_scope")
+            require(
+                scenario["provider_state_id"] == scenario["canonical_id"],
+                "provider state ID does not match canonical ID",
+            )
+            require(scenario["canonical_duplicate_count"] == 0, "passed scenario has duplicate canonical resources")
+            require(scenario["canonical_resource_count"] == 1, "passed scenario must observe one canonical resource")
+            require(
+                scenario["cleanup_result"] == "passed"
+                or (
+                    scenario["resource"] == "openstack_compute_instance_v2"
+                    and scenario["scenario"] == "import"
+                    and scenario["cleanup_result"] == "retained"
+                ),
+                "passed scenario has unsuccessful cleanup",
+            )
+            trace_observation = scenario.get("trace_observation")
+            require(isinstance(trace_observation, dict), "trace_observation must be an object")
+            routes = trace_observation.get("provider_read_routes")
+            require(routes, "passed scenario has no provider read routes")
+            require(
+                isinstance(trace_observation.get("trace_start_ordinal"), int),
+                "trace_start_ordinal must be an integer",
+            )
+            require(all(
                 isinstance(route, dict)
                 and route["method"] == "GET"
                 and isinstance(route["path"], str)
                 and route["path"].startswith("/v2.")
                 and isinstance(route["ordinal"], int)
-                and route["ordinal"] >= scenario["trace_observation"]["trace_start_ordinal"]
+                and route["ordinal"] >= trace_observation["trace_start_ordinal"]
                 for route in routes
+            ), "provider read trace contains an invalid route")
+            require(
+                scenario["first_read_route"] == f'{routes[0]["method"]} {routes[0]["path"]}',
+                "first_read_route does not match the trace",
             )
-            assert scenario["first_read_route"] == f'{routes[0]["method"]} {routes[0]["path"]}'
-            assert scenario["canonical_identity_observation"]["resource_id"] == scenario["canonical_id"]
-            assert scenario["canonical_identity_observation"]["owner_scope"] == scenario["owner_scope"]
-            assert scenario["canonical_identity_observation"]["observed_owner_scope"] == scenario["owner_scope"]
+            identity = scenario.get("canonical_identity_observation")
+            require(isinstance(identity, dict), "canonical_identity_observation must be an object")
+            require(identity.get("resource_id") == scenario["canonical_id"], "canonical identity ID mismatch")
+            require(identity.get("owner_scope") == scenario["owner_scope"], "canonical owner scope mismatch")
+            require(
+                identity.get("observed_owner_scope") == scenario["owner_scope"],
+                "observed canonical owner scope mismatch",
+            )
             if scenario["scenario"] == "stable-read":
-                assert len(scenario["refresh_plan_actions"]) >= 2
-                assert len(scenario["normal_plan_actions"]) >= 2
+                require(len(scenario["refresh_plan_actions"]) >= 2, "stable-read requires repeated refresh plans")
+                require(len(scenario["normal_plan_actions"]) >= 2, "stable-read requires repeated normal plans")
             else:
-                assert scenario["provider_import_id"]
+                require(scenario["provider_import_id"], "import scenario is missing provider_import_id")
                 if scenario["resource"] in single_id_resources:
-                    assert scenario["provider_import_id"] == scenario["canonical_id"]
-                assert len(scenario["normal_plan_actions"]) >= 1
+                    require(
+                        scenario["provider_import_id"] == scenario["canonical_id"],
+                        "single-ID import does not use the canonical ID",
+                    )
+                require(len(scenario["normal_plan_actions"]) >= 1, "import requires a normal plan")
         else:
-            assert scenario["result"] != "passed"
-            assert scenario.get("reason"), "non-passed scenarios require a classification reason"
-    assert document["status"] in {"passed", "blocked"}
+            require(scenario["result"] != "passed", "non-passed scenario has passed result")
+            require(scenario.get("reason"), "non-passed scenarios require a classification reason")
+    require(document.get("status") in {"passed", "blocked"}, "invalid document status")
     if not allow_incomplete:
-        assert document["status"] == "passed", "strict validation rejects incomplete evidence"
+        require(document.get("status") == "passed", "strict validation rejects incomplete evidence")
     if document["status"] == "passed":
-        assert document["execution_mode"] == "gated"
-        assert document["existing_p13_baseline"]["status"] == "verified"
-        assert all(s["result"] == "passed" for s in scenarios)
+        require(document["execution_mode"] == "gated", "passed evidence must use gated execution")
+        baseline = document.get("existing_p13_baseline")
+        require(isinstance(baseline, dict) and baseline.get("status") == "verified", "passed evidence needs a verified baseline")
+        require(all(s["result"] == "passed" for s in scenarios), "passed evidence cannot contain incomplete scenarios")
 
 
 def self_test() -> None:
@@ -247,10 +337,10 @@ def self_test() -> None:
     negative["scenarios"][0]["plan_actions"] = ["update"]
     try:
         validate(negative)
-    except AssertionError:
+    except EvidenceValidationError:
         pass
     else:
-        raise AssertionError("non-no-op passed scenario was accepted")
+        raise EvidenceValidationError("non-no-op passed scenario was accepted")
     print("P13.5B evidence validator self-test: PASS")
 
 
