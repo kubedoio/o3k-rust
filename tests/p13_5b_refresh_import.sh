@@ -901,9 +901,6 @@ resource "openstack_compute_instance_v2" "imported" {
   name = "p13-5b-server-import"
   image_id = data.openstack_images_image_v2.image.id
   flavor_id = data.openstack_compute_flavor_v2.flavor.id
-  power_state = "active"
-  force_delete = false
-  stop_before_destroy = false
   metadata = {}
   network { uuid = "$server_import_network_id" }
 }
