@@ -82,5 +82,5 @@ if [[ "$plan_status" -ne 0 ]]; then
   echo "post-import Router plan is not converged (exit $plan_status)" >&2
   exit "$plan_status"
 fi
-$tofu destroy -auto-approve
+$tofu destroy -parallelism=1 -auto-approve
 echo "P13.3 Router provider lifecycle passed"
