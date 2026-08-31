@@ -68,8 +68,6 @@ EOF
 
 O3K_BOOTSTRAP_PASSWORD="$password" \
 O3K_TOKEN_SIGNING_KEY="p13-5b-token-signing-key-012345678901234567890123" \
-O3K_CINDER_PASSWORD="$password" \
-O3K_CINDER_ENDPOINT="http://127.0.0.1:$port" \
 O3K_NETWORK_EXTERNAL_REALM_ID="00000000-0000-0000-0000-000000000009" \
 O3K_PUBLIC_POOL_CIDR="$external_pool_cidr" \
 O3K_PUBLIC_POOL_FIRST="$external_pool_first" \
@@ -97,8 +95,6 @@ restart_daemon() {
   pid=""
   O3K_BOOTSTRAP_PASSWORD="$password" \
   O3K_TOKEN_SIGNING_KEY="p13-5b-token-signing-key-012345678901234567890123" \
-  O3K_CINDER_PASSWORD="$password" \
-  O3K_CINDER_ENDPOINT="http://127.0.0.1:$port" \
   O3K_NETWORK_EXTERNAL_REALM_ID="$external_realm_id" \
   O3K_PUBLIC_POOL_CIDR="$external_pool_cidr" \
   O3K_PUBLIC_POOL_FIRST="$external_pool_first" \
@@ -974,7 +970,8 @@ sed -i "s/SERVER_IMAGE_ID/$server_image_id/" volume-attachment.tf
 "$tofu" apply -input=false -auto-approve >/dev/null
 volume_attachment_server_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_compute_instance_v2.server"))')"
 volume_attachment_volume_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_blockstorage_volume_v3.volume"))')"
-volume_attachment_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_compute_volume_attach_v2.managed"))')"
+volume_attachment_provider_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_compute_volume_attach_v2.managed"))')"
+volume_attachment_id="${volume_attachment_provider_id##*/}"
 volume_attachment_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 plan volume-attachment-read-1
 plan volume-attachment-read-2

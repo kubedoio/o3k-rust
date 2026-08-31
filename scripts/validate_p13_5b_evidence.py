@@ -121,6 +121,7 @@ def validate_plan_observation(scenario: dict) -> None:
                 actions = change.get("change", {}).get("actions")
                 require(isinstance(actions, list), f"{kind} resource change is missing actions")
                 require(all(action in {"no-op", "create", "read", "update", "delete"} for action in actions), "invalid structured plan action")
+                require(all(action == "no-op" for action in actions), f"{kind} structured plan is not a no-op")
 
 
 def validate_trace_observation(scenario: dict) -> None:
@@ -409,6 +410,15 @@ def validate(document: dict, *, allow_incomplete: bool = False) -> None:
                 require(scenario["provider_import_id"], "import scenario is missing provider_import_id")
                 validate_import_id(scenario)
                 require(len(scenario["normal_plan_actions"]) >= 1, "import requires a normal plan")
+            if scenario["resource"] == "openstack_compute_volume_attach_v2" and scenario["scenario"] == "import":
+                parent = scenario.get("canonical_parent_observation")
+                require(isinstance(parent, dict) and parent.get("parent_retention") == "passed", "volume attachment parent retention is not proven")
+                require(parent.get("server_status") == 200 and parent.get("volume_status") == 200, "volume attachment parents were not retained")
+                require(parent.get("relationship_count_before") == 1 and parent.get("relationship_count_after_read") == 1, "volume attachment relationship changed during import")
+            if scenario["resource"] == "openstack_networking_router_interface_v2" and scenario["scenario"] == "import":
+                parent = scenario.get("canonical_parent_observation")
+                require(isinstance(parent, dict) and parent.get("parent_retention") == "passed", "router interface parent retention is not proven")
+                require(parent.get("router_status") == 200 and parent.get("target_subnet_status") == 200 and parent.get("target_network_status") == 200, "router interface parents were not retained")
         else:
             require(scenario["result"] != "passed", "non-passed scenario has passed result")
             require(scenario.get("reason"), "non-passed scenarios require a classification reason")
