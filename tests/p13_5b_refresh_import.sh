@@ -398,6 +398,9 @@ fip_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips/$fip_stable_id" >"$work_dir/floating-ip-stable-projection.json"
 sed -i 's/port_id = openstack_networking_port_v2.private.id/port_id = null/' floating-ip.tf
 "$tofu" apply -input=false -auto-approve >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X PUT \
+  "http://127.0.0.1:$port/v2.0/floatingips/$fip_stable_id" \
+  --data '{"floatingip":{}}' >/dev/null
 "$tofu" destroy -input=false -auto-approve >/dev/null
 fip_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips/$fip_stable_id")"
 fip_stable_count_after="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["floatingips"] if x["id"] == wanted))' "$fip_stable_id")"
