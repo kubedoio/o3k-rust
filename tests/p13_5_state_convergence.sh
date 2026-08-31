@@ -44,14 +44,10 @@ if ! version="$("$tofu" version | head -n 1)"; then
 fi
 [[ "$version" == *"OpenTofu v1.12.6"* ]] || { echo "wrong OpenTofu: $version" >&2; exit 2; }
 if [[ "${P13_5A_RUN_BASELINE:-0}" != 1 ]]; then
-  if [[ "${P13_5B_RUN:-0}" == 1 ]]; then
-    if [[ "${P13_5B_BASELINE_RESULT:-}" != verified ]]; then
-      echo "P13.5B BLOCKED: set P13_5B_BASELINE_RESULT=verified only after the existing P13.2-P13.4 gates pass" >&2
-      exit 2
-    fi
-    bash "$root_dir/tests/p13_5b_refresh_import.sh"
-    exit $?
-  fi
+  [[ "${P13_5B_RUN:-0}" != 1 ]] || {
+    echo "P13.5B BLOCKED: run the parent harness with P13_5A_RUN_BASELINE=1 so the existing gates execute first" >&2
+    exit 2
+  }
   echo "P13.5A discovery harness: PASS (baseline execution opt-in)"
   echo "P13.5A convergence claims: NOT CLAIMED"
   exit 0
@@ -63,6 +59,7 @@ for gate in tests/p13_2_core_lifecycle.sh tests/p13_2b_subnet_lifecycle.sh tests
   bash "$root_dir/$gate"
 done
 if [[ "${P13_5B_RUN:-0}" == 1 ]]; then
+  export P13_5B_BASELINE_RESULT=verified
   bash "$root_dir/tests/p13_5b_refresh_import.sh"
   exit $?
 fi

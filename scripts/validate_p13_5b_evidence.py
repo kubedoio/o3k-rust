@@ -74,11 +74,15 @@ def validate(document: dict) -> None:
     assert document["toolchain"]["opentofu_archive_sha256"] == contract["toolchain"]["opentofu_archive_sha256"]
     assert document["toolchain"]["provider_archive_sha256"] == contract["toolchain"]["provider_archive_sha256"]
     assert document["toolchain"]["provider_binary_sha256"] == contract["toolchain"]["provider_binary_sha256"]
+    assert document["toolchain"]["provider_sha256"] == contract["toolchain"]["provider_binary_sha256"]
+    contract_imports = {item["resource"]: item["import"] for item in contract["resources"]}
     for scenario in scenarios:
         assert REQUIRED <= scenario.keys()
         assert scenario["resource"] in RESOURCES
         assert scenario["scenario"] in SCENARIOS
         assert scenario["result"] in RESULTS
+        if scenario["result"] == "upstream_provider_unsupported":
+            assert contract_imports[scenario["resource"]] == "unsupported"
         assert re.fullmatch(r"[0-9a-f]{40}", scenario["head_sha"])
         assert scenario["head_sha"] == document["tested_o3k_head_sha"]
         assert isinstance(scenario["plan_actions"], list)
@@ -98,11 +102,23 @@ def validate(document: dict) -> None:
                 if field in scenario:
                     assert all(actions in ([], ["no-op"]) for actions in scenario[field])
             assert scenario["final_plan_noop"] is True
+            assert scenario["canonical_id"]
+            assert scenario["owner_scope"]
             assert scenario["canonical_duplicate_count"] == 0
             assert scenario["canonical_resource_count"] == 1
             assert scenario["cleanup_result"] == "passed"
-            assert scenario["trace_observation"]["provider_read_routes"]
+            routes = scenario["trace_observation"]["provider_read_routes"]
+            assert routes
+            assert scenario["first_read_route"] == f'{routes[0]["method"]} {routes[0]["path"]}'
             assert scenario["canonical_identity_observation"]["resource_id"] == scenario["canonical_id"]
+            assert scenario["canonical_identity_observation"]["owner_scope"] == scenario["owner_scope"]
+            assert scenario["canonical_identity_observation"]["observed_owner_scope"] == scenario["owner_scope"]
+            if scenario["scenario"] == "stable-read":
+                assert len(scenario["refresh_plan_actions"]) >= 2
+                assert len(scenario["normal_plan_actions"]) >= 2
+            else:
+                assert scenario["provider_import_id"]
+                assert len(scenario["normal_plan_actions"]) >= 1
         else:
             assert scenario["result"] != "passed"
     assert document["status"] in {"passed", "blocked"}

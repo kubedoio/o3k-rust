@@ -28,6 +28,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ "$baseline_result" == verified && "${P13_5A_RUN_BASELINE:-0}" != 1 ]]; then
+  echo "P13.5B BLOCKED: verified baseline must come from the parent harness baseline execution" >&2
+  exit 2
+fi
 if [[ "$baseline_result" != verified && "${P13_5B_EXPLORATORY:-0}" != 1 ]]; then
   echo "P13.5B BLOCKED: existing P13.2-P13.4 baseline is not verified; use the parent harness or explicitly label an exploratory run" >&2
   exit 2
@@ -153,7 +157,7 @@ network_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 "$tofu" import -input=false openstack_networking_network_v2.imported "$import_network_id" >/dev/null
 "$tofu" plan -input=false -out="$work_dir/network-import-normal.tfplan" >/dev/null
 "$tofu" show -json "$work_dir/network-import-normal.tfplan" >"$work_dir/network-import-normal.json"
-network_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["networks"] if x["name"] == wanted))' p13-5b-import-network)"
+network_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["networks"] if x["id"] == wanted))' "$import_network_id")"
 network_projection="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$import_network_id")"
 printf '%s\n' "$network_projection" >"$work_dir/network-import-projection.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
@@ -205,7 +209,7 @@ def projection(path, resource):
     document = json.loads((work / path).read_text())
     if resource == "openstack_compute_keypair_v2":
         item = document["keypair"]
-        return {"id": item["name"], "owner_scope": project}
+        return {"id": item["name"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
     item = document["network"]
     return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id"))}
 
@@ -213,9 +217,10 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
     normal = actions(normal_files[-1]) if normal_files else []
     trace_routes = provider_read_routes(trace_start, resource)
     observed = projection(projection_file, resource) if projection_file else None
-    if result == "passed" and not trace_routes:
+    minimum_routes = 2 if kind == "stable-read" else 1
+    if result == "passed" and len(trace_routes) < minimum_routes:
         result = "blocked"
-        reason = "provider first-read route was not found in the structured compatibility trace"
+        reason = f"structured compatibility trace has {len(trace_routes)} provider reads; expected at least {minimum_routes}"
     if result == "passed" and int(duplicate_count) != 1:
         result = "blocked"
         reason = f"canonical compatibility projection count was {duplicate_count}, expected exactly one"
