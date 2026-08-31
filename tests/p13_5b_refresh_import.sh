@@ -281,8 +281,8 @@ unrun = {
     "openstack_networking_router_v2": "router stable/import cases are not part of this portable runner; the corrected upstream provider lifecycle gate passed in the baseline rerun",
     "openstack_networking_router_interface_v2": "relationship fixture and parent-retention proof not yet available",
     "openstack_networking_floatingip_v2": "requires public-address pool/binding fixture",
-    "openstack_blockstorage_volume_v3": "native volume service unavailable without configured storage backend",
-    "openstack_compute_volume_attach_v2": "requires disposable LVM backend and parent fixture",
+    "openstack_blockstorage_volume_v3": "native volume stable/import fixture is not part of this reusable runner; the host-backed P13.4 volume gates passed",
+    "openstack_compute_volume_attach_v2": "relationship fixture and parent-retention proof are not part of this reusable runner; the host-backed P13.4 attachment gate passed",
 }
 for resource, reason in unrun.items():
     for kind in ("stable-read", "import"):
@@ -298,6 +298,14 @@ for resource, reason in unrun.items():
             "result": "blocked",
             "reason": reason,
         })
+required_gates = [
+    "tests/p13_2_core_lifecycle.sh", "tests/p13_2b_subnet_lifecycle.sh",
+    "tests/p13_2c_port_lifecycle.sh", "tests/p13_2d_server_lifecycle.sh",
+    "tests/p13_3_security_group_provider.sh", "tests/p13_3_security_group_port_provider.sh",
+    "tests/p13_3_router_provider.sh", "tests/p13_3_floating_ip_provider.sh",
+    "tests/p13_4_provider_volume_smoke.sh", "tests/p13_4_provider_volume_attachment_smoke.sh",
+    "tests/p13_4_storage_lifecycle.sh",
+]
 document = {
     "artifact_type": "o3k-p13-5b-refresh-import-evidence",
     "schema_version": 1,
@@ -310,25 +318,18 @@ document = {
     "starting_main_sha": __import__("subprocess").check_output(["git", "-C", root, "merge-base", "HEAD", "origin/main"], text=True).strip(),
     "existing_p13_baseline": {
         "status": baseline_result,
-        "classification": "environment_and_existing_gate_limitations",
-        "required_gates": [
-            "tests/p13_2_core_lifecycle.sh", "tests/p13_2b_subnet_lifecycle.sh",
-            "tests/p13_2c_port_lifecycle.sh", "tests/p13_2d_server_lifecycle.sh",
-            "tests/p13_3_security_group_provider.sh", "tests/p13_3_security_group_port_provider.sh",
-            "tests/p13_3_router_provider.sh", "tests/p13_3_floating_ip_provider.sh",
-            "tests/p13_4_provider_volume_smoke.sh", "tests/p13_4_provider_volume_attachment_smoke.sh",
-            "tests/p13_4_storage_lifecycle.sh",
-        ],
-        "completed_before_block": [
+        "classification": "none" if baseline_result == "verified" else "environment_and_existing_gate_limitations",
+        "required_gates": required_gates,
+        "completed_before_block": required_gates if baseline_result == "verified" else [
             "tests/p13_2_core_lifecycle.sh", "tests/p13_2b_subnet_lifecycle.sh",
             "tests/p13_2c_port_lifecycle.sh", "tests/p13_2d_server_lifecycle.sh",
             "tests/p13_3_security_group_provider.sh", "tests/p13_3_security_group_port_provider.sh",
             "tests/p13_3_router_provider.sh", "tests/p13_3_floating_ip_provider.sh",
         ],
-        "failed_gate": "tests/p13_4_provider_volume_smoke.sh",
-        "failure": "native volume service unavailable",
+        "failed_gate": None if baseline_result == "verified" else "tests/p13_4_provider_volume_smoke.sh",
+        "failure": None if baseline_result == "verified" else "native volume service unavailable",
         "provider_import_limitation": "port fixed_ip/security_group_ids are computed all_* observations in upstream 3.4.0 and are not reconstructed as configurable state; the baseline uses the supported identity/name/network import subset",
-        "backend_limitations": ["native volume service unavailable", "VolumeAttachment requires disposable LVM"],
+        "backend_limitations": [] if baseline_result == "verified" else ["native volume service unavailable", "VolumeAttachment requires disposable LVM"],
     },
     "canonical_authority": "o3k",
     "manual_state_edits": False,
