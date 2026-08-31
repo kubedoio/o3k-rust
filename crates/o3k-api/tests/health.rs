@@ -2314,6 +2314,11 @@ async fn router_detach_dispatches_only_the_requested_gateway_and_finalizes_after
         )
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
+    let removal: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 1024).await?)?;
+    assert_eq!(removal["id"], removal["port_id"]);
+    assert_eq!(removal["subnet_id"], realm.id.to_string());
+    assert_eq!(removal["tenant_id"], project_id);
 
     {
         let commands = commands

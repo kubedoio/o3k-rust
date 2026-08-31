@@ -723,20 +723,18 @@ pub(crate) async fn remove_router_interface(
                 }
                 provider_dispatched = true;
             }
-            if provider_dispatched
+            if (provider_dispatched
                 || state.network_dispatcher.is_none()
-                || state.network_controller.is_none()
-            {
-                if let Err(error) = service
+                || state.network_controller.is_none())
+                && let Err(error) = service
                     .finalize_l3_gateway_realm_detachment_for_project(
                         project,
                         &deleting.id,
                         deleting.generation,
                     )
                     .await
-                {
-                    return network_error(error);
-                }
+            {
+                return network_error(error);
             }
             // The pinned provider extracts the successful response as an
             // InterfaceInfo.  Returning the canonical relationship fields is

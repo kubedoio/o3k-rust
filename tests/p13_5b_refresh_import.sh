@@ -278,7 +278,7 @@ unrun = {
     "openstack_compute_instance_v2": "requires image/compute fixture and attachment inspection",
     "openstack_networking_secgroup_v2": "requires policy fixture and default-rule observation",
     "openstack_networking_secgroup_rule_v2": "requires policy-parent fixture",
-    "openstack_networking_router_v2": "existing router gate requires rerun with its password environment set",
+    "openstack_networking_router_v2": "router stable/import cases are not part of this portable runner; the corrected upstream provider lifecycle gate passed in the baseline rerun",
     "openstack_networking_router_interface_v2": "relationship fixture and parent-retention proof not yet available",
     "openstack_networking_floatingip_v2": "requires public-address pool/binding fixture",
     "openstack_blockstorage_volume_v3": "native volume service unavailable without configured storage backend",

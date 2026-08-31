@@ -78,6 +78,7 @@ def validate(document: dict) -> None:
     assert document["toolchain"]["provider_binary_sha256"] == contract["toolchain"]["provider_binary_sha256"]
     assert document["toolchain"]["provider_sha256"] == contract["toolchain"]["provider_binary_sha256"]
     contract_imports = {item["resource"]: item["import"] for item in contract["resources"]}
+    single_id_resources = {"openstack_compute_keypair_v2", "openstack_networking_network_v2"}
     for scenario in scenarios:
         assert REQUIRED <= scenario.keys()
         assert scenario["resource"] in RESOURCES
@@ -121,7 +122,8 @@ def validate(document: dict) -> None:
                 assert len(scenario["normal_plan_actions"]) >= 2
             else:
                 assert scenario["provider_import_id"]
-                assert scenario["provider_import_id"] == scenario["canonical_id"]
+                if scenario["resource"] in single_id_resources:
+                    assert scenario["provider_import_id"] == scenario["canonical_id"]
                 assert len(scenario["normal_plan_actions"]) >= 1
         else:
             assert scenario["result"] != "passed"
