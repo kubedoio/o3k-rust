@@ -346,7 +346,10 @@ network_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Tok
 canonical_capture openstack_networking_network_v2 "$import_network_id" "$work_dir/network-import-canonical-after-cleanup.json"
 
 cat >subnet.tf <<EOF
-resource "openstack_networking_network_v2" "parent" { name = "p13-5b-subnet-network" tags = [] }
+resource "openstack_networking_network_v2" "parent" {
+  name = "p13-5b-subnet-network"
+  tags = []
+}
 resource "openstack_networking_subnet_v2" "managed" {
   network_id = openstack_networking_network_v2.parent.id
   name = "p13-5b-subnet"
