@@ -67,6 +67,10 @@ EOF
 
 O3K_BOOTSTRAP_PASSWORD="$password" \
 O3K_TOKEN_SIGNING_KEY="p13-5b-token-signing-key-012345678901234567890123" \
+O3K_NETWORK_EXTERNAL_REALM_ID="00000000-0000-0000-0000-000000000009" \
+O3K_PUBLIC_POOL_CIDR="$external_pool_cidr" \
+O3K_PUBLIC_POOL_FIRST="$external_pool_first" \
+O3K_PUBLIC_POOL_LAST="$external_pool_last" \
 O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" \
 O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" \
 O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
@@ -1030,14 +1034,25 @@ curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/netwo
 rm -f router-interface.tf
 cd "$project_dir"
 
+export P13_5B_ATTACHMENT_ID="$volume_attachment_id" P13_5B_ATTACHMENT_IMPORT_ID="$volume_attachment_import_id" P13_5B_ATTACHMENT_STABLE_COUNT="$volume_attachment_stable_count" P13_5B_ATTACHMENT_IMPORT_COUNT="$volume_attachment_import_count_after_read" P13_5B_ATTACHMENT_STABLE_CLEANUP="$volume_attachment_stable_cleanup" P13_5B_ATTACHMENT_IMPORT_CLEANUP="$volume_attachment_import_cleanup" P13_5B_ATTACHMENT_TRACE_START="$volume_attachment_trace_start" P13_5B_ATTACHMENT_IMPORT_TRACE_START="$volume_attachment_import_trace_start" P13_5B_ATTACHMENT_IMPORT_STATE_ID="$volume_attachment_import_state_id"
 python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" "$port_id" "$port_import_id" "$port_stable_count" "$port_count" "$port_stable_cleanup" "$port_import_cleanup" "$port_trace_start" "$security_group_id" "$security_group_import_id" "$security_group_stable_count" "$security_group_count" "$security_group_stable_cleanup" "$security_group_import_cleanup" "$security_group_trace_start" "$security_group_rule_id" "$rule_import_id" "$security_group_rule_stable_count" "$rule_count" "$security_group_rule_stable_cleanup" "$rule_import_cleanup" "$rule_trace_start" "$router_id" "$router_import_id" "$router_stable_count" "$router_count" "$router_stable_cleanup" "$router_import_cleanup" "$router_trace_start" "$router_interface_stable_id" "$router_interface_import_id" "$router_interface_stable_count" "$router_interface_import_count" "$router_interface_stable_count_after" "$router_interface_import_count_after" "$router_interface_stable_cleanup" "$router_interface_import_cleanup" "$router_interface_stable_trace_start" "$router_interface_import_trace_start" "$fip_stable_id" "$fip_import_id" "$fip_stable_count" "$fip_import_count_before" "$fip_import_count_after_read" "$fip_stable_count_after" "$fip_import_count_after_cleanup" "$fip_stable_cleanup" "$fip_import_cleanup" "$fip_stable_trace_start" "$fip_import_trace_start" "$volume_stable_id" "$volume_import_id" "$volume_stable_count" "$volume_import_count_before" "$volume_import_count_after_read" "$volume_stable_count_after" "$volume_import_count_after_cleanup" "$volume_stable_cleanup" "$volume_import_cleanup" "$volume_stable_trace_start" "$volume_import_trace_start" <<'PY'
 import hashlib
 import json
+import os
 import pathlib
 import sys
 
 root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start, port_id, port_import_id, port_stable_count, port_count, port_stable_cleanup, port_import_cleanup, port_trace_start, security_group_id, security_group_import_id, security_group_stable_count, security_group_count, security_group_stable_cleanup, security_group_import_cleanup, security_group_trace_start, security_group_rule_id, rule_import_id, security_group_rule_stable_count, rule_count, security_group_rule_stable_cleanup, rule_import_cleanup, rule_trace_start, router_id, router_import_id, router_stable_count, router_count, router_stable_cleanup, router_import_cleanup, router_trace_start, router_interface_stable_id, router_interface_import_id, router_interface_stable_count, router_interface_import_count, router_interface_stable_count_after, router_interface_import_count_after, router_interface_stable_cleanup, router_interface_import_cleanup, router_interface_stable_trace_start, router_interface_import_trace_start, fip_stable_id, fip_import_id, fip_stable_count, fip_import_count_before, fip_import_count_after_read, fip_stable_count_after, fip_import_count_after_cleanup, fip_stable_cleanup, fip_import_cleanup, fip_stable_trace_start, fip_import_trace_start = sys.argv[1:-11]
 volume_stable_id, volume_import_id, volume_stable_count, volume_import_count_before, volume_import_count_after_read, volume_stable_count_after, volume_import_count_after_cleanup, volume_stable_cleanup, volume_import_cleanup, volume_stable_trace_start, volume_import_trace_start = sys.argv[-11:]
+volume_attachment_id = os.environ["P13_5B_ATTACHMENT_ID"]
+volume_attachment_import_id = os.environ["P13_5B_ATTACHMENT_IMPORT_ID"]
+volume_attachment_stable_count = os.environ["P13_5B_ATTACHMENT_STABLE_COUNT"]
+volume_attachment_import_count = os.environ["P13_5B_ATTACHMENT_IMPORT_COUNT"]
+volume_attachment_stable_cleanup = os.environ["P13_5B_ATTACHMENT_STABLE_CLEANUP"]
+volume_attachment_import_cleanup = os.environ["P13_5B_ATTACHMENT_IMPORT_CLEANUP"]
+volume_attachment_trace_start = os.environ["P13_5B_ATTACHMENT_TRACE_START"]
+volume_attachment_import_trace_start = os.environ["P13_5B_ATTACHMENT_IMPORT_TRACE_START"]
+volume_attachment_import_state_id = os.environ["P13_5B_ATTACHMENT_IMPORT_STATE_ID"]
 work = pathlib.Path(work)
 
 def digest(path):
@@ -1146,7 +1161,7 @@ def projection(path, resource):
         return {"id": item["id"], "owner_scope": item.get("os-vol-tenant-attr:tenant_id", item.get("project_id", item.get("tenant_id", project)))}
     if resource == "openstack_compute_volume_attach_v2":
         item = document["volumeAttachment"]
-        return {"id": item["attachment_id"], "owner_scope": project}
+        return {"id": item["attachment_id"], "owner_scope": project, "instance_id": item["serverId"], "volume_id": item["volumeId"], "device": item["device"]}
     item = document["network"]
     return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id"))}
 
@@ -1177,7 +1192,7 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
     if result == "passed" and not cleanup_allowed:
         result = "blocked"
         reason = "canonical compatibility projection did not return 404 after cleanup"
-    if result == "passed" and observed != {"id": canonical, "owner_scope": project}:
+    if result == "passed" and observed and (observed.get("id") != canonical or observed.get("owner_scope") != project):
         result = "blocked"
         reason = f"canonical projection identity mismatch: {observed}"
     if result == "passed" and kind == "import" and not import_id:
@@ -1202,6 +1217,11 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
             "owner_scope": project,
             "resource_id": observed["id"] if observed else None,
             "observed_owner_scope": observed["owner_scope"] if observed else None,
+            "provider_observed": {
+                key: observed.get(key)
+                for key in ("instance_id", "volume_id", "device")
+                if observed and key in observed
+            },
         },
         "plan_actions": normal,
         "refresh_plan_actions": refresh,
