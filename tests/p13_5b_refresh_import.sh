@@ -427,14 +427,69 @@ curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-group-
 rule_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-group-rules/$rule_import_id")"
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/security-groups/$rule_import_parent_id" >/dev/null
 rm -f security-group-rule.tf
+cd "$project_dir"
 
-python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" "$port_id" "$port_import_id" "$port_stable_count" "$port_count" "$port_stable_cleanup" "$port_import_cleanup" "$port_trace_start" "$security_group_id" "$security_group_import_id" "$security_group_stable_count" "$security_group_count" "$security_group_stable_cleanup" "$security_group_import_cleanup" "$security_group_trace_start" "$security_group_rule_id" "$rule_import_id" "$security_group_rule_stable_count" "$rule_count" "$security_group_rule_stable_cleanup" "$rule_import_cleanup" "$rule_trace_start" <<'PY'
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-router-external"}}' >"$work_dir/router-external-network.json"
+router_external_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"]["id"])' "$work_dir/router-external-network.json")"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/subnets" --data "{\"subnet\":{\"network_id\":\"$router_external_network_id\",\"cidr\":\"198.51.146.0/24\",\"ip_version\":4,\"enable_dhcp\":false}}" >"$work_dir/router-external-subnet.json"
+
+cat >router.tf <<'EOF'
+resource "openstack_networking_router_v2" "managed" {
+  name = "p13-5b-router"
+  admin_state_up = true
+  external_network_id = "ROUTER_EXTERNAL_NETWORK_ID"
+  enable_snat = false
+}
+EOF
+sed -i "s/ROUTER_EXTERNAL_NETWORK_ID/$router_external_network_id/" router.tf
+"$tofu" apply -input=false -auto-approve >/dev/null
+router_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_router_v2.managed"))')"
+plan router-read-1
+plan router-read-2
+router_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["routers"] if x["id"] == wanted))' "$router_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers/$router_id" >"$work_dir/router-stable-projection.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+router_stable_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers/$router_id")"
+rm -f router.tf
+
+router_import_project="$work_dir/router-import-project"
+mkdir -p "$router_import_project"
+cp "$project_dir/provider.tf" "$router_import_project/provider.tf"
+(cd "$router_import_project" && "$tofu" init -input=false -upgrade=false >/dev/null)
+cd "$router_import_project"
+curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
+  "http://127.0.0.1:$port/v2.0/routers" --data "{\"router\":{\"name\":\"p13-5b-router-import\",\"enable_snat\":false,\"external_gateway_info\":{\"network_id\":\"$router_external_network_id\",\"enable_snat\":false}}}" >"$work_dir/router-import.json"
+router_import_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["router"]["id"])' "$work_dir/router-import.json")"
+cat >router.tf <<EOF
+resource "openstack_networking_router_v2" "imported" {
+  name = "p13-5b-router-import"
+  admin_state_up = true
+  external_network_id = "$router_external_network_id"
+  enable_snat = false
+}
+EOF
+router_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
+"$tofu" import -input=false openstack_networking_router_v2.imported "$router_import_id" >/dev/null
+"$tofu" plan -input=false -out="$work_dir/router-import-normal.tfplan" >/dev/null
+"$tofu" show -json "$work_dir/router-import-normal.tfplan" >"$work_dir/router-import-normal.json"
+router_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["routers"] if x["id"] == wanted))' "$router_import_id")"
+curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers/$router_import_id" >"$work_dir/router-import-projection.json"
+"$tofu" destroy -input=false -auto-approve >/dev/null
+router_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/routers/$router_import_id")"
+rm -f router.tf
+router_external_subnet_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["subnet"]["id"])' "$work_dir/router-external-subnet.json")"
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_external_subnet_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_external_network_id" >/dev/null
+
+python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" "$port_id" "$port_import_id" "$port_stable_count" "$port_count" "$port_stable_cleanup" "$port_import_cleanup" "$port_trace_start" "$security_group_id" "$security_group_import_id" "$security_group_stable_count" "$security_group_count" "$security_group_stable_cleanup" "$security_group_import_cleanup" "$security_group_trace_start" "$security_group_rule_id" "$rule_import_id" "$security_group_rule_stable_count" "$rule_count" "$security_group_rule_stable_cleanup" "$rule_import_cleanup" "$rule_trace_start" "$router_id" "$router_import_id" "$router_stable_count" "$router_count" "$router_stable_cleanup" "$router_import_cleanup" "$router_trace_start" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start, port_id, port_import_id, port_stable_count, port_count, port_stable_cleanup, port_import_cleanup, port_trace_start, security_group_id, security_group_import_id, security_group_stable_count, security_group_count, security_group_stable_cleanup, security_group_import_cleanup, security_group_trace_start, security_group_rule_id, rule_import_id, security_group_rule_stable_count, rule_count, security_group_rule_stable_cleanup, rule_import_cleanup, rule_trace_start = sys.argv[1:]
+root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start, port_id, port_import_id, port_stable_count, port_count, port_stable_cleanup, port_import_cleanup, port_trace_start, security_group_id, security_group_import_id, security_group_stable_count, security_group_count, security_group_stable_cleanup, security_group_import_cleanup, security_group_trace_start, security_group_rule_id, rule_import_id, security_group_rule_stable_count, rule_count, security_group_rule_stable_cleanup, rule_import_cleanup, rule_trace_start, router_id, router_import_id, router_stable_count, router_count, router_stable_cleanup, router_import_cleanup, router_trace_start = sys.argv[1:]
 work = pathlib.Path(work)
 
 def digest(path):
@@ -459,6 +514,7 @@ def provider_read_routes(start, resource, identity):
         "openstack_networking_port_v2": "/ports/",
         "openstack_networking_secgroup_v2": "/security-groups/",
         "openstack_networking_secgroup_rule_v2": "/security-group-rules/",
+        "openstack_networking_router_v2": "/routers/",
     }[resource]
     routes = []
     records = (work / "trace.jsonl").read_text().splitlines()
@@ -490,6 +546,9 @@ def projection(path, resource):
         return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
     if resource == "openstack_networking_secgroup_rule_v2":
         item = document["security_group_rule"]
+        return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
+    if resource == "openstack_networking_router_v2":
+        item = document["router"]
         return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id", project))}
     item = document["network"]
     return {"id": item["id"], "owner_scope": item.get("project_id", item.get("tenant_id"))}
@@ -557,10 +616,11 @@ scenarios = [
     scenario("openstack_networking_secgroup_v2", "import", security_group_import_id, security_group_import_id, [], ["security-group-import-normal.json"], cleanup_result(security_group_import_cleanup), security_group_count, trace_start=security_group_trace_start, projection_file="security-group-import-projection.json"),
     scenario("openstack_networking_secgroup_rule_v2", "stable-read", security_group_rule_id, "", ["security-group-rule-read-1-refresh.json", "security-group-rule-read-2-refresh.json"], ["security-group-rule-read-1-normal.json", "security-group-rule-read-2-normal.json"], cleanup_result(security_group_rule_stable_cleanup), security_group_rule_stable_count, trace_start=0, projection_file="security-group-rule-stable-projection.json"),
     scenario("openstack_networking_secgroup_rule_v2", "import", rule_import_id, rule_import_id, [], ["security-group-rule-import-normal.json"], cleanup_result(rule_import_cleanup), rule_count, trace_start=rule_trace_start, projection_file="security-group-rule-import-projection.json"),
+    scenario("openstack_networking_router_v2", "stable-read", router_id, "", ["router-read-1-refresh.json", "router-read-2-refresh.json"], ["router-read-1-normal.json", "router-read-2-normal.json"], cleanup_result(router_stable_cleanup), router_stable_count, trace_start=0, projection_file="router-stable-projection.json"),
+    scenario("openstack_networking_router_v2", "import", router_import_id, router_import_id, [], ["router-import-normal.json"], cleanup_result(router_import_cleanup), router_count, trace_start=router_trace_start, projection_file="router-import-projection.json"),
 ]
 unrun = {
     "openstack_compute_instance_v2": "requires image/compute fixture and attachment inspection",
-    "openstack_networking_router_v2": "router stable/import cases are not part of this portable runner; the corrected upstream provider lifecycle gate passed in the baseline rerun",
     "openstack_networking_router_interface_v2": "relationship fixture and parent-retention proof not yet available",
     "openstack_networking_floatingip_v2": "requires public-address pool/binding fixture",
     "openstack_blockstorage_volume_v3": "native volume stable/import fixture is not part of this reusable runner; the host-backed P13.4 volume gates passed",
