@@ -927,7 +927,7 @@ plan server-import-read-2
 python3 - "$work_dir/server-import-read-2-normal.json" <<'PY'
 import json, sys
 plan = json.load(open(sys.argv[1]))
-changes = [a for item in plan.get("resource_changes", []) for a in item["change"]["actions"]]
+changes = [a for item in plan.get("resource_changes", []) for a in item["change"]["actions"] if a != "no-op"]
 if changes:
     raise SystemExit(f"server import did not converge to no-op: {changes}")
 PY
