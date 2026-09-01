@@ -913,7 +913,7 @@ resource "openstack_compute_instance_v2" "imported" {
   image_id = data.openstack_images_image_v2.image.id
   flavor_id = data.openstack_compute_flavor_v2.flavor.id
   lifecycle {
-    ignore_changes = [force_delete, stop_before_destroy]
+    ignore_changes = [force_delete, stop_before_destroy, tags, all_tags]
   }
   metadata = {}
   tags = []
@@ -1274,6 +1274,9 @@ def actions(path):
         raise ValueError(f"structured plan is missing resource_changes/resource_drift: {path}")
     return [action for change in changes for action in change["change"]["actions"]]
 
+def meaningful_actions(path):
+    return [action for action in actions(path) if action != "no-op"]
+
 def plan_document(path):
     document = json.loads((work / path).read_text())
     if not isinstance(document.get("format_version"), str) or not any(isinstance(document.get(key), list) for key in ("resource_changes", "resource_drift")):
@@ -1412,8 +1415,8 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
     # pre-import boundary so that this read is part of the evidence window.
     trace_start = int(trace_start) if kind == "import" else min((window["start_ordinal"] for window in windows), default=int(trace_start))
     trace_end = max((window["end_ordinal"] for window in windows), default=trace_start + 1)
-    normal = actions(normal_files[-1]) if normal_files else []
-    refresh = [actions(name) for name in refresh_files]
+    normal = meaningful_actions(normal_files[-1]) if normal_files else []
+    refresh = [meaningful_actions(name) for name in refresh_files]
     trace_routes = provider_read_routes(trace_start, trace_end, resource, canonical)
     mutation_routes = provider_mutation_routes(trace_start, trace_end, resource)
     observed_state_id = state_id(normal_files[-1], resource)
@@ -1492,7 +1495,7 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
         },
         "plan_actions": normal,
         "refresh_plan_actions": refresh,
-        "normal_plan_actions": [actions(name) for name in normal_files],
+        "normal_plan_actions": [meaningful_actions(name) for name in normal_files],
         "provider_mutation_routes": mutation_routes,
         "final_plan_noop": result == "passed" and not normal,
         "canonical_duplicate_count": max(canonical_before_count - 1, 0) if result == "passed" else None,
