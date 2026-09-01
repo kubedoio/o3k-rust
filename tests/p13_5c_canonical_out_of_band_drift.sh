@@ -10,6 +10,7 @@ if [[ -z "$output" ]]; then output="$root_dir/target/p13-5c/canonical-out-of-ban
 if [[ "$output" != /* ]]; then output="$root_dir/$output"; fi
 mkdir -p "$(dirname "$output")"
 head_sha="$(git -C "$root_dir" rev-parse HEAD)"
+baseline_manifest="$(printenv P13_5B_BASELINE_MANIFEST || true)"
 
 blocked() {
   local reason="$1"
@@ -49,6 +50,12 @@ for name in O3K_P13_TOFU O3K_P13_PROVIDER_BINARY O3K_P13_PROVIDER_ARCHIVE O3K_P1
   [[ -n "$value" ]] || missing_names="$missing_names $name"
 done
 if [[ -n "$missing_names" ]]; then blocked "required P13 toolchain environment is missing:$missing_names"; fi
+if [[ -z "$baseline_manifest" || ! -f "$baseline_manifest" ]]; then blocked "verified P13.2-P13.4 baseline manifest is required"; fi
+if ! python3 - "$baseline_manifest" <<'PY'
+import json, sys
+if json.load(open(sys.argv[1])).get("status") != "verified": raise SystemExit(1)
+PY
+then blocked "P13.2-P13.4 baseline manifest is not verified"; fi
 
 tofu="$(printenv O3K_P13_TOFU)"
 provider_binary="$(printenv O3K_P13_PROVIDER_BINARY)"
@@ -209,6 +216,7 @@ if len(drift) != 1 or len(r.get("resource_drift",[])) != 1: raise SystemExit("re
 PY
 "$tofu" apply -input=false -auto-approve >/dev/null
 canonical_after_reapply="$(canonical_snapshot "$network_id" after_reapply)"
+canonical_after_cleanup=""
 compat_after_reapply="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$network_id")"
 plan_json final-normal normal
 python3 - "$work_dir/final-normal.json" "$canonical_before" "$canonical_after_reapply" "$compat_after_reapply" <<'PY'
@@ -221,10 +229,15 @@ PY
 "$tofu" destroy -input=false -auto-approve >/dev/null
 cleanup_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$network_id")"
 [[ "$cleanup_status" == 404 ]] || { echo "cleanup did not remove network: $cleanup_status" >&2; exit 1; }
+canonical_after_cleanup="$(canonical_snapshot "$network_id" after_cleanup)"
+python3 - "$canonical_after_cleanup" <<'PY'
+import json, sys
+if json.loads(sys.argv[1])["count"] != 0: raise SystemExit("canonical cleanup left a resource")
+PY
 
-python3 - "$contract" "$output" "$head_sha" "$tofu_version" "$provider_binary" "$provider_archive" "$tofu_archive" "$provider_sha" "$network_id" "$canonical_before" "$canonical_after_mutation" "$canonical_after_reapply" "$compat_after_mutation" "$compat_after_reapply" "$work_dir/initial-normal.json" "$work_dir/drift-refresh-only.json" "$work_dir/drift-normal.json" "$work_dir/final-normal.json" "$cleanup_status" <<'PY'
+python3 - "$contract" "$output" "$head_sha" "$tofu_version" "$provider_binary" "$provider_archive" "$tofu_archive" "$provider_sha" "$network_id" "$canonical_before" "$canonical_after_mutation" "$canonical_after_reapply" "$canonical_after_cleanup" "$compat_after_mutation" "$compat_after_reapply" "$work_dir/initial-normal.json" "$work_dir/drift-refresh-only.json" "$work_dir/drift-normal.json" "$work_dir/final-normal.json" "$cleanup_status" "$baseline_manifest" <<'PY'
 import hashlib, json, pathlib, sys
-(contract, output, head, tofu_version, provider_binary, provider_archive, tofu_archive, provider_sha, network_id, before, after_mutation, after_reapply, compat_mutation, compat_reapply, initial, refresh, normal, final, cleanup) = sys.argv[1:]
+(contract, output, head, tofu_version, provider_binary, provider_archive, tofu_archive, provider_sha, network_id, before, after_mutation, after_reapply, after_cleanup, compat_mutation, compat_reapply, initial, refresh, normal, final, cleanup, baseline_manifest) = sys.argv[1:]
 c=json.loads(pathlib.Path(contract).read_text())
 def digest(p):
  h=hashlib.sha256()
@@ -237,7 +250,7 @@ b,a,r=s(before),s(after_mutation),s(after_reapply)
 refresh_document = j(refresh)
 normal_document = j(normal)
 normal_changes = [x for x in normal_document.get("resource_changes", []) if x.get("address") == "openstack_networking_network_v2.managed"]
-d={"artifact_type":"o3k-p13-5c-canonical-out-of-band-drift-evidence","schema_version":1,"phase":"P13.5C","profile":"p13-iac-compatibility-v1","status":"passed","surface":"canonical_out_of_band","native_claim":False,"canonical_authority":"o3k","provider_modified":False,"p13_5a_contract_sha256":hashlib.sha256(pathlib.Path(contract).read_bytes()).hexdigest(),"tested_o3k_head_sha":head,"toolchain":{"opentofu":c["toolchain"]["opentofu"],"opentofu_version_output":tofu_version,"opentofu_archive_sha256":digest(tofu_archive),"provider":c["toolchain"]["provider"],"provider_archive_sha256":digest(provider_archive),"provider_binary_sha256":digest(provider_binary),"provider_sha256_expected":provider_sha,"provider_modified":False},"scenario":{"resource":"openstack_networking_network_v2","scenario":"canonical_out_of_band_mutable_drift","surface":"canonical_out_of_band","native_claim":False,"terraform_address":"openstack_networking_network_v2.managed","canonical_id_before":network_id,"canonical_id_after_mutation":a["records"][0]["resource_id"],"canonical_id_after_reapply":r["records"][0]["resource_id"],"owner_scope":b["owner_scope"],"native_change":"name","mutation_route":"PUT /v2.0/networks/{id}","refresh_only_actions":[x.get("change",{}).get("actions",[]) for x in refresh_document.get("resource_drift",[])],"normal_plan_actions":[{"address":x.get("address"),"actions":x.get("change",{}).get("actions",[]),"replacement":x.get("change",{}).get("replace",False)} for x in normal_changes],"unrelated_changes_count":0,"old_resource_absent":False,"new_resource_count":1,"canonical_duplicate_count":0,"final_plan_noop":True,"cleanup_http_status":int(cleanup),"canonical_observations":{"before":b,"after_mutation":a,"after_reapply":r},"compatibility_observations":{"after_mutation":s(compat_mutation),"after_reapply":s(compat_reapply)},"plan_observation":{"initial_normal":j(initial),"refresh_only":refresh_document,"normal":normal_document,"final_normal":j(final)},"result":"passed"}}
+d={"artifact_type":"o3k-p13-5c-canonical-out-of-band-drift-evidence","schema_version":1,"phase":"P13.5C","profile":"p13-iac-compatibility-v1","status":"passed","surface":"canonical_out_of_band","native_claim":False,"canonical_authority":"o3k","provider_modified":False,"p13_5a_contract_sha256":hashlib.sha256(pathlib.Path(contract).read_bytes()).hexdigest(),"tested_o3k_head_sha":head,"baseline":{"status":json.loads(pathlib.Path(baseline_manifest).read_text())["status"],"source_commit":json.loads(pathlib.Path(baseline_manifest).read_text())["source_commit"]},"toolchain":{"opentofu":c["toolchain"]["opentofu"],"opentofu_version_output":tofu_version,"opentofu_archive_sha256":digest(tofu_archive),"provider":c["toolchain"]["provider"],"provider_archive_sha256":digest(provider_archive),"provider_binary_sha256":digest(provider_binary),"provider_sha256_expected":provider_sha,"provider_modified":False},"scenario":{"resource":"openstack_networking_network_v2","scenario":"canonical_out_of_band_mutable_drift","surface":"canonical_out_of_band","native_claim":False,"terraform_address":"openstack_networking_network_v2.managed","canonical_id_before":network_id,"canonical_id_after_mutation":a["records"][0]["resource_id"],"canonical_id_after_reapply":r["records"][0]["resource_id"],"owner_scope":b["owner_scope"],"native_change":"name","mutation_route":"PUT /v2.0/networks/{id}","refresh_only_actions":[x.get("change",{}).get("actions",[]) for x in refresh_document.get("resource_drift",[])],"normal_plan_actions":[{"address":x.get("address"),"actions":x.get("change",{}).get("actions",[]),"replacement":x.get("change",{}).get("replace",False)} for x in normal_changes],"unrelated_changes_count":0,"old_resource_absent":False,"new_resource_count":1,"canonical_same_id_count":1,"final_plan_noop":True,"cleanup_http_status":int(cleanup),"canonical_observations":{"before":b,"after_mutation":a,"after_reapply":r,"after_cleanup":s(after_cleanup)},"compatibility_observations":{"after_mutation":s(compat_mutation),"after_reapply":s(compat_reapply)},"plan_observation":{"initial_normal":j(initial),"refresh_only":refresh_document,"normal":normal_document,"final_normal":j(final)},"result":"passed"}}
 pathlib.Path(output).write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
 PY
 python3 - "$output" <<'PY'
