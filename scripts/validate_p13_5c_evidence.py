@@ -116,6 +116,7 @@ def validate_canonical_evidence(document: dict, repository: Path) -> None:
     require(isinstance(row, dict), "canonical drift scenario is missing")
     require(row.get("resource") == "openstack_networking_network_v2", "canonical drift resource is outside bounded executable scope")
     require(row.get("scenario") == "canonical_out_of_band_mutable_drift", "invalid canonical drift scenario")
+    require(row.get("operation") == "mutable", "canonical drift operation is not explicit")
     require(row.get("surface") == "canonical_out_of_band" and row.get("native_claim") is False, "canonical drift row surface is invalid")
     require(row.get("mutation_route") == "PUT /v2.0/networks/{id}", "canonical drift mutation route is not the accepted compatibility route")
     if document.get("status") != "passed":
@@ -254,6 +255,7 @@ def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
         require(row.get("native_surface_status") in {"defined", "native_surface_not_defined", "not_checked"}, "invalid native surface status")
         require(row.get("resource") in {item["resource"] for item in contract["resources"]}, "unknown resource")
         require(row.get("scenario") in SCENARIOS, "unknown scenario")
+        require(row.get("operation") == ("mutable" if row["scenario"] == "native-mutable-drift" else "deletion"), "native scenario operation is inconsistent")
         require(UUID_SHA.fullmatch(row.get("head_sha", "")), "invalid row head_sha")
         require(row["head_sha"] == TESTED_SHA, "scenario is not bound to tested HEAD")
         if row["result"] == "passed":
@@ -278,6 +280,7 @@ def self_test() -> None:
             "resource": resource,
             "scenario": scenario,
             "native_change": native_change,
+            "operation": "mutable" if scenario == "native-mutable-drift" else "deletion",
             "surface": "native_api",
             "native_surface_status": "not_checked",
             "result": "blocked",

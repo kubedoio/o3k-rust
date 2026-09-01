@@ -54,9 +54,10 @@ for item in contract["resources"]:
         "reason": delete_reason,
     })
 for row in rows:
-    row.update({
+        row.update({
         "surface": "native_api",
         "native_surface_status": "native_surface_not_defined" if "native_surface_not_defined" in row["reason"] else "defined",
+        "operation": "mutable" if row["scenario"] == "native-mutable-drift" else "deletion",
         "terraform_address": None,
         "canonical_id_before": None,
         "canonical_id_after_native_mutation": None,
