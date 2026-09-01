@@ -82,6 +82,8 @@ def validate_canonical_evidence(document: dict, repository: Path) -> None:
     require(document.get("provider_modified") is False, "provider modification is not explicitly false")
     baseline = document.get("baseline")
     require(isinstance(baseline, dict) and baseline.get("status") == "verified" and UUID_SHA.fullmatch(baseline.get("source_commit", "")), "canonical drift lacks verified baseline binding")
+    require(baseline["source_commit"] == tested, "canonical drift baseline is not bound to tested HEAD")
+    require(UUID_SHA.fullmatch(baseline.get("evidence_sha256", "")), "canonical drift baseline digest is missing")
     require(document.get("p13_5a_contract_sha256") == contract_digest, "canonical drift is not bound to P13.5A")
     tested = document.get("tested_o3k_head_sha")
     current = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip()
@@ -108,6 +110,10 @@ def validate_canonical_evidence(document: dict, repository: Path) -> None:
     require(row.get("owner_scope"), "canonical drift owner scope is missing")
     require(row.get("old_resource_absent") is False and row.get("new_resource_count") == 1, "canonical resource count invariant failed")
     require(row.get("canonical_same_id_count") == 1, "canonical identity count invariant failed")
+    require(row.get("canonical_project_resource_count_before") == 1, "canonical project has unexpected initial resource count")
+    require(row.get("canonical_project_resource_count_after_mutation") == 1, "canonical project gained a duplicate during mutation")
+    require(row.get("canonical_project_resource_count_after_reapply") == 1, "canonical project has unexpected reapply resource count")
+    require(row.get("canonical_project_resource_count_after_cleanup") == 0, "canonical project cleanup left resources")
     require(row.get("unrelated_changes_count") == 0, "unrelated plan changes are present")
     require(row.get("final_plan_noop") is True, "canonical final plan is not no-op")
     require(row.get("cleanup_http_status") == 404, "canonical drift cleanup did not remove the fixture")
@@ -126,7 +132,8 @@ def validate_canonical_evidence(document: dict, repository: Path) -> None:
         require(isinstance(plan.get("planned_values"), dict) and isinstance(plan.get("prior_state"), dict), f"canonical drift plan {name} lacks state fields")
         validate_redactions(plan)
     refresh = observation["refresh_only"]
-    require(all(change.get("address") == row["terraform_address"] for change in refresh.get("resource_drift", [])), "refresh-only observed an unrelated address")
+    drift = refresh.get("resource_drift", [])
+    require(len(drift) == 1 and drift[0].get("address") == row["terraform_address"] and drift[0].get("change", {}).get("actions") == ["update"], "refresh-only lacks exact managed drift")
     normal = observation["normal"].get("resource_changes", [])
     managed = [change for change in normal if change.get("address") == row["terraform_address"] and change.get("change", {}).get("actions") == ["update"]]
     unrelated = [change for change in normal if change.get("address") != row["terraform_address"] and change.get("change", {}).get("actions") not in ([], ["no-op"])]

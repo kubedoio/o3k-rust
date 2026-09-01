@@ -76,6 +76,8 @@ trace_path="$work_dir/trace.jsonl"
 mirror_dir="$work_dir/mirror/registry.terraform.io/terraform-provider-openstack/openstack/3.4.0/linux_amd64"
 project_dir="$work_dir/project"
 pid=""
+network_id=""
+token=""
 cleanup() {
   if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
   rm -rf "$work_dir"
@@ -169,7 +171,8 @@ import json, sqlite3, sys
 db, project, identity, phase = sys.argv[1:]
 c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
 rows = c.execute("SELECT id, project_id, name, state FROM canonical_networks WHERE id=? AND project_id=? AND state <> 'deleted'", (identity, project)).fetchall()
-print(json.dumps({"source":"canonical_store","store":"canonical_store:sqlite:canonical_networks","phase":phase,"requested_id":identity,"owner_scope":project,"count":len(rows),"records":[{"resource_id":r[0],"owner_scope":r[1],"name":r[2],"state":r[3]} for r in rows]}, sort_keys=True))
+project_count = c.execute("SELECT count(*) FROM canonical_networks WHERE project_id=? AND state <> 'deleted'", (project,)).fetchone()[0]
+print(json.dumps({"source":"canonical_store","store":"canonical_store:sqlite:canonical_networks","phase":phase,"requested_id":identity,"owner_scope":project,"count":len(rows),"project_resource_count":project_count,"records":[{"resource_id":r[0],"owner_scope":r[1],"name":r[2],"state":r[3]} for r in rows]}, sort_keys=True))
 PY
 }
 
@@ -259,6 +262,11 @@ path = sys.argv[1]
 document = json.loads(open(path).read())
 scenario = document["scenario"]
 scenario["canonical_same_id_count"] = 1
+scenario["canonical_project_resource_count_before"] = scenario["canonical_observations"]["before"]["project_resource_count"]
+scenario["canonical_project_resource_count_after_mutation"] = scenario["canonical_observations"]["after_mutation"]["project_resource_count"]
+scenario["canonical_project_resource_count_after_reapply"] = scenario["canonical_observations"]["after_reapply"]["project_resource_count"]
+scenario["canonical_project_resource_count_after_cleanup"] = scenario["canonical_observations"]["after_cleanup"]["project_resource_count"]
+document["baseline"]["evidence_sha256"] = json.loads(open(baseline_manifest).read())["evidence_sha256"]
 scenario.pop("canonical_duplicate_count", None)
 open(path, "w").write(json.dumps(document, indent=2, sort_keys=True) + "\n")
 PY
