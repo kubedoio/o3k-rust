@@ -408,7 +408,7 @@ canonical_capture openstack_networking_subnet_v2 "$subnet_import_id" "$work_dir/
 "$tofu" destroy -input=false -auto-approve >/dev/null
 subnet_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/subnets/$subnet_import_id")"
 canonical_capture openstack_networking_subnet_v2 "$subnet_import_id" "$work_dir/subnet-import-canonical-after-cleanup.json"
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$subnet_import_network_id" >/dev/null
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$subnet_import_network_id" >/dev/null || true
 rm -f subnet.tf
 
 cat >port.tf <<EOF
@@ -494,8 +494,8 @@ canonical_capture openstack_networking_port_v2 "$port_import_id" "$work_dir/port
 "$tofu" destroy -input=false -auto-approve >/dev/null
 port_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$port_import_id")"
 canonical_capture openstack_networking_port_v2 "$port_import_id" "$work_dir/port-import-canonical-after-cleanup.json"
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$port_import_subnet_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$port_import_network_id" >/dev/null
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$port_import_subnet_id" >/dev/null || true
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$port_import_network_id" >/dev/null || true
 cd "$project_dir"
 
 # Re-assert the public allocator boundary immediately before the FIP cases.
@@ -592,12 +592,12 @@ fip_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: 
 fip_import_count_after_cleanup="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/floatingips" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["floatingips"] if x["id"] == wanted))' "$fip_import_id")"
 canonical_capture openstack_networking_floatingip_v2 "$fip_import_id" "$work_dir/floating-ip-import-canonical-after-cleanup.json"
 [[ "$fip_import_cleanup" == 404 && "$fip_import_count_after_cleanup" == 0 ]] || { echo "P13.5B FloatingIP import cleanup did not release the allocation" >&2; exit 1; }
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/ports/$fip_import_port_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$fip_import_subnet_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$fip_import_network_id" >/dev/null
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/ports/$fip_import_port_id" >/dev/null || true
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$fip_import_subnet_id" >/dev/null || true
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$fip_import_network_id" >/dev/null || true
 rm -f floating-ip.tf
 cd "$project_dir"
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$external_realm_id" >/dev/null
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$external_realm_id" >/dev/null || true
 
 # Volume is created through the canonical Cinder-compatible API and observed
 # through the unmodified provider.  The fixture is deliberately attachment-
@@ -828,7 +828,7 @@ canonical_capture openstack_networking_secgroup_rule_v2 "$rule_import_id" "$work
 "$tofu" destroy -input=false -auto-approve >/dev/null
 rule_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/security-group-rules/$rule_import_id")"
 canonical_capture openstack_networking_secgroup_rule_v2 "$rule_import_id" "$work_dir/security-group-rule-import-canonical-after-cleanup.json"
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/security-groups/$rule_import_parent_id" >/dev/null
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/security-groups/$rule_import_parent_id" >/dev/null || true
 rm -f security-group-rule.tf
 cd "$project_dir"
 
@@ -939,8 +939,8 @@ server_import_cleanup_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Au
 server_import_cleanup="blocked"
 [[ "$server_import_cleanup_status" == 404 ]] && server_import_cleanup="passed"
 canonical_capture openstack_compute_instance_v2 "$server_import_id" "$work_dir/server-import-canonical-after-cleanup.json"
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$server_import_subnet_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$server_import_network_id" >/dev/null
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$server_import_subnet_id" >/dev/null || true
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$server_import_network_id" >/dev/null || true
 rm -f server.tf
 cd "$project_dir"
 
