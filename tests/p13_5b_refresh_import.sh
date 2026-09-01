@@ -335,6 +335,7 @@ cat >network.tf <<'EOF'
 resource "openstack_networking_network_v2" "managed" {
   name = "p13-5b-network"
   admin_state_up = true
+  tags = []
 }
 EOF
 "$tofu" apply -input=false -auto-approve >/dev/null
@@ -356,6 +357,7 @@ import_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[
 cat >network.tf <<EOF
 resource "openstack_networking_network_v2" "imported" {
   name = "p13-5b-import-network"
+  tags = []
 }
 EOF
 network_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
@@ -375,6 +377,7 @@ canonical_capture openstack_networking_network_v2 "$import_network_id" "$work_di
 cat >subnet.tf <<EOF
 resource "openstack_networking_network_v2" "parent" {
   name = "p13-5b-subnet-network"
+  tags = []
 }
 resource "openstack_networking_subnet_v2" "managed" {
   network_id = openstack_networking_network_v2.parent.id
@@ -432,17 +435,20 @@ curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networ
 rm -f subnet.tf
 
 cat >port.tf <<EOF
-resource "openstack_networking_network_v2" "parent" { name = "p13-5b-port-network" }
+resource "openstack_networking_network_v2" "parent" { name = "p13-5b-port-network" tags = [] }
 resource "openstack_networking_subnet_v2" "parent" {
   network_id = openstack_networking_network_v2.parent.id
   cidr = "198.51.142.0/24"
   ip_version = 4
   enable_dhcp = false
+  dns_nameservers = []
+  tags = []
 }
 resource "openstack_networking_port_v2" "managed" {
   name = "p13-5b-port"
   network_id = openstack_networking_network_v2.parent.id
   fixed_ip { subnet_id = openstack_networking_subnet_v2.parent.id }
+  tags = []
 }
 EOF
 "$tofu" apply -input=false -auto-approve >/dev/null
@@ -540,15 +546,19 @@ resource "openstack_networking_subnet_v2" "private" {
   cidr = "198.51.148.0/24"
   ip_version = 4
   enable_dhcp = false
+  dns_nameservers = []
+  tags = []
 }
 resource "openstack_networking_port_v2" "private" {
   name = "p13-5b-floating-ip-port"
   network_id = openstack_networking_network_v2.private.id
   fixed_ip { subnet_id = openstack_networking_subnet_v2.private.id }
+  tags = []
 }
 resource "openstack_networking_floatingip_v2" "managed" {
   pool = "$external_pool_name"
   port_id = openstack_networking_port_v2.private.id
+  tags = []
 }
 EOF
 "$tofu" apply -input=false -auto-approve >/dev/null
@@ -740,6 +750,7 @@ resource "openstack_networking_secgroup_v2" "managed" {
   name = "p13-5b-security-group"
   description = "bounded canonical policy"
   delete_default_rules = false
+  tags = []
 }
 EOF
 "$tofu" apply -input=false -auto-approve >/dev/null
@@ -799,7 +810,7 @@ rm -f security-group.tf
 cd "$project_dir"
 
 cat >security-group-rule.tf <<'EOF'
-resource "openstack_networking_secgroup_v2" "parent" { name = "p13-5b-rule-parent" }
+resource "openstack_networking_secgroup_v2" "parent" { name = "p13-5b-rule-parent" tags = [] }
 resource "openstack_networking_secgroup_rule_v2" "managed" {
   security_group_id = openstack_networking_secgroup_v2.parent.id
   direction = "ingress"
@@ -885,6 +896,8 @@ resource "openstack_networking_subnet_v2" "parent" {
   cidr = "198.51.144.0/24"
   ip_version = 4
   enable_dhcp = false
+  dns_nameservers = []
+  tags = []
 }
 resource "openstack_compute_instance_v2" "managed" {
   name = "p13-5b-server"
@@ -1092,6 +1105,7 @@ resource "openstack_networking_router_v2" "managed" {
   admin_state_up = true
   external_network_id = "ROUTER_EXTERNAL_NETWORK_ID"
   enable_snat = false
+  tags = []
 }
 EOF
 sed -i "s/ROUTER_EXTERNAL_NETWORK_ID/$router_external_network_id/" router.tf
@@ -1122,6 +1136,7 @@ resource "openstack_networking_router_v2" "imported" {
   admin_state_up = true
   external_network_id = "$router_external_network_id"
   enable_snat = false
+  tags = []
 }
 EOF
 router_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
@@ -1145,6 +1160,7 @@ router_external_subnet_id="$(python3 -c 'import json,sys; print(json.load(open(s
 cat >router-interface.tf <<EOF
 resource "openstack_networking_network_v2" "parent" {
   name = "p13-5b-router-interface-network"
+  tags = []
 }
 
 resource "openstack_networking_subnet_v2" "parent" {
@@ -1152,12 +1168,15 @@ resource "openstack_networking_subnet_v2" "parent" {
   cidr = "198.51.147.0/24"
   ip_version = 4
   enable_dhcp = false
+  dns_nameservers = []
+  tags = []
 }
 
 resource "openstack_networking_router_v2" "parent" {
   name = "p13-5b-router-interface-router"
   external_network_id = "$router_external_network_id"
   enable_snat = false
+  tags = []
 }
 
 resource "openstack_networking_router_interface_v2" "managed" {
