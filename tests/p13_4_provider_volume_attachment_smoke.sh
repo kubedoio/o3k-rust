@@ -20,6 +20,10 @@ run_stage() {
     set +e; "$@" > >(tee -a "$work/stages.log") 2>&1; status=$?; set -e
     if [[ "$status" -ne 0 ]]; then printf 'FAILED: %s exit=%s artifacts=%s\n' "$stage" "$status" "$work" >&2; return "$status"; fi
 }
+redact_artifacts() {
+    sed -i "s/$password/[REDACTED]/g" "$work"/stages.log "$work"/main.tf 2>/dev/null || true
+    rm -f "$work/auth.headers"
+}
 cleanup() {
     local status=$?
     if [[ -n "$image_id" && -n "$auth_token" ]]; then
@@ -27,6 +31,7 @@ cleanup() {
     fi
     if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
     if [[ "$status" -ne 0 || "${O3K_P13_KEEP_LOGS:-0}" == 1 ]]; then
+        redact_artifacts
         echo "logs: $work" >&2
     else
         rm -rf "$work"
@@ -40,6 +45,7 @@ O3K_CINDER_ENDPOINT="http://127.0.0.1:$port" \
 O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" \
 O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" \
 O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
+O3K_COMPATIBILITY_TRACE_PATH="$work/trace.jsonl" \
   "$root_dir/target/debug/o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work/data" >"$work/o3kd.log" 2>&1 &
 pid=$!
 for _ in $(seq 1 120); do
