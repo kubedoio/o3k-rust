@@ -190,7 +190,14 @@ def validate_passed(row: dict, contract: dict) -> None:
     item = next(item for item in contract["resources"] if item["resource"] == resource)
     require(row["terraform_address"], "passed row lacks terraform_address")
     require(row["canonical_id_before"], "passed row lacks canonical_id_before")
-    require(row["canonical_id_after_native_mutation"], "passed row lacks native post-state identity")
+    if scenario == "native-mutable-drift":
+        require(row["canonical_id_after_native_mutation"], "passed mutable row lacks native post-state identity")
+    else:
+        require(
+            row["canonical_id_after_native_mutation"] is None
+            or row["canonical_id_after_native_mutation"],
+            "passed delete row lacks native post-state identity marker",
+        )
     require(row["canonical_id_after_reapply"], "passed row lacks reapply identity")
     require(row["owner_scope"], "passed row lacks owner_scope")
     require(isinstance(row["refresh_only_actions"], list), "refresh_only_actions must be a list")
@@ -213,6 +220,24 @@ def validate_passed(row: dict, contract: dict) -> None:
         require(row["old_resource_absent"] is True, "delete drift lacks authoritative absence")
         require(row["new_resource_count"] == 1, "delete drift does not prove one replacement")
         require(row["canonical_id_before"] != row["canonical_id_after_reapply"], "delete drift did not create a new identity")
+        require(row.get("surface") == "native_api" and row.get("native_surface_status") == "defined", "delete drift surface is invalid")
+        require(row.get("native_absence_http_status") == 404 and row.get("compatibility_absence_http_status") == 404, "delete drift absence statuses are not 404")
+        delete = row.get("native_delete")
+        require(isinstance(delete, dict), "delete drift lacks native DELETE evidence")
+        require(delete.get("status") == 204 and delete.get("replay_status") == 204, "native DELETE did not complete and replay successfully")
+        require(delete.get("http_path") == f"/o3k/v1/network/networks/{row['canonical_id_before']}", "native DELETE path is not bound to the old identity")
+        require(delete.get("idempotency_key") == "[REDACTED]" and SHA256.fullmatch(delete.get("idempotency_key_sha256", "")), "idempotency key is not safely represented")
+        replay = delete.get("replay_result")
+        require(isinstance(replay, dict) and replay.get("same_idempotency_key") is True, "DELETE replay lacks same-key evidence")
+        require(replay.get("same_terminal_canonical_absence") is True and replay.get("second_destructive_effect_observed") is False, "DELETE replay did not converge to the same terminal state")
+        observations = row.get("canonical_observations")
+        require(isinstance(observations, dict), "delete drift lacks canonical observations")
+        require(observations.get("before", {}).get("old_present") is True, "canonical before observation lacks old resource")
+        require(observations.get("after_delete", {}).get("old_present") is False, "canonical delete observation retains old resource")
+        require(observations.get("after_delete_replay", {}).get("old_present") is False, "canonical replay observation revives old resource")
+        require(observations.get("after_reapply", {}).get("replacement_count") == 1, "canonical reapply observation lacks one replacement")
+        leak = row.get("leak_or_foreign_state")
+        require(isinstance(leak, dict) and leak.get("old_absent") is True and leak.get("scope_unchanged") is True and leak.get("unrelated_changes") is True, "delete drift leak/foreign-state result is incomplete")
 
 
 def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
