@@ -14,6 +14,7 @@ from pathlib import Path
 RESULTS = {"passed", "blocked", "not_applicable"}
 SCENARIOS = {"native-mutable-drift", "native-delete-drift"}
 UUID_SHA = re.compile(r"[0-9a-f]{40}")
+SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 def require(condition: bool, message: str) -> None:
@@ -84,7 +85,7 @@ def validate_canonical_evidence(document: dict, repository: Path) -> None:
     baseline = document.get("baseline")
     require(isinstance(baseline, dict) and baseline.get("status") == "verified" and UUID_SHA.fullmatch(baseline.get("source_commit", "")), "canonical drift lacks verified baseline binding")
     require(baseline["source_commit"] == tested, "canonical drift baseline is not bound to tested HEAD")
-    require(UUID_SHA.fullmatch(baseline.get("evidence_sha256", "")), "canonical drift baseline digest is missing")
+    require(SHA256.fullmatch(baseline.get("evidence_sha256", "")), "canonical drift baseline digest is missing")
     require(document.get("p13_5a_contract_sha256") == contract_digest, "canonical drift is not bound to P13.5A")
     current = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip()
     require(isinstance(tested, str) and UUID_SHA.fullmatch(tested), "invalid canonical drift tested SHA")
