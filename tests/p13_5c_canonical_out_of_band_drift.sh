@@ -184,7 +184,13 @@ u=[x for x in n.get("resource_changes",[]) if x.get("address")!=a and x.get("cha
 if not c or c[0].get("change",{}).get("actions") != ["update"]: raise SystemExit("drift did not produce exact update")
 if c[0].get("change",{}).get("replace",False): raise SystemExit("drift proposed replacement")
 if u: raise SystemExit("drift produced unrelated changes")
-if any(x.get("change",{}).get("actions") not in ([],["no-op"]) for x in r.get("resource_drift",[])): raise SystemExit("refresh-only contained mutation actions")
+# Refresh-only is expected to report the remote drift as an update.  It must
+# not contain a create/delete replacement or any unrelated resource action;
+# the command itself is observational and does not apply the change.
+for x in r.get("resource_drift",[]):
+    actions=x.get("change",{}).get("actions",[])
+    if actions not in ([],["no-op"],["update"]): raise SystemExit("refresh-only contained create/delete mutation intent")
+if [x for x in r.get("resource_changes",[]) if x.get("change",{}).get("actions") not in ([],["no-op"],["update"])]: raise SystemExit("refresh-only contained invalid resource action")
 PY
 "$tofu" apply -input=false -auto-approve >/dev/null
 canonical_after_reapply="$(canonical_snapshot "$network_id" after_reapply)"

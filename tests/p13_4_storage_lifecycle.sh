@@ -3,6 +3,9 @@ set -euo pipefail
 
 root_dir=$(cd "$(dirname "$0")/.." && pwd)
 o3kd=${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}
+: "${O3K_LVM_VOLUME_GROUP:?set a disposable LVM volume group}"
+: "${O3K_LVM_THIN_POOL:?set a disposable LVM thin pool}"
+: "${O3K_LVM_PROVIDER_NAMESPACE:?set a disposable LVM provider namespace}"
 password=${O3K_P13_PASSWORD:-p13-4-disposable-password}
 project_id=eba29e2d-53de-461d-ae91-ede7402713cb
 port=$(python3 - <<'PY'
@@ -17,6 +20,9 @@ trap cleanup EXIT
 
 O3K_BOOTSTRAP_PASSWORD="$password" \
 O3K_TOKEN_SIGNING_KEY="p13-4-storage-token-signing-key-012345678901234567890123" \
+O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" \
+O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" \
+O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
   "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work/data" >"$work/o3kd.log" 2>&1 &
 pid=$!
 for _ in $(seq 1 120); do
