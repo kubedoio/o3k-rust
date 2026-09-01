@@ -21,20 +21,35 @@ output = pathlib.Path(sys.argv[2])
 contract = json.loads(contract_path.read_text())
 head = subprocess.check_output(["git", "-C", str(contract_path.parents[3]), "rev-parse", "HEAD"], text=True).strip()
 rows = []
+native_resources = {
+    "openstack_compute_instance_v2",
+    "openstack_networking_network_v2",
+    "openstack_blockstorage_volume_v3",
+}
 for item in contract["resources"]:
     resource = item["resource"]
     for attribute in item.get("mutable_attributes", []):
+        reason = (
+            "native_update_unsupported: registered native resource has no update operation"
+            if resource in native_resources
+            else "native_resource_unavailable: resource is not registered on the current /o3k/v1 surface"
+        )
         rows.append({
             "resource": resource,
             "scenario": "native-mutable-drift",
             "native_change": attribute,
-            "reason": "native_update_unsupported: current /o3k/v1 surface has no update operation",
+            "reason": reason,
         })
+    delete_reason = (
+        "native_delete_supported_but_not_executed: no real OpenTofu/native mutation run was performed"
+        if resource in native_resources
+        else "native_resource_unavailable: resource is not registered on the current /o3k/v1 surface"
+    )
     rows.append({
         "resource": resource,
         "scenario": "native-delete-drift",
         "native_change": "remote absence",
-        "reason": "native_delete_supported_but_not_executed: no real OpenTofu/native mutation run was performed",
+        "reason": delete_reason,
     })
 for row in rows:
     row.update({
