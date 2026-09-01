@@ -10,7 +10,7 @@ use super::{
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{
-    Row,
+    Row, SqlitePool,
     sqlite::{
         SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow, SqliteSynchronous,
     },
@@ -53,6 +53,197 @@ pub(super) async fn insert_sqlite_canonical_acceptance(
         .bind(&request.owner_scope).bind(&request.action).bind(&request.key).bind(&request.fingerprint)
         .bind(request.operation_id.to_string()).execute(&mut **connection).await.map_err(StoreError::Database)?;
     Ok(())
+}
+
+/// Rebuilds `operations` without the historical generic-resource foreign key.
+///
+/// SQLx 0.8.6's SQLite migrator always wraps migration SQL in a transaction,
+/// including migrations prefixed with `-- no-transaction`. SQLite refuses to
+/// change `foreign_keys` while a transaction is active, so this rebuild is
+/// coordinated here on one acquired connection. The connection is obtained
+/// before the store is exposed to callers, and `BEGIN IMMEDIATE` prevents
+/// concurrent writers while the rebuild runs.
+pub(super) async fn migrate_operation_resource_scope(pool: &SqlitePool) -> Result<(), StoreError> {
+    let mut connection = pool.acquire().await.map_err(StoreError::Database)?;
+    let has_operations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'operations'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(StoreError::Database)?;
+    if has_operations == 0 {
+        return Ok(());
+    }
+
+    let has_resource_fk: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('operations')\
+         WHERE \"table\" = 'resources' AND \"from\" = 'resource_id'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(StoreError::Database)?;
+
+    if has_resource_fk == 0 {
+        sqlx::query(
+            r#"CREATE TRIGGER IF NOT EXISTS resources_delete_generic_operations
+                AFTER DELETE ON resources
+                BEGIN
+                    DELETE FROM operations
+                    WHERE resource_id = OLD.id
+                      AND NOT EXISTS (
+                          SELECT 1 FROM canonical_operation_metadata metadata
+                          WHERE metadata.operation_id = operations.id
+                            AND metadata.resource_type IN ('network:network', 'network:address_realm')
+                      );
+                END"#,
+        )
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        sqlx::query(
+            r#"CREATE TRIGGER IF NOT EXISTS operations_validate_resource_reference
+                BEFORE INSERT ON operations
+                BEGIN
+                    SELECT RAISE(ABORT, 'operation resource not found')
+                    WHERE NOT EXISTS (SELECT 1 FROM resources WHERE id = NEW.resource_id)
+                      AND NOT EXISTS (SELECT 1 FROM canonical_networks WHERE id = NEW.resource_id)
+                      AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE id = NEW.resource_id);
+                END"#,
+        )
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        return Ok(());
+    }
+
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+    let foreign_keys_off: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+    if foreign_keys_off != 0 {
+        let _ = sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *connection)
+            .await;
+        return Err(StoreError::Corrupt(
+            "SQLite foreign-key enforcement could not be disabled for operation migration"
+                .to_owned(),
+        ));
+    }
+
+    let rebuild = async {
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query(
+            r#"CREATE TABLE operations_without_resource_fk (
+                id TEXT PRIMARY KEY NOT NULL,
+                resource_id TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'create',
+                state TEXT NOT NULL,
+                provider_operation_id TEXT,
+                error_category TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"#,
+        )
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        sqlx::query(
+            r#"INSERT INTO operations_without_resource_fk
+                (id, resource_id, kind, state, provider_operation_id, error_category, error_message, created_at)
+                SELECT id, resource_id, kind, state, provider_operation_id, error_category, error_message, created_at
+                FROM operations"#,
+        )
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        sqlx::query("DROP TABLE operations")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query("ALTER TABLE operations_without_resource_fk RENAME TO operations")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query("CREATE INDEX operations_resource_idx ON operations(resource_id)")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query(
+            r#"CREATE TRIGGER resources_delete_generic_operations
+                AFTER DELETE ON resources
+                BEGIN
+                    DELETE FROM operations
+                    WHERE resource_id = OLD.id
+                      AND NOT EXISTS (
+                          SELECT 1 FROM canonical_operation_metadata metadata
+                          WHERE metadata.operation_id = operations.id
+                            AND metadata.resource_type IN ('network:network', 'network:address_realm')
+                      );
+                END"#,
+        )
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        let foreign_key_violations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+        if foreign_key_violations != 0 {
+            return Err(StoreError::Corrupt(
+                "SQLite foreign-key check failed after operation migration".to_owned(),
+            ));
+        }
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query(
+            r#"CREATE TRIGGER operations_validate_resource_reference
+                BEFORE INSERT ON operations
+                BEGIN
+                    SELECT RAISE(ABORT, 'operation resource not found')
+                    WHERE NOT EXISTS (SELECT 1 FROM resources WHERE id = NEW.resource_id)
+                      AND NOT EXISTS (SELECT 1 FROM canonical_networks WHERE id = NEW.resource_id)
+                      AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE id = NEW.resource_id);
+                END"#,
+        )
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        if !integrity.eq_ignore_ascii_case("ok") {
+            return Err(StoreError::Corrupt(format!(
+                "SQLite integrity check failed after operation migration: {integrity}"
+            )));
+        }
+        sqlx::query("COMMIT")
+            .execute(&mut *connection)
+            .await
+            .map(|_| ())
+            .map_err(StoreError::Database)
+    }
+    .await;
+
+    if rebuild.is_err() {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+    }
+    let restore = sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await
+        .map(|_| ())
+        .map_err(StoreError::Database);
+    match (rebuild, restore) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 pub(super) async fn update_agent_command_once_sqlite(
@@ -176,6 +367,7 @@ impl SqliteStore {
             .run(&pool)
             .await
             .map_err(StoreError::Migration)?;
+        migrate_operation_resource_scope(&pool).await?;
 
         let store = Self {
             pool,
