@@ -341,16 +341,18 @@ rows=[]
 volume_row=json.loads(pathlib.Path(volume_observation).read_text())
 volume_row['head_sha']=head
 volume_row['classification']='passed'
+volume_old=volume_row['canonical_id_before']
+volume_new=volume_row['canonical_id_after_reapply']
 volume_after_ids=[item.get('metadata',{}).get('id') for item in json.loads(pathlib.Path(work,'volume-list-after.json').read_text()).get('items',[])]
-volume_other=[item for item in json.loads(pathlib.Path(work,'volume-list-after.json').read_text()).get('items',[]) if item.get('metadata',{}).get('owner_scope')==project and item.get('metadata',{}).get('id') != new]
-volume_row['new_resource_count']=volume_after_ids.count(new)
-volume_row['old_resource_absent']=old not in volume_after_ids
-volume_row['leak_or_foreign_state']['old_absent']=old not in volume_after_ids
+volume_other=[item for item in json.loads(pathlib.Path(work,'volume-list-after.json').read_text()).get('items',[]) if item.get('metadata',{}).get('owner_scope')==project and item.get('metadata',{}).get('id') != volume_new]
+volume_row['new_resource_count']=volume_after_ids.count(volume_new)
+volume_row['old_resource_absent']=volume_old not in volume_after_ids
+volume_row['leak_or_foreign_state']['old_absent']=volume_old not in volume_after_ids
 volume_row['leak_or_foreign_state']['unrelated_changes']=volume_row['leak_or_foreign_state']['unrelated_changes'] and not volume_other
 volume_row['leak_or_foreign_state']['same_scope_other_resources']=len(volume_other)
 volume_row['canonical_observations']['after_reapply']['ids']=volume_after_ids
-volume_row['canonical_observations']['after_reapply']['replacement_count']=volume_after_ids.count(new)
-volume_row['canonical_observations']['after_reapply']['old_present']=old in volume_after_ids
+volume_row['canonical_observations']['after_reapply']['replacement_count']=volume_after_ids.count(volume_new)
+volume_row['canonical_observations']['after_reapply']['old_present']=volume_old in volume_after_ids
 for item in contract['resources']:
  for attr in item.get('mutable_attributes',[]): rows.append({'resource':item['resource'],'scenario':'native-mutable-drift','native_change':attr,'reason':'native_surface_not_defined: no accepted native PUT/PATCH surface exists','native_surface_status':'native_surface_not_defined','result':'not_applicable','classification':'native_surface_not_defined'})
  if item['resource']==row['resource']: rows.append(row)
