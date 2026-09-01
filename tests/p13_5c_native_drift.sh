@@ -29,13 +29,10 @@ native_resources = {
 for item in contract["resources"]:
     resource = item["resource"]
     for attribute in item.get("mutable_attributes", []):
-        reason = (
-            "native_update_route_unavailable: manifest declares update but the native route/application is missing"
-            if resource == "openstack_networking_network_v2"
-            else "native_update_unsupported: registered native resource has no update operation"
-            if resource in native_resources
-            else "native_surface_not_defined: no accepted native mutable surface exists for this compatibility projection"
-        )
+        # Native PUT/PATCH is deliberately out of scope for P13.5C. A
+        # compatibility update declaration does not establish an executable
+        # native mutation surface, so classify every such row explicitly.
+        reason = "native_surface_not_defined: no accepted native mutable surface exists for this compatibility projection"
         rows.append({
             "resource": resource,
             "scenario": "native-mutable-drift",
