@@ -435,7 +435,10 @@ curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networ
 rm -f subnet.tf
 
 cat >port.tf <<EOF
-resource "openstack_networking_network_v2" "parent" { name = "p13-5b-port-network" tags = [] }
+resource "openstack_networking_network_v2" "parent" {
+  name = "p13-5b-port-network"
+  tags = []
+}
 resource "openstack_networking_subnet_v2" "parent" {
   network_id = openstack_networking_network_v2.parent.id
   cidr = "198.51.142.0/24"
@@ -540,7 +543,10 @@ cd "$project_dir"
 restart_daemon
 
 cat >floating-ip.tf <<EOF
-resource "openstack_networking_network_v2" "private" { name = "p13-5b-floating-ip-network" }
+resource "openstack_networking_network_v2" "private" {
+  name = "p13-5b-floating-ip-network"
+  tags = []
+}
 resource "openstack_networking_subnet_v2" "private" {
   network_id = openstack_networking_network_v2.private.id
   cidr = "198.51.148.0/24"
@@ -810,7 +816,10 @@ rm -f security-group.tf
 cd "$project_dir"
 
 cat >security-group-rule.tf <<'EOF'
-resource "openstack_networking_secgroup_v2" "parent" { name = "p13-5b-rule-parent" tags = [] }
+resource "openstack_networking_secgroup_v2" "parent" {
+  name = "p13-5b-rule-parent"
+  tags = []
+}
 resource "openstack_networking_secgroup_rule_v2" "managed" {
   security_group_id = openstack_networking_secgroup_v2.parent.id
   direction = "ingress"
@@ -890,7 +899,10 @@ curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/octet-stream' 
 cat >server.tf <<EOF
 data "openstack_images_image_v2" "image" { name = "p13-5b-server-image" }
 data "openstack_compute_flavor_v2" "flavor" { name = "test.small" }
-resource "openstack_networking_network_v2" "parent" { name = "p13-5b-server-network" }
+resource "openstack_networking_network_v2" "parent" {
+  name = "p13-5b-server-network"
+  tags = []
+}
 resource "openstack_networking_subnet_v2" "parent" {
   network_id = openstack_networking_network_v2.parent.id
   cidr = "198.51.144.0/24"
