@@ -7,16 +7,18 @@ set -euo pipefail
 : "${O3K_LVM_THIN_POOL:?set a disposable LVM thin pool}"
 : "${O3K_LVM_PROVIDER_NAMESPACE:?set a disposable LVM provider namespace}"
 root_dir=$(cd "$(dirname "$0")/.." && pwd)
+o3kd=${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}
 password=${O3K_P13_PASSWORD:-p13-4-provider-password}
 project_id=eba29e2d-53de-461d-ae91-ede7402713cb
 port=${O3K_P13_PORT:-18992}
 work=$(mktemp -d /tmp/o3k-p13-4-provider.XXXXXX)
 pid=
 validate_lvm_scope() {
-    local vg_tags pool_tags
+    local vg_tags pool_tags expected_hash
+    expected_hash="$(printf '%s' "$O3K_LVM_PROVIDER_NAMESPACE" | sha256sum | awk '{print $1}')"
     vg_tags="$(vgs --noheadings --options vg_tags --separator '|' "$O3K_LVM_VOLUME_GROUP" 2>/dev/null | tr -d '[:space:]')"
     pool_tags="$(lvs --noheadings --options lv_tags --separator '|' "$O3K_LVM_VOLUME_GROUP/$O3K_LVM_THIN_POOL" 2>/dev/null | tr -d '[:space:]')"
-    [[ "$vg_tags" == o3k_storage_* && "$pool_tags" == o3k_pool_* ]] || {
+    [[ "$vg_tags" == "o3k_storage_$expected_hash" && "$pool_tags" == "o3k_pool_$expected_hash" ]] || {
         echo "refusing non-disposable LVM scope" >&2
         return 2
     }
@@ -38,7 +40,7 @@ O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" \
 O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" \
 O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
 O3K_COMPATIBILITY_TRACE_PATH="$work/trace.jsonl" \
-  "$root_dir/target/debug/o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work/data" >"$work/o3kd.log" 2>&1 &
+  "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work/data" >"$work/o3kd.log" 2>&1 &
 pid=$!
 for _ in $(seq 1 120); do
     curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1 && break

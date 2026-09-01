@@ -55,6 +55,19 @@ def validate_surface_amendment(document: dict, repository: Path) -> None:
     require(compatibility.get("production_runtime_modified") is False, "amendment modifies production runtime")
 
 
+def validate_redactions(value: object) -> None:
+    sensitive = {"password", "token", "access_token", "secret", "private_key"}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key.lower() in sensitive:
+                require(item == "[REDACTED]", f"sensitive plan field {key} is not redacted")
+            else:
+                validate_redactions(item)
+    elif isinstance(value, list):
+        for item in value:
+            validate_redactions(item)
+
+
 def validate_canonical_evidence(document: dict, repository: Path) -> None:
     """Validate the executable out-of-band compatibility drift artifact."""
     contract, contract_digest = load_contract(repository)
@@ -92,7 +105,7 @@ def validate_canonical_evidence(document: dict, repository: Path) -> None:
     require(row.get("canonical_id_before") == row.get("canonical_id_after_mutation") == row.get("canonical_id_after_reapply"), "canonical identity changed")
     require(row.get("owner_scope"), "canonical drift owner scope is missing")
     require(row.get("old_resource_absent") is False and row.get("new_resource_count") == 1, "canonical resource count invariant failed")
-    require(row.get("canonical_duplicate_count") == 0, "canonical duplicate invariant failed")
+    require(row.get("canonical_same_id_count") == 1, "canonical identity count invariant failed")
     require(row.get("unrelated_changes_count") == 0, "unrelated plan changes are present")
     require(row.get("final_plan_noop") is True, "canonical final plan is not no-op")
     require(row.get("cleanup_http_status") == 404, "canonical drift cleanup did not remove the fixture")
@@ -103,6 +116,7 @@ def validate_canonical_evidence(document: dict, repository: Path) -> None:
         require(isinstance(plan, dict), f"canonical drift plan {name} is missing")
         require(isinstance(plan.get("format_version"), str), f"canonical drift plan {name} lacks format_version")
         require(isinstance(plan.get("planned_values"), dict) and isinstance(plan.get("prior_state"), dict), f"canonical drift plan {name} lacks state fields")
+        validate_redactions(plan)
     refresh = observation["refresh_only"]
     require(all(change.get("address") == row["terraform_address"] for change in refresh.get("resource_drift", [])), "refresh-only observed an unrelated address")
     normal = observation["normal"].get("resource_changes", [])

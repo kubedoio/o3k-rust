@@ -17,10 +17,11 @@ work=$(mktemp -d /tmp/o3k-p13-4.XXXXXX)
 pid=
 volume_id=
 validate_lvm_scope() {
-  local vg_tags pool_tags
+  local vg_tags pool_tags expected_hash
+  expected_hash="$(printf '%s' "$O3K_LVM_PROVIDER_NAMESPACE" | sha256sum | awk '{print $1}')"
   vg_tags="$(vgs --noheadings --options vg_tags --separator '|' "$O3K_LVM_VOLUME_GROUP" 2>/dev/null | tr -d '[:space:]')"
   pool_tags="$(lvs --noheadings --options lv_tags --separator '|' "$O3K_LVM_VOLUME_GROUP/$O3K_LVM_THIN_POOL" 2>/dev/null | tr -d '[:space:]')"
-  [[ "$vg_tags" == o3k_storage_* && "$pool_tags" == o3k_pool_* ]] || {
+  [[ "$vg_tags" == "o3k_storage_$expected_hash" && "$pool_tags" == "o3k_pool_$expected_hash" ]] || {
     echo "refusing non-disposable LVM scope" >&2
     return 2
   }

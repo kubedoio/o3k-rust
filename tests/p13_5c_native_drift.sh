@@ -34,7 +34,7 @@ for item in contract["resources"]:
             if resource == "openstack_networking_network_v2"
             else "native_update_unsupported: registered native resource has no update operation"
             if resource in native_resources
-            else "native_resource_unavailable: resource is not registered on the current /o3k/v1 surface"
+            else "native_surface_not_defined: no accepted native mutable surface exists for this compatibility projection"
         )
         rows.append({
             "resource": resource,
@@ -45,7 +45,7 @@ for item in contract["resources"]:
     delete_reason = (
         "native_delete_supported_but_not_executed: no real OpenTofu/native mutation run was performed"
         if resource in native_resources
-        else "native_resource_unavailable: resource is not registered on the current /o3k/v1 surface"
+        else "native_surface_not_defined: no accepted native delete surface exists for this compatibility projection"
     )
     rows.append({
         "resource": resource,
