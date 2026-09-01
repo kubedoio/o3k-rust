@@ -12,6 +12,14 @@ from pathlib import Path
 
 
 RESULTS = {"passed", "blocked", "not_applicable"}
+CLASSIFICATIONS = {
+    "passed",
+    "native_surface_not_defined",
+    "not_applicable",
+    "execution_profile_unavailable",
+    "upstream_provider_unsupported",
+    "blocked",
+}
 SCENARIOS = {"native-mutable-drift", "native-delete-drift"}
 UUID_SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -225,7 +233,11 @@ def validate_passed(row: dict, contract: dict) -> None:
         delete = row.get("native_delete")
         require(isinstance(delete, dict), "delete drift lacks native DELETE evidence")
         require(delete.get("status") == 204 and delete.get("replay_status") == 204, "native DELETE did not complete and replay successfully")
-        require(delete.get("http_path") == f"/o3k/v1/network/networks/{row['canonical_id_before']}", "native DELETE path is not bound to the old identity")
+        expected_path = {
+            "openstack_networking_network_v2": f"/o3k/v1/network/networks/{row['canonical_id_before']}",
+            "openstack_blockstorage_volume_v3": f"/o3k/v1/volume/volumes/{row['canonical_id_before']}",
+        }.get(resource)
+        require(delete.get("http_path") == expected_path, "native DELETE path is not bound to the old identity")
         require(delete.get("idempotency_key") == "[REDACTED]" and SHA256.fullmatch(delete.get("idempotency_key_sha256", "")), "idempotency key is not safely represented")
         replay = delete.get("replay_result")
         require(isinstance(replay, dict) and replay.get("same_idempotency_key") is True, "DELETE replay lacks same-key evidence")
@@ -276,6 +288,7 @@ def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
     for row in rows:
         require(isinstance(row, dict), "scenario row must be an object")
         require(row.get("result") in RESULTS, "invalid scenario result")
+        require(row.get("classification") in CLASSIFICATIONS, "invalid scenario classification")
         require(row.get("surface") == "native_api", "native scenario surface is not explicit")
         require(row.get("native_surface_status") in {"defined", "native_surface_not_defined", "not_checked"}, "invalid native surface status")
         require(row.get("resource") in {item["resource"] for item in contract["resources"]}, "unknown resource")
@@ -284,12 +297,14 @@ def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
         require(UUID_SHA.fullmatch(row.get("head_sha", "")), "invalid row head_sha")
         require(row["head_sha"] == TESTED_SHA, "scenario is not bound to tested HEAD")
         if row["result"] == "passed":
+            require(row["classification"] == "passed", "passed scenario has a non-passed classification")
             validate_passed(row, contract)
         else:
             require(isinstance(row.get("reason"), str) and row["reason"].strip(), "blocked/not_applicable row needs reason")
             require(not row.get("plan_observation"), "blocked row must not contain fabricated plan JSON")
             if "native_surface_not_defined" in row["reason"]:
                 require(row["native_surface_status"] == "native_surface_not_defined", "undefined native surface status is inconsistent")
+                require(row["classification"] == "native_surface_not_defined", "undefined native surface classification is inconsistent")
     if document["status"] == "passed":
         require(all(row["result"] == "passed" for row in rows), "passed evidence contains incomplete rows")
     elif not allow_blocked:
@@ -309,6 +324,7 @@ def self_test() -> None:
             "surface": "native_api",
             "native_surface_status": "not_checked",
             "result": "blocked",
+            "classification": "blocked",
             "reason": "self-test blocked fixture",
             "head_sha": subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip(),
         })

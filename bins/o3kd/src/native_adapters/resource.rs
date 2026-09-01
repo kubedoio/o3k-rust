@@ -688,7 +688,14 @@ impl ResourceApplication for GenericResourceApplication {
         idempotency_key: Option<&str>,
         expected_generation: Option<i64>,
     ) -> Result<MutationResult, ResourceApplicationError> {
-        if let Some(controller) = self.external_controllers.get(&descriptor.owning_service) {
+        // Native volumes are owned by the in-process storage boundary even
+        // when a compatibility controller with the same service identity is
+        // registered.  The provider-backed native lifecycle must run first;
+        // the generic controller path can otherwise report success without
+        // removing the LVM realization.
+        if descriptor.resource_type.to_string() != "volume:volume"
+            && let Some(controller) = self.external_controllers.get(&descriptor.owning_service)
+        {
             if !controller.health().await.healthy {
                 return Err(ResourceApplicationError::NotReady);
             }
