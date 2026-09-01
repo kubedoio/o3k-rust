@@ -859,6 +859,79 @@ impl ResourceApplication for GenericResourceApplication {
                             return Err(ResourceApplicationError::PreconditionConflict);
                         }
                     }
+                    if existing.state != o3k_store::OperationState::Succeeded {
+                        // A retry can arrive after provider deletion but before
+                        // the first request persisted its terminal operation.
+                        let Some(provider) = self.storage_provider.clone() else {
+                            return Err(ResourceApplicationError::NotReady);
+                        };
+                        if let Some(record) = self
+                            .store
+                            .get_volume(resource_id)
+                            .await
+                            .map_err(|_| ResourceApplicationError::Internal)?
+                        {
+                            if record.volume.project_id != auth.effective_scope().id().as_str() {
+                                return Err(ResourceApplicationError::NotFound);
+                            }
+                            o3k_api::remove_native_volume(
+                                self.store.clone(),
+                                provider,
+                                auth.effective_scope().id().as_str(),
+                                resource_id,
+                            )
+                            .await
+                            .map_err(|_| ResourceApplicationError::Retryable)?;
+                            let bookkeeping = self
+                                .store
+                                .get_resource(resource_id)
+                                .await
+                                .map_err(|_| ResourceApplicationError::Internal)?;
+                            if bookkeeping.project_id != auth.effective_scope().id().as_str()
+                                || bookkeeping.kind != "volume"
+                            {
+                                return Err(ResourceApplicationError::NotFound);
+                            }
+                            if bookkeeping.observed_state != "DELETED"
+                                || bookkeeping.desired_state != "DELETED"
+                            {
+                                self.store
+                                    .update_resource(
+                                        resource_id,
+                                        bookkeeping.generation,
+                                        "DELETED",
+                                        "DELETED",
+                                        bookkeeping.generation.saturating_add(1),
+                                        None,
+                                    )
+                                    .await
+                                    .map_err(|_| ResourceApplicationError::Internal)?;
+                            }
+                            let now = chrono::Utc::now().to_rfc3339();
+                            let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                                o3k_kernel::OperationState::Succeeded,
+                                existing.attempt.saturating_add(1),
+                                Some(now.clone()),
+                                Some(now),
+                                None,
+                            )
+                            .map_err(|_| ResourceApplicationError::Internal)?;
+                            self.store
+                                .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                                .await
+                                .map_err(|_| ResourceApplicationError::Internal)?;
+                            self.store
+                                .delete_volume(auth.effective_scope().id().as_str(), resource_id)
+                                .await
+                                .map_err(|_| ResourceApplicationError::Internal)?;
+                            return Ok(MutationResult {
+                                operation_id: operation_id.to_string(),
+                                resource_id: Some(id.to_owned()),
+                                complete: true,
+                                resource: None,
+                            });
+                        }
+                    }
                     return Ok(MutationResult {
                         operation_id: operation_id.to_string(),
                         resource_id: Some(id.to_owned()),
