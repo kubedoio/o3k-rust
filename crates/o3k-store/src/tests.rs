@@ -779,6 +779,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_canonical_scoped_operation_uses_authoritative_network_row()
+    -> Result<(), StoreError> {
+        let path =
+            std::env::temp_dir().join(format!("o3k-scoped-network-{}.sqlite", Uuid::now_v7()));
+        let store = SqliteStore::connect(&format!("sqlite://{}", path.display())).await?;
+        let resource_id = Uuid::now_v7();
+        store
+            .insert_canonical_network(&CanonicalNetworkRecord {
+                id: resource_id,
+                project_id: "project-a".to_owned(),
+                name: "native-delete-network".to_owned(),
+                admin_state_up: true,
+                generation: 1,
+                state: "active".to_owned(),
+            })
+            .await?;
+        let operation = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id,
+            kind: "lifecycle:delete".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        let canonical = CanonicalOperationRecord {
+            resource_type: "network:network".to_owned(),
+            ..canonical_idempotent_operation(&operation, "project-a", "network:DeleteNetwork")
+        };
+        let request = IdempotencyReservationRequest::from_semantics(
+            "project-a",
+            "network:DeleteNetwork",
+            "native-delete",
+            "network:network",
+            Some(&resource_id.to_string()),
+            &serde_json::json!({}),
+            operation.id,
+        )?;
+        assert_eq!(
+            store
+                .create_or_replay_canonical_scoped_operation(&operation, &canonical, &request)
+                .await?,
+            IdempotencyReservation::Created(operation.id)
+        );
+        let update = CanonicalOperationLifecycleUpdate::new(
+            o3k_kernel::OperationState::Succeeded,
+            1,
+            Some("2026-08-22T00:00:01Z".to_owned()),
+            Some("2026-08-22T00:00:02Z".to_owned()),
+            None,
+        )?;
+        store
+            .update_canonical_operation_lifecycle(operation.id, &update)
+            .await?;
+        assert_eq!(
+            store.get_canonical_operation(operation.id).await?,
+            CanonicalOperationRecord {
+                state: OperationState::Succeeded,
+                attempt: 1,
+                finished_at: Some("2026-08-22T00:00:02Z".to_owned()),
+                started_at: Some("2026-08-22T00:00:01Z".to_owned()),
+                ..canonical.clone()
+            }
+        );
+        let replay_id = Uuid::now_v7();
+        assert_eq!(
+            store
+                .create_or_replay_canonical_scoped_operation(
+                    &OperationRecord {
+                        id: replay_id,
+                        ..operation.clone()
+                    },
+                    &CanonicalOperationRecord {
+                        id: replay_id,
+                        ..canonical
+                    },
+                    &IdempotencyReservationRequest {
+                        operation_id: replay_id,
+                        ..request
+                    },
+                )
+                .await?,
+            IdempotencyReservation::ExistingEquivalent(operation.id)
+        );
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sqlite_canonical_idempotency_reopens_and_replays_complete_operation()
     -> Result<(), StoreError> {
         let path = std::env::temp_dir().join(format!("o3k-p12-4-reopen-{}", Uuid::now_v7()));

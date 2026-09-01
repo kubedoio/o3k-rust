@@ -1088,24 +1088,27 @@ impl ResourceApplication for GenericResourceApplication {
             .map_err(|_| ResourceApplicationError::Validation)?;
             let acceptance = self
                 .store
-                .create_or_replay_canonical_lifecycle_operation(&operation, &canonical, &identity)
+                .create_or_replay_canonical_scoped_operation(&operation, &canonical, &identity)
                 .await
                 .map_err(|_| ResourceApplicationError::Internal)?;
-            if let o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent {
-                operation_id, ..
-            } = acceptance
-            {
-                let existing = self
-                    .store
-                    .get_canonical_operation(operation_id)
-                    .await
-                    .map_err(|_| ResourceApplicationError::Internal)?;
-                return Ok(MutationResult {
-                    operation_id: operation_id.to_string(),
-                    resource_id: Some(id.to_owned()),
-                    complete: existing.state == o3k_store::OperationState::Succeeded,
-                    resource: None,
-                });
+            match acceptance {
+                o3k_store::IdempotencyReservation::Conflict => {
+                    return Err(ResourceApplicationError::IdempotencyConflict);
+                }
+                o3k_store::IdempotencyReservation::ExistingEquivalent(operation_id) => {
+                    let existing = self
+                        .store
+                        .get_canonical_operation(operation_id)
+                        .await
+                        .map_err(|_| ResourceApplicationError::Internal)?;
+                    return Ok(MutationResult {
+                        operation_id: operation_id.to_string(),
+                        resource_id: Some(id.to_owned()),
+                        complete: existing.state == o3k_store::OperationState::Succeeded,
+                        resource: None,
+                    });
+                }
+                o3k_store::IdempotencyReservation::Created(_) => {}
             }
             let network = self
                 .network_service

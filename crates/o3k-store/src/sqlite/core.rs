@@ -30,6 +30,7 @@ use crate::{
     VolumeAttachmentRecord, WalCheckpointMode, is_sqlite_busy, restrict_sqlite_sidecars,
     validate_canonical_idempotent_operation_identity, validate_canonical_lifecycle_update,
     validate_canonical_operation_read, validate_canonical_resource_acceptance,
+    validate_canonical_scoped_operation_read,
 };
 
 pub(super) async fn insert_sqlite_canonical_acceptance(
@@ -860,7 +861,6 @@ impl DurableStore for SqliteStore {
             .map_err(StoreError::Database)?
             .ok_or(StoreError::OperationNotFound)?;
         let operation = self.get_operation(id).await?;
-        let resource = self.get_resource(operation.resource_id).await?;
         let canonical = CanonicalOperationRecord {
             id,
             service: row.get("service"),
@@ -878,7 +878,13 @@ impl DurableStore for SqliteStore {
             error: row.get("error"),
             request_id: row.get("request_id"),
         };
-        validate_canonical_operation_read(&operation, &canonical, &resource)?;
+        match self.get_resource(operation.resource_id).await {
+            Ok(resource) => validate_canonical_operation_read(&operation, &canonical, &resource)?,
+            Err(StoreError::ResourceNotFound) => {
+                validate_canonical_scoped_operation_read(&operation, &canonical)?;
+            }
+            Err(error) => return Err(error),
+        }
         Ok(canonical)
     }
 
@@ -943,15 +949,6 @@ impl DurableStore for SqliteStore {
             .await
             .map_err(StoreError::Database)?;
         let result: Result<IdempotencyReservation, StoreError> = async {
-            let resource = sqlx::query("SELECT kind, project_id FROM resources WHERE id=?")
-                .bind(operation.resource_id.to_string()).fetch_optional(&mut *connection)
-                .await.map_err(StoreError::Database)?
-                .ok_or(StoreError::ResourceNotFound)?;
-            if resource.get::<String, _>("kind") != canonical.resource_type
-                || resource.get::<String, _>("project_id") != canonical.owner_scope
-            {
-                return Err(StoreError::Corrupt("canonical scoped operation resource index differs".into()));
-            }
             if let Some(row) = sqlx::query("SELECT fingerprint, operation_id FROM idempotency_reservations WHERE owner_scope=? AND action=? AND idempotency_key=?")
                 .bind(&request.owner_scope).bind(&request.action).bind(&request.key)
                 .fetch_optional(&mut *connection).await.map_err(StoreError::Database)?
@@ -974,6 +971,18 @@ impl DurableStore for SqliteStore {
                     return Err(StoreError::Corrupt("canonical scoped operation replay identity differs".into()));
                 }
                 return Ok(IdempotencyReservation::ExistingEquivalent(existing));
+            }
+            let owner_scope: Option<String> = match canonical.resource_type.as_str() {
+                "network:network" => sqlx::query_scalar("SELECT project_id FROM canonical_networks WHERE id=?")
+                    .bind(operation.resource_id.to_string()).fetch_optional(&mut *connection).await
+                    .map_err(StoreError::Database)?,
+                "network:address_realm" => sqlx::query_scalar("SELECT project_id FROM canonical_address_realms WHERE id=?")
+                    .bind(operation.resource_id.to_string()).fetch_optional(&mut *connection).await
+                    .map_err(StoreError::Database)?,
+                _ => return Err(StoreError::Corrupt("unsupported canonical scoped resource type".into())),
+            };
+            if owner_scope.as_deref() != Some(canonical.owner_scope.as_str()) {
+                return Err(StoreError::ResourceNotFound);
             }
             insert_sqlite_canonical_acceptance(&mut connection, operation, canonical, request).await?;
             Ok(IdempotencyReservation::Created(operation.id))
