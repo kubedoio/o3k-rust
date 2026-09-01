@@ -182,7 +182,11 @@ def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
     require(isinstance(TESTED_SHA, str) and UUID_SHA.fullmatch(TESTED_SHA), "invalid tested_o3k_head_sha")
     require(subprocess.run(["git", "-C", str(repository), "merge-base", "--is-ancestor", TESTED_SHA, current_sha], check=False).returncode == 0, "tested SHA is not an ancestor of current HEAD")
     changed = subprocess.check_output(["git", "-C", str(repository), "diff", "--name-only", TESTED_SHA, current_sha], text=True).splitlines()
-    require(changed in ([], ["docs/compatibility/p13-5/p13-5c-native-drift-evidence.json"]), "changes after tested SHA exceed evidence-only follow-up")
+    allowed_followups = {
+        "docs/compatibility/p13-5/p13-5c-native-drift-evidence.json",
+        "docs/compatibility/p13-5/p13-5c-canonical-out-of-band-drift-evidence.json",
+    }
+    require(set(changed).issubset(allowed_followups), "changes after tested SHA exceed evidence-only follow-up")
     toolchain = document.get("toolchain")
     require(isinstance(toolchain, dict), "toolchain is missing")
     require(toolchain.get("opentofu") == contract["toolchain"]["opentofu"], "OpenTofu version mismatch")
