@@ -228,6 +228,7 @@ pub async fn remove_native_volume(
     provider: Arc<dyn o3k_storage::StorageProvider>,
     project_id: &str,
     id: Uuid,
+    operation_id: Option<Uuid>,
 ) -> Result<(), String> {
     let record = store
         .get_volume(id)
@@ -254,6 +255,9 @@ pub async fn remove_native_volume(
     }
     let mut deleting = record.clone();
     deleting.volume.state = VolumeState::Deleting;
+    if operation_id.is_some() {
+        deleting.volume.operation_id = operation_id;
+    }
     deleting.volume.generation = record
         .volume
         .generation
@@ -274,10 +278,9 @@ pub async fn remove_native_volume(
         Err(error) => return Err(error.to_string()),
     }
     match provider.inspect_volume(&request).await {
-        Err(o3k_storage::StorageProviderError::NotFound) => store
-            .delete_volume(project_id, id)
-            .await
-            .map_err(|error| error.to_string()),
+        // Keep the Deleting row as recovery inventory.  The caller removes
+        // it only after all durable lifecycle projections have committed.
+        Err(o3k_storage::StorageProviderError::NotFound) => Ok(()),
         Ok(_) => Err("provider volume is still present".to_owned()),
         Err(error) => Err(error.to_string()),
     }
@@ -539,8 +542,11 @@ pub(crate) async fn delete(
         // durable row is the recovery inventory for an owned provider volume.
         return unavailable();
     };
-    match remove_native_volume(store.clone(), provider, &project_id, id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+    match remove_native_volume(store.clone(), provider, &project_id, id, None).await {
+        Ok(()) => match store.delete_volume(&project_id, id).await {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(_) => unavailable(),
+        },
         Err(_) => match store.get_volume(id).await {
             Ok(Some(deleting)) if deleting.volume.state == VolumeState::Deleting => (
                 StatusCode::ACCEPTED,
@@ -554,8 +560,52 @@ pub(crate) async fn delete(
     }
 }
 
+async fn finalize_recovered_native_delete(
+    store: &Arc<dyn o3k_store::StorageRepository>,
+    record: &VolumeRecord,
+) -> bool {
+    let Some(operation_id) = record.volume.operation_id else {
+        return true;
+    };
+    let operation = match store.get_canonical_operation(operation_id).await {
+        Ok(operation) => operation,
+        Err(o3k_store::StoreError::OperationNotFound) => return true,
+        Err(error) => {
+            tracing::warn!(%error, volume_id = %record.volume.id, "native volume recovery could not read delete operation");
+            return false;
+        }
+    };
+    if operation.state == o3k_store::OperationState::Succeeded {
+        return true;
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let update = match o3k_store::CanonicalOperationLifecycleUpdate::new(
+        o3k_kernel::OperationState::Succeeded,
+        operation.attempt.saturating_add(1),
+        Some(now.clone()),
+        Some(now),
+        None,
+    ) {
+        Ok(update) => update,
+        Err(error) => {
+            tracing::warn!(%error, volume_id = %record.volume.id, "native volume recovery could not build delete completion");
+            return false;
+        }
+    };
+    match store
+        .update_canonical_operation_lifecycle(operation_id, &update)
+        .await
+    {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!(%error, volume_id = %record.volume.id, "native volume recovery could not persist delete completion");
+            false
+        }
+    }
+}
+
 /// Reconciles native volumes left in a transitional state by a process
-/// restart.  Canonical volume rows are the recovery inventory; provider
+/// restart. Canonical volume rows are the recovery inventory; provider
 /// inspection is performed before any repeat mutation and provider state is
 /// never used to create a canonical volume.
 pub async fn recover_native_volumes(state: &AppState) {
@@ -675,9 +725,11 @@ pub async fn recover_native_volumes(state: &AppState) {
             },
             VolumeState::Deleting => match provider.inspect_volume(&request).await {
                 Err(o3k_storage::StorageProviderError::NotFound) => {
-                    let _ = store
-                        .delete_volume(&record.volume.project_id, record.volume.id.as_uuid())
-                        .await;
+                    if finalize_recovered_native_delete(store, &record).await {
+                        let _ = store
+                            .delete_volume(&record.volume.project_id, record.volume.id.as_uuid())
+                            .await;
+                    }
                 }
                 Ok(observation) if volume_observation_matches(&record, &observation) => {
                     match provider.delete_volume(&request).await {
@@ -685,7 +737,8 @@ pub async fn recover_native_volumes(state: &AppState) {
                             if matches!(
                                 provider.inspect_volume(&request).await,
                                 Err(o3k_storage::StorageProviderError::NotFound)
-                            ) {
+                            ) && finalize_recovered_native_delete(store, &record).await
+                            {
                                 let _ = store
                                     .delete_volume(
                                         &record.volume.project_id,

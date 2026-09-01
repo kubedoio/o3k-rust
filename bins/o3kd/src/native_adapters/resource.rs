@@ -688,7 +688,14 @@ impl ResourceApplication for GenericResourceApplication {
         idempotency_key: Option<&str>,
         expected_generation: Option<i64>,
     ) -> Result<MutationResult, ResourceApplicationError> {
-        if let Some(controller) = self.external_controllers.get(&descriptor.owning_service) {
+        // Native volumes are owned by the in-process storage boundary even
+        // when a compatibility controller with the same service identity is
+        // registered.  The provider-backed native lifecycle must run first;
+        // the generic controller path can otherwise report success without
+        // removing the LVM realization.
+        if descriptor.resource_type.to_string() != "volume:volume"
+            && let Some(controller) = self.external_controllers.get(&descriptor.owning_service)
+        {
             if !controller.health().await.healthy {
                 return Err(ResourceApplicationError::NotReady);
             }
@@ -822,6 +829,120 @@ impl ResourceApplication for GenericResourceApplication {
             let resource_id = id
                 .parse::<Uuid>()
                 .map_err(|_| ResourceApplicationError::NotFound)?;
+            let key = idempotency_key
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("native:volume-delete:{id}"));
+            let operation_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!(
+                    "volume:delete:{}:{resource_id}:{key}:generation={}",
+                    auth.effective_scope().id(),
+                    expected_generation.map_or(-1, |generation| generation)
+                )
+                .as_bytes(),
+            );
+            // A successful delete removes the native volume row. Resolve a
+            // deterministic replay before looking up that row so an
+            // equivalent retry returns the original terminal operation.
+            match self.store.get_canonical_operation(operation_id).await {
+                Ok(existing) => {
+                    if let Some(expected) = expected_generation {
+                        let bookkeeping = self
+                            .store
+                            .get_resource(resource_id)
+                            .await
+                            .map_err(|_| ResourceApplicationError::NotFound)?;
+                        if bookkeeping.project_id != auth.effective_scope().id().as_str()
+                            || bookkeeping.kind != "volume"
+                            || bookkeeping.generation != expected.saturating_add(1)
+                        {
+                            return Err(ResourceApplicationError::PreconditionConflict);
+                        }
+                    }
+                    if existing.state != o3k_store::OperationState::Succeeded {
+                        // A retry can arrive after provider deletion but before
+                        // the first request persisted its terminal operation.
+                        let Some(provider) = self.storage_provider.clone() else {
+                            return Err(ResourceApplicationError::NotReady);
+                        };
+                        if let Some(record) = self
+                            .store
+                            .get_volume(resource_id)
+                            .await
+                            .map_err(|_| ResourceApplicationError::Internal)?
+                        {
+                            if record.volume.project_id != auth.effective_scope().id().as_str() {
+                                return Err(ResourceApplicationError::NotFound);
+                            }
+                            o3k_api::remove_native_volume(
+                                self.store.clone(),
+                                provider,
+                                auth.effective_scope().id().as_str(),
+                                resource_id,
+                                Some(operation_id),
+                            )
+                            .await
+                            .map_err(|_| ResourceApplicationError::Retryable)?;
+                            let bookkeeping = self
+                                .store
+                                .get_resource(resource_id)
+                                .await
+                                .map_err(|_| ResourceApplicationError::Internal)?;
+                            if bookkeeping.project_id != auth.effective_scope().id().as_str()
+                                || bookkeeping.kind != "volume"
+                            {
+                                return Err(ResourceApplicationError::NotFound);
+                            }
+                            if bookkeeping.observed_state != "DELETED"
+                                || bookkeeping.desired_state != "DELETED"
+                            {
+                                self.store
+                                    .update_resource(
+                                        resource_id,
+                                        bookkeeping.generation,
+                                        "DELETED",
+                                        "DELETED",
+                                        bookkeeping.generation.saturating_add(1),
+                                        None,
+                                    )
+                                    .await
+                                    .map_err(|_| ResourceApplicationError::Internal)?;
+                            }
+                            let now = chrono::Utc::now().to_rfc3339();
+                            let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                                o3k_kernel::OperationState::Succeeded,
+                                existing.attempt.saturating_add(1),
+                                Some(now.clone()),
+                                Some(now),
+                                None,
+                            )
+                            .map_err(|_| ResourceApplicationError::Internal)?;
+                            self.store
+                                .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                                .await
+                                .map_err(|_| ResourceApplicationError::Internal)?;
+                            self.store
+                                .delete_volume(auth.effective_scope().id().as_str(), resource_id)
+                                .await
+                                .map_err(|_| ResourceApplicationError::Internal)?;
+                            return Ok(MutationResult {
+                                operation_id: operation_id.to_string(),
+                                resource_id: Some(id.to_owned()),
+                                complete: true,
+                                resource: None,
+                            });
+                        }
+                    }
+                    return Ok(MutationResult {
+                        operation_id: operation_id.to_string(),
+                        resource_id: Some(id.to_owned()),
+                        complete: existing.state == o3k_store::OperationState::Succeeded,
+                        resource: None,
+                    });
+                }
+                Err(o3k_store::StoreError::OperationNotFound) => {}
+                Err(_) => return Err(ResourceApplicationError::Internal),
+            }
             if let Some(record) = self
                 .store
                 .get_volume(resource_id)
@@ -841,20 +962,36 @@ impl ResourceApplication for GenericResourceApplication {
                     .get(&o3k_native_api::resource::LifecycleOperation::Delete)
                     .cloned()
                     .ok_or(ResourceApplicationError::UnsupportedOperation)?;
-                let key = idempotency_key
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("native:volume-delete:{id}"));
-                let operation_id = Uuid::new_v5(
-                    &Uuid::NAMESPACE_URL,
-                    format!(
-                        "volume:delete:{}:{resource_id}:{key}",
-                        auth.effective_scope().id()
-                    )
-                    .as_bytes(),
-                );
                 let Some(provider) = self.storage_provider.clone() else {
                     return Err(ResourceApplicationError::NotReady);
                 };
+                // The native volume table is the lifecycle authority, while
+                // the shared operation journal enforces its resource FK
+                // through `resources`.  Compatibility-created volumes
+                // predate that projection, so materialize the bookkeeping
+                // row before reserving the native delete operation.
+                if let Err(error) = self.store.get_resource(resource_id).await {
+                    if !matches!(error, o3k_store::StoreError::ResourceNotFound) {
+                        return Err(ResourceApplicationError::Internal);
+                    }
+                    self.store
+                        .insert_resource(&o3k_store::ResourceRecord {
+                            id: resource_id,
+                            kind: "volume".to_owned(),
+                            project_id: record.volume.project_id.clone(),
+                            generation: record.volume.generation as i64,
+                            observed_generation: record.volume.generation as i64,
+                            desired_state: "AVAILABLE".to_owned(),
+                            observed_state: "AVAILABLE".to_owned(),
+                            provider_id: record
+                                .volume
+                                .provider_reference
+                                .as_ref()
+                                .map(|reference| reference.resource_id.clone()),
+                        })
+                        .await
+                        .map_err(|_| ResourceApplicationError::Internal)?;
+                }
                 let operation = o3k_store::OperationRecord {
                     id: operation_id,
                     resource_id,
@@ -883,7 +1020,7 @@ impl ResourceApplication for GenericResourceApplication {
                     key,
                     "volume:volume",
                     Some(id),
-                    &serde_json::json!({"resource_id": id}),
+                        &serde_json::json!({"resource_id": id, "expected_generation": expected_generation}),
                     operation_id,
                 )
                 .map_err(|_| ResourceApplicationError::Validation)?;
@@ -916,9 +1053,13 @@ impl ResourceApplication for GenericResourceApplication {
                     provider,
                     auth.effective_scope().id().as_str(),
                     resource_id,
+                    Some(operation_id),
                 )
                 .await
-                .map_err(|_| ResourceApplicationError::Retryable)?;
+                .map_err(|error| {
+                    tracing::error!(volume_id = %resource_id, %error, "native volume delete failed");
+                    ResourceApplicationError::Retryable
+                })?;
                 self.store
                     .update_resource(
                         resource_id,
@@ -941,6 +1082,13 @@ impl ResourceApplication for GenericResourceApplication {
                 .map_err(|_| ResourceApplicationError::Internal)?;
                 self.store
                     .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                // Keep the Deleting row until the canonical operation is
+                // terminal. If cleanup fails, restart recovery still owns the
+                // durable provider inventory and can finish the deletion.
+                self.store
+                    .delete_volume(auth.effective_scope().id().as_str(), resource_id)
                     .await
                     .map_err(|_| ResourceApplicationError::Internal)?;
                 return Ok(MutationResult {

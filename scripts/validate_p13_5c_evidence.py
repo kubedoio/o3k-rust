@@ -12,9 +12,23 @@ from pathlib import Path
 
 
 RESULTS = {"passed", "blocked", "not_applicable"}
+CLASSIFICATIONS = {
+    "passed",
+    "native_surface_not_defined",
+    "not_applicable",
+    "execution_profile_unavailable",
+    "upstream_provider_unsupported",
+    "blocked",
+}
 SCENARIOS = {"native-mutable-drift", "native-delete-drift"}
 UUID_SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+NON_BLOCKING_CLASSIFICATIONS = {
+    "native_surface_not_defined",
+    "not_applicable",
+    "execution_profile_unavailable",
+    "upstream_provider_unsupported",
+}
 
 
 def require(condition: bool, message: str) -> None:
@@ -190,7 +204,14 @@ def validate_passed(row: dict, contract: dict) -> None:
     item = next(item for item in contract["resources"] if item["resource"] == resource)
     require(row["terraform_address"], "passed row lacks terraform_address")
     require(row["canonical_id_before"], "passed row lacks canonical_id_before")
-    require(row["canonical_id_after_native_mutation"], "passed row lacks native post-state identity")
+    if scenario == "native-mutable-drift":
+        require(row["canonical_id_after_native_mutation"], "passed mutable row lacks native post-state identity")
+    else:
+        require(
+            row["canonical_id_after_native_mutation"] is None
+            or row["canonical_id_after_native_mutation"],
+            "passed delete row lacks native post-state identity marker",
+        )
     require(row["canonical_id_after_reapply"], "passed row lacks reapply identity")
     require(row["owner_scope"], "passed row lacks owner_scope")
     require(isinstance(row["refresh_only_actions"], list), "refresh_only_actions must be a list")
@@ -213,6 +234,28 @@ def validate_passed(row: dict, contract: dict) -> None:
         require(row["old_resource_absent"] is True, "delete drift lacks authoritative absence")
         require(row["new_resource_count"] == 1, "delete drift does not prove one replacement")
         require(row["canonical_id_before"] != row["canonical_id_after_reapply"], "delete drift did not create a new identity")
+        require(row.get("surface") == "native_api" and row.get("native_surface_status") == "defined", "delete drift surface is invalid")
+        require(row.get("native_absence_http_status") == 404 and row.get("compatibility_absence_http_status") == 404, "delete drift absence statuses are not 404")
+        delete = row.get("native_delete")
+        require(isinstance(delete, dict), "delete drift lacks native DELETE evidence")
+        require(delete.get("status") == 204 and delete.get("replay_status") == 204, "native DELETE did not complete and replay successfully")
+        expected_path = {
+            "openstack_networking_network_v2": f"/o3k/v1/network/networks/{row['canonical_id_before']}",
+            "openstack_blockstorage_volume_v3": f"/o3k/v1/volume/volumes/{row['canonical_id_before']}",
+        }.get(resource)
+        require(delete.get("http_path") == expected_path, "native DELETE path is not bound to the old identity")
+        require(delete.get("idempotency_key") == "[REDACTED]" and SHA256.fullmatch(delete.get("idempotency_key_sha256", "")), "idempotency key is not safely represented")
+        replay = delete.get("replay_result")
+        require(isinstance(replay, dict) and replay.get("same_idempotency_key") is True, "DELETE replay lacks same-key evidence")
+        require(replay.get("same_terminal_canonical_absence") is True and replay.get("second_destructive_effect_observed") is False, "DELETE replay did not converge to the same terminal state")
+        observations = row.get("canonical_observations")
+        require(isinstance(observations, dict), "delete drift lacks canonical observations")
+        require(observations.get("before", {}).get("old_present") is True, "canonical before observation lacks old resource")
+        require(observations.get("after_delete", {}).get("old_present") is False, "canonical delete observation retains old resource")
+        require(observations.get("after_delete_replay", {}).get("old_present") is False, "canonical replay observation revives old resource")
+        require(observations.get("after_reapply", {}).get("replacement_count") == 1, "canonical reapply observation lacks one replacement")
+        leak = row.get("leak_or_foreign_state")
+        require(isinstance(leak, dict) and leak.get("old_absent") is True and leak.get("scope_unchanged") is True and leak.get("unrelated_changes") is True, "delete drift leak/foreign-state result is incomplete")
 
 
 def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
@@ -251,6 +294,7 @@ def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
     for row in rows:
         require(isinstance(row, dict), "scenario row must be an object")
         require(row.get("result") in RESULTS, "invalid scenario result")
+        require(row.get("classification") in CLASSIFICATIONS, "invalid scenario classification")
         require(row.get("surface") == "native_api", "native scenario surface is not explicit")
         require(row.get("native_surface_status") in {"defined", "native_surface_not_defined", "not_checked"}, "invalid native surface status")
         require(row.get("resource") in {item["resource"] for item in contract["resources"]}, "unknown resource")
@@ -259,14 +303,25 @@ def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
         require(UUID_SHA.fullmatch(row.get("head_sha", "")), "invalid row head_sha")
         require(row["head_sha"] == TESTED_SHA, "scenario is not bound to tested HEAD")
         if row["result"] == "passed":
+            require(row["classification"] == "passed", "passed scenario has a non-passed classification")
             validate_passed(row, contract)
         else:
             require(isinstance(row.get("reason"), str) and row["reason"].strip(), "blocked/not_applicable row needs reason")
             require(not row.get("plan_observation"), "blocked row must not contain fabricated plan JSON")
+            if row["classification"] == "blocked":
+                require(row["result"] == "blocked", "blocked classification must have blocked result")
+            elif row["classification"] in NON_BLOCKING_CLASSIFICATIONS:
+                require(row["result"] == "not_applicable", "non-blocking classification must be not_applicable")
             if "native_surface_not_defined" in row["reason"]:
                 require(row["native_surface_status"] == "native_surface_not_defined", "undefined native surface status is inconsistent")
+                require(row["classification"] == "native_surface_not_defined", "undefined native surface classification is inconsistent")
+            if "execution_profile_unavailable" in row["reason"]:
+                require(row["classification"] == "execution_profile_unavailable", "unavailable execution classification is inconsistent")
     if document["status"] == "passed":
-        require(all(row["result"] == "passed" for row in rows), "passed evidence contains incomplete rows")
+        require(
+            all(row["result"] == "passed" or row["classification"] in NON_BLOCKING_CLASSIFICATIONS for row in rows),
+            "passed evidence contains blocked rows",
+        )
     elif not allow_blocked:
         raise ValueError("strict validation rejects blocked evidence")
 
@@ -284,6 +339,7 @@ def self_test() -> None:
             "surface": "native_api",
             "native_surface_status": "not_checked",
             "result": "blocked",
+            "classification": "blocked",
             "reason": "self-test blocked fixture",
             "head_sha": subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip(),
         })
