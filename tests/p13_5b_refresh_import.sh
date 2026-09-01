@@ -1270,6 +1270,7 @@ import hashlib
 import json
 import os
 import pathlib
+import subprocess
 import sys
 
 root, output, work, tofu, tofu_archive, provider_archive, provider_binary, provider_sha, project, network_id, import_network_id, keypair_stable_count, keypair_count, network_stable_count, network_count, keypair_stable_cleanup, keypair_import_cleanup, network_stable_cleanup, network_import_cleanup, keypair_trace_start, network_trace_start, baseline_result, subnet_id, subnet_import_id, subnet_stable_count, subnet_count, subnet_stable_cleanup, subnet_import_cleanup, subnet_trace_start, port_id, port_import_id, port_stable_count, port_count, port_stable_cleanup, port_import_cleanup, port_trace_start, security_group_id, security_group_import_id, security_group_stable_count, security_group_count, security_group_stable_cleanup, security_group_import_cleanup, security_group_trace_start, security_group_rule_id, rule_import_id, security_group_rule_stable_count, rule_count, security_group_rule_stable_cleanup, rule_import_cleanup, rule_trace_start, router_id, router_import_id, router_stable_count, router_count, router_stable_cleanup, router_import_cleanup, router_trace_start, router_interface_stable_id, router_interface_import_id, router_interface_stable_count, router_interface_import_count, router_interface_stable_count_after, router_interface_import_count_after, router_interface_stable_cleanup, router_interface_import_cleanup, router_interface_stable_trace_start, router_interface_import_trace_start, fip_stable_id, fip_import_id, fip_stable_count, fip_import_count_before, fip_import_count_after_read, fip_stable_count_after, fip_import_count_after_cleanup, fip_stable_cleanup, fip_import_cleanup, fip_stable_trace_start, fip_import_trace_start = sys.argv[1:-11]
@@ -1442,6 +1443,32 @@ def canonical_snapshot(resource, kind, phase):
         raise ValueError(f"canonical observation is not store-backed: {path}")
     return document
 
+def lvm_backend_observation():
+    vg = os.environ["O3K_LVM_VOLUME_GROUP"]
+    thin_pool = os.environ["O3K_LVM_THIN_POOL"]
+    namespace = os.environ["O3K_LVM_PROVIDER_NAMESPACE"]
+    vgs = subprocess.run(
+        ["sudo", "-n", "vgs", "--noheadings", "--separator", "|", "-o", "vg_name,vg_uuid,pv_count,lv_count"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip().splitlines()
+    lvs = subprocess.run(
+        ["sudo", "-n", "lvs", "--noheadings", "--separator", "|", "-o", "vg_name,lv_name,lv_uuid,lv_attr,lv_size,pool_lv"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip().splitlines()
+    vg_rows = [row.strip() for row in vgs if row.strip().split("|", 1)[0].strip() == vg]
+    thin_rows = [row.strip() for row in lvs if row.strip().split("|", 1)[0].strip() == vg and row.strip().split("|", 2)[1].strip() == thin_pool]
+    if len(vg_rows) != 1 or len(thin_rows) != 1:
+        raise ValueError(f"host LVM identity not found for {vg}/{thin_pool}")
+    return {
+        "canonical_provider": "lvm",
+        "provider_namespace": namespace,
+        "volume_group": vg,
+        "thin_pool": thin_pool,
+        "verified_read_only": True,
+        "vgs": vg_rows,
+        "lvs": thin_rows,
+    }
+
 def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, cleanup, duplicate_count=0, result="passed", reason=None, trace_start=0, projection_file=None, canonical_count_after=None, parent_file=None):
     plan_documents = {"refresh-only": [plan_document(name) for name in refresh_files], "normal": [plan_document(name) for name in normal_files]}
     windows = [plan_window(name) for name in refresh_files + normal_files]
@@ -1542,12 +1569,12 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
         "result": result,
     }
     if resource in {"openstack_blockstorage_volume_v3", "openstack_compute_volume_attach_v2"}:
-        item["backend_observation"] = {
-            "canonical_provider": "lvm",
-            "volume_group": os.environ.get("O3K_LVM_VOLUME_GROUP"),
-            "thin_pool": os.environ.get("O3K_LVM_THIN_POOL"),
-            "provider_namespace": os.environ.get("O3K_LVM_PROVIDER_NAMESPACE"),
-        }
+        try:
+            item["backend_observation"] = lvm_backend_observation()
+        except (OSError, subprocess.CalledProcessError, ValueError) as error:
+            item["result"] = "blocked"
+            item["reason"] = f"read-only host LVM identity observation failed: {error}"
+            item["backend_observation"] = {"canonical_provider": "lvm", "verified_read_only": False}
     if resource == "openstack_compute_volume_attach_v2" and kind == "import":
         server_id, attachment_id = import_id.split("/", 1)
         item["provider_import_components"] = {"server_id": server_id, "attachment_id": attachment_id}
