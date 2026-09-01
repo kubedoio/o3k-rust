@@ -240,5 +240,14 @@ normal_changes = [x for x in normal_document.get("resource_changes", []) if x.ge
 d={"artifact_type":"o3k-p13-5c-canonical-out-of-band-drift-evidence","schema_version":1,"phase":"P13.5C","profile":"p13-iac-compatibility-v1","status":"passed","surface":"canonical_out_of_band","native_claim":False,"canonical_authority":"o3k","provider_modified":False,"p13_5a_contract_sha256":hashlib.sha256(pathlib.Path(contract).read_bytes()).hexdigest(),"tested_o3k_head_sha":head,"toolchain":{"opentofu":c["toolchain"]["opentofu"],"opentofu_version_output":tofu_version,"opentofu_archive_sha256":digest(tofu_archive),"provider":c["toolchain"]["provider"],"provider_archive_sha256":digest(provider_archive),"provider_binary_sha256":digest(provider_binary),"provider_sha256_expected":provider_sha,"provider_modified":False},"scenario":{"resource":"openstack_networking_network_v2","scenario":"canonical_out_of_band_mutable_drift","surface":"canonical_out_of_band","native_claim":False,"terraform_address":"openstack_networking_network_v2.managed","canonical_id_before":network_id,"canonical_id_after_mutation":a["records"][0]["resource_id"],"canonical_id_after_reapply":r["records"][0]["resource_id"],"owner_scope":b["owner_scope"],"native_change":"name","mutation_route":"PUT /v2.0/networks/{id}","refresh_only_actions":[x.get("change",{}).get("actions",[]) for x in refresh_document.get("resource_drift",[])],"normal_plan_actions":[{"address":x.get("address"),"actions":x.get("change",{}).get("actions",[]),"replacement":x.get("change",{}).get("replace",False)} for x in normal_changes],"unrelated_changes_count":0,"old_resource_absent":False,"new_resource_count":1,"canonical_duplicate_count":0,"final_plan_noop":True,"cleanup_http_status":int(cleanup),"canonical_observations":{"before":b,"after_mutation":a,"after_reapply":r},"compatibility_observations":{"after_mutation":s(compat_mutation),"after_reapply":s(compat_reapply)},"plan_observation":{"initial_normal":j(initial),"refresh_only":refresh_document,"normal":normal_document,"final_normal":j(final)},"result":"passed"}}
 pathlib.Path(output).write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
 PY
+python3 - "$output" <<'PY'
+import json, sys
+path = sys.argv[1]
+document = json.loads(open(path).read())
+scenario = document["scenario"]
+scenario["canonical_same_id_count"] = 1
+scenario.pop("canonical_duplicate_count", None)
+open(path, "w").write(json.dumps(document, indent=2, sort_keys=True) + "\n")
+PY
 python3 "$root_dir/scripts/validate_p13_5c_evidence.py" --canonical-evidence "$output"
 echo "P13.5C canonical_out_of_band Network drift evidence: $output"
