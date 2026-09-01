@@ -76,3 +76,4 @@ PY
 
 python3 "$root_dir/scripts/validate_p13_5c_evidence.py" --allow-blocked "$output"
 echo "P13.5C execution status: BLOCKED (no native mutation driver configured)"
+exit 2
