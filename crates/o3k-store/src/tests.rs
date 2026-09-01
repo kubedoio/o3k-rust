@@ -220,6 +220,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_scoped_operation_migration_normalizes_only_approved_legacy_checksum()
+    -> Result<(), Box<dyn Error>> {
+        async fn create_database() -> Result<PathBuf, Box<dyn Error>> {
+            let path = std::env::temp_dir().join(format!(
+                "o3k-scoped-operation-checksum-{}.sqlite",
+                Uuid::now_v7()
+            ));
+            let store = SqliteStore::connect_file(&path).await?;
+            store.pool.close().await;
+            Ok(path)
+        }
+
+        async fn set_checksum(
+            path: &std::path::Path,
+            checksum: &[u8],
+        ) -> Result<(), Box<dyn Error>> {
+            let url = format!("sqlite://{}", path.display());
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&url)
+                .await?;
+            sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 37")
+                .bind(checksum)
+                .execute(&pool)
+                .await?;
+            pool.close().await;
+            Ok(())
+        }
+
+        let approved = [
+            0x89, 0xe6, 0x76, 0x54, 0xcd, 0x55, 0xd6, 0xc7, 0xaf, 0xbf, 0x46, 0x1c, 0x10, 0x46,
+            0x82, 0xa9, 0xda, 0x1a, 0x20, 0xee, 0x6e, 0x56, 0x40, 0x8a, 0x29, 0x37, 0x45, 0xe0,
+            0x3a, 0xbf, 0x2a, 0x66, 0x73, 0x24, 0x4f, 0xc2, 0x64, 0xe6, 0x67, 0x40, 0xbb, 0x1d,
+            0x8e, 0xcf, 0x13, 0x93, 0x33, 0xd6,
+        ];
+        let approved_path = create_database().await?;
+        set_checksum(&approved_path, &approved).await?;
+        let reopened = SqliteStore::connect_file(&approved_path).await?;
+        let normalized: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 37")
+                .fetch_one(&reopened.pool)
+                .await?;
+        assert_ne!(normalized, approved);
+        reopened.pool.close().await;
+        let _ = std::fs::remove_file(&approved_path);
+        let _ = std::fs::remove_file(format!("{}-wal", approved_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", approved_path.display()));
+
+        let arbitrary = vec![0x5a; 48];
+        let arbitrary_path = create_database().await?;
+        set_checksum(&arbitrary_path, &arbitrary).await?;
+        assert!(SqliteStore::connect_file(&arbitrary_path).await.is_err());
+        let _ = std::fs::remove_file(&arbitrary_path);
+        let _ = std::fs::remove_file(format!("{}-wal", arbitrary_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", arbitrary_path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sqlite_relationship_intent_is_unique_replayable_and_reopenable()
     -> Result<(), StoreError> {
         let path = std::env::temp_dir().join(format!("o3k-relationship-{}.sqlite", Uuid::now_v7()));

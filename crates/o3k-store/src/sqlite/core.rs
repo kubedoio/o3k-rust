@@ -252,6 +252,12 @@ pub(super) async fn migrate_operation_resource_scope(pool: &SqlitePool) -> Resul
 async fn normalize_legacy_operation_migration_checksum(
     pool: &SqlitePool,
 ) -> Result<(), StoreError> {
+    const APPROVED_LEGACY_CHECKSUM: [u8; 48] = [
+        0x89, 0xe6, 0x76, 0x54, 0xcd, 0x55, 0xd6, 0xc7, 0xaf, 0xbf, 0x46, 0x1c, 0x10, 0x46, 0x82,
+        0xa9, 0xda, 0x1a, 0x20, 0xee, 0x6e, 0x56, 0x40, 0x8a, 0x29, 0x37, 0x45, 0xe0, 0x3a, 0xbf,
+        0x2a, 0x66, 0x73, 0x24, 0x4f, 0xc2, 0x64, 0xe6, 0x67, 0x40, 0xbb, 0x1d, 0x8e, 0xcf, 0x13,
+        0x93, 0x33, 0xd6,
+    ];
     let migration_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
     )
@@ -276,6 +282,9 @@ async fn normalize_legacy_operation_migration_checksum(
         return Ok(());
     };
     if recorded == expected.checksum.as_ref() {
+        return Ok(());
+    }
+    if recorded.as_slice() != APPROVED_LEGACY_CHECKSUM {
         return Ok(());
     }
     let has_resource_fk: i64 = sqlx::query_scalar(
