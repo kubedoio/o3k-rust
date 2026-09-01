@@ -279,6 +279,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_scoped_operation_migration_upgrades_legacy_checksum_with_resource_fk()
+    -> Result<(), Box<dyn Error>> {
+        use sqlx::migrate::Migrator;
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+
+        let path = std::env::temp_dir().join(format!(
+            "o3k-scoped-operation-legacy-fk-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let url = format!("sqlite://{}", path.display());
+        let options = SqliteConnectOptions::from_str(&url)?
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+        let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut historical = Migrator::new(migration_path).await?;
+        historical
+            .migrations
+            .to_mut()
+            .retain(|migration| migration.version < 37);
+        historical.run(&pool).await?;
+
+        let legacy_checksum: [u8; 48] = [
+            0x89, 0xe6, 0x76, 0x54, 0xcd, 0x55, 0xd6, 0xc7, 0xaf, 0xbf, 0x46, 0x1c, 0x10, 0x46,
+            0x82, 0xa9, 0xda, 0x1a, 0x20, 0xee, 0x6e, 0x56, 0x40, 0x8a, 0x29, 0x37, 0x45, 0xe0,
+            0x3a, 0xbf, 0x2a, 0x66, 0x73, 0x24, 0x4f, 0xc2, 0x64, 0xe6, 0x67, 0x40, 0xbb, 0x1d,
+            0x8e, 0xcf, 0x13, 0x93, 0x33, 0xd6,
+        ];
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations (version, description, installed_on, success, checksum, execution_time) VALUES (37, 'canonical operation resource scope', CURRENT_TIMESTAMP, 1, ?, 0)",
+        )
+        .bind(legacy_checksum.as_slice())
+        .execute(&pool)
+        .await?;
+        let fk_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('operations') WHERE \"table\" = 'resources' AND \"from\" = 'resource_id'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(fk_before, 1);
+        pool.close().await;
+
+        let store = SqliteStore::connect_file(&path).await?;
+        let fk_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('operations') WHERE \"table\" = 'resources' AND \"from\" = 'resource_id'",
+        )
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(fk_after, 0);
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&store.pool)
+            .await?;
+        assert_eq!(foreign_keys, 1);
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&store.pool)
+            .await?;
+        assert_eq!(integrity, "ok");
+        store.pool.close().await;
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sqlite_relationship_intent_is_unique_replayable_and_reopenable()
     -> Result<(), StoreError> {
         let path = std::env::temp_dir().join(format!("o3k-relationship-{}.sqlite", Uuid::now_v7()));

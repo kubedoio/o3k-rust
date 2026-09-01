@@ -246,9 +246,10 @@ pub(super) async fn migrate_operation_resource_scope(pool: &SqlitePool) -> Resul
     }
 }
 
-/// Accepts the pre-release 0037 checksum only when that database already has
-/// the post-rebuild schema. An FK-bearing database is left for SQLx's normal
-/// checksum failure rather than being silently reclassified.
+/// Accepts the exact released pre-redesign 0037 checksum so the controlled
+/// SQLite rebuild below can migrate that database before normal use. No other
+/// checksum is normalized; SQLx remains the authority for all unrelated
+/// migration tampering or drift.
 async fn normalize_legacy_operation_migration_checksum(
     pool: &SqlitePool,
 ) -> Result<(), StoreError> {
@@ -285,16 +286,6 @@ async fn normalize_legacy_operation_migration_checksum(
         return Ok(());
     }
     if recorded.as_slice() != APPROVED_LEGACY_CHECKSUM {
-        return Ok(());
-    }
-    let has_resource_fk: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_foreign_key_list('operations')\
-         WHERE \"table\" = 'resources' AND \"from\" = 'resource_id'",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(StoreError::Database)?;
-    if has_resource_fk != 0 {
         return Ok(());
     }
     sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 37")
