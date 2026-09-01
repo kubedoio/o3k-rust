@@ -904,12 +904,14 @@ impl ResourceApplication for GenericResourceApplication {
                         .get_canonical_operation(operation_id)
                         .await
                         .map_err(|_| ResourceApplicationError::Internal)?;
-                    return Ok(MutationResult {
-                        operation_id: operation_id.to_string(),
-                        resource_id: Some(id.to_owned()),
-                        complete: existing.state == o3k_store::OperationState::Succeeded,
-                        resource: None,
-                    });
+                    if existing.state == o3k_store::OperationState::Succeeded {
+                        return Ok(MutationResult {
+                            operation_id: operation_id.to_string(),
+                            resource_id: Some(id.to_owned()),
+                            complete: true,
+                            resource: None,
+                        });
+                    }
                 }
                 o3k_api::remove_native_volume(
                     self.store.clone(),
@@ -1050,6 +1052,16 @@ impl ResourceApplication for GenericResourceApplication {
             let key = idempotency_key
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("native:network-delete:{id}"));
+            let network = self
+                .network_service
+                .get_canonical_network(auth, resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            if expected_generation.is_some_and(|expected| {
+                expected != i64::try_from(network.generation).unwrap_or(i64::MAX)
+            }) {
+                return Err(ResourceApplicationError::PreconditionConflict);
+            }
             let operation_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
                 format!("network:delete:{}:{id}:{key}", auth.effective_scope().id()).as_bytes(),
@@ -1109,16 +1121,6 @@ impl ResourceApplication for GenericResourceApplication {
                     });
                 }
                 o3k_store::IdempotencyReservation::Created(_) => {}
-            }
-            let network = self
-                .network_service
-                .get_canonical_network(auth, resource_id)
-                .await
-                .map_err(|_| ResourceApplicationError::NotFound)?;
-            if expected_generation.is_some_and(|expected| {
-                expected != i64::try_from(network.generation).unwrap_or(i64::MAX)
-            }) {
-                return Err(ResourceApplicationError::PreconditionConflict);
             }
             self.network_service
                 .delete_canonical_network(auth, resource_id)
