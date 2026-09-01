@@ -846,6 +846,19 @@ impl ResourceApplication for GenericResourceApplication {
             // equivalent retry returns the original terminal operation.
             match self.store.get_canonical_operation(operation_id).await {
                 Ok(existing) => {
+                    if let Some(expected) = expected_generation {
+                        let bookkeeping = self
+                            .store
+                            .get_resource(resource_id)
+                            .await
+                            .map_err(|_| ResourceApplicationError::NotFound)?;
+                        if bookkeeping.project_id != auth.effective_scope().id().as_str()
+                            || bookkeeping.kind != "volume"
+                            || bookkeeping.generation != expected.saturating_add(1)
+                        {
+                            return Err(ResourceApplicationError::PreconditionConflict);
+                        }
+                    }
                     return Ok(MutationResult {
                         operation_id: operation_id.to_string(),
                         resource_id: Some(id.to_owned()),
@@ -983,6 +996,10 @@ impl ResourceApplication for GenericResourceApplication {
                     )
                     .await
                     .map_err(|_| ResourceApplicationError::Internal)?;
+                self.store
+                    .delete_volume(auth.effective_scope().id().as_str(), resource_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
                 let now = chrono::Utc::now().to_rfc3339();
                 let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
                     o3k_kernel::OperationState::Succeeded,
@@ -994,10 +1011,6 @@ impl ResourceApplication for GenericResourceApplication {
                 .map_err(|_| ResourceApplicationError::Internal)?;
                 self.store
                     .update_canonical_operation_lifecycle(operation_id, &lifecycle)
-                    .await
-                    .map_err(|_| ResourceApplicationError::Internal)?;
-                self.store
-                    .delete_volume(auth.effective_scope().id().as_str(), resource_id)
                     .await
                     .map_err(|_| ResourceApplicationError::Internal)?;
                 return Ok(MutationResult {
