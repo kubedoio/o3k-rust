@@ -1102,7 +1102,14 @@ impl ResourceApplication for GenericResourceApplication {
                 .store
                 .create_or_replay_canonical_scoped_operation(&operation, &canonical, &identity)
                 .await
-                .map_err(|_| ResourceApplicationError::Internal)?;
+                .map_err(|error| match error {
+                    o3k_store::StoreError::ResourceNotFound
+                    | o3k_store::StoreError::NetworkNotFound => ResourceApplicationError::NotFound,
+                    o3k_store::StoreError::IdempotencyConflict => {
+                        ResourceApplicationError::IdempotencyConflict
+                    }
+                    _ => ResourceApplicationError::Internal,
+                })?;
             match acceptance {
                 o3k_store::IdempotencyReservation::Conflict => {
                     return Err(ResourceApplicationError::IdempotencyConflict);
