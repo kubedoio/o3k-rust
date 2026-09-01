@@ -1000,7 +1000,13 @@ impl NetworkService {
             .repository
             .delete_canonical_network(project_id, &id)
             .await
-            .map_err(map_store_error)
+            .map_err(map_store_error)?;
+        match self.inner.repository.delete_network(project_id, &id).await {
+            Ok(())
+            | Err(o3k_store::StoreError::ResourceNotFound)
+            | Err(o3k_store::StoreError::NetworkNotFound) => Ok(()),
+            Err(error) => Err(map_store_error(error)),
+        }
     }
 
     pub async fn delete_canonical_network(

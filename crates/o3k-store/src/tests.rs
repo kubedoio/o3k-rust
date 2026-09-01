@@ -8,6 +8,277 @@ mod tests {
     use uuid::Uuid;
 
     #[tokio::test]
+    async fn sqlite_scoped_operation_migration_preserves_populated_database()
+    -> Result<(), Box<dyn Error>> {
+        use sqlx::migrate::Migrator;
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+
+        let path = std::env::temp_dir().join(format!(
+            "o3k-scoped-operation-upgrade-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let url = format!("sqlite://{}", path.display());
+        let options = SqliteConnectOptions::from_str(&url)?
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+        let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut historical = Migrator::new(migration_path).await?;
+        historical
+            .migrations
+            .to_mut()
+            .retain(|migration| migration.version < 37);
+        historical.run(&pool).await?;
+
+        let generic_resource = Uuid::now_v7().to_string();
+        let canonical_network = Uuid::now_v7().to_string();
+        let generic_operation = Uuid::now_v7().to_string();
+        let canonical_operation = Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO resources (id, kind, project_id, generation, observed_generation, desired_state, observed_state) VALUES (?, 'server', 'project-a', 1, 0, 'requested', 'unknown')",
+        )
+        .bind(&generic_resource)
+        .execute(&pool)
+        .await?;
+        // Pre-0037 canonical operations used the historical generic-resource
+        // projection. Preserve that existing row while the upgrade removes
+        // the FK; the migration must not create another authority row.
+        sqlx::query(
+            "INSERT INTO resources (id, kind, project_id, generation, observed_generation, desired_state, observed_state) VALUES (?, 'network:network', 'project-a', 1, 1, 'active', 'active')",
+        )
+        .bind(&canonical_network)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO canonical_networks (id, project_id, name, generation, state) VALUES (?, 'project-a', 'upgrade-network', 1, 'active')",
+        )
+        .bind(&canonical_network)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO operations (id, resource_id, kind, state, provider_operation_id, error_category, error_message) VALUES (?, ?, 'create', 'succeeded', 'provider-generic', NULL, NULL), (?, ?, 'network:create', 'running', 'provider-canonical', NULL, NULL)",
+        )
+        .bind(&generic_operation)
+        .bind(&generic_resource)
+        .bind(&canonical_operation)
+        .bind(&canonical_network)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO canonical_operation_metadata (operation_id, service, action, actor, owner_scope, resource_type, resource_id, attempt, created_at) VALUES (?, 'compute', 'create', 'user-a', 'project-a', 'compute:server', ?, 0, '2026-01-01T00:00:00Z'), (?, 'network', 'create', 'user-a', 'project-a', 'network:network', ?, 0, '2026-01-01T00:00:01Z')",
+        )
+        .bind(&generic_operation)
+        .bind(&generic_resource)
+        .bind(&canonical_operation)
+        .bind(&canonical_network)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO operation_retry_state (operation_id, attempts) VALUES (?, 2), (?, 3)",
+        )
+        .bind(&generic_operation)
+        .bind(&canonical_operation)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO agent_commands (command_id, idempotency_key, operation_id, resource_id, agent_id, agent_epoch, payload_fingerprint_sha256, payload, state) VALUES ('command-upgrade', 'command-key-upgrade', ?, ?, 'agent-a', 'epoch-a', ?, X'01', 'accepted')",
+        )
+        .bind(&generic_operation)
+        .bind(&generic_resource)
+        .bind("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO artifact_transfers (transfer_id, command_id, operation_id, resource_id, agent_id, agent_epoch, artifact_id, artifact_kind, sha256, size_bytes, format, chunk_size_bytes, chunk_count, state) VALUES ('transfer-upgrade', 'command-upgrade', ?, ?, 'agent-a', 'epoch-a', 'artifact-upgrade', 'image', ?, 1, 'raw', 1, 1, 'offered')",
+        )
+        .bind(&generic_operation)
+        .bind(&generic_resource)
+        .bind("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO image_overlay_ownership (overlay_id, resource_id, operation_id, command_id, agent_id, agent_epoch, base_sha256, base_format, overlay_format, state) VALUES ('overlay-upgrade', ?, ?, 'command-upgrade', 'agent-a', 'epoch-a', ?, 'raw', 'qcow2', 'pending')",
+        )
+        .bind(&generic_resource)
+        .bind(&generic_operation)
+        .bind("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO idempotency_reservations (owner_scope, action, idempotency_key, fingerprint, operation_id) VALUES ('project-a', 'network:create', 'upgrade-idempotency', 'fingerprint-upgrade', ?)",
+        )
+        .bind(&canonical_operation)
+        .execute(&pool)
+        .await?;
+        pool.close().await;
+
+        let store = SqliteStore::connect_file(&path).await?;
+        let operation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
+            .fetch_one(&store.pool)
+            .await?;
+        assert_eq!(operation_count, 2);
+        let metadata_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM canonical_operation_metadata")
+                .fetch_one(&store.pool)
+                .await?;
+        assert_eq!(metadata_count, 2);
+        let retry_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operation_retry_state")
+            .fetch_one(&store.pool)
+            .await?;
+        assert_eq!(retry_count, 2);
+        for table in [
+            "agent_commands",
+            "artifact_transfers",
+            "image_overlay_ownership",
+            "idempotency_reservations",
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&store.pool)
+                .await?;
+            assert_eq!(count, 1, "row lost from {table}");
+        }
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&store.pool)
+            .await?;
+        assert_eq!(foreign_keys, 1);
+        let foreign_key_violations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+                .fetch_one(&store.pool)
+                .await?;
+        assert_eq!(foreign_key_violations, 0);
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&store.pool)
+            .await?;
+        assert_eq!(integrity, "ok");
+
+        sqlx::query("DELETE FROM resources WHERE id = ?")
+            .bind(&generic_resource)
+            .execute(&store.pool)
+            .await?;
+        assert!(
+            store
+                .get_operation(Uuid::parse_str(&generic_operation)?)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .get_operation(Uuid::parse_str(&canonical_operation)?)
+                .await
+                .is_ok()
+        );
+        sqlx::query("DELETE FROM resources WHERE id = ?")
+            .bind(&canonical_network)
+            .execute(&store.pool)
+            .await?;
+        assert!(
+            store
+                .get_operation(Uuid::parse_str(&canonical_operation)?)
+                .await
+                .is_ok()
+        );
+        let canonical_metadata_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM canonical_operation_metadata WHERE operation_id = ?",
+        )
+        .bind(&canonical_operation)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(canonical_metadata_count, 1);
+        drop(store);
+
+        let reopened = SqliteStore::connect_file(&path).await?;
+        assert!(
+            reopened
+                .get_operation(Uuid::parse_str(&canonical_operation)?)
+                .await
+                .is_ok()
+        );
+        let trigger_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ('resources_delete_generic_operations', 'operations_validate_resource_reference')",
+        )
+        .fetch_one(&reopened.pool)
+        .await?;
+        assert_eq!(trigger_count, 2);
+        let invalid_operation = Uuid::now_v7().to_string();
+        let invalid_insert = sqlx::query(
+            "INSERT INTO operations (id, resource_id, kind, state) VALUES (?, ?, 'network:create', 'running')",
+        )
+        .bind(&invalid_operation)
+        .bind(Uuid::now_v7().to_string())
+        .execute(&reopened.pool)
+        .await;
+        assert!(invalid_insert.is_err());
+        drop(reopened);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_scoped_operation_migration_normalizes_only_approved_legacy_checksum()
+    -> Result<(), Box<dyn Error>> {
+        async fn create_database() -> Result<PathBuf, Box<dyn Error>> {
+            let path = std::env::temp_dir().join(format!(
+                "o3k-scoped-operation-checksum-{}.sqlite",
+                Uuid::now_v7()
+            ));
+            let store = SqliteStore::connect_file(&path).await?;
+            store.pool.close().await;
+            Ok(path)
+        }
+
+        async fn set_checksum(
+            path: &std::path::Path,
+            checksum: &[u8],
+        ) -> Result<(), Box<dyn Error>> {
+            let url = format!("sqlite://{}", path.display());
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&url)
+                .await?;
+            sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 37")
+                .bind(checksum)
+                .execute(&pool)
+                .await?;
+            pool.close().await;
+            Ok(())
+        }
+
+        let approved = [
+            0x89, 0xe6, 0x76, 0x54, 0xcd, 0x55, 0xd6, 0xc7, 0xaf, 0xbf, 0x46, 0x1c, 0x10, 0x46,
+            0x82, 0xa9, 0xda, 0x1a, 0x20, 0xee, 0x6e, 0x56, 0x40, 0x8a, 0x29, 0x37, 0x45, 0xe0,
+            0x3a, 0xbf, 0x2a, 0x66, 0x73, 0x24, 0x4f, 0xc2, 0x64, 0xe6, 0x67, 0x40, 0xbb, 0x1d,
+            0x8e, 0xcf, 0x13, 0x93, 0x33, 0xd6,
+        ];
+        let approved_path = create_database().await?;
+        set_checksum(&approved_path, &approved).await?;
+        let reopened = SqliteStore::connect_file(&approved_path).await?;
+        let normalized: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 37")
+                .fetch_one(&reopened.pool)
+                .await?;
+        assert_ne!(normalized, approved);
+        reopened.pool.close().await;
+        let _ = std::fs::remove_file(&approved_path);
+        let _ = std::fs::remove_file(format!("{}-wal", approved_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", approved_path.display()));
+
+        let arbitrary = vec![0x5a; 48];
+        let arbitrary_path = create_database().await?;
+        set_checksum(&arbitrary_path, &arbitrary).await?;
+        assert!(SqliteStore::connect_file(&arbitrary_path).await.is_err());
+        let _ = std::fs::remove_file(&arbitrary_path);
+        let _ = std::fs::remove_file(format!("{}-wal", arbitrary_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", arbitrary_path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sqlite_relationship_intent_is_unique_replayable_and_reopenable()
     -> Result<(), StoreError> {
         let path = std::env::temp_dir().join(format!("o3k-relationship-{}.sqlite", Uuid::now_v7()));
@@ -775,6 +1046,109 @@ mod tests {
                 .await?,
             CanonicalAcceptanceOutcome::Conflict
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_canonical_scoped_operation_uses_authoritative_network_row()
+    -> Result<(), StoreError> {
+        let path =
+            std::env::temp_dir().join(format!("o3k-scoped-network-{}.sqlite", Uuid::now_v7()));
+        let store = SqliteStore::connect(&format!("sqlite://{}", path.display())).await?;
+        let resource_id = Uuid::now_v7();
+        store
+            .insert_canonical_network(&CanonicalNetworkRecord {
+                id: resource_id,
+                project_id: "project-a".to_owned(),
+                name: "native-delete-network".to_owned(),
+                admin_state_up: true,
+                generation: 1,
+                state: "active".to_owned(),
+            })
+            .await?;
+        let operation = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id,
+            kind: "lifecycle:delete".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        let canonical = CanonicalOperationRecord {
+            resource_type: "network:network".to_owned(),
+            ..canonical_idempotent_operation(&operation, "project-a", "network:DeleteNetwork")
+        };
+        let request = IdempotencyReservationRequest::from_semantics(
+            "project-a",
+            "network:DeleteNetwork",
+            "native-delete",
+            "network:network",
+            Some(&resource_id.to_string()),
+            &serde_json::json!({}),
+            operation.id,
+        )?;
+        assert_eq!(
+            store
+                .create_or_replay_canonical_scoped_operation(&operation, &canonical, &request)
+                .await?,
+            IdempotencyReservation::Created(operation.id)
+        );
+        let update = CanonicalOperationLifecycleUpdate::new(
+            o3k_kernel::OperationState::Succeeded,
+            1,
+            Some("2026-08-22T00:00:01Z".to_owned()),
+            Some("2026-08-22T00:00:02Z".to_owned()),
+            None,
+        )?;
+        store
+            .update_canonical_operation_lifecycle(operation.id, &update)
+            .await?;
+        assert_eq!(
+            store.get_canonical_operation(operation.id).await?,
+            CanonicalOperationRecord {
+                state: OperationState::Succeeded,
+                attempt: 1,
+                finished_at: Some("2026-08-22T00:00:02Z".to_owned()),
+                started_at: Some("2026-08-22T00:00:01Z".to_owned()),
+                ..canonical.clone()
+            }
+        );
+        let replay_id = Uuid::now_v7();
+        assert_eq!(
+            store
+                .create_or_replay_canonical_scoped_operation(
+                    &OperationRecord {
+                        id: replay_id,
+                        ..operation.clone()
+                    },
+                    &CanonicalOperationRecord {
+                        id: replay_id,
+                        ..canonical
+                    },
+                    &IdempotencyReservationRequest {
+                        operation_id: replay_id,
+                        ..request
+                    },
+                )
+                .await?,
+            IdempotencyReservation::ExistingEquivalent(operation.id)
+        );
+        sqlx::query(
+            "UPDATE canonical_operation_metadata SET owner_scope = 'project-b' WHERE operation_id = ?",
+        )
+        .bind(operation.id.to_string())
+        .execute(&store.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        assert!(matches!(
+            store.get_canonical_operation(operation.id).await,
+            Err(StoreError::Corrupt(_))
+        ));
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
         Ok(())
     }
 
@@ -1700,6 +2074,17 @@ mod tests {
     #[tokio::test]
     async fn transaction_rolls_back_when_operation_insert_fails() -> Result<(), StoreError> {
         let store = SqliteStore::connect("sqlite::memory:").await?;
+        let anchor = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "server".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "requested".to_owned(),
+            observed_state: "unknown".to_owned(),
+            provider_id: None,
+        };
+        store.insert_resource(&anchor).await?;
         let resource = ResourceRecord {
             id: Uuid::now_v7(),
             kind: "server".to_owned(),
@@ -1712,13 +2097,18 @@ mod tests {
         };
         let operation = OperationRecord {
             id: Uuid::now_v7(),
-            resource_id: Uuid::now_v7(),
+            resource_id: anchor.id,
             kind: "test".to_owned(),
             state: OperationState::Pending,
             provider_operation_id: None,
             error_category: None,
             error_message: None,
         };
+        // The canonical operation migration deliberately removes the generic
+        // resource foreign key.  Force the operation insert to fail through a
+        // real uniqueness violation so this test continues to verify the
+        // transaction rollback contract.
+        store.insert_operation(&operation).await?;
         assert!(
             store
                 .insert_resource_and_operation(&resource, &operation, None)

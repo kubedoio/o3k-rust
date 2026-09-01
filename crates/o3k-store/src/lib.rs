@@ -234,6 +234,56 @@ pub(crate) fn validate_canonical_operation_read(
     Ok(())
 }
 
+/// Validates a canonical operation whose resource is owned by a service
+/// table, not by the generic resource index.
+pub(crate) fn validate_canonical_scoped_operation_read(
+    operation: &OperationRecord,
+    canonical: &CanonicalOperationRecord,
+) -> Result<(), StoreError> {
+    if operation.id != canonical.id
+        || canonical.resource_id.as_deref() != Some(&operation.resource_id.to_string())
+    {
+        return Err(StoreError::Corrupt(
+            "canonical scoped operation identities differ".into(),
+        ));
+    }
+    if canonical.actor.trim().is_empty()
+        || canonical.owner_scope.trim().is_empty()
+        || canonical.created_at.trim().is_empty()
+        || DateTime::parse_from_rfc3339(&canonical.created_at).is_err()
+        || canonical
+            .started_at
+            .as_deref()
+            .is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
+        || canonical
+            .finished_at
+            .as_deref()
+            .is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
+    {
+        return Err(StoreError::Corrupt(
+            "canonical operation identity is incomplete".into(),
+        ));
+    }
+    let action = o3k_kernel::ActionId::parse(&canonical.action)
+        .map_err(|e| StoreError::Corrupt(format!("invalid operation action: {e}")))?;
+    let (namespace, name) = canonical
+        .resource_type
+        .split_once(':')
+        .ok_or_else(|| StoreError::Corrupt("invalid operation resource type".into()))?;
+    let resource_type = o3k_kernel::ResourceType::new(namespace, name)
+        .map_err(|e| StoreError::Corrupt(format!("invalid operation resource type: {e}")))?;
+    if action.namespace() != resource_type.namespace()
+        || operation.state != canonical.state
+        || resource_type.namespace() != "network"
+        || !matches!(resource_type.name(), "network" | "address_realm")
+    {
+        return Err(StoreError::Corrupt(
+            "canonical scoped operation action/resource/state differs".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_canonical_resource_acceptance(
     resource: &ResourceRecord,
     operation: &OperationRecord,

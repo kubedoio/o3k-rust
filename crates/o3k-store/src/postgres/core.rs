@@ -484,19 +484,6 @@ impl DurableStore for PostgresStore {
             .execute(&mut *tx)
             .await
             .map_err(StoreError::Database)?;
-        let resource = sqlx::query("SELECT kind, project_id FROM resources WHERE id=$1")
-            .bind(operation.resource_id.to_string())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(StoreError::Database)?
-            .ok_or(StoreError::ResourceNotFound)?;
-        if resource.get::<String, _>("kind") != canonical.resource_type
-            || resource.get::<String, _>("project_id") != canonical.owner_scope
-        {
-            return Err(StoreError::Corrupt(
-                "canonical scoped operation resource index differs".into(),
-            ));
-        }
         if let Some(row) = sqlx::query("SELECT fingerprint, operation_id FROM idempotency_reservations WHERE owner_scope=$1 AND action=$2 AND idempotency_key=$3")
             .bind(&request.owner_scope).bind(&request.action).bind(&request.key)
             .fetch_optional(&mut *tx).await.map_err(StoreError::Database)?
@@ -521,6 +508,30 @@ impl DurableStore for PostgresStore {
             }
             tx.commit().await.map_err(StoreError::Database)?;
             return Ok(IdempotencyReservation::ExistingEquivalent(existing));
+        }
+        let owner_scope: Option<String> = match canonical.resource_type.as_str() {
+            "network:network" => {
+                sqlx::query_scalar("SELECT project_id FROM canonical_networks WHERE id=$1")
+                    .bind(operation.resource_id.to_string())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(StoreError::Database)?
+            }
+            "network:address_realm" => {
+                sqlx::query_scalar("SELECT project_id FROM canonical_address_realms WHERE id=$1")
+                    .bind(operation.resource_id.to_string())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(StoreError::Database)?
+            }
+            _ => {
+                return Err(StoreError::Corrupt(
+                    "unsupported canonical scoped resource type".into(),
+                ));
+            }
+        };
+        if owner_scope.as_deref() != Some(canonical.owner_scope.as_str()) {
+            return Err(StoreError::ResourceNotFound);
         }
         insert_postgres_canonical_acceptance(&mut tx, operation, canonical).await?;
         sqlx::query("INSERT INTO idempotency_reservations (owner_scope, action, idempotency_key, fingerprint, operation_id) VALUES ($1,$2,$3,$4,$5)")
@@ -661,7 +672,6 @@ impl DurableStore for PostgresStore {
             .map_err(StoreError::Database)?
             .ok_or(StoreError::OperationNotFound)?;
         let operation = self.get_operation(id).await?;
-        let resource = self.get_resource(operation.resource_id).await?;
         let canonical = CanonicalOperationRecord {
             id,
             service: row.try_get("service").map_err(StoreError::Database)?,
@@ -682,7 +692,75 @@ impl DurableStore for PostgresStore {
             error: row.try_get("error").map_err(StoreError::Database)?,
             request_id: row.try_get("request_id").map_err(StoreError::Database)?,
         };
-        crate::validate_canonical_operation_read(&operation, &canonical, &resource)?;
+        match canonical.resource_type.as_str() {
+            "network:network" => {
+                let owner = sqlx::query_scalar::<_, String>(
+                    "SELECT project_id FROM canonical_networks WHERE id = $1",
+                )
+                .bind(operation.resource_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+                if let Some(owner) = owner {
+                    if owner != canonical.owner_scope {
+                        return Err(StoreError::Corrupt(
+                            "canonical network operation owner differs from network owner".into(),
+                        ));
+                    }
+                } else if sqlx::query_scalar::<_, String>(
+                    "SELECT project_id FROM canonical_address_realms WHERE id = $1",
+                )
+                .bind(operation.resource_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?
+                .is_some()
+                {
+                    return Err(StoreError::Corrupt(
+                        "canonical network operation references an address realm".into(),
+                    ));
+                }
+            }
+            "network:address_realm" => {
+                let owner = sqlx::query_scalar::<_, String>(
+                    "SELECT project_id FROM canonical_address_realms WHERE id = $1",
+                )
+                .bind(operation.resource_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+                if let Some(owner) = owner {
+                    if owner != canonical.owner_scope {
+                        return Err(StoreError::Corrupt(
+                            "canonical address realm operation owner differs from realm owner"
+                                .into(),
+                        ));
+                    }
+                } else if sqlx::query_scalar::<_, String>(
+                    "SELECT project_id FROM canonical_networks WHERE id = $1",
+                )
+                .bind(operation.resource_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?
+                .is_some()
+                {
+                    return Err(StoreError::Corrupt(
+                        "canonical address realm operation references a network".into(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+        match self.get_resource(operation.resource_id).await {
+            Ok(resource) => {
+                crate::validate_canonical_operation_read(&operation, &canonical, &resource)?
+            }
+            Err(StoreError::ResourceNotFound) => {
+                crate::validate_canonical_scoped_operation_read(&operation, &canonical)?;
+            }
+            Err(error) => return Err(error),
+        }
         Ok(canonical)
     }
 

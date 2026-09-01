@@ -10,7 +10,7 @@ use super::{
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{
-    Row,
+    Row, SqlitePool,
     sqlite::{
         SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow, SqliteSynchronous,
     },
@@ -30,6 +30,7 @@ use crate::{
     VolumeAttachmentRecord, WalCheckpointMode, is_sqlite_busy, restrict_sqlite_sidecars,
     validate_canonical_idempotent_operation_identity, validate_canonical_lifecycle_update,
     validate_canonical_operation_read, validate_canonical_resource_acceptance,
+    validate_canonical_scoped_operation_read,
 };
 
 pub(super) async fn insert_sqlite_canonical_acceptance(
@@ -51,6 +52,256 @@ pub(super) async fn insert_sqlite_canonical_acceptance(
     sqlx::query("INSERT INTO idempotency_reservations (owner_scope,action,idempotency_key,fingerprint,operation_id) VALUES (?,?,?,?,?)")
         .bind(&request.owner_scope).bind(&request.action).bind(&request.key).bind(&request.fingerprint)
         .bind(request.operation_id.to_string()).execute(&mut **connection).await.map_err(StoreError::Database)?;
+    Ok(())
+}
+
+/// Rebuilds `operations` without the historical generic-resource foreign key.
+///
+/// SQLx 0.8.6's SQLite migrator always wraps migration SQL in a transaction,
+/// including migrations prefixed with `-- no-transaction`. SQLite refuses to
+/// change `foreign_keys` while a transaction is active, so this rebuild is
+/// coordinated here on one acquired connection. The connection is obtained
+/// before the store is exposed to callers, and `BEGIN IMMEDIATE` prevents
+/// concurrent writers while the rebuild runs.
+pub(super) async fn migrate_operation_resource_scope(pool: &SqlitePool) -> Result<(), StoreError> {
+    let mut connection = pool.acquire().await.map_err(StoreError::Database)?;
+    let has_operations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'operations'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(StoreError::Database)?;
+    if has_operations == 0 {
+        return Ok(());
+    }
+
+    let has_resource_fk: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('operations')\
+         WHERE \"table\" = 'resources' AND \"from\" = 'resource_id'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(StoreError::Database)?;
+
+    if has_resource_fk == 0 {
+        sqlx::query(
+            r#"CREATE TRIGGER IF NOT EXISTS resources_delete_generic_operations
+                AFTER DELETE ON resources
+                BEGIN
+                    DELETE FROM operations
+                    WHERE resource_id = OLD.id
+                      AND NOT EXISTS (
+                          SELECT 1 FROM canonical_operation_metadata metadata
+                          WHERE metadata.operation_id = operations.id
+                            AND metadata.resource_type IN ('network:network', 'network:address_realm')
+                      );
+                END"#,
+        )
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        sqlx::query(
+            r#"CREATE TRIGGER IF NOT EXISTS operations_validate_resource_reference
+                BEFORE INSERT ON operations
+                BEGIN
+                    SELECT RAISE(ABORT, 'operation resource not found')
+                    WHERE NOT EXISTS (SELECT 1 FROM resources WHERE id = NEW.resource_id)
+                      AND NOT EXISTS (SELECT 1 FROM canonical_networks WHERE id = NEW.resource_id)
+                      AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE id = NEW.resource_id);
+                END"#,
+        )
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        return Ok(());
+    }
+
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+    let foreign_keys_off: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+    if foreign_keys_off != 0 {
+        let _ = sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *connection)
+            .await;
+        return Err(StoreError::Corrupt(
+            "SQLite foreign-key enforcement could not be disabled for operation migration"
+                .to_owned(),
+        ));
+    }
+
+    let rebuild = async {
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query(
+            r#"CREATE TABLE operations_without_resource_fk (
+                id TEXT PRIMARY KEY NOT NULL,
+                resource_id TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'create',
+                state TEXT NOT NULL,
+                provider_operation_id TEXT,
+                error_category TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"#,
+        )
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        sqlx::query(
+            r#"INSERT INTO operations_without_resource_fk
+                (id, resource_id, kind, state, provider_operation_id, error_category, error_message, created_at)
+                SELECT id, resource_id, kind, state, provider_operation_id, error_category, error_message, created_at
+                FROM operations"#,
+        )
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        sqlx::query("DROP TABLE operations")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query("ALTER TABLE operations_without_resource_fk RENAME TO operations")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query("CREATE INDEX operations_resource_idx ON operations(resource_id)")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query(
+            r#"CREATE TRIGGER resources_delete_generic_operations
+                AFTER DELETE ON resources
+                BEGIN
+                    DELETE FROM operations
+                    WHERE resource_id = OLD.id
+                      AND NOT EXISTS (
+                          SELECT 1 FROM canonical_operation_metadata metadata
+                          WHERE metadata.operation_id = operations.id
+                            AND metadata.resource_type IN ('network:network', 'network:address_realm')
+                      );
+                END"#,
+        )
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        let foreign_key_violations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+        if foreign_key_violations != 0 {
+            return Err(StoreError::Corrupt(
+                "SQLite foreign-key check failed after operation migration".to_owned(),
+            ));
+        }
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query(
+            r#"CREATE TRIGGER operations_validate_resource_reference
+                BEFORE INSERT ON operations
+                BEGIN
+                    SELECT RAISE(ABORT, 'operation resource not found')
+                    WHERE NOT EXISTS (SELECT 1 FROM resources WHERE id = NEW.resource_id)
+                      AND NOT EXISTS (SELECT 1 FROM canonical_networks WHERE id = NEW.resource_id)
+                      AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE id = NEW.resource_id);
+                END"#,
+        )
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        if !integrity.eq_ignore_ascii_case("ok") {
+            return Err(StoreError::Corrupt(format!(
+                "SQLite integrity check failed after operation migration: {integrity}"
+            )));
+        }
+        sqlx::query("COMMIT")
+            .execute(&mut *connection)
+            .await
+            .map(|_| ())
+            .map_err(StoreError::Database)
+    }
+    .await;
+
+    if rebuild.is_err() {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+    }
+    let restore = sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await
+        .map(|_| ())
+        .map_err(StoreError::Database);
+    match (rebuild, restore) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+/// Accepts the pre-release 0037 checksum only when that database already has
+/// the post-rebuild schema. An FK-bearing database is left for SQLx's normal
+/// checksum failure rather than being silently reclassified.
+async fn normalize_legacy_operation_migration_checksum(
+    pool: &SqlitePool,
+) -> Result<(), StoreError> {
+    const APPROVED_LEGACY_CHECKSUM: [u8; 48] = [
+        0x89, 0xe6, 0x76, 0x54, 0xcd, 0x55, 0xd6, 0xc7, 0xaf, 0xbf, 0x46, 0x1c, 0x10, 0x46, 0x82,
+        0xa9, 0xda, 0x1a, 0x20, 0xee, 0x6e, 0x56, 0x40, 0x8a, 0x29, 0x37, 0x45, 0xe0, 0x3a, 0xbf,
+        0x2a, 0x66, 0x73, 0x24, 0x4f, 0xc2, 0x64, 0xe6, 0x67, 0x40, 0xbb, 0x1d, 0x8e, 0xcf, 0x13,
+        0x93, 0x33, 0xd6,
+    ];
+    let migration_table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(StoreError::Database)?;
+    if migration_table == 0 {
+        return Ok(());
+    }
+    let Some(expected) = sqlx::migrate!()
+        .iter()
+        .find(|migration| migration.version == 37)
+    else {
+        return Ok(());
+    };
+    let Some(recorded): Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 37")
+            .fetch_optional(pool)
+            .await
+            .map_err(StoreError::Database)?
+    else {
+        return Ok(());
+    };
+    if recorded == expected.checksum.as_ref() {
+        return Ok(());
+    }
+    if recorded.as_slice() != APPROVED_LEGACY_CHECKSUM {
+        return Ok(());
+    }
+    let has_resource_fk: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('operations')\
+         WHERE \"table\" = 'resources' AND \"from\" = 'resource_id'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(StoreError::Database)?;
+    if has_resource_fk != 0 {
+        return Ok(());
+    }
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 37")
+        .bind(expected.checksum.as_ref())
+        .execute(pool)
+        .await
+        .map_err(StoreError::Database)?;
     Ok(())
 }
 
@@ -171,10 +422,12 @@ impl SqliteStore {
             .await
             .map_err(StoreError::Database)?;
 
+        normalize_legacy_operation_migration_checksum(&pool).await?;
         sqlx::migrate!()
             .run(&pool)
             .await
             .map_err(StoreError::Migration)?;
+        migrate_operation_resource_scope(&pool).await?;
 
         let store = Self {
             pool,
@@ -860,7 +1113,6 @@ impl DurableStore for SqliteStore {
             .map_err(StoreError::Database)?
             .ok_or(StoreError::OperationNotFound)?;
         let operation = self.get_operation(id).await?;
-        let resource = self.get_resource(operation.resource_id).await?;
         let canonical = CanonicalOperationRecord {
             id,
             service: row.get("service"),
@@ -878,7 +1130,73 @@ impl DurableStore for SqliteStore {
             error: row.get("error"),
             request_id: row.get("request_id"),
         };
-        validate_canonical_operation_read(&operation, &canonical, &resource)?;
+        match canonical.resource_type.as_str() {
+            "network:network" => {
+                let owner = sqlx::query_scalar::<_, String>(
+                    "SELECT project_id FROM canonical_networks WHERE id = ?",
+                )
+                .bind(operation.resource_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+                if let Some(owner) = owner {
+                    if owner != canonical.owner_scope {
+                        return Err(StoreError::Corrupt(
+                            "canonical network operation owner differs from network owner".into(),
+                        ));
+                    }
+                } else if sqlx::query_scalar::<_, String>(
+                    "SELECT project_id FROM canonical_address_realms WHERE id = ?",
+                )
+                .bind(operation.resource_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?
+                .is_some()
+                {
+                    return Err(StoreError::Corrupt(
+                        "canonical network operation references an address realm".into(),
+                    ));
+                }
+            }
+            "network:address_realm" => {
+                let owner = sqlx::query_scalar::<_, String>(
+                    "SELECT project_id FROM canonical_address_realms WHERE id = ?",
+                )
+                .bind(operation.resource_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+                if let Some(owner) = owner {
+                    if owner != canonical.owner_scope {
+                        return Err(StoreError::Corrupt(
+                            "canonical address realm operation owner differs from realm owner"
+                                .into(),
+                        ));
+                    }
+                } else if sqlx::query_scalar::<_, String>(
+                    "SELECT project_id FROM canonical_networks WHERE id = ?",
+                )
+                .bind(operation.resource_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?
+                .is_some()
+                {
+                    return Err(StoreError::Corrupt(
+                        "canonical address realm operation references a network".into(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+        match self.get_resource(operation.resource_id).await {
+            Ok(resource) => validate_canonical_operation_read(&operation, &canonical, &resource)?,
+            Err(StoreError::ResourceNotFound) => {
+                validate_canonical_scoped_operation_read(&operation, &canonical)?;
+            }
+            Err(error) => return Err(error),
+        }
         Ok(canonical)
     }
 
@@ -943,15 +1261,6 @@ impl DurableStore for SqliteStore {
             .await
             .map_err(StoreError::Database)?;
         let result: Result<IdempotencyReservation, StoreError> = async {
-            let resource = sqlx::query("SELECT kind, project_id FROM resources WHERE id=?")
-                .bind(operation.resource_id.to_string()).fetch_optional(&mut *connection)
-                .await.map_err(StoreError::Database)?
-                .ok_or(StoreError::ResourceNotFound)?;
-            if resource.get::<String, _>("kind") != canonical.resource_type
-                || resource.get::<String, _>("project_id") != canonical.owner_scope
-            {
-                return Err(StoreError::Corrupt("canonical scoped operation resource index differs".into()));
-            }
             if let Some(row) = sqlx::query("SELECT fingerprint, operation_id FROM idempotency_reservations WHERE owner_scope=? AND action=? AND idempotency_key=?")
                 .bind(&request.owner_scope).bind(&request.action).bind(&request.key)
                 .fetch_optional(&mut *connection).await.map_err(StoreError::Database)?
@@ -974,6 +1283,18 @@ impl DurableStore for SqliteStore {
                     return Err(StoreError::Corrupt("canonical scoped operation replay identity differs".into()));
                 }
                 return Ok(IdempotencyReservation::ExistingEquivalent(existing));
+            }
+            let owner_scope: Option<String> = match canonical.resource_type.as_str() {
+                "network:network" => sqlx::query_scalar("SELECT project_id FROM canonical_networks WHERE id=?")
+                    .bind(operation.resource_id.to_string()).fetch_optional(&mut *connection).await
+                    .map_err(StoreError::Database)?,
+                "network:address_realm" => sqlx::query_scalar("SELECT project_id FROM canonical_address_realms WHERE id=?")
+                    .bind(operation.resource_id.to_string()).fetch_optional(&mut *connection).await
+                    .map_err(StoreError::Database)?,
+                _ => return Err(StoreError::Corrupt("unsupported canonical scoped resource type".into())),
+            };
+            if owner_scope.as_deref() != Some(canonical.owner_scope.as_str()) {
+                return Err(StoreError::ResourceNotFound);
             }
             insert_sqlite_canonical_acceptance(&mut connection, operation, canonical, request).await?;
             Ok(IdempotencyReservation::Created(operation.id))
