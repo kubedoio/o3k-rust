@@ -13,6 +13,7 @@ use axum::{
 };
 use o3k_kernel::{ManifestRegistry, ServiceLifecycleState};
 use serde::Serialize;
+use std::sync::{Arc, RwLock};
 
 pub mod auth;
 pub mod compute;
@@ -28,6 +29,7 @@ pub mod volume;
 #[derive(Clone, Default)]
 pub struct NativeApiState {
     pub registry: Option<ManifestRegistry>,
+    lifecycle_registry: Option<Arc<RwLock<ManifestRegistry>>>,
     pub cursor_config: pagination::CursorConfig,
     pub token_issuer: Option<std::sync::Arc<dyn auth::TokenIssuer>>,
     pub server_reader: Option<std::sync::Arc<dyn compute::ServerReader>>,
@@ -51,14 +53,21 @@ impl NativeApiState {
         volume_reader: Option<std::sync::Arc<dyn volume::VolumeReader>>,
         network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
     ) -> Result<Self, String> {
-        let resource_index = registry
+        let lifecycle_registry = registry.map(|registry| Arc::new(RwLock::new(registry)));
+        let resource_index = lifecycle_registry
             .as_ref()
-            .map(resource::ResourceDispatcher::from_manifest_registry)
+            .map(|registry| {
+                resource::ResourceDispatcher::from_shared_manifest_registry(registry.clone())
+            })
             .transpose()
             .map_err(|error| format!("native resource dispatcher construction failed: {error:?}"))?
             .unwrap_or_default();
+        let registry = lifecycle_registry
+            .as_ref()
+            .and_then(|registry| registry.read().ok().map(|registry| registry.clone()));
         Ok(Self {
             registry,
+            lifecycle_registry,
             cursor_config,
             token_issuer,
             server_reader,
@@ -96,6 +105,14 @@ impl NativeApiState {
     ) -> Self {
         self.authorizer = Some(authorizer);
         self
+    }
+
+    /// Returns the shared lifecycle registry used by native discovery and
+    /// mutation gating. Runtime health transitions must update this registry
+    /// so every cloned request state observes the same readiness.
+    #[must_use]
+    pub fn lifecycle_registry(&self) -> Option<Arc<RwLock<ManifestRegistry>>> {
+        self.lifecycle_registry.clone()
     }
 }
 
@@ -187,9 +204,17 @@ pub struct ServicesResponse {
 }
 
 pub async fn discover_services(State(state): State<NativeApiState>) -> impl IntoResponse {
-    let Some(registry) = &state.registry else {
+    let Some(registry) = state.lifecycle_registry.as_ref() else {
         return (
             StatusCode::OK,
+            Json(serde_json::json!({"services": [], "count": 0})),
+        )
+            .into_response();
+    };
+
+    let Ok(registry) = registry.read() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"services": [], "count": 0})),
         )
             .into_response();
@@ -242,7 +267,7 @@ pub struct ResourceTypesResponse {
 }
 
 pub async fn discover_resource_types(State(state): State<NativeApiState>) -> impl IntoResponse {
-    let Some(_registry) = &state.registry else {
+    if state.lifecycle_registry.is_none() {
         return (
             StatusCode::OK,
             Json(serde_json::json!({"resource_types": [], "count": 0})),
@@ -263,7 +288,7 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
             schema_version: descriptor.schema_version.clone(),
             collection: descriptor.collection.clone(),
             scope: descriptor.scope.to_string(),
-            ready: descriptor.ready,
+            ready: state.resource_index.is_ready(descriptor),
             lifecycle_actions: actions,
         });
     }
@@ -487,6 +512,77 @@ mod tests {
         assert!(kinds.iter().any(|kind| kind == "compute:server"));
         assert!(kinds.iter().any(|kind| kind == "network:address_realm"));
         assert!(kinds.iter().any(|kind| kind == "volume:volume"));
+    }
+
+    #[tokio::test]
+    async fn resource_discovery_tracks_shared_readiness_transition() {
+        let mut registry = ManifestRegistry::new();
+        registry.seed_core().unwrap();
+        registry
+            .register_in_process_controller("compute", true, None)
+            .unwrap();
+        let state = NativeApiState::new(
+            Some(registry),
+            pagination::CursorConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let lifecycle = state.lifecycle_registry().unwrap();
+        let app = router(state);
+
+        let request = || {
+            axum::http::Request::builder()
+                .uri("/resource-types")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let response = tower::ServiceExt::oneshot(app.clone(), request())
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let compute = body["resource_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|resource| resource["service"] == "compute")
+            .unwrap();
+        assert!(compute["ready"].as_bool().unwrap());
+
+        lifecycle
+            .write()
+            .unwrap()
+            .update_controller_health(
+                "compute",
+                o3k_kernel::controller::ControllerHealth {
+                    healthy: false,
+                    detail: Some("provider unavailable".to_owned()),
+                    protocol_version: o3k_kernel::controller::ProtocolVersion::V1,
+                },
+            )
+            .unwrap();
+
+        let response = tower::ServiceExt::oneshot(app, request()).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let compute = body["resource_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|resource| resource["service"] == "compute")
+            .unwrap();
+        assert!(!compute["ready"].as_bool().unwrap());
     }
 
     #[tokio::test]
