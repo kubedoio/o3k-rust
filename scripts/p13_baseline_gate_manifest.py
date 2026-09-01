@@ -39,6 +39,12 @@ BASELINE_GATES = [
     "tests/p13_4_storage_lifecycle.sh",
 ]
 
+GENERATED_BASELINE_ARTIFACTS = [
+    "docs/compatibility/p13-2/p13-2c-provider-port-lifecycle-evidence.json",
+    "docs/compatibility/p13-3/p13-3b3-port-security-group-provider-lifecycle-evidence.json",
+    "docs/compatibility/p13-3/p13-3e-floating-ip-provider-lifecycle-evidence.json",
+]
+
 
 def git(root: Path, *args: str) -> str:
     return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
@@ -163,6 +169,15 @@ def blocked_record(gate_path: str, source_commit: str, log_path: Path, reason: s
     }
 
 
+def restore_generated_artifacts(root: Path) -> None:
+    """Keep upstream gate evidence side effects out of the caller's checkout."""
+
+    subprocess.run(
+        ["git", "-C", str(root), "restore", "--", *GENERATED_BASELINE_ARTIFACTS],
+        check=True,
+    )
+
+
 def build_manifest(root: Path, output: Path, timeout_seconds: int | None) -> dict[str, object]:
     run_id = str(uuid.uuid4())
     source_commit = git(root, "rev-parse", "HEAD")
@@ -179,6 +194,9 @@ def build_manifest(root: Path, output: Path, timeout_seconds: int | None) -> dic
         gates.append(record)
         if record.get("reason") in {"head_changed_before_gate", "head_changed_after_gate"}:
             head_changed = True
+
+    if working_tree_clean_before:
+        restore_generated_artifacts(root)
 
     all_passed = all(gate["result"] == "passed" for gate in gates)
     current_commit = git(root, "rev-parse", "HEAD")

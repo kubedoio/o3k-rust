@@ -1541,6 +1541,13 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
         "head_sha": __import__("subprocess").check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip(),
         "result": result,
     }
+    if resource in {"openstack_blockstorage_volume_v3", "openstack_compute_volume_attach_v2"}:
+        item["backend_observation"] = {
+            "canonical_provider": "lvm",
+            "volume_group": os.environ.get("O3K_LVM_VOLUME_GROUP"),
+            "thin_pool": os.environ.get("O3K_LVM_THIN_POOL"),
+            "provider_namespace": os.environ.get("O3K_LVM_PROVIDER_NAMESPACE"),
+        }
     if resource == "openstack_compute_volume_attach_v2" and kind == "import":
         server_id, attachment_id = import_id.split("/", 1)
         item["provider_import_components"] = {"server_id": server_id, "attachment_id": attachment_id}
@@ -1611,6 +1618,7 @@ document = {
         **baseline_evidence,
     },
     "canonical_authority": "o3k",
+    "p13_5a_contract_sha256": digest(root + "/docs/compatibility/p13-5/p13-5a-convergence-contract.json"),
     "manual_state_edits": False,
     "toolchain": {
         "opentofu": "1.12.6", "opentofu_archive_sha256": digest(tofu_archive),

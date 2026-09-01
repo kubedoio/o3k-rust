@@ -203,6 +203,7 @@ def validate_verified_baseline(baseline: object, tested_sha: str) -> None:
     require(isinstance(gates, list) and len(gates) == len(BASELINE_GATES), "baseline evidence needs exactly 11 gate results")
     require(baseline.get("gate_count") == len(BASELINE_GATES), "baseline gate_count is invalid")
     require(baseline.get("execution", {}).get("working_tree_clean_before") is True, "baseline did not start from a clean worktree")
+    require(baseline.get("execution", {}).get("working_tree_clean_after") is True, "baseline did not finish with a clean worktree")
     require(
         {gate.get("path") for gate in gates if isinstance(gate, dict)} == BASELINE_GATES,
         "baseline evidence does not cover the complete P13.2-P13.4 gate set",
@@ -296,6 +297,9 @@ def validate(document: dict, *, allow_incomplete: bool = False) -> None:
         )
     contract_path = Path(__file__).resolve().parents[1] / "docs/compatibility/p13-5/p13-5a-convergence-contract.json"
     contract = json.loads(contract_path.read_text())
+    contract_digest = __import__("hashlib").sha256(contract_path.read_bytes()).hexdigest()
+    if not allow_incomplete:
+        require(document.get("p13_5a_contract_sha256") == contract_digest, "P13.5B evidence is not bound to the frozen P13.5A contract")
     contract_resources = [item.get("resource") for item in contract.get("resources", [])]
     require(
         len(contract_resources) == len(RESOURCES)
@@ -364,6 +368,10 @@ def validate(document: dict, *, allow_incomplete: bool = False) -> None:
             require(scenario["owner_scope"], "passed scenario is missing owner_scope")
             validate_state_identity(scenario)
             require(scenario["canonical_duplicate_count"] == 0, "passed scenario has duplicate canonical resources")
+            if scenario["resource"] in {"openstack_blockstorage_volume_v3", "openstack_compute_volume_attach_v2"}:
+                backend = scenario.get("backend_observation")
+                require(isinstance(backend, dict) and backend.get("canonical_provider") == "lvm", "native LVM backend observation is missing")
+                require(all(backend.get(key) for key in ("volume_group", "thin_pool", "provider_namespace")), "native LVM identity is incomplete")
             require(scenario["canonical_resource_count"] == 1, "passed scenario must observe one canonical resource")
             require(scenario["cleanup_result"] == "passed", "passed scenario has unsuccessful cleanup")
             validate_plan_observation(scenario)
