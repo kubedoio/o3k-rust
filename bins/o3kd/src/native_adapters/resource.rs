@@ -835,8 +835,9 @@ impl ResourceApplication for GenericResourceApplication {
             let operation_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
                 format!(
-                    "volume:delete:{}:{resource_id}:{key}",
-                    auth.effective_scope().id()
+                    "volume:delete:{}:{resource_id}:{key}:generation={}",
+                    auth.effective_scope().id(),
+                    expected_generation.map_or(-1, |generation| generation)
                 )
                 .as_bytes(),
             );
@@ -932,7 +933,7 @@ impl ResourceApplication for GenericResourceApplication {
                     key,
                     "volume:volume",
                     Some(id),
-                    &serde_json::json!({"resource_id": id}),
+                        &serde_json::json!({"resource_id": id, "expected_generation": expected_generation}),
                     operation_id,
                 )
                 .map_err(|_| ResourceApplicationError::Validation)?;
@@ -993,6 +994,10 @@ impl ResourceApplication for GenericResourceApplication {
                 .map_err(|_| ResourceApplicationError::Internal)?;
                 self.store
                     .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                self.store
+                    .delete_volume(auth.effective_scope().id().as_str(), resource_id)
                     .await
                     .map_err(|_| ResourceApplicationError::Internal)?;
                 return Ok(MutationResult {

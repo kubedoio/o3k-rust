@@ -254,15 +254,16 @@ PY
 )"
 [[ "$volume_replacement_id" != "$volume_id" ]] || { echo "volume replacement reused old ID" >&2; exit 1; }
 curl -fsS -H "Authorization: Bearer $token" "http://127.0.0.1:$port/o3k/v1/volume/volumes/$volume_replacement_id" >"$work_dir/volume-native-after.json"
+curl -fsS -H "Authorization: Bearer $token" "http://127.0.0.1:$port/o3k/v1/volume/volumes" >"$work_dir/volume-list-after.json"
 volume_replacement_scope="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["metadata"]["owner_scope"])' "$work_dir/volume-native-after.json")"
 [[ "$volume_replacement_scope" == "$volume_scope" ]] || { echo "volume replacement owner scope changed" >&2; exit 1; }
 volume_lv_after="o3k-v-${volume_replacement_id//-/}"
 [[ -n "$(lvs --noheadings --options lv_name "$O3K_LVM_VOLUME_GROUP" 2>/dev/null | awk -v expected="$volume_lv_after" '$1 == expected {print $1}' || true)" ]] || { echo "replacement LVM realization is missing" >&2; exit 1; }
 volume_final_exit=0; (cd "$volume_dir" && TF_CLI_CONFIG_FILE="$work_dir/tofu.tfrc" "$tofu" plan -detailed-exitcode -input=false >/dev/null) || volume_final_exit=$?
 [[ "$volume_final_exit" == 0 ]] || { echo "volume final plan is not no-op" >&2; exit 1; }
-python3 - "$work_dir/volume-observation.json" "$work_dir/volume-refresh.json" "$work_dir/volume-normal.json" "$work_dir/volume-state-before.json" "$work_dir/volume-list-before.json" "$work_dir/volume-list-after-delete.json" "$work_dir/volume-native-after.json" "$volume_id" "$volume_replacement_id" "$volume_scope" "$volume_replacement_scope" "$volume_delete_status" "$volume_replay_status" "$volume_native_absence" "$volume_compat_absence" "$volume_final_exit" "$volume_delete_key" <<'PY'
+python3 - "$work_dir/volume-observation.json" "$work_dir/volume-refresh.json" "$work_dir/volume-normal.json" "$work_dir/volume-state-before.json" "$work_dir/volume-list-before.json" "$work_dir/volume-list-after-delete.json" "$work_dir/volume-list-after.json" "$volume_id" "$volume_replacement_id" "$volume_scope" "$volume_replacement_scope" "$volume_delete_status" "$volume_replay_status" "$volume_native_absence" "$volume_compat_absence" "$volume_final_exit" "$volume_delete_key" <<'PY'
 import hashlib, json, pathlib, sys
-(out, refresh_path, normal_path, state_path, before_path, after_delete_path, after_path,
+(out, refresh_path, normal_path, state_path, before_path, after_delete_path, list_after_path,
  old, new, scope, replacement_scope, delete_status, replay_status, native_absence,
  compat_absence, final_exit, key) = sys.argv[1:]
 refresh_raw = json.loads(pathlib.Path(refresh_path).read_text())
@@ -284,10 +285,12 @@ if len(drift) != 1 or drift[0].get("address") != "openstack_blockstorage_volume_
 if len(rc) != 1 or actions != ["create"] or unrelated: raise SystemExit("volume normal plan is not exactly one recreation")
 before = json.loads(pathlib.Path(before_path).read_text()).get("items", [])
 after_delete = json.loads(pathlib.Path(after_delete_path).read_text()).get("items", [])
-after = [json.loads(pathlib.Path(after_path).read_text())]
+after = json.loads(pathlib.Path(list_after_path).read_text()).get("items", [])
 before_ids = [x.get("metadata", {}).get("id") for x in before]
 after_delete_ids = [x.get("metadata", {}).get("id") for x in after_delete]
-if old not in before_ids or old in after_delete_ids: raise SystemExit("volume list observations are inconsistent")
+after_ids = [x.get("metadata", {}).get("id") for x in after]
+same_scope_other_resources = [x for x in after if x.get("metadata", {}).get("owner_scope") == scope and x.get("metadata", {}).get("id") != new]
+if old not in before_ids or old in after_delete_ids or old in after_ids or after_ids.count(new) != 1: raise SystemExit("volume list observations are inconsistent")
 row = {
  "resource": "openstack_blockstorage_volume_v3", "scenario": "native-delete-drift", "native_change": "remote absence", "surface": "native_api", "native_surface_status": "defined", "operation": "deletion", "terraform_address": "openstack_blockstorage_volume_v3.managed", "canonical_id_before": old, "canonical_id_after_native_mutation": None, "canonical_id_after_reapply": new, "owner_scope": scope, "refresh_only_actions": [{"address": "openstack_blockstorage_volume_v3.managed", "actions": ["delete"]}], "normal_plan_actions": [{"address": "openstack_blockstorage_volume_v3.managed", "actions": actions, "replacement": actions == ["create"]}], "unrelated_changes_count": len(unrelated), "old_resource_absent": old not in after_delete_ids, "new_resource_count": 1, "final_plan_noop": int(final_exit) == 0, "backend": "sqlite", "head_sha": "", "provider_modified": False, "result": "passed", "native_delete": {"http_path": f"/o3k/v1/volume/volumes/{old}", "status": int(delete_status), "response_body": pathlib.Path(pathlib.Path(out).parent, "volume-delete.body").read_text() or None, "replay_status": int(replay_status), "replay_response_body": pathlib.Path(pathlib.Path(out).parent, "volume-replay.body").read_text() or None, "idempotency_key": "[REDACTED]", "idempotency_key_sha256": hashlib.sha256(key.encode()).hexdigest(), "problem_details": None, "operation_id": None, "replay_result": {"same_idempotency_key": True, "same_terminal_canonical_absence": True, "second_destructive_effect_observed": False}}, "native_absence_http_status": int(native_absence), "compatibility_absence_http_status": int(compat_absence), "leak_or_foreign_state": {"old_absent": old not in after_delete_ids, "scope_unchanged": replacement_scope == scope, "unrelated_changes": len(unrelated) == 0, "same_scope_other_resources": 0}, "canonical_observations": {"before": {"ids": before_ids, "old_present": old in before_ids}, "after_delete": {"ids": after_delete_ids, "old_present": old in after_delete_ids}, "after_delete_replay": {"ids": after_delete_ids, "native_absence_http_status": int(native_absence), "old_present": old in after_delete_ids}, "after_reapply": {"ids": [new], "replacement_count": 1, "old_present": False, "replacement_scope": replacement_scope}}, "plan_observation": {"refresh-only": [refresh], "normal": [normal]}, "backend_realization": {"provider": "lvm", "old_realization": "absent", "replacement_realization": "present"}
 }
@@ -338,6 +341,16 @@ rows=[]
 volume_row=json.loads(pathlib.Path(volume_observation).read_text())
 volume_row['head_sha']=head
 volume_row['classification']='passed'
+volume_after_ids=[item.get('metadata',{}).get('id') for item in json.loads(pathlib.Path(work,'volume-list-after.json').read_text()).get('items',[])]
+volume_other=[item for item in json.loads(pathlib.Path(work,'volume-list-after.json').read_text()).get('items',[]) if item.get('metadata',{}).get('owner_scope')==project and item.get('metadata',{}).get('id') != new]
+volume_row['new_resource_count']=volume_after_ids.count(new)
+volume_row['old_resource_absent']=old not in volume_after_ids
+volume_row['leak_or_foreign_state']['old_absent']=old not in volume_after_ids
+volume_row['leak_or_foreign_state']['unrelated_changes']=volume_row['leak_or_foreign_state']['unrelated_changes'] and not volume_other
+volume_row['leak_or_foreign_state']['same_scope_other_resources']=len(volume_other)
+volume_row['canonical_observations']['after_reapply']['ids']=volume_after_ids
+volume_row['canonical_observations']['after_reapply']['replacement_count']=volume_after_ids.count(new)
+volume_row['canonical_observations']['after_reapply']['old_present']=old in volume_after_ids
 for item in contract['resources']:
  for attr in item.get('mutable_attributes',[]): rows.append({'resource':item['resource'],'scenario':'native-mutable-drift','native_change':attr,'reason':'native_surface_not_defined: no accepted native PUT/PATCH surface exists','native_surface_status':'native_surface_not_defined','result':'not_applicable','classification':'native_surface_not_defined'})
  if item['resource']==row['resource']: rows.append(row)

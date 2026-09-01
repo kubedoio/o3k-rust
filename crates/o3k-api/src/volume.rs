@@ -274,10 +274,9 @@ pub async fn remove_native_volume(
         Err(error) => return Err(error.to_string()),
     }
     match provider.inspect_volume(&request).await {
-        Err(o3k_storage::StorageProviderError::NotFound) => store
-            .delete_volume(project_id, id)
-            .await
-            .map_err(|error| error.to_string()),
+        // Keep the Deleting row as recovery inventory.  The caller removes
+        // it only after all durable lifecycle projections have committed.
+        Err(o3k_storage::StorageProviderError::NotFound) => Ok(()),
         Ok(_) => Err("provider volume is still present".to_owned()),
         Err(error) => Err(error.to_string()),
     }
@@ -540,7 +539,10 @@ pub(crate) async fn delete(
         return unavailable();
     };
     match remove_native_volume(store.clone(), provider, &project_id, id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => match store.delete_volume(&project_id, id).await {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(_) => unavailable(),
+        },
         Err(_) => match store.get_volume(id).await {
             Ok(Some(deleting)) if deleting.volume.state == VolumeState::Deleting => (
                 StatusCode::ACCEPTED,
