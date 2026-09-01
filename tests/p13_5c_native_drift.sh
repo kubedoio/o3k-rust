@@ -55,6 +55,8 @@ for item in contract["resources"]:
     })
 for row in rows:
     row.update({
+        "surface": "native_api",
+        "native_surface_status": "native_surface_not_defined" if "native_surface_not_defined" in row["reason"] else "defined",
         "terraform_address": None,
         "canonical_id_before": None,
         "canonical_id_after_native_mutation": None,

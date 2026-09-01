@@ -233,6 +233,8 @@ def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
     for row in rows:
         require(isinstance(row, dict), "scenario row must be an object")
         require(row.get("result") in RESULTS, "invalid scenario result")
+        require(row.get("surface") == "native_api", "native scenario surface is not explicit")
+        require(row.get("native_surface_status") in {"defined", "native_surface_not_defined", "not_checked"}, "invalid native surface status")
         require(row.get("resource") in {item["resource"] for item in contract["resources"]}, "unknown resource")
         require(row.get("scenario") in SCENARIOS, "unknown scenario")
         require(UUID_SHA.fullmatch(row.get("head_sha", "")), "invalid row head_sha")
@@ -242,6 +244,8 @@ def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
         else:
             require(isinstance(row.get("reason"), str) and row["reason"].strip(), "blocked/not_applicable row needs reason")
             require(not row.get("plan_observation"), "blocked row must not contain fabricated plan JSON")
+            if "native_surface_not_defined" in row["reason"]:
+                require(row["native_surface_status"] == "native_surface_not_defined", "undefined native surface status is inconsistent")
     if document["status"] == "passed":
         require(all(row["result"] == "passed" for row in rows), "passed evidence contains incomplete rows")
     elif not allow_blocked:
@@ -257,6 +261,8 @@ def self_test() -> None:
             "resource": resource,
             "scenario": scenario,
             "native_change": native_change,
+            "surface": "native_api",
+            "native_surface_status": "not_checked",
             "result": "blocked",
             "reason": "self-test blocked fixture",
             "head_sha": subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip(),
