@@ -197,6 +197,21 @@ mod tests {
                 .await
                 .is_ok()
         );
+        let trigger_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ('resources_delete_generic_operations', 'operations_validate_resource_reference')",
+        )
+        .fetch_one(&reopened.pool)
+        .await?;
+        assert_eq!(trigger_count, 2);
+        let invalid_operation = Uuid::now_v7().to_string();
+        let invalid_insert = sqlx::query(
+            "INSERT INTO operations (id, resource_id, kind, state) VALUES (?, ?, 'network:create', 'running')",
+        )
+        .bind(&invalid_operation)
+        .bind(Uuid::now_v7().to_string())
+        .execute(&reopened.pool)
+        .await;
+        assert!(invalid_insert.is_err());
         drop(reopened);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));

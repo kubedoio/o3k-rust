@@ -246,6 +246,56 @@ pub(super) async fn migrate_operation_resource_scope(pool: &SqlitePool) -> Resul
     }
 }
 
+/// Accepts the pre-release 0037 checksum only when that database already has
+/// the post-rebuild schema. An FK-bearing database is left for SQLx's normal
+/// checksum failure rather than being silently reclassified.
+async fn normalize_legacy_operation_migration_checksum(
+    pool: &SqlitePool,
+) -> Result<(), StoreError> {
+    let migration_table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(StoreError::Database)?;
+    if migration_table == 0 {
+        return Ok(());
+    }
+    let Some(expected) = sqlx::migrate!()
+        .iter()
+        .find(|migration| migration.version == 37)
+    else {
+        return Ok(());
+    };
+    let Some(recorded): Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 37")
+            .fetch_optional(pool)
+            .await
+            .map_err(StoreError::Database)?
+    else {
+        return Ok(());
+    };
+    if recorded == expected.checksum.as_ref() {
+        return Ok(());
+    }
+    let has_resource_fk: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('operations')\
+         WHERE \"table\" = 'resources' AND \"from\" = 'resource_id'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(StoreError::Database)?;
+    if has_resource_fk != 0 {
+        return Ok(());
+    }
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 37")
+        .bind(expected.checksum.as_ref())
+        .execute(pool)
+        .await
+        .map_err(StoreError::Database)?;
+    Ok(())
+}
+
 pub(super) async fn update_agent_command_once_sqlite(
     store: &SqliteStore,
     command_id: &str,
@@ -363,6 +413,7 @@ impl SqliteStore {
             .await
             .map_err(StoreError::Database)?;
 
+        normalize_legacy_operation_migration_checksum(&pool).await?;
         sqlx::migrate!()
             .run(&pool)
             .await
