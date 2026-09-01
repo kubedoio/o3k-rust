@@ -436,6 +436,15 @@ impl SqliteStore {
         network_id: &Uuid,
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        if sqlx::query_scalar::<_, String>("SELECT project_id FROM network_networks WHERE id = ?")
+            .bind(network_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?
+            .is_some_and(|projection_project| projection_project != project_id)
+        {
+            return Err(StoreError::OwnershipConflict);
+        }
         let canonical = sqlx::query("DELETE FROM canonical_networks WHERE id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE network_id = canonical_networks.id)")
             .bind(network_id.to_string()).bind(project_id).execute(&mut *tx).await
             .map_err(StoreError::Database)?;

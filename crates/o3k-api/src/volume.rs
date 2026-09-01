@@ -252,17 +252,19 @@ pub async fn remove_native_volume(
     {
         return Err("volume has an active attachment".to_owned());
     }
-    let mut deleting = record.clone();
-    deleting.volume.state = VolumeState::Deleting;
-    deleting.volume.generation = record
-        .volume
-        .generation
-        .checked_add(1)
-        .ok_or_else(|| "volume generation overflow".to_owned())?;
-    store
-        .update_volume(record.volume.generation, &deleting)
-        .await
-        .map_err(|error| error.to_string())?;
+    if !matches!(record.volume.state, VolumeState::Deleting) {
+        let mut deleting = record.clone();
+        deleting.volume.state = VolumeState::Deleting;
+        deleting.volume.generation = record
+            .volume
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| "volume generation overflow".to_owned())?;
+        store
+            .update_volume(record.volume.generation, &deleting)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     let request = StorageVolumeRequest {
         volume_id: id.into(),
         project_id: project_id.to_owned(),
@@ -274,10 +276,7 @@ pub async fn remove_native_volume(
         Err(error) => return Err(error.to_string()),
     }
     match provider.inspect_volume(&request).await {
-        Err(o3k_storage::StorageProviderError::NotFound) => store
-            .delete_volume(project_id, id)
-            .await
-            .map_err(|error| error.to_string()),
+        Err(o3k_storage::StorageProviderError::NotFound) => Ok(()),
         Ok(_) => Err("provider volume is still present".to_owned()),
         Err(error) => Err(error.to_string()),
     }
@@ -540,7 +539,10 @@ pub(crate) async fn delete(
         return unavailable();
     };
     match remove_native_volume(store.clone(), provider, &project_id, id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => match store.delete_volume(&project_id, id).await {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        },
         Err(_) => match store.get_volume(id).await {
             Ok(Some(deleting)) if deleting.volume.state == VolumeState::Deleting => (
                 StatusCode::ACCEPTED,

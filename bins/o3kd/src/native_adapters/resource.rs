@@ -921,15 +921,24 @@ impl ResourceApplication for GenericResourceApplication {
                 )
                 .await
                 .map_err(|_| ResourceApplicationError::Retryable)?;
+                let generic = self
+                    .store
+                    .get_resource(resource_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
                 self.store
                     .update_resource(
                         resource_id,
-                        record.volume.generation as i64,
+                        generic.generation,
                         "DELETED",
                         "DELETED",
-                        record.volume.generation.saturating_add(1) as i64,
+                        generic.generation.saturating_add(1),
                         None,
                     )
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                self.store
+                    .delete_volume(auth.effective_scope().id().as_str(), resource_id)
                     .await
                     .map_err(|_| ResourceApplicationError::Internal)?;
                 let now = chrono::Utc::now().to_rfc3339();
@@ -1052,16 +1061,6 @@ impl ResourceApplication for GenericResourceApplication {
             let key = idempotency_key
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("native:network-delete:{id}"));
-            let network = self
-                .network_service
-                .get_canonical_network(auth, resource_id)
-                .await
-                .map_err(|_| ResourceApplicationError::NotFound)?;
-            if expected_generation.is_some_and(|expected| {
-                expected != i64::try_from(network.generation).unwrap_or(i64::MAX)
-            }) {
-                return Err(ResourceApplicationError::PreconditionConflict);
-            }
             let operation_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
                 format!("network:delete:{}:{id}:{key}", auth.effective_scope().id()).as_bytes(),
@@ -1098,6 +1097,22 @@ impl ResourceApplication for GenericResourceApplication {
                 operation_id,
             )
             .map_err(|_| ResourceApplicationError::Validation)?;
+            let live_network = match self
+                .network_service
+                .get_canonical_network(auth, resource_id)
+                .await
+            {
+                Ok(network) => Some(network),
+                Err(o3k_network::NetworkError::NotFound) => None,
+                Err(_) => return Err(ResourceApplicationError::Internal),
+            };
+            if let Some(network) = live_network.as_ref()
+                && expected_generation.is_some_and(|expected| {
+                    expected != i64::try_from(network.generation).unwrap_or(i64::MAX)
+                })
+            {
+                return Err(ResourceApplicationError::PreconditionConflict);
+            }
             let acceptance = self
                 .store
                 .create_or_replay_canonical_scoped_operation(&operation, &canonical, &identity)
@@ -1110,7 +1125,7 @@ impl ResourceApplication for GenericResourceApplication {
                     }
                     _ => ResourceApplicationError::Internal,
                 })?;
-            match acceptance {
+            let replayed = match acceptance {
                 o3k_store::IdempotencyReservation::Conflict => {
                     return Err(ResourceApplicationError::IdempotencyConflict);
                 }
@@ -1120,19 +1135,27 @@ impl ResourceApplication for GenericResourceApplication {
                         .get_canonical_operation(operation_id)
                         .await
                         .map_err(|_| ResourceApplicationError::Internal)?;
-                    return Ok(MutationResult {
-                        operation_id: operation_id.to_string(),
-                        resource_id: Some(id.to_owned()),
-                        complete: existing.state == o3k_store::OperationState::Succeeded,
-                        resource: None,
-                    });
+                    if existing.state == o3k_store::OperationState::Succeeded {
+                        return Ok(MutationResult {
+                            operation_id: operation_id.to_string(),
+                            resource_id: Some(id.to_owned()),
+                            complete: true,
+                            resource: None,
+                        });
+                    }
+                    true
                 }
-                o3k_store::IdempotencyReservation::Created(_) => {}
-            }
-            self.network_service
+                o3k_store::IdempotencyReservation::Created(_) => false,
+            };
+            let delete_result = self
+                .network_service
                 .delete_canonical_network(auth, resource_id)
-                .await
-                .map_err(|_| ResourceApplicationError::Retryable)?;
+                .await;
+            if let Err(error) = delete_result
+                && (!replayed || !matches!(error, o3k_network::NetworkError::NotFound))
+            {
+                return Err(ResourceApplicationError::Retryable);
+            }
             let now = chrono::Utc::now().to_rfc3339();
             let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
                 o3k_kernel::OperationState::Succeeded,
