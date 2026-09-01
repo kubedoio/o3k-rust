@@ -28,6 +28,33 @@ def load_contract(repository: Path) -> tuple[dict, str]:
     return contract, digest
 
 
+def validate_surface_amendment(document: dict, repository: Path) -> None:
+    contract, contract_digest = load_contract(repository)
+    require(
+        document.get("artifact_type") == "o3k-p13-5c-drift-surface-amendment",
+        "invalid drift-surface amendment artifact_type",
+    )
+    require(document.get("schema_version") == 1, "unsupported drift-surface amendment schema_version")
+    require(document.get("phase") == "P13.5C", "invalid drift-surface amendment phase")
+    require(document.get("status") == "documentation_only", "drift-surface amendment is not documentation-only")
+    require(document.get("p13_5a_contract_sha256") == contract_digest, "drift-surface amendment is not bound to frozen P13.5A contract")
+    surfaces = document.get("surface_classes")
+    require(isinstance(surfaces, dict), "drift-surface amendment lacks surface_classes")
+    require(set(surfaces) == {"canonical_out_of_band", "native_api"}, "drift-surface amendment has unexpected surface classes")
+    require(surfaces["canonical_out_of_band"].get("native_api_claim") is False, "canonical surface claims native API evidence")
+    native = surfaces["native_api"]
+    require(native.get("native_api_claim") is True, "native surface does not claim native API evidence")
+    require(native.get("missing_surface_result") == "native_surface_not_defined", "native surface missing result is not explicit")
+    extension = document.get("evidence_row_extension")
+    require(isinstance(extension, dict), "drift-surface amendment lacks evidence_row_extension")
+    require(extension.get("surface", {}).get("enum") == ["canonical_out_of_band", "native_api"], "invalid surface enum")
+    require(extension.get("native_surface_status", {}).get("enum") == ["defined", "native_surface_not_defined", "not_checked"], "invalid native surface status enum")
+    compatibility = document.get("compatibility")
+    require(isinstance(compatibility, dict), "drift-surface amendment lacks compatibility declaration")
+    require(compatibility.get("frozen_p13_5a_contract_modified") is False, "amendment modifies frozen P13.5A contract")
+    require(compatibility.get("production_runtime_modified") is False, "amendment modifies production runtime")
+
+
 def expected_cells(contract: dict) -> set[tuple[str, str, str]]:
     cells: set[tuple[str, str, str]] = set()
     for item in contract["resources"]:
@@ -162,14 +189,19 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("evidence", nargs="?")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--surface-amendment", type=Path, help="validate the documentation-only drift-surface amendment")
     parser.add_argument("--allow-blocked", action="store_true", help="validate honest blocked evidence; strict completion rejects it")
     args = parser.parse_args()
+    repository = Path(__file__).resolve().parents[1]
+    if args.surface_amendment:
+        validate_surface_amendment(json.loads(args.surface_amendment.read_text()), repository)
+        print("P13.5C drift-surface amendment: PASS")
+        return
     if args.self_test:
         self_test()
         return
     if not args.evidence:
         parser.error("evidence is required unless --self-test is used")
-    repository = Path(__file__).resolve().parents[1]
     validate(json.loads(Path(args.evidence).read_text()), repository, args.allow_blocked)
     print("P13.5C evidence structure: PASS")
 
