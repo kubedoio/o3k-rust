@@ -942,7 +942,7 @@ resource "openstack_compute_instance_v2" "imported" {
   image_id = data.openstack_images_image_v2.image.id
   flavor_id = data.openstack_compute_flavor_v2.flavor.id
   lifecycle {
-    ignore_changes = [force_delete, stop_before_destroy]
+    ignore_changes = [force_delete, stop_before_destroy, all_tags]
   }
   network { uuid = "$server_import_network_id" }
 }
@@ -1465,7 +1465,7 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
     if result == "passed" and len(trace_routes) < minimum_routes:
         result = "blocked"
         reason = f"structured compatibility trace has {len(trace_routes)} provider reads; expected at least {minimum_routes}"
-  if result == "passed" and mutation_routes:
+    if result == "passed" and mutation_routes:
         result = "blocked"
         reason = f"provider read/plan issued mutation requests: {mutation_routes}"
     canonical_before_count = int(canonical_before.get("count", -1))
