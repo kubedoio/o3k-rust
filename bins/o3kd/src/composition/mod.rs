@@ -6,6 +6,7 @@ pub mod storage;
 
 use o3k_kernel::Controller;
 use o3k_provider::ComputeProvider;
+use o3k_storage::StorageProvider;
 use o3k_store::ComputeRepository;
 use std::{sync::Arc, time::Duration};
 use tracing::info;
@@ -525,6 +526,7 @@ pub async fn build_composition(
         let health = controller.health().await;
         native_manifest_registry.update_controller_health(service_id, health)?;
     }
+
     let native_lvm_provider = match (
         std::env::var("O3K_LVM_VOLUME_GROUP").ok(),
         std::env::var("O3K_LVM_THIN_POOL").ok(),
@@ -540,7 +542,78 @@ pub async fn build_composition(
         _ => None,
     };
     let native_storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>> =
-        native_lvm_provider.clone().map(|provider| provider as _);
+        match native_lvm_provider.clone() {
+            Some(provider) => match provider.capabilities().await {
+                Ok(capabilities) if capabilities.create_volume => Some(provider as _),
+                Ok(_) => {
+                    tracing::warn!("native storage provider lacks volume-create capability");
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "native storage provider readiness probe failed");
+                    None
+                }
+            },
+            None => None,
+        };
+
+    // First-party services remain in-process in the modular o3kd composition,
+    // but they still publish the shared controller lifecycle state used by
+    // native discovery and mutation dispatch.  Each readiness value is tied
+    // to the dependency that the service actually needs; no manifest is
+    // promoted to Ready merely because it was seeded.
+    for (service_id, ready, detail) in [
+        (
+            "identity",
+            token_issuer.is_some(),
+            if token_issuer.is_some() {
+                Some("identity service is configured".to_owned())
+            } else {
+                Some("identity service is not configured".to_owned())
+            },
+        ),
+        (
+            "image",
+            true,
+            Some("image service and repository are available".to_owned()),
+        ),
+        (
+            "compute",
+            compute_ready,
+            Some(
+                if compute_ready {
+                    "compute provider is available"
+                } else {
+                    "compute provider is unavailable"
+                }
+                .to_owned(),
+            ),
+        ),
+        (
+            "network",
+            true,
+            Some("network service and repository are available".to_owned()),
+        ),
+        (
+            "volume",
+            native_storage_provider.is_some(),
+            Some(
+                if native_storage_provider.is_some() {
+                    "native storage provider is available"
+                } else {
+                    "native storage provider is not configured"
+                }
+                .to_owned(),
+            ),
+        ),
+    ] {
+        if external_controllers.contains_key(service_id) {
+            // An explicitly configured external controller owns its own
+            // session/readiness and must not be replaced by in-process state.
+            continue;
+        }
+        native_manifest_registry.register_in_process_controller(service_id, ready, detail)?;
+    }
     let generic_application: std::sync::Arc<dyn o3k_native_api::resource::ResourceApplication> =
         std::sync::Arc::new(crate::native_adapters::GenericResourceApplication {
             compute: std::sync::Arc::new(compute_service.clone()),
@@ -677,19 +750,19 @@ pub async fn build_composition(
     } else {
         o3k_native_api::pagination::CursorConfig::default()
     };
-    state = state.with_native_api(
-        o3k_native_api::NativeApiState::new(
-            Some(native_manifest_registry),
-            cursor_config,
-            token_issuer,
-            server_reader,
-            volume_reader,
-            network_reader,
-        )?
-        .with_operation_reader(operation_reader)
-        .with_resource_application(generic_application)
-        .with_authorizer(std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard())),
-    );
+    let native_state = o3k_native_api::NativeApiState::new(
+        Some(native_manifest_registry),
+        cursor_config,
+        token_issuer,
+        server_reader,
+        volume_reader,
+        network_reader,
+    )?
+    .with_operation_reader(operation_reader)
+    .with_resource_application(generic_application)
+    .with_authorizer(std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard()));
+    let native_lifecycle_registry = native_state.lifecycle_registry();
+    state = state.with_native_api(native_state);
     state = state.with_storage_store(store.clone());
     if let Some(provider) = native_storage_provider {
         state = state.with_storage_provider(provider);
@@ -750,11 +823,24 @@ pub async fn build_composition(
                 authorized_agents,
             };
             let readiness = state.clone();
+            let lifecycle_readiness = native_lifecycle_registry.clone();
             info!(address = %config.compute_control_addr, "compute-agent control plane enabled");
             Some(tokio::spawn(async move {
                 let result = server.serve(control_shutdown_signal()).await;
                 if let Err(error) = &result {
                     readiness.set_ready(false);
+                    if let Some(registry) = lifecycle_readiness
+                        && let Ok(mut registry) = registry.write()
+                    {
+                        let _ = registry.update_controller_health(
+                            "compute",
+                            o3k_kernel::controller::ControllerHealth {
+                                healthy: false,
+                                detail: Some("compute-agent control plane stopped".to_owned()),
+                                protocol_version: o3k_kernel::controller::ProtocolVersion::V1,
+                            },
+                        );
+                    }
                     tracing::error!(%error, "compute-agent control plane stopped before shutdown");
                 }
                 let _ = result;

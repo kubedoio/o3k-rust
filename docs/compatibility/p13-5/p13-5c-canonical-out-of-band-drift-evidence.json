@@ -1,0 +1,1087 @@
+{
+  "artifact_type": "o3k-p13-5c-canonical-out-of-band-drift-evidence",
+  "baseline": {
+    "evidence_sha256": "3a43c366860a7b4c37e58e8261c4d07df1c2593f95a4573d70a776fbab6c92f4",
+    "source_commit": "4db09b5564fc1574af3342738262976b804897e0",
+    "status": "verified"
+  },
+  "canonical_authority": "o3k",
+  "native_claim": false,
+  "p13_5a_contract_sha256": "ba70725ccb09190675ddcf05922e301be9433ceeb37800866dbfb260df774f5f",
+  "phase": "P13.5C",
+  "profile": "p13-iac-compatibility-v1",
+  "provider_modified": false,
+  "scenario": {
+    "canonical_id_after_mutation": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+    "canonical_id_after_reapply": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+    "canonical_id_before": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+    "canonical_observations": {
+      "after_cleanup": {
+        "count": 0,
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "phase": "after_cleanup",
+        "project_resource_count": 0,
+        "records": [],
+        "requested_id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+        "source": "canonical_store",
+        "store": "canonical_store:sqlite:canonical_networks"
+      },
+      "after_mutation": {
+        "count": 1,
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "phase": "after_mutation",
+        "project_resource_count": 1,
+        "records": [
+          {
+            "name": "p13-5c-network-drifted",
+            "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+            "resource_id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+            "state": "active"
+          }
+        ],
+        "requested_id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+        "source": "canonical_store",
+        "store": "canonical_store:sqlite:canonical_networks"
+      },
+      "after_reapply": {
+        "count": 1,
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "phase": "after_reapply",
+        "project_resource_count": 1,
+        "records": [
+          {
+            "name": "p13-5c-network-desired",
+            "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+            "resource_id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+            "state": "active"
+          }
+        ],
+        "requested_id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+        "source": "canonical_store",
+        "store": "canonical_store:sqlite:canonical_networks"
+      },
+      "before": {
+        "count": 1,
+        "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+        "phase": "before",
+        "project_resource_count": 1,
+        "records": [
+          {
+            "name": "p13-5c-network-desired",
+            "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+            "resource_id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+            "state": "active"
+          }
+        ],
+        "requested_id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+        "source": "canonical_store",
+        "store": "canonical_store:sqlite:canonical_networks"
+      }
+    },
+    "canonical_project_resource_count_after_cleanup": 0,
+    "canonical_project_resource_count_after_mutation": 1,
+    "canonical_project_resource_count_after_reapply": 1,
+    "canonical_project_resource_count_before": 1,
+    "canonical_same_id_count": 1,
+    "cleanup_http_status": 404,
+    "compatibility_observations": {
+      "after_mutation": {
+        "network": {
+          "admin_state_up": true,
+          "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+          "mtu": 1500,
+          "name": "p13-5c-network-drifted",
+          "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+          "status": "ACTIVE",
+          "subnets": [],
+          "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb"
+        }
+      },
+      "after_reapply": {
+        "network": {
+          "admin_state_up": true,
+          "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+          "mtu": 1500,
+          "name": "p13-5c-network-desired",
+          "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+          "status": "ACTIVE",
+          "subnets": [],
+          "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb"
+        }
+      }
+    },
+    "final_plan_noop": true,
+    "mutation_route": "PUT /v2.0/networks/{id}",
+    "native_change": "name",
+    "native_claim": false,
+    "new_resource_count": 1,
+    "normal_plan_actions": [
+      {
+        "actions": [
+          "update"
+        ],
+        "address": "openstack_networking_network_v2.managed",
+        "replacement": false
+      }
+    ],
+    "old_resource_absent": false,
+    "operation": "mutable",
+    "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+    "plan_observation": {
+      "final_normal": {
+        "configuration": {
+          "provider_config": {
+            "openstack": {
+              "expressions": {
+                "auth_url": {
+                  "constant_value": "http://127.0.0.1:51501"
+                },
+                "max_retries": {
+                  "constant_value": 0
+                },
+                "password": "[REDACTED]",
+                "tenant_id": {
+                  "constant_value": "eba29e2d-53de-461d-ae91-ede7402713cb"
+                },
+                "user_name": {
+                  "constant_value": "admin"
+                }
+              },
+              "full_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+              "name": "openstack",
+              "version_constraint": "3.4.0"
+            }
+          },
+          "root_module": {
+            "resources": [
+              {
+                "address": "openstack_networking_network_v2.managed",
+                "expressions": {
+                  "admin_state_up": {
+                    "constant_value": true
+                  },
+                  "name": {
+                    "constant_value": "p13-5c-network-desired"
+                  },
+                  "tags": {
+                    "constant_value": []
+                  }
+                },
+                "mode": "managed",
+                "name": "managed",
+                "provider_config_key": "openstack",
+                "schema_version": 0,
+                "type": "openstack_networking_network_v2"
+              }
+            ]
+          }
+        },
+        "errored": false,
+        "format_version": "1.2",
+        "planned_values": {
+          "root_module": {
+            "resources": [
+              {
+                "address": "openstack_networking_network_v2.managed",
+                "mode": "managed",
+                "name": "managed",
+                "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+                "schema_version": 0,
+                "sensitive_values": {
+                  "all_tags": [],
+                  "availability_zone_hints": [],
+                  "segments": [],
+                  "tags": []
+                },
+                "type": "openstack_networking_network_v2",
+                "values": {
+                  "admin_state_up": true,
+                  "all_tags": [],
+                  "availability_zone_hints": [],
+                  "description": "",
+                  "dns_domain": "",
+                  "external": false,
+                  "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                  "mtu": 1500,
+                  "name": "p13-5c-network-desired",
+                  "port_security_enabled": false,
+                  "qos_policy_id": "",
+                  "region": "",
+                  "segments": [],
+                  "shared": false,
+                  "tags": [],
+                  "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                  "timeouts": null,
+                  "transparent_vlan": false,
+                  "value_specs": null
+                }
+              }
+            ]
+          }
+        },
+        "prior_state": {
+          "format_version": "1.0",
+          "terraform_version": "1.12.6",
+          "values": {
+            "root_module": {
+              "resources": [
+                {
+                  "address": "openstack_networking_network_v2.managed",
+                  "mode": "managed",
+                  "name": "managed",
+                  "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+                  "schema_version": 0,
+                  "sensitive_values": {
+                    "all_tags": [],
+                    "availability_zone_hints": [],
+                    "segments": [],
+                    "tags": []
+                  },
+                  "type": "openstack_networking_network_v2",
+                  "values": {
+                    "admin_state_up": true,
+                    "all_tags": [],
+                    "availability_zone_hints": [],
+                    "description": "",
+                    "dns_domain": "",
+                    "external": false,
+                    "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                    "mtu": 1500,
+                    "name": "p13-5c-network-desired",
+                    "port_security_enabled": false,
+                    "qos_policy_id": "",
+                    "region": "",
+                    "segments": [],
+                    "shared": false,
+                    "tags": [],
+                    "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                    "timeouts": null,
+                    "transparent_vlan": false,
+                    "value_specs": null
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "resource_changes": [
+          {
+            "address": "openstack_networking_network_v2.managed",
+            "change": {
+              "actions": [
+                "no-op"
+              ],
+              "after": {
+                "admin_state_up": true,
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "description": "",
+                "dns_domain": "",
+                "external": false,
+                "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                "mtu": 1500,
+                "name": "p13-5c-network-desired",
+                "port_security_enabled": false,
+                "qos_policy_id": "",
+                "region": "",
+                "segments": [],
+                "shared": false,
+                "tags": [],
+                "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "timeouts": null,
+                "transparent_vlan": false,
+                "value_specs": null
+              },
+              "after_sensitive": {
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "segments": [],
+                "tags": []
+              },
+              "after_unknown": {},
+              "before": {
+                "admin_state_up": true,
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "description": "",
+                "dns_domain": "",
+                "external": false,
+                "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                "mtu": 1500,
+                "name": "p13-5c-network-desired",
+                "port_security_enabled": false,
+                "qos_policy_id": "",
+                "region": "",
+                "segments": [],
+                "shared": false,
+                "tags": [],
+                "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "timeouts": null,
+                "transparent_vlan": false,
+                "value_specs": null
+              },
+              "before_sensitive": {
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "segments": [],
+                "tags": []
+              }
+            },
+            "mode": "managed",
+            "name": "managed",
+            "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+            "type": "openstack_networking_network_v2"
+          }
+        ],
+        "terraform_version": "1.12.6",
+        "timestamp": "2026-09-01T10:23:37Z"
+      },
+      "initial_normal": {
+        "configuration": {
+          "provider_config": {
+            "openstack": {
+              "expressions": {
+                "auth_url": {
+                  "constant_value": "http://127.0.0.1:51501"
+                },
+                "max_retries": {
+                  "constant_value": 0
+                },
+                "password": "[REDACTED]",
+                "tenant_id": {
+                  "constant_value": "eba29e2d-53de-461d-ae91-ede7402713cb"
+                },
+                "user_name": {
+                  "constant_value": "admin"
+                }
+              },
+              "full_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+              "name": "openstack",
+              "version_constraint": "3.4.0"
+            }
+          },
+          "root_module": {
+            "resources": [
+              {
+                "address": "openstack_networking_network_v2.managed",
+                "expressions": {
+                  "admin_state_up": {
+                    "constant_value": true
+                  },
+                  "name": {
+                    "constant_value": "p13-5c-network-desired"
+                  },
+                  "tags": {
+                    "constant_value": []
+                  }
+                },
+                "mode": "managed",
+                "name": "managed",
+                "provider_config_key": "openstack",
+                "schema_version": 0,
+                "type": "openstack_networking_network_v2"
+              }
+            ]
+          }
+        },
+        "errored": false,
+        "format_version": "1.2",
+        "planned_values": {
+          "root_module": {
+            "resources": [
+              {
+                "address": "openstack_networking_network_v2.managed",
+                "mode": "managed",
+                "name": "managed",
+                "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+                "schema_version": 0,
+                "sensitive_values": {
+                  "all_tags": [],
+                  "availability_zone_hints": [],
+                  "segments": [],
+                  "tags": []
+                },
+                "type": "openstack_networking_network_v2",
+                "values": {
+                  "admin_state_up": true,
+                  "all_tags": [],
+                  "availability_zone_hints": [],
+                  "description": "",
+                  "dns_domain": "",
+                  "external": false,
+                  "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                  "mtu": 1500,
+                  "name": "p13-5c-network-desired",
+                  "port_security_enabled": false,
+                  "qos_policy_id": "",
+                  "region": "",
+                  "segments": [],
+                  "shared": false,
+                  "tags": [],
+                  "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                  "timeouts": null,
+                  "transparent_vlan": false,
+                  "value_specs": null
+                }
+              }
+            ]
+          }
+        },
+        "prior_state": {
+          "format_version": "1.0",
+          "terraform_version": "1.12.6",
+          "values": {
+            "root_module": {
+              "resources": [
+                {
+                  "address": "openstack_networking_network_v2.managed",
+                  "mode": "managed",
+                  "name": "managed",
+                  "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+                  "schema_version": 0,
+                  "sensitive_values": {
+                    "all_tags": [],
+                    "availability_zone_hints": [],
+                    "segments": [],
+                    "tags": []
+                  },
+                  "type": "openstack_networking_network_v2",
+                  "values": {
+                    "admin_state_up": true,
+                    "all_tags": [],
+                    "availability_zone_hints": [],
+                    "description": "",
+                    "dns_domain": "",
+                    "external": false,
+                    "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                    "mtu": 1500,
+                    "name": "p13-5c-network-desired",
+                    "port_security_enabled": false,
+                    "qos_policy_id": "",
+                    "region": "",
+                    "segments": [],
+                    "shared": false,
+                    "tags": [],
+                    "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                    "timeouts": null,
+                    "transparent_vlan": false,
+                    "value_specs": null
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "resource_changes": [
+          {
+            "address": "openstack_networking_network_v2.managed",
+            "change": {
+              "actions": [
+                "no-op"
+              ],
+              "after": {
+                "admin_state_up": true,
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "description": "",
+                "dns_domain": "",
+                "external": false,
+                "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                "mtu": 1500,
+                "name": "p13-5c-network-desired",
+                "port_security_enabled": false,
+                "qos_policy_id": "",
+                "region": "",
+                "segments": [],
+                "shared": false,
+                "tags": [],
+                "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "timeouts": null,
+                "transparent_vlan": false,
+                "value_specs": null
+              },
+              "after_sensitive": {
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "segments": [],
+                "tags": []
+              },
+              "after_unknown": {},
+              "before": {
+                "admin_state_up": true,
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "description": "",
+                "dns_domain": "",
+                "external": false,
+                "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                "mtu": 1500,
+                "name": "p13-5c-network-desired",
+                "port_security_enabled": false,
+                "qos_policy_id": "",
+                "region": "",
+                "segments": [],
+                "shared": false,
+                "tags": [],
+                "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "timeouts": null,
+                "transparent_vlan": false,
+                "value_specs": null
+              },
+              "before_sensitive": {
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "segments": [],
+                "tags": []
+              }
+            },
+            "mode": "managed",
+            "name": "managed",
+            "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+            "type": "openstack_networking_network_v2"
+          }
+        ],
+        "resource_drift": [
+          {
+            "address": "openstack_networking_network_v2.managed",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "after": {
+                "admin_state_up": true,
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "description": "",
+                "dns_domain": "",
+                "external": false,
+                "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                "mtu": 1500,
+                "name": "p13-5c-network-desired",
+                "port_security_enabled": false,
+                "qos_policy_id": "",
+                "region": "",
+                "segments": [],
+                "shared": false,
+                "tags": [],
+                "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "timeouts": null,
+                "transparent_vlan": false,
+                "value_specs": null
+              },
+              "after_sensitive": {
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "segments": [],
+                "tags": []
+              },
+              "after_unknown": {},
+              "before": {
+                "admin_state_up": true,
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "description": "",
+                "dns_domain": "",
+                "external": false,
+                "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                "mtu": 1500,
+                "name": "p13-5c-network-desired",
+                "port_security_enabled": false,
+                "qos_policy_id": "",
+                "region": "",
+                "segments": [],
+                "shared": false,
+                "tags": null,
+                "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "timeouts": null,
+                "transparent_vlan": false,
+                "value_specs": null
+              },
+              "before_sensitive": {
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "segments": []
+              }
+            },
+            "mode": "managed",
+            "name": "managed",
+            "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+            "type": "openstack_networking_network_v2"
+          }
+        ],
+        "terraform_version": "1.12.6",
+        "timestamp": "2026-09-01T10:23:20Z"
+      },
+      "normal": {
+        "configuration": {
+          "provider_config": {
+            "openstack": {
+              "expressions": {
+                "auth_url": {
+                  "constant_value": "http://127.0.0.1:51501"
+                },
+                "max_retries": {
+                  "constant_value": 0
+                },
+                "password": "[REDACTED]",
+                "tenant_id": {
+                  "constant_value": "eba29e2d-53de-461d-ae91-ede7402713cb"
+                },
+                "user_name": {
+                  "constant_value": "admin"
+                }
+              },
+              "full_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+              "name": "openstack",
+              "version_constraint": "3.4.0"
+            }
+          },
+          "root_module": {
+            "resources": [
+              {
+                "address": "openstack_networking_network_v2.managed",
+                "expressions": {
+                  "admin_state_up": {
+                    "constant_value": true
+                  },
+                  "name": {
+                    "constant_value": "p13-5c-network-desired"
+                  },
+                  "tags": {
+                    "constant_value": []
+                  }
+                },
+                "mode": "managed",
+                "name": "managed",
+                "provider_config_key": "openstack",
+                "schema_version": 0,
+                "type": "openstack_networking_network_v2"
+              }
+            ]
+          }
+        },
+        "errored": false,
+        "format_version": "1.2",
+        "planned_values": {
+          "root_module": {
+            "resources": [
+              {
+                "address": "openstack_networking_network_v2.managed",
+                "mode": "managed",
+                "name": "managed",
+                "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+                "schema_version": 0,
+                "sensitive_values": {
+                  "all_tags": [],
+                  "availability_zone_hints": [],
+                  "segments": [],
+                  "tags": []
+                },
+                "type": "openstack_networking_network_v2",
+                "values": {
+                  "admin_state_up": true,
+                  "all_tags": [],
+                  "availability_zone_hints": [],
+                  "description": "",
+                  "dns_domain": "",
+                  "external": false,
+                  "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                  "mtu": 1500,
+                  "name": "p13-5c-network-desired",
+                  "port_security_enabled": false,
+                  "qos_policy_id": "",
+                  "region": "",
+                  "segments": [],
+                  "shared": false,
+                  "tags": [],
+                  "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                  "timeouts": null,
+                  "transparent_vlan": false,
+                  "value_specs": null
+                }
+              }
+            ]
+          }
+        },
+        "prior_state": {
+          "format_version": "1.0",
+          "terraform_version": "1.12.6",
+          "values": {
+            "root_module": {
+              "resources": [
+                {
+                  "address": "openstack_networking_network_v2.managed",
+                  "mode": "managed",
+                  "name": "managed",
+                  "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+                  "schema_version": 0,
+                  "sensitive_values": {
+                    "all_tags": [],
+                    "availability_zone_hints": [],
+                    "segments": [],
+                    "tags": []
+                  },
+                  "type": "openstack_networking_network_v2",
+                  "values": {
+                    "admin_state_up": true,
+                    "all_tags": [],
+                    "availability_zone_hints": [],
+                    "description": "",
+                    "dns_domain": "",
+                    "external": false,
+                    "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                    "mtu": 1500,
+                    "name": "p13-5c-network-drifted",
+                    "port_security_enabled": false,
+                    "qos_policy_id": "",
+                    "region": "",
+                    "segments": [],
+                    "shared": false,
+                    "tags": [],
+                    "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                    "timeouts": null,
+                    "transparent_vlan": false,
+                    "value_specs": null
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "resource_changes": [
+          {
+            "address": "openstack_networking_network_v2.managed",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "after": {
+                "admin_state_up": true,
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "description": "",
+                "dns_domain": "",
+                "external": false,
+                "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                "mtu": 1500,
+                "name": "p13-5c-network-desired",
+                "port_security_enabled": false,
+                "qos_policy_id": "",
+                "region": "",
+                "segments": [],
+                "shared": false,
+                "tags": [],
+                "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "timeouts": null,
+                "transparent_vlan": false,
+                "value_specs": null
+              },
+              "after_sensitive": {
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "segments": [],
+                "tags": []
+              },
+              "after_unknown": {},
+              "before": {
+                "admin_state_up": true,
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "description": "",
+                "dns_domain": "",
+                "external": false,
+                "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                "mtu": 1500,
+                "name": "p13-5c-network-drifted",
+                "port_security_enabled": false,
+                "qos_policy_id": "",
+                "region": "",
+                "segments": [],
+                "shared": false,
+                "tags": [],
+                "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "timeouts": null,
+                "transparent_vlan": false,
+                "value_specs": null
+              },
+              "before_sensitive": {
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "segments": [],
+                "tags": []
+              }
+            },
+            "mode": "managed",
+            "name": "managed",
+            "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+            "type": "openstack_networking_network_v2"
+          }
+        ],
+        "resource_drift": [
+          {
+            "address": "openstack_networking_network_v2.managed",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "after": {
+                "admin_state_up": true,
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "description": "",
+                "dns_domain": "",
+                "external": false,
+                "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                "mtu": 1500,
+                "name": "p13-5c-network-drifted",
+                "port_security_enabled": false,
+                "qos_policy_id": "",
+                "region": "",
+                "segments": [],
+                "shared": false,
+                "tags": [],
+                "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "timeouts": null,
+                "transparent_vlan": false,
+                "value_specs": null
+              },
+              "after_sensitive": {
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "segments": [],
+                "tags": []
+              },
+              "after_unknown": {},
+              "before": {
+                "admin_state_up": true,
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "description": "",
+                "dns_domain": "",
+                "external": false,
+                "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                "mtu": 1500,
+                "name": "p13-5c-network-desired",
+                "port_security_enabled": false,
+                "qos_policy_id": "",
+                "region": "",
+                "segments": [],
+                "shared": false,
+                "tags": null,
+                "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "timeouts": null,
+                "transparent_vlan": false,
+                "value_specs": null
+              },
+              "before_sensitive": {
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "segments": []
+              }
+            },
+            "mode": "managed",
+            "name": "managed",
+            "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+            "type": "openstack_networking_network_v2"
+          }
+        ],
+        "terraform_version": "1.12.6",
+        "timestamp": "2026-09-01T10:23:27Z"
+      },
+      "refresh_only": {
+        "configuration": {
+          "provider_config": {
+            "openstack": {
+              "expressions": {
+                "auth_url": {
+                  "constant_value": "http://127.0.0.1:51501"
+                },
+                "max_retries": {
+                  "constant_value": 0
+                },
+                "password": "[REDACTED]",
+                "tenant_id": {
+                  "constant_value": "eba29e2d-53de-461d-ae91-ede7402713cb"
+                },
+                "user_name": {
+                  "constant_value": "admin"
+                }
+              },
+              "full_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+              "name": "openstack",
+              "version_constraint": "3.4.0"
+            }
+          },
+          "root_module": {
+            "resources": [
+              {
+                "address": "openstack_networking_network_v2.managed",
+                "expressions": {
+                  "admin_state_up": {
+                    "constant_value": true
+                  },
+                  "name": {
+                    "constant_value": "p13-5c-network-desired"
+                  },
+                  "tags": {
+                    "constant_value": []
+                  }
+                },
+                "mode": "managed",
+                "name": "managed",
+                "provider_config_key": "openstack",
+                "schema_version": 0,
+                "type": "openstack_networking_network_v2"
+              }
+            ]
+          }
+        },
+        "errored": false,
+        "format_version": "1.2",
+        "planned_values": {
+          "root_module": {}
+        },
+        "prior_state": {
+          "format_version": "1.0",
+          "terraform_version": "1.12.6",
+          "values": {
+            "root_module": {
+              "resources": [
+                {
+                  "address": "openstack_networking_network_v2.managed",
+                  "mode": "managed",
+                  "name": "managed",
+                  "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+                  "schema_version": 0,
+                  "sensitive_values": {
+                    "all_tags": [],
+                    "availability_zone_hints": [],
+                    "segments": [],
+                    "tags": []
+                  },
+                  "type": "openstack_networking_network_v2",
+                  "values": {
+                    "admin_state_up": true,
+                    "all_tags": [],
+                    "availability_zone_hints": [],
+                    "description": "",
+                    "dns_domain": "",
+                    "external": false,
+                    "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                    "mtu": 1500,
+                    "name": "p13-5c-network-drifted",
+                    "port_security_enabled": false,
+                    "qos_policy_id": "",
+                    "region": "",
+                    "segments": [],
+                    "shared": false,
+                    "tags": [],
+                    "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                    "timeouts": null,
+                    "transparent_vlan": false,
+                    "value_specs": null
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "resource_drift": [
+          {
+            "address": "openstack_networking_network_v2.managed",
+            "change": {
+              "actions": [
+                "update"
+              ],
+              "after": {
+                "admin_state_up": true,
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "description": "",
+                "dns_domain": "",
+                "external": false,
+                "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                "mtu": 1500,
+                "name": "p13-5c-network-drifted",
+                "port_security_enabled": false,
+                "qos_policy_id": "",
+                "region": "",
+                "segments": [],
+                "shared": false,
+                "tags": [],
+                "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "timeouts": null,
+                "transparent_vlan": false,
+                "value_specs": null
+              },
+              "after_sensitive": {
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "segments": [],
+                "tags": []
+              },
+              "after_unknown": {},
+              "before": {
+                "admin_state_up": true,
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "description": "",
+                "dns_domain": "",
+                "external": false,
+                "id": "01a05c7e-a7d6-7760-8de0-40b1bb08f2f8",
+                "mtu": 1500,
+                "name": "p13-5c-network-desired",
+                "port_security_enabled": false,
+                "qos_policy_id": "",
+                "region": "",
+                "segments": [],
+                "shared": false,
+                "tags": null,
+                "tenant_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "timeouts": null,
+                "transparent_vlan": false,
+                "value_specs": null
+              },
+              "before_sensitive": {
+                "all_tags": [],
+                "availability_zone_hints": [],
+                "segments": []
+              }
+            },
+            "mode": "managed",
+            "name": "managed",
+            "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+            "type": "openstack_networking_network_v2"
+          }
+        ],
+        "terraform_version": "1.12.6",
+        "timestamp": "2026-09-01T10:23:23Z"
+      }
+    },
+    "refresh_only_actions": [
+      [
+        "update"
+      ]
+    ],
+    "resource": "openstack_networking_network_v2",
+    "result": "passed",
+    "scenario": "canonical_out_of_band_mutable_drift",
+    "surface": "canonical_out_of_band",
+    "terraform_address": "openstack_networking_network_v2.managed",
+    "unrelated_changes_count": 0
+  },
+  "schema_version": 1,
+  "status": "passed",
+  "surface": "canonical_out_of_band",
+  "tested_o3k_head_sha": "4db09b5564fc1574af3342738262976b804897e0",
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
+    "opentofu_version_output": "OpenTofu v1.12.6",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+    "provider_modified": false,
+    "provider_sha256_expected": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc"
+  }
+}

@@ -65,4 +65,13 @@ if [[ "${P13_5B_RUN:-0}" == 1 ]]; then
   bash "$root_dir/tests/p13_5b_refresh_import.sh"
   exit $?
 fi
+if [[ "${P13_5C_RUN:-0}" == 1 ]]; then
+  bash "$root_dir/tests/p13_5c_canonical_out_of_band_drift.sh"
+  python3 "$root_dir/scripts/validate_p13_5c_evidence.py" --canonical-evidence \
+    "${O3K_P13_5C_OUT_OF_BAND_EVIDENCE_OUTPUT:-$root_dir/target/p13-5c/canonical-out-of-band-drift-evidence.json}"
+  # Native-surface rows remain fail-closed until each supported native delete
+  # has real provider evidence; a blocked native run must not become aggregate PASS.
+  bash "$root_dir/tests/p13_5c_native_drift.sh"
+  exit $?
+fi
 echo "P13.5A existing P13 baseline: PASS"

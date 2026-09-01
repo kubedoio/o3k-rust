@@ -3,6 +3,9 @@ set -euo pipefail
 
 root_dir=$(cd "$(dirname "$0")/.." && pwd)
 o3kd=${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}
+: "${O3K_LVM_VOLUME_GROUP:?set a disposable LVM volume group}"
+: "${O3K_LVM_THIN_POOL:?set a disposable LVM thin pool}"
+: "${O3K_LVM_PROVIDER_NAMESPACE:?set a disposable LVM provider namespace}"
 password=${O3K_P13_PASSWORD:-p13-4-disposable-password}
 project_id=eba29e2d-53de-461d-ae91-ede7402713cb
 port=$(python3 - <<'PY'
@@ -12,11 +15,36 @@ PY
 )
 work=$(mktemp -d /tmp/o3k-p13-4.XXXXXX)
 pid=
-cleanup() { if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; rm -rf "$work"; }
+volume_id=
+validate_lvm_scope() {
+  local vg_tags pool_tags expected_hash
+  expected_hash="$(printf '%s' "$O3K_LVM_PROVIDER_NAMESPACE" | sha256sum | awk '{print $1}')"
+  vg_tags="$(vgs --noheadings --options vg_tags --separator '|' "$O3K_LVM_VOLUME_GROUP" 2>/dev/null | tr -d '[:space:]')"
+  pool_tags="$(lvs --noheadings --options lv_tags --separator '|' "$O3K_LVM_VOLUME_GROUP/$O3K_LVM_THIN_POOL" 2>/dev/null | tr -d '[:space:]')"
+  [[ "$vg_tags" == "o3k_storage_$expected_hash" && "$pool_tags" == "o3k_pool_$expected_hash" ]] || {
+    echo "refusing non-disposable LVM scope" >&2
+    return 2
+  }
+}
+validate_lvm_scope
+cleanup() {
+  if [[ -n "${token:-}" && -n "${volume_id:-}" ]]; then
+    curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_id" >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+      [[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_id" 2>/dev/null || true)" == 404 ]] && break
+      sleep 0.1
+    done
+  fi
+  if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+  rm -rf "$work"
+}
 trap cleanup EXIT
 
 O3K_BOOTSTRAP_PASSWORD="$password" \
 O3K_TOKEN_SIGNING_KEY="p13-4-storage-token-signing-key-012345678901234567890123" \
+O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" \
+O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" \
+O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
   "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work/data" >"$work/o3kd.log" 2>&1 &
 pid=$!
 for _ in $(seq 1 120); do

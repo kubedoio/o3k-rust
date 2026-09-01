@@ -60,6 +60,7 @@ pub enum DescriptorError {
 #[derive(Debug, Clone, Default)]
 pub struct ResourceDispatcher {
     descriptors: HashMap<(String, String), ResourceDescriptor>,
+    lifecycle_registry: Option<Arc<std::sync::RwLock<o3k_kernel::ManifestRegistry>>>,
 }
 
 impl ResourceDispatcher {
@@ -69,7 +70,19 @@ impl ResourceDispatcher {
     pub fn from_manifest_registry(
         manifests: &o3k_kernel::ManifestRegistry,
     ) -> Result<Self, DescriptorError> {
+        Self::from_shared_manifest_registry(Arc::new(std::sync::RwLock::new(manifests.clone())))
+    }
+
+    /// Builds the dispatch index while retaining the shared lifecycle state.
+    /// Descriptor metadata is static, but readiness is resolved from the
+    /// registry for every discovery and mutation request.
+    pub fn from_shared_manifest_registry(
+        lifecycle_registry: Arc<std::sync::RwLock<o3k_kernel::ManifestRegistry>>,
+    ) -> Result<Self, DescriptorError> {
         let mut index = Self::default();
+        let manifests = lifecycle_registry
+            .read()
+            .map_err(|_| DescriptorError::InvalidOperation)?;
         for manifest in manifests.all() {
             let ready = manifests
                 .controller(&manifest.service_id)
@@ -103,6 +116,8 @@ impl ResourceDispatcher {
                 })?;
             }
         }
+        drop(manifests);
+        index.lifecycle_registry = Some(lifecycle_registry);
         Ok(index)
     }
 
@@ -147,6 +162,21 @@ impl ResourceDispatcher {
     }
     pub fn all(&self) -> impl Iterator<Item = &ResourceDescriptor> {
         self.descriptors.values()
+    }
+
+    pub(crate) fn is_ready(&self, descriptor: &ResourceDescriptor) -> bool {
+        let Some(registry) = &self.lifecycle_registry else {
+            return descriptor.ready;
+        };
+        registry
+            .read()
+            .ok()
+            .and_then(|registry| {
+                registry
+                    .controller(&descriptor.owning_service)
+                    .map(|c| c.state)
+            })
+            .is_some_and(|state| state == o3k_kernel::controller::ControllerState::Ready)
     }
 
     /// Resolve an authoritative lifecycle action from the manifest-derived
@@ -269,8 +299,11 @@ fn idempotency_key(headers: &HeaderMap) -> Result<Option<&str>, ErrorCode> {
     Ok(Some(value))
 }
 
-fn ready_for_mutation(descriptor: &ResourceDescriptor) -> Result<(), ErrorCode> {
-    if descriptor.ready {
+fn ready_for_mutation(
+    dispatcher: &ResourceDispatcher,
+    descriptor: &ResourceDescriptor,
+) -> Result<(), ErrorCode> {
+    if dispatcher.is_ready(descriptor) {
         Ok(())
     } else {
         Err(ErrorCode::NotAvailable)
@@ -404,6 +437,38 @@ mod tests {
         d.lifecycle_actions.remove(&LifecycleOperation::Delete);
         assert!(registry.register(d).is_ok());
     }
+
+    #[test]
+    fn mutation_readiness_tracks_shared_lifecycle_transition() {
+        let mut manifests = o3k_kernel::ManifestRegistry::new();
+        manifests.seed_core().unwrap();
+        manifests
+            .register_in_process_controller("compute", true, None)
+            .unwrap();
+        let shared = Arc::new(std::sync::RwLock::new(manifests));
+        let dispatcher = ResourceDispatcher::from_shared_manifest_registry(shared.clone()).unwrap();
+        let descriptor = dispatcher.resolve("compute", "servers").unwrap();
+
+        assert_eq!(ready_for_mutation(&dispatcher, descriptor), Ok(()));
+
+        shared
+            .write()
+            .unwrap()
+            .update_controller_health(
+                "compute",
+                o3k_kernel::controller::ControllerHealth {
+                    healthy: false,
+                    detail: Some("provider unavailable".to_owned()),
+                    protocol_version: o3k_kernel::controller::ProtocolVersion::V1,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            ready_for_mutation(&dispatcher, descriptor),
+            Err(ErrorCode::NotAvailable)
+        );
+    }
 }
 
 pub async fn create(
@@ -479,7 +544,7 @@ async fn create_for(
     if let Err(response) = authorize(&state, descriptor, action, &auth.0, None) {
         return ProblemDetails::new(response).into_response();
     }
-    if let Err(response) = ready_for_mutation(descriptor) {
+    if let Err(response) = ready_for_mutation(&state.resource_index, descriptor) {
         return ProblemDetails::new(response).into_response();
     }
     if let Some(kind) = request.kind.as_deref()
@@ -574,7 +639,7 @@ async fn delete_for(
     if let Err(response) = authorize(&state, descriptor, action, &auth.0, Some(&id)) {
         return ProblemDetails::new(response).into_response();
     }
-    if let Err(response) = ready_for_mutation(descriptor) {
+    if let Err(response) = ready_for_mutation(&state.resource_index, descriptor) {
         return ProblemDetails::new(response).into_response();
     }
     let Some(application) = state.resource_application else {
