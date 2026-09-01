@@ -879,6 +879,7 @@ impl ResourceApplication for GenericResourceApplication {
                                 provider,
                                 auth.effective_scope().id().as_str(),
                                 resource_id,
+                                Some(operation_id),
                             )
                             .await
                             .map_err(|_| ResourceApplicationError::Retryable)?;
@@ -1052,6 +1053,7 @@ impl ResourceApplication for GenericResourceApplication {
                     provider,
                     auth.effective_scope().id().as_str(),
                     resource_id,
+                    Some(operation_id),
                 )
                 .await
                 .map_err(|error| {
