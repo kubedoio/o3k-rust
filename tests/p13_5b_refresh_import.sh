@@ -1045,10 +1045,10 @@ volume_attachment_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "
 canonical_capture openstack_compute_volume_attach_v2 "$volume_attachment_import_id" "$work_dir/volume-attachment-import-canonical-after-cleanup.json"
 volume_attachment_import_server_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id")"
 volume_attachment_import_volume_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_attachment_import_volume_id")"
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_attachment_import_volume_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$volume_attachment_import_subnet_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$volume_attachment_import_network_id" >/dev/null
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_import_server_id" >/dev/null || true
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_attachment_import_volume_id" >/dev/null || true
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$volume_attachment_import_subnet_id" >/dev/null || true
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$volume_attachment_import_network_id" >/dev/null || true
 [[ "$volume_attachment_import_cleanup" == 404 && "$volume_attachment_import_server_status" == 200 && "$volume_attachment_import_volume_status" == 200 ]] || { echo "P13.5B VolumeAttachment import did not retain parents before cleanup" >&2; exit 1; }
 rm -f volume-attachment.tf
 cd "$project_dir"
@@ -1226,13 +1226,13 @@ EOF
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X PUT \
   "http://127.0.0.1:$port/v2.0/routers/$router_interface_import_router_id/remove_router_interface" \
   --data "{\"port_id\":\"$router_interface_unrelated_id\"}" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/routers/$router_interface_import_router_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_interface_import_subnet_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_interface_unrelated_subnet_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_interface_import_network_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_interface_unrelated_network_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_external_subnet_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_external_network_id" >/dev/null
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/routers/$router_interface_import_router_id" >/dev/null || true
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_interface_import_subnet_id" >/dev/null || true
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_interface_unrelated_subnet_id" >/dev/null || true
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_interface_import_network_id" >/dev/null || true
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_interface_unrelated_network_id" >/dev/null || true
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_external_subnet_id" >/dev/null || true
+curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_external_network_id" >/dev/null || true
 rm -f router-interface.tf
 cd "$project_dir"
 
