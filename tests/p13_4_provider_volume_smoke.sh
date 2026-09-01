@@ -12,7 +12,22 @@ project_id=eba29e2d-53de-461d-ae91-ede7402713cb
 port=${O3K_P13_PORT:-18992}
 work=$(mktemp -d /tmp/o3k-p13-4-provider.XXXXXX)
 pid=
-cleanup() { if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; }
+validate_lvm_scope() {
+    local vg_tags pool_tags
+    vg_tags="$(vgs --noheadings --options vg_tags --separator '|' "$O3K_LVM_VOLUME_GROUP" 2>/dev/null | tr -d '[:space:]')"
+    pool_tags="$(lvs --noheadings --options lv_tags --separator '|' "$O3K_LVM_VOLUME_GROUP/$O3K_LVM_THIN_POOL" 2>/dev/null | tr -d '[:space:]')"
+    [[ "$vg_tags" == o3k_storage_* && "$pool_tags" == o3k_pool_* ]] || {
+        echo "refusing non-disposable LVM scope" >&2
+        return 2
+    }
+}
+validate_lvm_scope
+cleanup() {
+    if [[ -f "$work/terraform.tfstate" && -n "${O3K_P13_TOFU:-}" ]]; then
+        (cd "$work" && TF_CLI_CONFIG_FILE="$work/tofu.tfrc" "$O3K_P13_TOFU" destroy -input=false -auto-approve >/dev/null 2>&1) || true
+    fi
+    if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+}
 trap cleanup EXIT
 
 O3K_BOOTSTRAP_PASSWORD="$password" \

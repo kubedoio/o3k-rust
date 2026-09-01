@@ -55,6 +55,60 @@ def validate_surface_amendment(document: dict, repository: Path) -> None:
     require(compatibility.get("production_runtime_modified") is False, "amendment modifies production runtime")
 
 
+def validate_canonical_evidence(document: dict, repository: Path) -> None:
+    """Validate the executable out-of-band compatibility drift artifact."""
+    contract, contract_digest = load_contract(repository)
+    require(document.get("artifact_type") == "o3k-p13-5c-canonical-out-of-band-drift-evidence", "invalid canonical drift artifact_type")
+    require(document.get("schema_version") == 1, "unsupported canonical drift schema_version")
+    require(document.get("phase") == "P13.5C", "invalid canonical drift phase")
+    require(document.get("profile") == "p13-iac-compatibility-v1", "invalid canonical drift profile")
+    require(document.get("status") in RESULTS, "invalid canonical drift status")
+    require(document.get("surface") == "canonical_out_of_band", "canonical drift surface is not explicit")
+    require(document.get("native_claim") is False, "canonical drift claims native API evidence")
+    require(document.get("canonical_authority") == "o3k", "canonical authority is not O3K")
+    require(document.get("provider_modified") is False, "provider modification is not explicitly false")
+    require(document.get("p13_5a_contract_sha256") == contract_digest, "canonical drift is not bound to P13.5A")
+    tested = document.get("tested_o3k_head_sha")
+    current = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip()
+    require(isinstance(tested, str) and UUID_SHA.fullmatch(tested), "invalid canonical drift tested SHA")
+    require(subprocess.run(["git", "-C", str(repository), "merge-base", "--is-ancestor", tested, current], check=False).returncode == 0, "canonical drift tested SHA is not an ancestor")
+    toolchain = document.get("toolchain")
+    require(isinstance(toolchain, dict), "canonical drift toolchain is missing")
+    require(toolchain.get("opentofu") == contract["toolchain"]["opentofu"], "canonical drift OpenTofu mismatch")
+    require(toolchain.get("provider") == contract["toolchain"]["provider"], "canonical drift provider mismatch")
+    require(toolchain.get("provider_modified") is False, "canonical drift provider modification is not false")
+    row = document.get("scenario")
+    require(isinstance(row, dict), "canonical drift scenario is missing")
+    require(row.get("resource") == "openstack_networking_network_v2", "canonical drift resource is outside bounded executable scope")
+    require(row.get("scenario") == "canonical_out_of_band_mutable_drift", "invalid canonical drift scenario")
+    require(row.get("surface") == "canonical_out_of_band" and row.get("native_claim") is False, "canonical drift row surface is invalid")
+    require(row.get("mutation_route") == "PUT /v2.0/networks/{id}", "canonical drift mutation route is not the accepted compatibility route")
+    require(row.get("native_change") in {"name", "description", "admin_state_up"}, "canonical drift attribute is outside contract")
+    require(row.get("canonical_id_before") == row.get("canonical_id_after_mutation") == row.get("canonical_id_after_reapply"), "canonical identity changed")
+    require(row.get("owner_scope"), "canonical drift owner scope is missing")
+    require(row.get("old_resource_absent") is False and row.get("new_resource_count") == 1, "canonical resource count invariant failed")
+    require(row.get("canonical_duplicate_count") == 0, "canonical duplicate invariant failed")
+    require(row.get("unrelated_changes_count") == 0, "unrelated plan changes are present")
+    require(row.get("final_plan_noop") is True, "canonical final plan is not no-op")
+    require(row.get("cleanup_http_status") == 404, "canonical drift cleanup did not remove the fixture")
+    observation = row.get("plan_observation")
+    require(isinstance(observation, dict), "canonical drift plan observation is missing")
+    for name in ("initial_normal", "refresh_only", "normal", "final_normal"):
+        plan = observation.get(name)
+        require(isinstance(plan, dict), f"canonical drift plan {name} is missing")
+        require(isinstance(plan.get("format_version"), str), f"canonical drift plan {name} lacks format_version")
+        require(isinstance(plan.get("planned_values"), dict) and isinstance(plan.get("prior_state"), dict), f"canonical drift plan {name} lacks state fields")
+    refresh = observation["refresh_only"]
+    require(all(change.get("address") == row["terraform_address"] for change in refresh.get("resource_drift", [])), "refresh-only observed an unrelated address")
+    normal = observation["normal"].get("resource_changes", [])
+    managed = [change for change in normal if change.get("address") == row["terraform_address"] and change.get("change", {}).get("actions") == ["update"]]
+    unrelated = [change for change in normal if change.get("address") != row["terraform_address"] and change.get("change", {}).get("actions") not in ([], ["no-op"])]
+    require(managed, "canonical drift normal plan lacks exact in-place update")
+    require(not unrelated, "canonical drift normal plan has unrelated changes")
+    if document.get("status") == "passed":
+        require(row.get("result") == "passed", "passed canonical artifact has incomplete row")
+
+
 def expected_cells(contract: dict) -> set[tuple[str, str, str]]:
     cells: set[tuple[str, str, str]] = set()
     for item in contract["resources"]:
@@ -190,9 +244,14 @@ def main() -> None:
     parser.add_argument("evidence", nargs="?")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--surface-amendment", type=Path, help="validate the documentation-only drift-surface amendment")
+    parser.add_argument("--canonical-evidence", type=Path, help="validate canonical/out-of-band drift evidence")
     parser.add_argument("--allow-blocked", action="store_true", help="validate honest blocked evidence; strict completion rejects it")
     args = parser.parse_args()
     repository = Path(__file__).resolve().parents[1]
+    if args.canonical_evidence:
+        validate_canonical_evidence(json.loads(args.canonical_evidence.read_text()), repository)
+        print("P13.5C canonical/out-of-band evidence: PASS")
+        return
     if args.surface_amendment:
         validate_surface_amendment(json.loads(args.surface_amendment.read_text()), repository)
         print("P13.5C drift-surface amendment: PASS")

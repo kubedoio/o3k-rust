@@ -15,7 +15,24 @@ PY
 )
 work=$(mktemp -d /tmp/o3k-p13-4.XXXXXX)
 pid=
-cleanup() { if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; rm -rf "$work"; }
+volume_id=
+validate_lvm_scope() {
+  local vg_tags pool_tags
+  vg_tags="$(vgs --noheadings --options vg_tags --separator '|' "$O3K_LVM_VOLUME_GROUP" 2>/dev/null | tr -d '[:space:]')"
+  pool_tags="$(lvs --noheadings --options lv_tags --separator '|' "$O3K_LVM_VOLUME_GROUP/$O3K_LVM_THIN_POOL" 2>/dev/null | tr -d '[:space:]')"
+  [[ "$vg_tags" == o3k_storage_* && "$pool_tags" == o3k_pool_* ]] || {
+    echo "refusing non-disposable LVM scope" >&2
+    return 2
+  }
+}
+validate_lvm_scope
+cleanup() {
+  if [[ -n "${token:-}" && -n "${volume_id:-}" ]]; then
+    curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_id" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+  rm -rf "$work"
+}
 trap cleanup EXIT
 
 O3K_BOOTSTRAP_PASSWORD="$password" \
