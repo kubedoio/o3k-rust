@@ -153,10 +153,33 @@ plan() {
   wc -l <"$work_dir/trace.jsonl" >"$work_dir/$label-refresh-start"
   "$tofu" plan -input=false -refresh-only -out="$work_dir/$label-refresh.tfplan" >/dev/null
   "$tofu" show -json "$work_dir/$label-refresh.tfplan" >"$work_dir/$label-refresh.json"
+  # OpenTofu omits the empty change collection for a no-op refresh-only plan.
+  # Preserve the structured observation while making the empty collection
+  # explicit for the machine-readable evidence validator.
+  python3 - "$work_dir/$label-refresh.json" refresh-only <<'PY'
+import json
+import sys
+
+path, kind = sys.argv[1:]
+document = json.loads(open(path).read())
+key = "resource_drift" if kind == "refresh-only" else "resource_changes"
+document.setdefault(key, [])
+open(path, "w").write(json.dumps(document, sort_keys=True))
+PY
   wc -l <"$work_dir/trace.jsonl" >"$work_dir/$label-refresh-end"
   wc -l <"$work_dir/trace.jsonl" >"$work_dir/$label-normal-start"
   "$tofu" plan -input=false -out="$work_dir/$label-normal.tfplan" >/dev/null
   "$tofu" show -json "$work_dir/$label-normal.tfplan" >"$work_dir/$label-normal.json"
+  python3 - "$work_dir/$label-normal.json" normal <<'PY'
+import json
+import sys
+
+path, kind = sys.argv[1:]
+document = json.loads(open(path).read())
+key = "resource_drift" if kind == "refresh-only" else "resource_changes"
+document.setdefault(key, [])
+open(path, "w").write(json.dumps(document, sort_keys=True))
+PY
   wc -l <"$work_dir/trace.jsonl" >"$work_dir/$label-normal-end"
   "$tofu" show -json >"$work_dir/$label-state.json"
 }
@@ -273,8 +296,9 @@ EOF
 plan keypair-read-1
 plan keypair-read-2
 keypair_id="p13-5b-keypair"
-keypair_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs" | python3 -c 'import json,sys; print(sum(1 for x in json.load(sys.stdin)["keypairs"] if x["keypair"]["name"] == "p13-5b-keypair"))')"
-curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs/p13-5b-keypair" >"$work_dir/keypair-stable-projection.json"
+keypair_stable_response="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs")"
+keypair_stable_count="$(printf '%s' "$keypair_stable_response" | python3 -c 'import json,sys; print(sum(1 for x in json.load(sys.stdin)["keypairs"] if x["keypair"]["name"] == "p13-5b-keypair"))')"
+printf '%s' "$keypair_stable_response" | python3 -c 'import json,sys; item=next(x["keypair"] for x in json.load(sys.stdin)["keypairs"] if x["keypair"]["name"] == "p13-5b-keypair"); print(json.dumps({"keypair": item}))' >"$work_dir/keypair-stable-projection.json"
 canonical_capture openstack_compute_keypair_v2 p13-5b-keypair "$work_dir/keypair-stable-canonical-before.json"
 canonical_capture openstack_compute_keypair_v2 p13-5b-keypair "$work_dir/keypair-stable-canonical-after-read.json"
 sleep 1
@@ -297,8 +321,9 @@ keypair_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 plan keypair-import
 "$tofu" show -json "$work_dir/keypair-import-normal.tfplan" >"$work_dir/keypair-import-normal.json"
 "$tofu" show -json >"$work_dir/keypair-import-state.json"
-keypair_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs" | python3 -c 'import json,sys; print(sum(1 for x in json.load(sys.stdin)["keypairs"] if x["keypair"]["name"] == "p13-5b-import-keypair"))')"
-curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs/p13-5b-import-keypair" >"$work_dir/keypair-import-projection.json"
+keypair_import_response="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/os-keypairs")"
+keypair_count="$(printf '%s' "$keypair_import_response" | python3 -c 'import json,sys; print(sum(1 for x in json.load(sys.stdin)["keypairs"] if x["keypair"]["name"] == "p13-5b-import-keypair"))')"
+printf '%s' "$keypair_import_response" | python3 -c 'import json,sys; item=next(x["keypair"] for x in json.load(sys.stdin)["keypairs"] if x["keypair"]["name"] == "p13-5b-import-keypair"); print(json.dumps({"keypair": item}))' >"$work_dir/keypair-import-projection.json"
 canonical_capture openstack_compute_keypair_v2 p13-5b-import-keypair "$work_dir/keypair-import-canonical-before.json"
 canonical_capture openstack_compute_keypair_v2 p13-5b-import-keypair "$work_dir/keypair-import-canonical-after-read.json"
 "$tofu" destroy -input=false -auto-approve >/dev/null
@@ -310,7 +335,6 @@ cat >network.tf <<'EOF'
 resource "openstack_networking_network_v2" "managed" {
   name = "p13-5b-network"
   admin_state_up = true
-  tags = []
 }
 EOF
 "$tofu" apply -input=false -auto-approve >/dev/null
@@ -332,7 +356,6 @@ import_network_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[
 cat >network.tf <<EOF
 resource "openstack_networking_network_v2" "imported" {
   name = "p13-5b-import-network"
-  tags = []
 }
 EOF
 network_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
@@ -352,7 +375,6 @@ canonical_capture openstack_networking_network_v2 "$import_network_id" "$work_di
 cat >subnet.tf <<EOF
 resource "openstack_networking_network_v2" "parent" {
   name = "p13-5b-subnet-network"
-  tags = []
 }
 resource "openstack_networking_subnet_v2" "managed" {
   network_id = openstack_networking_network_v2.parent.id
@@ -361,7 +383,6 @@ resource "openstack_networking_subnet_v2" "managed" {
   ip_version = 4
   enable_dhcp = false
   dns_nameservers = []
-  tags = []
 }
 EOF
 "$tofu" apply -input=false -auto-approve >/dev/null
@@ -393,7 +414,6 @@ resource "openstack_networking_subnet_v2" "imported" {
   ip_version = 4
   enable_dhcp = false
   dns_nameservers = []
-  tags = []
 }
 EOF
 subnet_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
@@ -445,8 +465,18 @@ rm -f port.tf
 kill "$pid" 2>/dev/null || true
 wait "$pid" 2>/dev/null || true
 pid=""
+# Allow the prior daemon's SQLite handles and background workers to quiesce
+# before reconstructing the same persisted store.
+sleep 1
 O3K_BOOTSTRAP_PASSWORD="$password" \
 O3K_TOKEN_SIGNING_KEY="p13-5b-token-signing-key-012345678901234567890123" \
+O3K_NETWORK_EXTERNAL_REALM_ID="$external_realm_id" \
+O3K_PUBLIC_POOL_CIDR="$external_pool_cidr" \
+O3K_PUBLIC_POOL_FIRST="$external_pool_first" \
+O3K_PUBLIC_POOL_LAST="$external_pool_last" \
+O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" \
+O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" \
+O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
 O3K_COMPATIBILITY_TRACE_PATH="$work_dir/trace.jsonl" \
   "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
 pid=$!
@@ -863,7 +893,6 @@ resource "openstack_compute_instance_v2" "managed" {
   power_state = "active"
   force_delete = false
   stop_before_destroy = false
-  tags = []
   network { uuid = openstack_networking_network_v2.parent.id }
 }
 EOF
@@ -913,10 +942,9 @@ resource "openstack_compute_instance_v2" "imported" {
   image_id = data.openstack_images_image_v2.image.id
   flavor_id = data.openstack_compute_flavor_v2.flavor.id
   lifecycle {
-    ignore_changes = [force_delete, stop_before_destroy, tags, all_tags]
+    ignore_changes = [force_delete, stop_before_destroy]
   }
   metadata = {}
-  tags = []
   network { uuid = "$server_import_network_id" }
 }
 EOF
@@ -1236,6 +1264,7 @@ curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networ
 rm -f router-interface.tf
 cd "$project_dir"
 
+export P13_5B_SERVER_ID="$server_id" P13_5B_SERVER_IMPORT_ID="$server_import_id" P13_5B_SERVER_STABLE_COUNT="$server_stable_count" P13_5B_SERVER_COUNT="$server_count" P13_5B_SERVER_STABLE_CLEANUP="$server_stable_cleanup" P13_5B_SERVER_IMPORT_CLEANUP="$server_import_cleanup" P13_5B_SERVER_STABLE_TRACE_START="$server_stable_trace_start" P13_5B_SERVER_IMPORT_TRACE_START="$server_import_trace_start"
 export P13_5B_ATTACHMENT_ID="$volume_attachment_id" P13_5B_ATTACHMENT_IMPORT_ID="$volume_attachment_import_id" P13_5B_ATTACHMENT_STABLE_COUNT="$volume_attachment_stable_count" P13_5B_ATTACHMENT_IMPORT_COUNT="$volume_attachment_import_count_after_read" P13_5B_ATTACHMENT_STABLE_CLEANUP="$volume_attachment_stable_cleanup" P13_5B_ATTACHMENT_IMPORT_CLEANUP="$volume_attachment_import_cleanup" P13_5B_ATTACHMENT_TRACE_START="$volume_attachment_trace_start" P13_5B_ATTACHMENT_IMPORT_TRACE_START="$volume_attachment_import_trace_start" P13_5B_ATTACHMENT_IMPORT_STATE_ID="$volume_attachment_import_state_id"
 python3 - "$root_dir" "$output" "$work_dir" "$tofu" "$tofu_archive" "$provider_archive" "$provider_binary" "$provider_sha" "$project_id" "$network_id" "$import_network_id" "$keypair_stable_count" "$keypair_count" "$network_stable_count" "$network_count" "$keypair_stable_cleanup" "$keypair_import_cleanup" "$network_stable_cleanup" "$network_import_cleanup" "$keypair_trace_start" "$network_trace_start" "$baseline_result" "$subnet_id" "$subnet_import_id" "$subnet_stable_count" "$subnet_count" "$subnet_stable_cleanup" "$subnet_import_cleanup" "$subnet_trace_start" "$port_id" "$port_import_id" "$port_stable_count" "$port_count" "$port_stable_cleanup" "$port_import_cleanup" "$port_trace_start" "$security_group_id" "$security_group_import_id" "$security_group_stable_count" "$security_group_count" "$security_group_stable_cleanup" "$security_group_import_cleanup" "$security_group_trace_start" "$security_group_rule_id" "$rule_import_id" "$security_group_rule_stable_count" "$rule_count" "$security_group_rule_stable_cleanup" "$rule_import_cleanup" "$rule_trace_start" "$router_id" "$router_import_id" "$router_stable_count" "$router_count" "$router_stable_cleanup" "$router_import_cleanup" "$router_trace_start" "$router_interface_stable_id" "$router_interface_import_id" "$router_interface_stable_count" "$router_interface_import_count" "$router_interface_stable_count_after" "$router_interface_import_count_after" "$router_interface_stable_cleanup" "$router_interface_import_cleanup" "$router_interface_stable_trace_start" "$router_interface_import_trace_start" "$fip_stable_id" "$fip_import_id" "$fip_stable_count" "$fip_import_count_before" "$fip_import_count_after_read" "$fip_stable_count_after" "$fip_import_count_after_cleanup" "$fip_stable_cleanup" "$fip_import_cleanup" "$fip_stable_trace_start" "$fip_import_trace_start" "$volume_stable_id" "$volume_import_id" "$volume_stable_count" "$volume_import_count_before" "$volume_import_count_after_read" "$volume_stable_count_after" "$volume_import_count_after_cleanup" "$volume_stable_cleanup" "$volume_import_cleanup" "$volume_stable_trace_start" "$volume_import_trace_start" <<'PY'
 import hashlib
@@ -1255,6 +1284,14 @@ volume_attachment_import_cleanup = os.environ["P13_5B_ATTACHMENT_IMPORT_CLEANUP"
 volume_attachment_trace_start = os.environ["P13_5B_ATTACHMENT_TRACE_START"]
 volume_attachment_import_trace_start = os.environ["P13_5B_ATTACHMENT_IMPORT_TRACE_START"]
 volume_attachment_import_state_id = os.environ["P13_5B_ATTACHMENT_IMPORT_STATE_ID"]
+server_id = os.environ["P13_5B_SERVER_ID"]
+server_import_id = os.environ["P13_5B_SERVER_IMPORT_ID"]
+server_stable_count = os.environ["P13_5B_SERVER_STABLE_COUNT"]
+server_count = os.environ["P13_5B_SERVER_COUNT"]
+server_stable_cleanup = os.environ["P13_5B_SERVER_STABLE_CLEANUP"]
+server_import_cleanup = os.environ["P13_5B_SERVER_IMPORT_CLEANUP"]
+server_stable_trace_start = os.environ["P13_5B_SERVER_STABLE_TRACE_START"]
+server_import_trace_start = os.environ["P13_5B_SERVER_IMPORT_TRACE_START"]
 work = pathlib.Path(work)
 baseline_document = json.loads(pathlib.Path(os.environ["P13_5B_BASELINE_MANIFEST"]).read_text()) if os.environ.get("P13_5B_BASELINE_MANIFEST") else {"status": baseline_result}
 
@@ -1341,7 +1378,7 @@ def provider_mutation_routes(start, end, resource=None):
         user_agent = headers.get("user-agent", "")
         method = record.get("method") or record.get("request_method")
         path = record.get("path") or record.get("request_path")
-        if "Terraform Provider OpenStack/3.4.0" in user_agent and method in {"POST", "PUT", "PATCH", "DELETE"} and path:
+        if "Terraform Provider OpenStack/3.4.0" in user_agent and method in {"POST", "PUT", "PATCH", "DELETE"} and path and path != "/v3/auth/tokens":
             routes.append({"method": method, "path": path, "ordinal": ordinal})
     return routes
 
@@ -1517,19 +1554,19 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
 
 scenarios = [
     scenario("openstack_compute_keypair_v2", "stable-read", "p13-5b-keypair", "", ["keypair-read-1-refresh.json", "keypair-read-2-refresh.json"], ["keypair-read-1-normal.json", "keypair-read-2-normal.json"], cleanup_result(keypair_stable_cleanup), keypair_stable_count, trace_start=0, projection_file="keypair-stable-projection.json"),
-    scenario("openstack_compute_keypair_v2", "import", "p13-5b-import-keypair", "p13-5b-import-keypair", [], ["keypair-import-normal.json"], cleanup_result(keypair_import_cleanup), keypair_count, trace_start=keypair_trace_start, projection_file="keypair-import-projection.json"),
+    scenario("openstack_compute_keypair_v2", "import", "p13-5b-import-keypair", "p13-5b-import-keypair", ["keypair-import-refresh.json"], ["keypair-import-normal.json"], cleanup_result(keypair_import_cleanup), keypair_count, trace_start=keypair_trace_start, projection_file="keypair-import-projection.json"),
     scenario("openstack_networking_network_v2", "stable-read", network_id, "", ["network-read-1-refresh.json", "network-read-2-refresh.json"], ["network-read-1-normal.json", "network-read-2-normal.json"], cleanup_result(network_stable_cleanup), network_stable_count, trace_start=0, projection_file="network-stable-projection.json"),
-    scenario("openstack_networking_network_v2", "import", import_network_id, import_network_id, [], ["network-import-normal.json"], cleanup_result(network_import_cleanup), network_count, trace_start=network_trace_start, projection_file="network-import-projection.json"),
+    scenario("openstack_networking_network_v2", "import", import_network_id, import_network_id, ["network-import-refresh.json"], ["network-import-normal.json"], cleanup_result(network_import_cleanup), network_count, trace_start=network_trace_start, projection_file="network-import-projection.json"),
     scenario("openstack_networking_subnet_v2", "stable-read", subnet_id, "", ["subnet-read-1-refresh.json", "subnet-read-2-refresh.json"], ["subnet-read-1-normal.json", "subnet-read-2-normal.json"], cleanup_result(subnet_stable_cleanup), subnet_stable_count, trace_start=0, projection_file="subnet-stable-projection.json"),
-    scenario("openstack_networking_subnet_v2", "import", subnet_import_id, subnet_import_id, [], ["subnet-import-normal.json"], cleanup_result(subnet_import_cleanup), subnet_count, trace_start=subnet_trace_start, projection_file="subnet-import-projection.json"),
+    scenario("openstack_networking_subnet_v2", "import", subnet_import_id, subnet_import_id, ["subnet-import-refresh.json"], ["subnet-import-normal.json"], cleanup_result(subnet_import_cleanup), subnet_count, trace_start=subnet_trace_start, projection_file="subnet-import-projection.json"),
     scenario("openstack_networking_port_v2", "stable-read", port_id, "", ["port-read-1-refresh.json", "port-read-2-refresh.json"], ["port-read-1-normal.json", "port-read-2-normal.json"], cleanup_result(port_stable_cleanup), port_stable_count, trace_start=0, projection_file="port-stable-projection.json"),
-    scenario("openstack_networking_port_v2", "import", port_import_id, port_import_id, [], ["port-import-normal.json"], cleanup_result(port_import_cleanup), port_count, trace_start=port_trace_start, projection_file="port-import-projection.json"),
+    scenario("openstack_networking_port_v2", "import", port_import_id, port_import_id, ["port-import-refresh.json"], ["port-import-normal.json"], cleanup_result(port_import_cleanup), port_count, trace_start=port_trace_start, projection_file="port-import-projection.json"),
     scenario("openstack_networking_secgroup_v2", "stable-read", security_group_id, "", ["security-group-read-1-refresh.json", "security-group-read-2-refresh.json"], ["security-group-read-1-normal.json", "security-group-read-2-normal.json"], cleanup_result(security_group_stable_cleanup), security_group_stable_count, trace_start=0, projection_file="security-group-stable-projection.json"),
-    scenario("openstack_networking_secgroup_v2", "import", security_group_import_id, security_group_import_id, [], ["security-group-import-normal.json"], cleanup_result(security_group_import_cleanup), security_group_count, trace_start=security_group_trace_start, projection_file="security-group-import-projection.json"),
+    scenario("openstack_networking_secgroup_v2", "import", security_group_import_id, security_group_import_id, ["security-group-import-refresh.json"], ["security-group-import-normal.json"], cleanup_result(security_group_import_cleanup), security_group_count, trace_start=security_group_trace_start, projection_file="security-group-import-projection.json"),
     scenario("openstack_networking_secgroup_rule_v2", "stable-read", security_group_rule_id, "", ["security-group-rule-read-1-refresh.json", "security-group-rule-read-2-refresh.json"], ["security-group-rule-read-1-normal.json", "security-group-rule-read-2-normal.json"], cleanup_result(security_group_rule_stable_cleanup), security_group_rule_stable_count, trace_start=0, projection_file="security-group-rule-stable-projection.json"),
-    scenario("openstack_networking_secgroup_rule_v2", "import", rule_import_id, rule_import_id, [], ["security-group-rule-import-normal.json"], cleanup_result(rule_import_cleanup), rule_count, trace_start=rule_trace_start, projection_file="security-group-rule-import-projection.json"),
+    scenario("openstack_networking_secgroup_rule_v2", "import", rule_import_id, rule_import_id, ["security-group-rule-import-refresh.json"], ["security-group-rule-import-normal.json"], cleanup_result(rule_import_cleanup), rule_count, trace_start=rule_trace_start, projection_file="security-group-rule-import-projection.json"),
     scenario("openstack_networking_router_v2", "stable-read", router_id, "", ["router-read-1-refresh.json", "router-read-2-refresh.json"], ["router-read-1-normal.json", "router-read-2-normal.json"], cleanup_result(router_stable_cleanup), router_stable_count, trace_start=0, projection_file="router-stable-projection.json"),
-    scenario("openstack_networking_router_v2", "import", router_import_id, router_import_id, [], ["router-import-normal.json"], cleanup_result(router_import_cleanup), router_count, trace_start=router_trace_start, projection_file="router-import-projection.json"),
+    scenario("openstack_networking_router_v2", "import", router_import_id, router_import_id, ["router-import-refresh.json"], ["router-import-normal.json"], cleanup_result(router_import_cleanup), router_count, trace_start=router_trace_start, projection_file="router-import-projection.json"),
     scenario("openstack_networking_router_interface_v2", "stable-read", router_interface_stable_id, "", ["router-interface-read-1-refresh.json", "router-interface-read-2-refresh.json"], ["router-interface-read-1-normal.json", "router-interface-read-2-normal.json"], cleanup_result(router_interface_stable_cleanup), router_interface_stable_count, trace_start=router_interface_stable_trace_start, projection_file="router-interface-stable-projection.json", canonical_count_after=router_interface_stable_count_after, parent_file="router-interface-stable-parent.json"),
     scenario("openstack_networking_router_interface_v2", "import", router_interface_import_id, router_interface_import_id, ["router-interface-import-read-1-refresh.json", "router-interface-import-read-2-refresh.json"], ["router-interface-import-read-1-normal.json", "router-interface-import-read-2-normal.json"], cleanup_result(router_interface_import_cleanup), router_interface_import_count, trace_start=router_interface_import_trace_start, projection_file="router-interface-import-projection.json", canonical_count_after=router_interface_import_count_after, parent_file="router-interface-import-parent.json"),
     scenario("openstack_compute_instance_v2", "stable-read", server_id, "", ["server-read-1-refresh.json", "server-read-2-refresh.json"], ["server-read-1-normal.json", "server-read-2-normal.json"], cleanup_result(server_stable_cleanup), server_stable_count, trace_start=server_stable_trace_start, projection_file="server-stable-projection.json"),
@@ -1539,7 +1576,7 @@ scenarios = [
     scenario("openstack_blockstorage_volume_v3", "stable-read", volume_stable_id, "", ["volume-read-1-refresh.json", "volume-read-2-refresh.json"], ["volume-read-1-normal.json", "volume-read-2-normal.json"], cleanup_result(volume_stable_cleanup), volume_stable_count, trace_start=volume_stable_trace_start, projection_file="volume-stable-projection.json", canonical_count_after=volume_stable_count_after),
     scenario("openstack_blockstorage_volume_v3", "import", volume_import_id, volume_import_id, ["volume-import-read-1-refresh.json", "volume-import-read-2-refresh.json"], ["volume-import-read-1-normal.json", "volume-import-read-2-normal.json"], cleanup_result(volume_import_cleanup), volume_import_count_after_read, trace_start=volume_import_trace_start, projection_file="volume-import-projection.json", canonical_count_after=volume_import_count_after_cleanup),
     scenario("openstack_compute_volume_attach_v2", "stable-read", volume_attachment_id, "", ["volume-attachment-read-1-refresh.json", "volume-attachment-read-2-refresh.json"], ["volume-attachment-read-1-normal.json", "volume-attachment-read-2-normal.json"], cleanup_result(volume_attachment_stable_cleanup), volume_attachment_stable_count, trace_start=volume_attachment_trace_start, projection_file="volume-attachment-stable-projection.json"),
-    scenario("openstack_compute_volume_attach_v2", "import", volume_attachment_import_id, volume_attachment_import_state_id, ["volume-attachment-import-read-1-refresh.json", "volume-attachment-import-read-2-refresh.json"], ["volume-attachment-import-read-1-normal.json", "volume-attachment-import-read-2-normal.json"], cleanup_result(volume_attachment_import_cleanup), volume_attachment_import_count_after_read, trace_start=volume_attachment_import_trace_start, projection_file="volume-attachment-import-projection.json", parent_file="volume-attachment-import-parents.json"),
+    scenario("openstack_compute_volume_attach_v2", "import", volume_attachment_import_id, volume_attachment_import_state_id, ["volume-attachment-import-read-1-refresh.json", "volume-attachment-import-read-2-refresh.json"], ["volume-attachment-import-read-1-normal.json", "volume-attachment-import-read-2-normal.json"], cleanup_result(volume_attachment_import_cleanup), volume_attachment_import_count, trace_start=volume_attachment_import_trace_start, projection_file="volume-attachment-import-projection.json", parent_file="volume-attachment-import-parents.json"),
 ]
 required_gates = [
     "tests/p13_2_core_lifecycle.sh", "tests/p13_2b_subnet_lifecycle.sh",
