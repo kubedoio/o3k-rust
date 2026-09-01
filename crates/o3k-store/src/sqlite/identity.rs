@@ -475,42 +475,52 @@ impl SqliteStore {
         project_id: &str,
         name: &str,
     ) -> Result<(), StoreError> {
-        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
-        let attached: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM server_keypairs WHERE keypair_id = (SELECT id FROM keypairs WHERE user_id = ? AND project_id = ? AND name = ?)")
-            .bind(user_id).bind(project_id).bind(name).fetch_one(&mut *transaction).await.map_err(StoreError::Database)?;
-        if attached > 0 {
-            transaction.rollback().await.map_err(StoreError::Database)?;
-            return Err(StoreError::KeypairInUse);
+        let mut backoff = std::time::Duration::from_millis(10);
+        for attempt in 0..crate::SQLITE_BUSY_MAX_ATTEMPTS {
+            let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+            let began = sqlx::query("BEGIN IMMEDIATE")
+                .execute(&mut *connection)
+                .await;
+            let outcome = match began {
+                Ok(_) => {
+                    let outcome: Result<sqlx::sqlite::SqliteQueryResult, StoreError> = async {
+                        let attached: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM server_keypairs WHERE keypair_id = (SELECT id FROM keypairs WHERE user_id = ? AND project_id = ? AND name = ?)")
+                            .bind(user_id).bind(project_id).bind(name).fetch_one(&mut *connection).await.map_err(StoreError::Database)?;
+                        if attached > 0 {
+                            return Err(StoreError::KeypairInUse);
+                        }
+                        let pending_reference: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM resources WHERE project_id = ? AND kind = 'compute_instance' AND observed_state != 'DELETED' AND EXISTS (SELECT 1 FROM operations WHERE operations.resource_id = resources.id AND operations.kind = 'create' AND operations.state IN ('pending', 'running', 'unknown_outcome')) AND (json_extract(desired_state, '$.keypair_id') = (SELECT id FROM keypairs WHERE user_id = ? AND project_id = ? AND name = ?) OR (json_extract(desired_state, '$.keypair_id') IS NULL AND json_extract(desired_state, '$.key_name') = ?))",
+                        )
+                        .bind(project_id).bind(user_id).bind(project_id).bind(name).bind(name)
+                        .fetch_one(&mut *connection).await.map_err(StoreError::Database)?;
+                        if pending_reference > 0 {
+                            return Err(StoreError::KeypairInUse);
+                        }
+                        sqlx::query("DELETE FROM keypairs WHERE user_id = ? AND project_id = ? AND name = ?")
+                            .bind(user_id).bind(project_id).bind(name)
+                            .execute(&mut *connection).await.map_err(StoreError::Database)
+                    }.await;
+                    SqliteStore::commit_or_rollback(&mut connection, outcome).await
+                }
+                Err(error) => Err(StoreError::Database(error)),
+            };
+            match outcome {
+                Ok(result) if result.rows_affected() == 0 => {
+                    return Err(StoreError::KeypairNotFound);
+                }
+                Ok(_) => return Ok(()),
+                Err(StoreError::Database(error))
+                    if crate::is_sqlite_busy(&error)
+                        && attempt + 1 < crate::SQLITE_BUSY_MAX_ATTEMPTS =>
+                {
+                    tokio::time::sleep(backoff).await;
+                    backoff *= 2;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        let pending_reference: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM resources WHERE project_id = ? AND kind = 'compute_instance' AND observed_state != 'DELETED' AND EXISTS (SELECT 1 FROM operations WHERE operations.resource_id = resources.id AND operations.kind = 'create' AND operations.state IN ('pending', 'running', 'unknown_outcome')) AND (json_extract(desired_state, '$.keypair_id') = (SELECT id FROM keypairs WHERE user_id = ? AND project_id = ? AND name = ?) OR (json_extract(desired_state, '$.keypair_id') IS NULL AND json_extract(desired_state, '$.key_name') = ?))",
-        )
-        .bind(project_id)
-        .bind(user_id)
-        .bind(project_id)
-        .bind(name)
-        .bind(name)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(StoreError::Database)?;
-        if pending_reference > 0 {
-            transaction.rollback().await.map_err(StoreError::Database)?;
-            return Err(StoreError::KeypairInUse);
-        }
-        let result =
-            sqlx::query("DELETE FROM keypairs WHERE user_id = ? AND project_id = ? AND name = ?")
-                .bind(user_id)
-                .bind(project_id)
-                .bind(name)
-                .execute(&mut *transaction)
-                .await
-                .map_err(StoreError::Database)?;
-        transaction.commit().await.map_err(StoreError::Database)?;
-        if result.rows_affected() == 0 {
-            Err(StoreError::KeypairNotFound)
-        } else {
-            Ok(())
-        }
+        unreachable!("the loop returns on the final attempt")
     }
 
     pub async fn attach_server_keypair(

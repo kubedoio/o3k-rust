@@ -126,12 +126,12 @@ fn native_attachment_view(
 }
 
 fn native_attachment_enabled(state: &AppState) -> bool {
-    state.storage_store.is_some()
-        && state.storage_provider.is_some()
-        && state
-            .compute
-            .as_ref()
-            .is_none_or(|compute| !compute.cinder_configured())
+    // Native storage is the canonical authority whenever its execution
+    // boundary is configured.  The compatibility Cinder endpoint may still
+    // be advertised so the upstream provider can discover the volume API;
+    // that endpoint must not redirect native attachment mutations to an
+    // external service.
+    state.storage_store.is_some() && state.storage_provider.is_some()
 }
 
 fn now_rfc3339() -> String {

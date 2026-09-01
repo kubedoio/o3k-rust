@@ -2442,6 +2442,71 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn keypair_delete_waits_out_a_concurrent_writer() -> Result<(), Box<dyn Error>> {
+        // A deferred read-then-write transaction can read through a concurrent
+        // WAL writer and then fail with SQLITE_BUSY_SNAPSHOT when it promotes
+        // the read transaction for DELETE. The deletion must acquire its write
+        // lock before reading so the configured busy timeout can take effect.
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-store-keypair-delete-busy-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let blob = [
+            0, 0, 0, 11, b's', b's', b'h', b'-', b'e', b'd', b'2', b'5', b'5', b'1', b'9', 0, 0, 0,
+            32,
+        ]
+        .into_iter()
+        .chain([13_u8; 32])
+        .collect::<Vec<_>>();
+        let public_key = format!("ssh-ed25519 {}", BASE64.encode(blob));
+        let (key_type, fingerprint, canonical) = validate_public_key(&public_key)?;
+        let record = KeypairRecord {
+            id: Uuid::now_v7(),
+            user_id: "user-busy".to_owned(),
+            project_id: "project-busy".to_owned(),
+            name: "key-busy".to_owned(),
+            key_type,
+            public_key: canonical,
+            fingerprint,
+            created_at: "1".to_owned(),
+        };
+        let store = SqliteStore::connect_file(&path).await?;
+        store.insert_keypair(&record).await?;
+
+        let lock_url = format!("sqlite://{}", path.display());
+        let (lock_acquired, lock_acquired_rx) = tokio::sync::oneshot::channel();
+        let holder = tokio::spawn(async move {
+            use sqlx::Connection as _;
+
+            let mut connection = sqlx::sqlite::SqliteConnection::connect(&lock_url).await?;
+            sqlx::query("BEGIN IMMEDIATE")
+                .execute(&mut connection)
+                .await?;
+            let _ = lock_acquired.send(());
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            sqlx::query("COMMIT").execute(&mut connection).await?;
+            Ok::<(), sqlx::Error>(())
+        });
+        lock_acquired_rx.await?;
+
+        store
+            .delete_keypair(&record.user_id, &record.project_id, &record.name)
+            .await?;
+        holder.await??;
+        assert!(matches!(
+            store
+                .get_keypair(&record.user_id, &record.project_id, &record.name)
+                .await,
+            Err(StoreError::KeypairNotFound)
+        ));
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn wal_mode_and_foreign_keys_enabled_for_persistent_database()
     -> Result<(), Box<dyn Error>> {

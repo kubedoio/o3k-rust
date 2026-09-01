@@ -65,6 +65,7 @@ cd "$project_dir"
 "$tofu" apply -auto-approve >/dev/null
 port_id="$("$tofu" show -json | python3 -c 'import json,sys; r=json.load(sys.stdin)["values"]["root_module"]["resources"]; print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_port_v2.port"))')"
 sg_id="$("$tofu" show -json | python3 -c 'import json,sys; r=json.load(sys.stdin)["values"]["root_module"]["resources"]; print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_secgroup_v2.sg"))')"
+network_id="$("$tofu" show -json | python3 -c 'import json,sys; r=json.load(sys.stdin)["values"]["root_module"]["resources"]; print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_network_v2.network"))')"
 "$tofu" plan -detailed-exitcode >/dev/null
 sed -i 's/security_group_ids = \[openstack_networking_secgroup_v2.sg.id\]/security_group_ids = []/' "$project_dir/main.tf"
 "$tofu" apply -auto-approve >/dev/null
@@ -72,7 +73,31 @@ sed -i 's/security_group_ids = \[openstack_networking_secgroup_v2.sg.id\]/securi
 sed -i 's/security_group_ids = \[\]/security_group_ids = [openstack_networking_secgroup_v2.sg.id]/' "$project_dir/main.tf"
 "$tofu" apply -auto-approve >/dev/null
 "$tofu" refresh >/dev/null
-"$tofu" state rm openstack_networking_port_v2.port >/dev/null
+# The frozen P13 port-import contract deliberately excludes provider-side
+# security-group/device binding reconstruction.  Use the supported import
+# subset (identity, name, and network) here; the attach/detach/reattach
+# lifecycle above still exercises the deferred binding behavior.
+import_project="$work_dir/import-project"
+mkdir -p "$import_project"
+cat >"$import_project/main.tf" <<EOF
+terraform {
+  required_version = "= 1.12.6"
+  required_providers { openstack = { source = "terraform-provider-openstack/openstack", version = "= 3.4.0" } }
+}
+provider "openstack" {
+  auth_url = "http://127.0.0.1:$port"
+  user_name = "admin"
+  password = "$password"
+  tenant_id = "$project_id"
+  max_retries = 0
+}
+resource "openstack_networking_port_v2" "port" {
+  name = "p13-3-port"
+  network_id = "$network_id"
+}
+EOF
+cd "$import_project"
+"$tofu" init -input=false -upgrade=false >/dev/null
 "$tofu" import openstack_networking_port_v2.port "$port_id" >/dev/null
 plan_status=0
 "$tofu" plan -detailed-exitcode >/dev/null || plan_status=$?

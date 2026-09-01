@@ -735,110 +735,141 @@ impl crate::SqliteStore {
         endpoint: &Uuid,
         policy_ids: &[Uuid],
     ) -> Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> {
-        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
-        let endpoint_row = sqlx::query("SELECT project_id FROM canonical_endpoints WHERE id=?")
-            .bind(endpoint.to_string())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(StoreError::Database)?
-            .ok_or(StoreError::ResourceNotFound)?;
-        if endpoint_row.get::<String, _>("project_id") != project {
-            return Err(StoreError::OwnershipConflict);
-        }
-        let existing = sqlx::query(&format!(
-            "SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE endpoint_id=? AND project_id=? ORDER BY id"
-        ))
-        .bind(endpoint.to_string())
-        .bind(project)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(StoreError::Database)?;
-        let existing = existing
-            .iter()
-            .map(sqlite_attachment)
-            .collect::<Result<Vec<_>, _>>()?;
         let requested = policy_ids
             .iter()
             .copied()
             .collect::<std::collections::BTreeSet<_>>();
-        for policy_id in &requested {
-            let policy = sqlx::query(
-                "SELECT project_id,state,unmatched_action FROM canonical_reusable_network_policies WHERE id=?",
-            )
-            .bind(policy_id.to_string())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(StoreError::Database)?
-            .ok_or(StoreError::ResourceNotFound)?;
-            if policy.get::<String, _>("project_id") != project
-                || policy.get::<String, _>("state") != "active"
-            {
-                return Err(StoreError::OwnershipConflict);
-            }
-        }
-        let mut default_value = None;
-        for policy_id in &requested {
-            let value = sqlx::query_scalar::<_, String>(
-                "SELECT unmatched_action FROM canonical_reusable_network_policies WHERE id=?",
-            )
-            .bind(policy_id.to_string())
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(StoreError::Database)?;
-            if let Some(previous) = &default_value {
-                if previous != &value {
-                    return Err(StoreError::PolicyCompositionConflict);
+        let mut backoff = std::time::Duration::from_millis(10);
+        for attempt in 0..crate::SQLITE_BUSY_MAX_ATTEMPTS {
+            let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+            let began = sqlx::query("BEGIN IMMEDIATE")
+                .execute(&mut *connection)
+                .await;
+            let outcome = match began {
+                Ok(_) => {
+                    let outcome: Result<Vec<CanonicalPolicyAttachmentRecord>, StoreError> =
+                        async {
+                            let endpoint_row =
+                                sqlx::query("SELECT project_id FROM canonical_endpoints WHERE id=?")
+                                    .bind(endpoint.to_string())
+                                    .fetch_optional(&mut *connection)
+                                    .await
+                                    .map_err(StoreError::Database)?
+                                    .ok_or(StoreError::ResourceNotFound)?;
+                            if endpoint_row.get::<String, _>("project_id") != project {
+                                return Err(StoreError::OwnershipConflict);
+                            }
+                            let existing = sqlx::query(&format!(
+                                "SELECT {ATTACHMENT_COLUMNS} FROM canonical_policy_attachments WHERE endpoint_id=? AND project_id=? ORDER BY id"
+                            ))
+                            .bind(endpoint.to_string())
+                            .bind(project)
+                            .fetch_all(&mut *connection)
+                            .await
+                            .map_err(StoreError::Database)?;
+                            let existing = existing
+                                .iter()
+                                .map(sqlite_attachment)
+                                .collect::<Result<Vec<_>, _>>()?;
+                            for policy_id in &requested {
+                                let policy = sqlx::query(
+                                    "SELECT project_id,state,unmatched_action FROM canonical_reusable_network_policies WHERE id=?",
+                                )
+                                .bind(policy_id.to_string())
+                                .fetch_optional(&mut *connection)
+                                .await
+                                .map_err(StoreError::Database)?
+                                .ok_or(StoreError::ResourceNotFound)?;
+                                if policy.get::<String, _>("project_id") != project
+                                    || policy.get::<String, _>("state") != "active"
+                                {
+                                    return Err(StoreError::OwnershipConflict);
+                                }
+                            }
+                            let mut default_value = None;
+                            for policy_id in &requested {
+                                let value = sqlx::query_scalar::<_, String>(
+                                    "SELECT unmatched_action FROM canonical_reusable_network_policies WHERE id=?",
+                                )
+                                .bind(policy_id.to_string())
+                                .fetch_one(&mut *connection)
+                                .await
+                                .map_err(StoreError::Database)?;
+                                if let Some(previous) = &default_value {
+                                    if previous != &value {
+                                        return Err(StoreError::PolicyCompositionConflict);
+                                    }
+                                } else {
+                                    default_value = Some(value);
+                                }
+                            }
+                            let mut deleting = Vec::new();
+                            for attachment in &existing {
+                                if attachment.state == "active"
+                                    && !requested.contains(&attachment.policy_id)
+                                {
+                                    sqlx::query("UPDATE canonical_policy_attachments SET state='deleting', generation=generation+1 WHERE id=? AND state='active' AND generation=?")
+                                        .bind(attachment.id.to_string())
+                                        .bind(checked_generation(attachment.generation)?)
+                                        .execute(&mut *connection)
+                                        .await
+                                        .map_err(StoreError::Database)?;
+                                    deleting.push(CanonicalPolicyAttachmentRecord {
+                                        state: "deleting".to_owned(),
+                                        generation: attachment.generation.saturating_add(1),
+                                        ..attachment.clone()
+                                    });
+                                } else if attachment.state == "deleting"
+                                    && requested.contains(&attachment.policy_id)
+                                {
+                                    return Err(StoreError::OwnershipConflict);
+                                }
+                            }
+                            for policy_id in &requested {
+                                if existing.iter().any(|attachment| {
+                                    attachment.policy_id == *policy_id && attachment.state == "active"
+                                }) {
+                                    continue;
+                                }
+                                let attachment = CanonicalPolicyAttachmentRecord {
+                                    id: Uuid::now_v7(),
+                                    policy_id: *policy_id,
+                                    endpoint_id: *endpoint,
+                                    project_id: project.to_owned(),
+                                    state: "active".to_owned(),
+                                    generation: 1,
+                                };
+                                sqlx::query("INSERT INTO canonical_policy_attachments (id,policy_id,endpoint_id,project_id,state,generation) VALUES (?,?,?,?,?,?)")
+                                    .bind(attachment.id.to_string())
+                                    .bind(attachment.policy_id.to_string())
+                                    .bind(attachment.endpoint_id.to_string())
+                                    .bind(project)
+                                    .bind("active")
+                                    .bind(1_i64)
+                                    .execute(&mut *connection)
+                                    .await
+                                    .map_err(map_canonical_insert_error)?;
+                            }
+                            Ok(deleting)
+                        }
+                        .await;
+                    crate::SqliteStore::commit_or_rollback(&mut connection, outcome).await
                 }
-            } else {
-                default_value = Some(value);
-            }
-        }
-        let mut deleting = Vec::new();
-        for attachment in &existing {
-            if attachment.state == "active" && !requested.contains(&attachment.policy_id) {
-                sqlx::query("UPDATE canonical_policy_attachments SET state='deleting', generation=generation+1 WHERE id=? AND state='active' AND generation=?")
-                    .bind(attachment.id.to_string())
-                    .bind(checked_generation(attachment.generation)?)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(StoreError::Database)?;
-                deleting.push(CanonicalPolicyAttachmentRecord {
-                    state: "deleting".to_owned(),
-                    generation: attachment.generation.saturating_add(1),
-                    ..attachment.clone()
-                });
-            } else if attachment.state == "deleting" && requested.contains(&attachment.policy_id) {
-                return Err(StoreError::OwnershipConflict);
-            }
-        }
-        for policy_id in requested {
-            if existing
-                .iter()
-                .any(|attachment| attachment.policy_id == policy_id && attachment.state == "active")
-            {
-                continue;
-            }
-            let attachment = CanonicalPolicyAttachmentRecord {
-                id: Uuid::now_v7(),
-                policy_id,
-                endpoint_id: *endpoint,
-                project_id: project.to_owned(),
-                state: "active".to_owned(),
-                generation: 1,
+                Err(error) => Err(StoreError::Database(error)),
             };
-            sqlx::query("INSERT INTO canonical_policy_attachments (id,policy_id,endpoint_id,project_id,state,generation) VALUES (?,?,?,?,?,?)")
-                .bind(attachment.id.to_string())
-                .bind(attachment.policy_id.to_string())
-                .bind(attachment.endpoint_id.to_string())
-                .bind(project)
-                .bind("active")
-                .bind(1_i64)
-                .execute(&mut *tx)
-                .await
-                .map_err(map_canonical_insert_error)?;
+            match outcome {
+                Ok(deleting) => return Ok(deleting),
+                Err(StoreError::Database(error))
+                    if crate::is_sqlite_busy(&error)
+                        && attempt + 1 < crate::SQLITE_BUSY_MAX_ATTEMPTS =>
+                {
+                    tokio::time::sleep(backoff).await;
+                    backoff *= 2;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        tx.commit().await.map_err(StoreError::Database)?;
-        Ok(deleting)
+        unreachable!("the loop returns on the final attempt")
     }
     pub async fn begin_policy_attachment_deletion(
         &self,

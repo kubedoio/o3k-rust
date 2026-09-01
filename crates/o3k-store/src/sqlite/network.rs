@@ -13,14 +13,16 @@ use super::{
 use async_trait::async_trait;
 use sqlx::Row;
 use std::net::Ipv4Addr;
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
     CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord,
     CanonicalNetworkRecord, CanonicalRealmBindingRecord, NetworkAddressAllocationRecord,
-    NetworkIntentRecord, NetworkRecord, NetworkRepository, PortRecord, SecurityGroupBindingRecord,
-    SecurityGroupRecord, SecurityGroupRuleRecord, StoreError, SubnetRecord, legacy_policy_records,
+    NetworkIntentRecord, NetworkRecord, NetworkRepository, PortRecord, SQLITE_BUSY_MAX_ATTEMPTS,
+    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, StoreError,
+    SubnetRecord, is_sqlite_busy, legacy_policy_records,
 };
 
 impl SqliteStore {
@@ -1438,19 +1440,55 @@ impl SqliteStore {
     }
 
     pub async fn delete_subnet(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
-        let result = sqlx::query("DELETE FROM network_subnets WHERE id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM network_ports WHERE network_id = network_subnets.network_id)")
-            .bind(id.to_string())
-            .bind(project_id)
-            .execute(&self.pool)
-            .await
-            .map_err(StoreError::Database)?;
-        if result.rows_affected() == 0 {
-            return match self.get_subnet(project_id, id).await? {
-                Some(_) => Err(StoreError::NetworkInUse),
-                None => Err(StoreError::NetworkNotFound),
+        let mut backoff = Duration::from_millis(10);
+        for attempt in 0..SQLITE_BUSY_MAX_ATTEMPTS {
+            let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+            let began = sqlx::query("BEGIN IMMEDIATE")
+                .execute(&mut *connection)
+                .await;
+            let outcome = match began {
+                Ok(_) => {
+                    let outcome: Result<(), StoreError> = async {
+                        let result = sqlx::query("DELETE FROM network_subnets WHERE id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM network_ports WHERE network_id = network_subnets.network_id)")
+                            .bind(id.to_string())
+                            .bind(project_id)
+                            .execute(&mut *connection)
+                            .await
+                            .map_err(StoreError::Database)?;
+                        if result.rows_affected() == 0 {
+                            let exists: Option<String> = sqlx::query_scalar(
+                                "SELECT id FROM network_subnets WHERE id = ? AND project_id = ?",
+                            )
+                            .bind(id.to_string())
+                            .bind(project_id)
+                            .fetch_optional(&mut *connection)
+                            .await
+                            .map_err(StoreError::Database)?;
+                            return Err(if exists.is_some() {
+                                StoreError::NetworkInUse
+                            } else {
+                                StoreError::NetworkNotFound
+                            });
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    SqliteStore::commit_or_rollback(&mut connection, outcome).await
+                }
+                Err(error) => Err(StoreError::Database(error)),
             };
+            match outcome {
+                Ok(()) => return Ok(()),
+                Err(StoreError::Database(error))
+                    if is_sqlite_busy(&error) && attempt + 1 < SQLITE_BUSY_MAX_ATTEMPTS =>
+                {
+                    tokio::time::sleep(backoff).await;
+                    backoff *= 2;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        Ok(())
+        unreachable!("the loop returns on the final attempt")
     }
 
     pub async fn update_subnet(&self, subnet: &SubnetRecord) -> Result<(), StoreError> {
