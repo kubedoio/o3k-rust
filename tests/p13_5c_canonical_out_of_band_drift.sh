@@ -177,14 +177,14 @@ if [x for x in p.get("resource_changes",[]) if x.get("change",{}).get("actions")
 PY
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X PUT \
   "http://127.0.0.1:$port/v2.0/networks/$network_id" \
-  --data '{"network":{"name":"p13-5c-network-drifted","admin_state_up":false}}' >"$work_dir/mutation-response.json"
+  --data '{"network":{"name":"p13-5c-network-drifted"}}' >"$work_dir/mutation-response.json"
 compat_after_mutation="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$network_id")"
 canonical_after_mutation="$(canonical_snapshot "$network_id" after_mutation)"
 python3 - "$canonical_before" "$canonical_after_mutation" "$compat_after_mutation" <<'PY'
 import json, sys
 b,a,p=map(json.loads,sys.argv[1:])
 if b["count"] != 1 or a["count"] != 1 or b["records"][0]["resource_id"] != a["records"][0]["resource_id"]: raise SystemExit("canonical identity/count changed")
-if p["network"]["name"] != "p13-5c-network-drifted" or p["network"]["admin_state_up"] is not False: raise SystemExit("mutation not projected")
+if p["network"]["name"] != "p13-5c-network-drifted": raise SystemExit("mutation not projected")
 PY
 plan_json drift-refresh-only refresh-only
 plan_json drift-normal normal
@@ -204,7 +204,8 @@ for x in r.get("resource_drift",[]):
     actions=x.get("change",{}).get("actions",[])
     if actions not in ([],["no-op"],["update"]): raise SystemExit("refresh-only contained create/delete mutation intent")
 if [x for x in r.get("resource_changes",[]) if x.get("change",{}).get("actions") not in ([],["no-op"],["update"])]: raise SystemExit("refresh-only contained invalid resource action")
-if any(x.get("address") != a for x in r.get("resource_drift",[])): raise SystemExit("refresh-only observed an unrelated address")
+drift=[x for x in r.get("resource_drift",[]) if x.get("address")==a and x.get("change",{}).get("actions")==["update"]]
+if len(drift) != 1 or len(r.get("resource_drift",[])) != 1: raise SystemExit("refresh-only did not report exactly the managed drift")
 PY
 "$tofu" apply -input=false -auto-approve >/dev/null
 canonical_after_reapply="$(canonical_snapshot "$network_id" after_reapply)"

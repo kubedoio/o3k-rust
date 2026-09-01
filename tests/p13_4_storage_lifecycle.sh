@@ -29,6 +29,10 @@ validate_lvm_scope
 cleanup() {
   if [[ -n "${token:-}" && -n "${volume_id:-}" ]]; then
     curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_id" >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+      [[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v3/$project_id/volumes/$volume_id" 2>/dev/null || true)" == 404 ]] && break
+      sleep 0.1
+    done
   fi
   if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
   rm -rf "$work"

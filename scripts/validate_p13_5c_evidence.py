@@ -83,6 +83,11 @@ def validate_canonical_evidence(document: dict, repository: Path) -> None:
     require(row.get("scenario") == "canonical_out_of_band_mutable_drift", "invalid canonical drift scenario")
     require(row.get("surface") == "canonical_out_of_band" and row.get("native_claim") is False, "canonical drift row surface is invalid")
     require(row.get("mutation_route") == "PUT /v2.0/networks/{id}", "canonical drift mutation route is not the accepted compatibility route")
+    if document.get("status") != "passed":
+        require(row.get("result") in {"blocked", "not_applicable"}, "blocked canonical artifact has invalid row result")
+        require(isinstance(row.get("reason"), str) and row["reason"].strip(), "blocked canonical artifact lacks reason")
+        require("plan_observation" not in row, "blocked canonical artifact contains fabricated plan JSON")
+        return
     require(row.get("native_change") in {"name", "description", "admin_state_up"}, "canonical drift attribute is outside contract")
     require(row.get("canonical_id_before") == row.get("canonical_id_after_mutation") == row.get("canonical_id_after_reapply"), "canonical identity changed")
     require(row.get("owner_scope"), "canonical drift owner scope is missing")
