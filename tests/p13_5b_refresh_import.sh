@@ -1582,6 +1582,21 @@ required_gates = [
     "tests/p13_4_provider_volume_smoke.sh", "tests/p13_4_provider_volume_attachment_smoke.sh",
     "tests/p13_4_storage_lifecycle.sh",
 ]
+baseline_evidence = baseline_document if baseline_result == "verified" else {
+    **baseline_document,
+    "classification": "none" if baseline_result == "verified" else "environment_and_existing_gate_limitations",
+    "required_gates": required_gates,
+    "completed_before_block": required_gates if baseline_result == "verified" else [
+        "tests/p13_2_core_lifecycle.sh", "tests/p13_2b_subnet_lifecycle.sh",
+        "tests/p13_2c_port_lifecycle.sh", "tests/p13_2d_server_lifecycle.sh",
+        "tests/p13_3_security_group_provider.sh", "tests/p13_3_security_group_port_provider.sh",
+        "tests/p13_3_router_provider.sh", "tests/p13_3_floating_ip_provider.sh",
+    ],
+    "failed_gate": None if baseline_result == "verified" else "tests/p13_4_provider_volume_smoke.sh",
+    "failure": None if baseline_result == "verified" else "native volume service unavailable",
+    "provider_import_limitation": "port fixed_ip/security_group_ids are computed all_* observations in upstream 3.4.0 and are not reconstructed as configurable state; the baseline uses the supported identity/name/network import subset",
+    "backend_limitations": [] if baseline_result == "verified" else ["native volume service unavailable", "VolumeAttachment requires disposable LVM"],
+}
 document = {
     "artifact_type": "o3k-p13-5b-refresh-import-evidence",
     "schema_version": 1,
@@ -1593,19 +1608,7 @@ document = {
     "tested_o3k_head_sha": scenarios[0]["head_sha"],
     "starting_main_sha": __import__("subprocess").check_output(["git", "-C", root, "merge-base", "HEAD", "origin/main"], text=True).strip(),
     "existing_p13_baseline": {
-        **baseline_document,
-        "classification": "none" if baseline_result == "verified" else "environment_and_existing_gate_limitations",
-        "required_gates": required_gates,
-        "completed_before_block": required_gates if baseline_result == "verified" else [
-            "tests/p13_2_core_lifecycle.sh", "tests/p13_2b_subnet_lifecycle.sh",
-            "tests/p13_2c_port_lifecycle.sh", "tests/p13_2d_server_lifecycle.sh",
-            "tests/p13_3_security_group_provider.sh", "tests/p13_3_security_group_port_provider.sh",
-            "tests/p13_3_router_provider.sh", "tests/p13_3_floating_ip_provider.sh",
-        ],
-        "failed_gate": None if baseline_result == "verified" else "tests/p13_4_provider_volume_smoke.sh",
-        "failure": None if baseline_result == "verified" else "native volume service unavailable",
-        "provider_import_limitation": "port fixed_ip/security_group_ids are computed all_* observations in upstream 3.4.0 and are not reconstructed as configurable state; the baseline uses the supported identity/name/network import subset",
-        "backend_limitations": [] if baseline_result == "verified" else ["native volume service unavailable", "VolumeAttachment requires disposable LVM"],
+        **baseline_evidence,
     },
     "canonical_authority": "o3k",
     "manual_state_edits": False,
