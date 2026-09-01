@@ -20,17 +20,22 @@ contract_path = pathlib.Path(sys.argv[1])
 output = pathlib.Path(sys.argv[2])
 contract = json.loads(contract_path.read_text())
 head = subprocess.check_output(["git", "-C", str(contract_path.parents[3]), "rev-parse", "HEAD"], text=True).strip()
-reason = (
-    "native drift execution blocked: no P13.5C native mutation driver is "
-    "configured; current /o3k/v1 surface has no update operation, and no real "
-    "OpenTofu/native mutation run was performed"
-)
 rows = []
 for item in contract["resources"]:
     resource = item["resource"]
     for attribute in item.get("mutable_attributes", []):
-        rows.append({"resource": resource, "scenario": "native-mutable-drift", "native_change": attribute})
-    rows.append({"resource": resource, "scenario": "native-delete-drift", "native_change": "remote absence"})
+        rows.append({
+            "resource": resource,
+            "scenario": "native-mutable-drift",
+            "native_change": attribute,
+            "reason": "native_update_unsupported: current /o3k/v1 surface has no update operation",
+        })
+    rows.append({
+        "resource": resource,
+        "scenario": "native-delete-drift",
+        "native_change": "remote absence",
+        "reason": "native_delete_supported_but_not_executed: no real OpenTofu/native mutation run was performed",
+    })
 for row in rows:
     row.update({
         "terraform_address": None,
@@ -48,7 +53,6 @@ for row in rows:
         "head_sha": head,
         "provider_modified": False,
         "result": "blocked",
-        "reason": reason,
     })
 document = {
     "artifact_type": "o3k-p13-5c-native-drift-evidence",
