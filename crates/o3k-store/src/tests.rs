@@ -1811,6 +1811,11 @@ mod tests {
             error_category: None,
             error_message: None,
         };
+        // The canonical operation migration deliberately removes the generic
+        // resource foreign key.  Force the operation insert to fail through a
+        // real uniqueness violation so this test continues to verify the
+        // transaction rollback contract.
+        store.insert_operation(&operation).await?;
         assert!(
             store
                 .insert_resource_and_operation(&resource, &operation, None)

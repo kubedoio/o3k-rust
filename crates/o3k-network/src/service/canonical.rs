@@ -1002,7 +1002,9 @@ impl NetworkService {
             .await
             .map_err(map_store_error)?;
         match self.inner.repository.delete_network(project_id, &id).await {
-            Ok(()) | Err(o3k_store::StoreError::ResourceNotFound) => Ok(()),
+            Ok(())
+            | Err(o3k_store::StoreError::ResourceNotFound)
+            | Err(o3k_store::StoreError::NetworkNotFound) => Ok(()),
             Err(error) => Err(map_store_error(error)),
         }
     }
