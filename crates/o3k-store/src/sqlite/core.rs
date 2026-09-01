@@ -1914,6 +1914,11 @@ impl DurableStore for SqliteStore {
         operation: &OperationRecord,
         expected_placement_allocation_id: Option<&str>,
     ) -> Result<(), StoreError> {
+        if operation.resource_id != resource.id {
+            return Err(StoreError::Corrupt(
+                "operation resource identity differs from inserted resource".to_owned(),
+            ));
+        }
         let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
         let insert_resource = sqlx::query("INSERT INTO resources (id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(resource.id.to_string())

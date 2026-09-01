@@ -505,6 +505,22 @@ impl NetworkRepository for O3kStore {
             Self::Postgres(s) => s.delete_canonical_network(project_id, network_id).await,
         }
     }
+    async fn delete_canonical_network_with_projection(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.delete_canonical_network_with_projection(project_id, network_id)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.delete_canonical_network_with_projection(project_id, network_id)
+                    .await
+            }
+        }
+    }
     async fn backfill_canonical_network_state(&self) -> Result<(), StoreError> {
         match self {
             Self::Sqlite(s) => s.backfill_canonical_network_state().await,

@@ -430,6 +430,49 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub async fn delete_canonical_network_with_projection(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let canonical = sqlx::query("DELETE FROM canonical_networks WHERE id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE network_id = canonical_networks.id)")
+            .bind(network_id.to_string()).bind(project_id).execute(&mut *tx).await
+            .map_err(StoreError::Database)?;
+        if canonical.rows_affected() == 0 {
+            let exists: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM canonical_networks WHERE id = ? AND project_id = ?",
+            )
+            .bind(network_id.to_string())
+            .bind(project_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+            return Err(if exists.is_some() {
+                StoreError::NetworkInUse
+            } else {
+                StoreError::NetworkNotFound
+            });
+        }
+        let projection = sqlx::query("DELETE FROM network_networks WHERE id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM network_subnets WHERE network_id = network_networks.id) AND NOT EXISTS (SELECT 1 FROM network_ports WHERE network_id = network_networks.id)")
+            .bind(network_id.to_string()).bind(project_id).execute(&mut *tx).await
+            .map_err(StoreError::Database)?;
+        if projection.rows_affected() == 0 {
+            let in_use: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM network_networks WHERE id = ? AND project_id = ?",
+            )
+            .bind(network_id.to_string())
+            .bind(project_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+            if in_use.is_some() {
+                return Err(StoreError::NetworkInUse);
+            }
+        }
+        tx.commit().await.map_err(StoreError::Database)
+    }
+
     pub async fn insert_canonical_realm(
         &self,
         realm: &CanonicalAddressRealmRecord,
@@ -2519,6 +2562,14 @@ impl NetworkRepository for SqliteStore {
         network_id: &Uuid,
     ) -> Result<(), StoreError> {
         self.delete_canonical_network(project_id, network_id).await
+    }
+    async fn delete_canonical_network_with_projection(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.delete_canonical_network_with_projection(project_id, network_id)
+            .await
     }
     async fn backfill_canonical_network_state(&self) -> Result<(), StoreError> {
         self.backfill_canonical_network_state().await

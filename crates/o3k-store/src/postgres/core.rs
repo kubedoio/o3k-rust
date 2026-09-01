@@ -1601,6 +1601,11 @@ impl DurableStore for PostgresStore {
         operation: &OperationRecord,
         expected_placement_allocation_id: Option<&str>,
     ) -> Result<(), StoreError> {
+        if operation.resource_id != resource.id {
+            return Err(StoreError::Corrupt(
+                "operation resource identity differs from inserted resource".to_owned(),
+            ));
+        }
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
 
         if let Some(allocation_id) = expected_placement_allocation_id {

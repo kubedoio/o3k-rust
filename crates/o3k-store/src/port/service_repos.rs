@@ -417,6 +417,11 @@ pub trait NetworkRepository:
         project_id: &str,
         network_id: &Uuid,
     ) -> Result<(), StoreError>;
+    async fn delete_canonical_network_with_projection(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<(), StoreError>;
     async fn backfill_canonical_network_state(&self) -> Result<(), StoreError>;
     async fn allocate_network_address(
         &self,
