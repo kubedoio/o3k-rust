@@ -1131,7 +1131,7 @@ resource "openstack_networking_subnet_v2" "parent" {
 
 resource "openstack_networking_router_v2" "parent" {
   name = "p13-5b-router-interface-router"
-  external_network_id = "$external_realm_id"
+  external_network_id = "$router_external_network_id"
   enable_snat = false
 }
 
