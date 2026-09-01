@@ -1,6 +1,6 @@
 {
   "artifact_type": "o3k-p13-5c-drift-surface-amendment",
-  "schema_version": 1,
+  "schema_version": 2,
   "phase": "P13.5C",
   "status": "documentation_only",
   "p13_5a_contract_sha256": "ba70725ccb09190675ddcf05922e301be9433ceeb37800866dbfb260df774f5f",
@@ -10,12 +10,14 @@
       "meaning": "A mutation or deletion against the O3K canonical/domain/application authority outside the OpenTofu compatibility provider.",
       "authority": "O3K canonical resources and Operations",
       "applicability_source": "P13.5A resources[*].native_drift_cases",
+      "operations": ["mutable", "deletion"],
       "native_api_claim": false
     },
     "native_api": {
       "meaning": "A mutation or deletion through an accepted native O3K API/application surface.",
       "capability_authority": "Runtime /o3k/v1/resource-types lifecycle_actions and collection",
       "applicability_source": "Runtime discovery plus executable evidence",
+      "operations": ["mutable", "deletion"],
       "native_api_claim": true,
       "missing_surface_result": "native_surface_not_defined",
       "no_inference_from": [
@@ -36,6 +38,23 @@
       "type": "string",
       "enum": ["defined", "native_surface_not_defined", "not_checked"],
       "required_for_native_api_rows": true
+    },
+    "operation": {
+      "type": "string",
+      "enum": ["mutable", "deletion"],
+      "required_for_new_evidence": true
+    },
+    "surface_requirements": {
+      "canonical_out_of_band": {
+        "surface": "canonical_out_of_band",
+        "native_claim": false,
+        "native_surface_status": "omitted"
+      },
+      "native_api": {
+        "surface": "native_api",
+        "native_claim": true,
+        "native_surface_status": "required"
+      }
     }
   },
   "compatibility": {

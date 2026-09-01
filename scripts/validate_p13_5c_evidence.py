@@ -35,21 +35,38 @@ def validate_surface_amendment(document: dict, repository: Path) -> None:
         document.get("artifact_type") == "o3k-p13-5c-drift-surface-amendment",
         "invalid drift-surface amendment artifact_type",
     )
-    require(document.get("schema_version") == 1, "unsupported drift-surface amendment schema_version")
+    require(document.get("schema_version") == 2, "unsupported drift-surface amendment schema_version")
     require(document.get("phase") == "P13.5C", "invalid drift-surface amendment phase")
     require(document.get("status") == "documentation_only", "drift-surface amendment is not documentation-only")
     require(document.get("p13_5a_contract_sha256") == contract_digest, "drift-surface amendment is not bound to frozen P13.5A contract")
     surfaces = document.get("surface_classes")
     require(isinstance(surfaces, dict), "drift-surface amendment lacks surface_classes")
     require(set(surfaces) == {"canonical_out_of_band", "native_api"}, "drift-surface amendment has unexpected surface classes")
-    require(surfaces["canonical_out_of_band"].get("native_api_claim") is False, "canonical surface claims native API evidence")
+    operations = ["mutable", "deletion"]
+    canonical = surfaces["canonical_out_of_band"]
+    require(canonical.get("native_api_claim") is False, "canonical surface claims native API evidence")
+    require(canonical.get("operations") == operations, "canonical surface operations are not separated")
     native = surfaces["native_api"]
     require(native.get("native_api_claim") is True, "native surface does not claim native API evidence")
+    require(native.get("operations") == operations, "native surface operations are not separated")
     require(native.get("missing_surface_result") == "native_surface_not_defined", "native surface missing result is not explicit")
     extension = document.get("evidence_row_extension")
     require(isinstance(extension, dict), "drift-surface amendment lacks evidence_row_extension")
     require(extension.get("surface", {}).get("enum") == ["canonical_out_of_band", "native_api"], "invalid surface enum")
     require(extension.get("native_surface_status", {}).get("enum") == ["defined", "native_surface_not_defined", "not_checked"], "invalid native surface status enum")
+    require(extension.get("operation", {}).get("enum") == operations, "invalid operation enum")
+    requirements = extension.get("surface_requirements")
+    require(isinstance(requirements, dict), "drift-surface amendment lacks surface_requirements")
+    require(requirements.get("canonical_out_of_band") == {
+        "surface": "canonical_out_of_band",
+        "native_claim": False,
+        "native_surface_status": "omitted",
+    }, "invalid canonical surface requirements")
+    require(requirements.get("native_api") == {
+        "surface": "native_api",
+        "native_claim": True,
+        "native_surface_status": "required",
+    }, "invalid native surface requirements")
     compatibility = document.get("compatibility")
     require(isinstance(compatibility, dict), "drift-surface amendment lacks compatibility declaration")
     require(compatibility.get("frozen_p13_5a_contract_modified") is False, "amendment modifies frozen P13.5A contract")
