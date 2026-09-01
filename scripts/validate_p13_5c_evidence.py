@@ -63,7 +63,7 @@ def validate_passed(row: dict, contract: dict) -> None:
     require(isinstance(row["normal_plan_actions"], list), "normal_plan_actions must be a list")
     require(isinstance(row["unrelated_changes_count"], int) and row["unrelated_changes_count"] == 0, "unrelated plan changes are present")
     require(isinstance(row["final_plan_noop"], bool) and row["final_plan_noop"], "final plan is not no-op")
-    require(row["head_sha"] == CURRENT_SHA, "row is not bound to current HEAD")
+    require(row["head_sha"] == TESTED_SHA, "row is not bound to tested HEAD")
     require(row["provider_modified"] is False, "provider modification is not explicitly false")
     validate_plan_observation(row)
     if scenario == "native-mutable-drift":
@@ -82,8 +82,8 @@ def validate_passed(row: dict, contract: dict) -> None:
 
 
 def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
-    global CURRENT_SHA
-    CURRENT_SHA = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip()
+    global TESTED_SHA
+    current_sha = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip()
     contract, contract_digest = load_contract(repository)
     require(document.get("artifact_type") == "o3k-p13-5c-native-drift-evidence", "invalid artifact_type")
     require(document.get("schema_version") == 1, "unsupported schema_version")
@@ -92,7 +92,11 @@ def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
     require(document.get("canonical_authority") == "o3k", "canonical authority is not O3K")
     require(document.get("provider_modified") is False, "provider_modified must be false")
     require(document.get("p13_5a_contract_sha256") == contract_digest, "evidence is not bound to P13.5A contract")
-    require(document.get("tested_o3k_head_sha") == CURRENT_SHA, "evidence is not bound to current HEAD")
+    TESTED_SHA = document.get("tested_o3k_head_sha")
+    require(isinstance(TESTED_SHA, str) and UUID_SHA.fullmatch(TESTED_SHA), "invalid tested_o3k_head_sha")
+    require(subprocess.run(["git", "-C", str(repository), "merge-base", "--is-ancestor", TESTED_SHA, current_sha], check=False).returncode == 0, "tested SHA is not an ancestor of current HEAD")
+    changed = subprocess.check_output(["git", "-C", str(repository), "diff", "--name-only", TESTED_SHA, current_sha], text=True).splitlines()
+    require(changed in ([], ["docs/compatibility/p13-5/p13-5c-native-drift-evidence.json"]), "changes after tested SHA exceed evidence-only follow-up")
     toolchain = document.get("toolchain")
     require(isinstance(toolchain, dict), "toolchain is missing")
     require(toolchain.get("opentofu") == contract["toolchain"]["opentofu"], "OpenTofu version mismatch")
@@ -112,7 +116,7 @@ def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
         require(row.get("resource") in {item["resource"] for item in contract["resources"]}, "unknown resource")
         require(row.get("scenario") in SCENARIOS, "unknown scenario")
         require(UUID_SHA.fullmatch(row.get("head_sha", "")), "invalid row head_sha")
-        require(row["head_sha"] == CURRENT_SHA, "scenario is not bound to current HEAD")
+        require(row["head_sha"] == TESTED_SHA, "scenario is not bound to tested HEAD")
         if row["result"] == "passed":
             validate_passed(row, contract)
         else:
