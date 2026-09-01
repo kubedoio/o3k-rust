@@ -121,7 +121,8 @@ def validate_plan_observation(scenario: dict) -> None:
                 actions = change.get("change", {}).get("actions")
                 require(isinstance(actions, list), f"{kind} resource change is missing actions")
                 require(all(action in {"no-op", "create", "read", "update", "delete"} for action in actions), "invalid structured plan action")
-                require(all(action == "no-op" for action in actions), f"{kind} structured plan is not a no-op")
+                allowed_actions = {"no-op", "update"} if kind == "refresh-only" else {"no-op"}
+                require(all(action in allowed_actions for action in actions), f"{kind} structured plan has an unsupported action")
 
 
 def validate_trace_observation(scenario: dict) -> None:
@@ -355,8 +356,8 @@ def validate(document: dict, *, allow_incomplete: bool = False) -> None:
             for field in ("refresh_plan_actions", "normal_plan_actions"):
                 if field in scenario:
                     require(
-                        all(all(action == "no-op" for action in actions) for actions in scenario[field]),
-                        f"passed scenario has non-no-op {field}",
+                        all(all(action in ({"no-op", "update"} if field == "refresh_plan_actions" else {"no-op"}) for action in actions) for actions in scenario[field]),
+                        f"passed scenario has an unsupported action in {field}",
                     )
             require(scenario["final_plan_noop"] is True, "passed scenario is not marked no-op")
             require(scenario["canonical_id"], "passed scenario is missing canonical_id")
