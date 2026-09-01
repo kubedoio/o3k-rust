@@ -14,11 +14,23 @@ work=$(mktemp -d /tmp/o3k-p13-4-attachment.XXXXXX)
 pid=
 auth_token=
 image_id=
+run_stage() {
+    local stage="$1"; shift; local status
+    printf 'RUN %s\n' "$stage" | tee -a "$work/stages.log" >&2
+    set +e; "$@" > >(tee -a "$work/stages.log") 2>&1; status=$?; set -e
+    if [[ "$status" -ne 0 ]]; then printf 'FAILED: %s exit=%s artifacts=%s\n' "$stage" "$status" "$work" >&2; return "$status"; fi
+}
 cleanup() {
+    local status=$?
     if [[ -n "$image_id" && -n "$auth_token" ]]; then
         curl -fsS -X DELETE -H "X-Auth-Token: $auth_token" "http://127.0.0.1:$port/v2/images/$image_id" >/dev/null 2>&1 || true
     fi
     if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+    if [[ "$status" -ne 0 || "${O3K_P13_KEEP_LOGS:-0}" == 1 ]]; then
+        echo "logs: $work" >&2
+    else
+        rm -rf "$work"
+    fi
 }
 trap cleanup EXIT
 
@@ -100,8 +112,8 @@ resource "openstack_compute_volume_attach_v2" "attachment" {
 }
 EOF
 export TF_CLI_CONFIG_FILE="$work/tofu.tfrc" TF_IN_AUTOMATION=1
-(cd "$work" && "$O3K_P13_TOFU" init -input=false -upgrade=false >/dev/null)
-(cd "$work" && "$O3K_P13_TOFU" apply -input=false -auto-approve >/dev/null)
-(cd "$work" && "$O3K_P13_TOFU" plan -detailed-exitcode >/dev/null)
-(cd "$work" && "$O3K_P13_TOFU" destroy -input=false -auto-approve >/dev/null)
+(cd "$work" && run_stage "tofu init" "$O3K_P13_TOFU" init -input=false -upgrade=false)
+(cd "$work" && run_stage "tofu apply" "$O3K_P13_TOFU" apply -input=false -auto-approve)
+(cd "$work" && run_stage "tofu plan" "$O3K_P13_TOFU" plan -detailed-exitcode)
+(cd "$work" && run_stage "tofu destroy" "$O3K_P13_TOFU" destroy -input=false -auto-approve)
 echo "P13.4 native volume attachment provider lifecycle passed"

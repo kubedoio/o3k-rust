@@ -15,7 +15,13 @@ work_dir="$(mktemp -d /tmp/o3k-p13-3-fip.XXXXXX)"
 project_dir="$work_dir/project"
 mirror_dir="$work_dir/mirror/registry.terraform.io/terraform-provider-openstack/openstack/3.4.0/linux_amd64"
 pid=""
-cleanup() { [[ -z "$pid" ]] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }; if [[ "${O3K_P13_KEEP_LOGS:-0}" == 1 ]]; then echo "logs: $work_dir" >&2; else rm -rf "$work_dir"; fi; }
+run_stage() {
+  local stage="$1"; shift; local status
+  printf 'RUN %s\n' "$stage" | tee -a "$work_dir/stages.log" >&2
+  set +e; "$@" > >(tee -a "$work_dir/stages.log") 2>&1; status=$?; set -e
+  if [[ "$status" -ne 0 ]]; then printf 'FAILED: %s exit=%s artifacts=%s\n' "$stage" "$status" "$work_dir" >&2; return "$status"; fi
+}
+cleanup() { local status=$?; [[ -z "$pid" ]] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }; if [[ "$status" -ne 0 || "${O3K_P13_KEEP_LOGS:-0}" == 1 ]]; then echo "logs: $work_dir" >&2; else rm -rf "$work_dir"; fi; }
 trap cleanup EXIT
 mkdir -p "$project_dir" "$mirror_dir"
 cp "$provider_binary" "$mirror_dir/terraform-provider-openstack_v3.4.0"
@@ -69,26 +75,26 @@ resource "openstack_networking_floatingip_v2" "fip" {
 EOF
 export TF_CLI_CONFIG_FILE="$work_dir/tofu.tfrc" TF_IN_AUTOMATION=1
 cd "$project_dir"
-plan() { local status=0; "$tofu" plan -detailed-exitcode >/dev/null || status=$?; [[ "$status" -eq 0 ]]; }
-"$tofu" init -input=false -upgrade=false >/dev/null
-"$tofu" apply -auto-approve >/dev/null
+plan() { local status=0; run_stage "tofu plan" "$tofu" plan -detailed-exitcode || status=$?; [[ "$status" -eq 0 ]]; }
+run_stage "tofu init" "$tofu" init -input=false -upgrade=false
+run_stage "tofu initial apply" "$tofu" apply -auto-approve
 fip_id="$("$tofu" show -json | python3 -c 'import json,sys; r=json.load(sys.stdin)["values"]["root_module"]["resources"]; print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_floatingip_v2.fip"))')"
 plan
 sed -i 's/port_id = openstack_networking_port_v2.port.id/port_id = null/' "$project_dir/main.tf"
-"$tofu" apply -auto-approve >/dev/null
+run_stage "tofu disassociate apply" "$tofu" apply -auto-approve
 sed -i 's/port_id = null/port_id = openstack_networking_port_v2.port.id/' "$project_dir/main.tf"
-"$tofu" apply -auto-approve >/dev/null
-"$tofu" refresh >/dev/null
+run_stage "tofu reassociate apply" "$tofu" apply -auto-approve
+run_stage "tofu refresh" "$tofu" refresh
 kill "$pid"; wait "$pid" 2>/dev/null || true; pid=""
-O3K_BOOTSTRAP_PASSWORD="$password" O3K_TOKEN_SIGNING_KEY="p13-3-fip-token-signing-key-012345678901234567890123" O3K_NETWORK_EXTERNAL_REALM_ID="$external_realm" O3K_PUBLIC_POOL_CIDR="198.51.104.0/29" O3K_PUBLIC_POOL_FIRST="198.51.104.2" O3K_PUBLIC_POOL_LAST="198.51.104.6" "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >/dev/null 2>&1 &
+O3K_BOOTSTRAP_PASSWORD="$password" O3K_TOKEN_SIGNING_KEY="p13-3-fip-token-signing-key-012345678901234567890123" O3K_NETWORK_EXTERNAL_REALM_ID="$external_realm" O3K_PUBLIC_POOL_CIDR="198.51.104.0/29" O3K_PUBLIC_POOL_FIRST="198.51.104.2" O3K_PUBLIC_POOL_LAST="198.51.104.6" "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd-final.log" 2>&1 &
 pid=$!
 for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1 && break; sleep .1; done
 plan
-"$tofu" state rm openstack_networking_floatingip_v2.fip >/dev/null
-"$tofu" import openstack_networking_floatingip_v2.fip "$fip_id" >/dev/null
+run_stage "tofu state rm" "$tofu" state rm openstack_networking_floatingip_v2.fip
+run_stage "tofu import" "$tofu" import openstack_networking_floatingip_v2.fip "$fip_id"
 plan
 sed -i 's/port_id = openstack_networking_port_v2.port.id/port_id = null/' "$project_dir/main.tf"
-"$tofu" apply -auto-approve >/dev/null
+run_stage "tofu post-import apply" "$tofu" apply -auto-approve
 curl -fsS -X PUT "http://127.0.0.1:$port/v2.0/floatingips/$fip_id" -H 'content-type: application/json' -H "x-auth-token: $token" --data '{"floatingip":{}}' >/dev/null
 mkdir -p "$(dirname "$evidence_output")"
 python3 - "$evidence_output" "$fip_id" "$external_realm" "$provider_sha" "$root_dir" <<'PY'
@@ -110,5 +116,5 @@ pathlib.Path(output).write_text(json.dumps({
     "external_neutron": False,
 }, indent=2) + "\n")
 PY
-"$tofu" destroy -auto-approve >/dev/null
+run_stage "tofu destroy" "$tofu" destroy -auto-approve
 echo "P13.3 floating IP lifecycle passed (id=$fip_id pool=$external_realm provider_sha=$provider_sha)"
