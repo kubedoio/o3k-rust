@@ -1110,8 +1110,6 @@ router_import_cleanup="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Toke
 canonical_capture openstack_networking_router_v2 "$router_import_id" "$work_dir/router-import-canonical-after-cleanup.json"
 rm -f router.tf
 router_external_subnet_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["subnet"]["id"])' "$work_dir/router-external-subnet.json")"
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_external_subnet_id" >/dev/null
-curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_external_network_id" >/dev/null
 
 # RouterInterface is a relationship projection over the canonical gateway and
 # realm.  Keep this fixture independent from the Router rows above so that
@@ -1233,6 +1231,8 @@ curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subne
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_interface_unrelated_subnet_id" >/dev/null
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_interface_import_network_id" >/dev/null
 curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_interface_unrelated_network_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_external_subnet_id" >/dev/null
+curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$router_external_network_id" >/dev/null
 rm -f router-interface.tf
 cd "$project_dir"
 
