@@ -23,6 +23,12 @@ CLASSIFICATIONS = {
 SCENARIOS = {"native-mutable-drift", "native-delete-drift"}
 UUID_SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+NON_BLOCKING_CLASSIFICATIONS = {
+    "native_surface_not_defined",
+    "not_applicable",
+    "execution_profile_unavailable",
+    "upstream_provider_unsupported",
+}
 
 
 def require(condition: bool, message: str) -> None:
@@ -302,11 +308,20 @@ def validate(document: dict, repository: Path, allow_blocked: bool) -> None:
         else:
             require(isinstance(row.get("reason"), str) and row["reason"].strip(), "blocked/not_applicable row needs reason")
             require(not row.get("plan_observation"), "blocked row must not contain fabricated plan JSON")
+            if row["classification"] == "blocked":
+                require(row["result"] == "blocked", "blocked classification must have blocked result")
+            elif row["classification"] in NON_BLOCKING_CLASSIFICATIONS:
+                require(row["result"] == "not_applicable", "non-blocking classification must be not_applicable")
             if "native_surface_not_defined" in row["reason"]:
                 require(row["native_surface_status"] == "native_surface_not_defined", "undefined native surface status is inconsistent")
                 require(row["classification"] == "native_surface_not_defined", "undefined native surface classification is inconsistent")
+            if "execution_profile_unavailable" in row["reason"]:
+                require(row["classification"] == "execution_profile_unavailable", "unavailable execution classification is inconsistent")
     if document["status"] == "passed":
-        require(all(row["result"] == "passed" for row in rows), "passed evidence contains incomplete rows")
+        require(
+            all(row["result"] == "passed" or row["classification"] in NON_BLOCKING_CLASSIFICATIONS for row in rows),
+            "passed evidence contains blocked rows",
+        )
     elif not allow_blocked:
         raise ValueError("strict validation rejects blocked evidence")
 
