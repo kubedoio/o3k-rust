@@ -50,13 +50,13 @@ fn realm_json(item: AddressRealmItem) -> serde_json::Value {
     serde_json::json!({"api_version":"o3k.io/v1","kind":"network:address_realm","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"prefix":item.prefix,"overlapping_prefixes":item.overlapping_prefixes},"status":{"state":item.state}})
 }
 
-fn network_json(item: o3k_store::NetworkRecord) -> serde_json::Value {
+fn network_json(item: &o3k_store::CanonicalNetworkRecord) -> serde_json::Value {
     serde_json::json!({
         "api_version":"o3k.io/v1",
         "kind":"network:network",
-        "metadata":{"id":item.id,"owner_scope":item.project_id,"generation":1},
+        "metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation},
         "spec":{"name":item.name},
-        "status":{"state":item.status}
+        "status":{"state":item.state}
     })
 }
 
@@ -121,9 +121,9 @@ impl ResourceApplication for GenericResourceApplication {
                 .map_err(generic_read_error),
             "network:network" => self
                 .network_service
-                .list_networks(auth)
+                .list_canonical_networks(auth)
                 .await
-                .map(|items| items.into_iter().map(network_json).collect())
+                .map(|items| items.iter().map(network_json).collect())
                 .map_err(|_| ResourceApplicationError::Internal),
             "volume:volume" => self
                 .store
@@ -178,9 +178,9 @@ impl ResourceApplication for GenericResourceApplication {
                 .map_err(generic_read_error),
             "network:network" => self
                 .network_service
-                .get_network(auth, id)
+                .get_canonical_network(auth, id)
                 .await
-                .map(network_json)
+                .map(|item| network_json(&item))
                 .map_err(|_| ResourceApplicationError::NotFound),
             "volume:volume" => self
                 .store
@@ -557,6 +557,11 @@ impl ResourceApplication for GenericResourceApplication {
                 .create_network(auth, spec.name)
                 .await
                 .map_err(|_| ResourceApplicationError::Conflict)?;
+            let canonical = self
+                .network_service
+                .get_canonical_network(auth, network.id)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
             return Ok(MutationResult {
                 operation_id: Uuid::new_v5(
                     &Uuid::NAMESPACE_URL,
@@ -565,7 +570,7 @@ impl ResourceApplication for GenericResourceApplication {
                 .to_string(),
                 resource_id: Some(network.id.to_string()),
                 complete: true,
-                resource: Some(network_json(network)),
+                resource: Some(network_json(&canonical)),
             });
         }
         if descriptor.resource_type.to_string() != "compute:server" {
@@ -831,13 +836,81 @@ impl ResourceApplication for GenericResourceApplication {
                 {
                     return Err(ResourceApplicationError::PreconditionConflict);
                 }
+                let action = descriptor
+                    .lifecycle_actions
+                    .get(&o3k_native_api::resource::LifecycleOperation::Delete)
+                    .cloned()
+                    .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+                let key = idempotency_key
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("native:volume-delete:{id}"));
                 let operation_id = Uuid::new_v5(
                     &Uuid::NAMESPACE_URL,
-                    format!("volume:delete:{resource_id}").as_bytes(),
+                    format!(
+                        "volume:delete:{}:{resource_id}:{key}",
+                        auth.effective_scope().id()
+                    )
+                    .as_bytes(),
                 );
                 let Some(provider) = self.storage_provider.clone() else {
                     return Err(ResourceApplicationError::NotReady);
                 };
+                let operation = o3k_store::OperationRecord {
+                    id: operation_id,
+                    resource_id,
+                    kind: "lifecycle:delete".into(),
+                    state: o3k_store::OperationState::Pending,
+                    provider_operation_id: None,
+                    error_category: None,
+                    error_message: None,
+                };
+                let canonical = o3k_store::CanonicalOperationRecord::from_kernel_operation(
+                    &o3k_kernel::Operation::new(
+                        operation_id,
+                        "volume",
+                        action.clone(),
+                        auth.principal().id().to_string(),
+                        auth.effective_scope().clone(),
+                        o3k_kernel::ResourceType::new_unchecked("volume", "volume"),
+                        Some(o3k_kernel::ResourceId::new_unchecked(id)),
+                        Some(auth.request_id().to_owned()),
+                    ),
+                )
+                .map_err(|_| ResourceApplicationError::Internal)?;
+                let identity = o3k_store::IdempotencyReservationRequest::from_semantics(
+                    auth.effective_scope().id().as_str(),
+                    action.to_string(),
+                    key,
+                    "volume:volume",
+                    Some(id),
+                    &serde_json::json!({"resource_id": id}),
+                    operation_id,
+                )
+                .map_err(|_| ResourceApplicationError::Validation)?;
+                let acceptance = self
+                    .store
+                    .create_or_replay_canonical_lifecycle_operation(
+                        &operation, &canonical, &identity,
+                    )
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                if let o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent {
+                    operation_id,
+                    ..
+                } = acceptance
+                {
+                    let existing = self
+                        .store
+                        .get_canonical_operation(operation_id)
+                        .await
+                        .map_err(|_| ResourceApplicationError::Internal)?;
+                    return Ok(MutationResult {
+                        operation_id: operation_id.to_string(),
+                        resource_id: Some(id.to_owned()),
+                        complete: existing.state == o3k_store::OperationState::Succeeded,
+                        resource: None,
+                    });
+                }
                 o3k_api::remove_native_volume(
                     self.store.clone(),
                     provider,
@@ -846,10 +919,30 @@ impl ResourceApplication for GenericResourceApplication {
                 )
                 .await
                 .map_err(|_| ResourceApplicationError::Retryable)?;
-                let _ = self
-                    .store
-                    .update_resource(resource_id, 1, "DELETED", "DELETED", 2, None)
-                    .await;
+                self.store
+                    .update_resource(
+                        resource_id,
+                        record.volume.generation as i64,
+                        "DELETED",
+                        "DELETED",
+                        record.volume.generation.saturating_add(1) as i64,
+                        None,
+                    )
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                let now = chrono::Utc::now().to_rfc3339();
+                let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                    o3k_kernel::OperationState::Succeeded,
+                    1,
+                    Some(now.clone()),
+                    Some(now),
+                    None,
+                )
+                .map_err(|_| ResourceApplicationError::Internal)?;
+                self.store
+                    .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
                 return Ok(MutationResult {
                     operation_id: operation_id.to_string(),
                     resource_id: Some(id.to_owned()),
@@ -880,7 +973,7 @@ impl ResourceApplication for GenericResourceApplication {
                 .unwrap_or_else(|| format!("native:volume-delete:{id}"));
             let operation_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
-                format!("volume:delete:{id}:{key}").as_bytes(),
+                format!("volume:delete:{}:{id}:{key}", auth.effective_scope().id()).as_bytes(),
             );
             let operation = o3k_store::OperationRecord {
                 id: operation_id,
@@ -949,29 +1042,100 @@ impl ResourceApplication for GenericResourceApplication {
             let resource_id = id
                 .parse::<Uuid>()
                 .map_err(|_| ResourceApplicationError::NotFound)?;
-            let resource = self
+            let action = descriptor
+                .lifecycle_actions
+                .get(&o3k_native_api::resource::LifecycleOperation::Delete)
+                .cloned()
+                .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+            let key = idempotency_key
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("native:network-delete:{id}"));
+            let operation_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("network:delete:{}:{id}:{key}", auth.effective_scope().id()).as_bytes(),
+            );
+            let operation = o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id,
+                kind: "lifecycle:delete".into(),
+                state: o3k_store::OperationState::Pending,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            };
+            let canonical = o3k_store::CanonicalOperationRecord::from_kernel_operation(
+                &o3k_kernel::Operation::new(
+                    operation_id,
+                    "network",
+                    action.clone(),
+                    auth.principal().id().to_string(),
+                    auth.effective_scope().clone(),
+                    o3k_kernel::ResourceType::new_unchecked("network", "network"),
+                    Some(o3k_kernel::ResourceId::new_unchecked(id)),
+                    Some(auth.request_id().to_owned()),
+                ),
+            )
+            .map_err(|_| ResourceApplicationError::Internal)?;
+            let identity = o3k_store::IdempotencyReservationRequest::from_semantics(
+                auth.effective_scope().id().as_str(),
+                action.to_string(),
+                key,
+                "network:network",
+                Some(id),
+                &serde_json::json!({"resource_id": id}),
+                operation_id,
+            )
+            .map_err(|_| ResourceApplicationError::Validation)?;
+            let acceptance = self
                 .store
-                .get_resource(resource_id)
+                .create_or_replay_canonical_lifecycle_operation(&operation, &canonical, &identity)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            if let o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent {
+                operation_id, ..
+            } = acceptance
+            {
+                let existing = self
+                    .store
+                    .get_canonical_operation(operation_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                return Ok(MutationResult {
+                    operation_id: operation_id.to_string(),
+                    resource_id: Some(id.to_owned()),
+                    complete: existing.state == o3k_store::OperationState::Succeeded,
+                    resource: None,
+                });
+            }
+            let network = self
+                .network_service
+                .get_canonical_network(auth, resource_id)
                 .await
                 .map_err(|_| ResourceApplicationError::NotFound)?;
-            if resource.kind != "network:network"
-                || resource.project_id != auth.effective_scope().id().as_str()
-            {
-                return Err(ResourceApplicationError::NotFound);
-            }
-            if expected_generation.is_some_and(|expected| expected != resource.generation) {
+            if expected_generation.is_some_and(|expected| {
+                expected != i64::try_from(network.generation).unwrap_or(i64::MAX)
+            }) {
                 return Err(ResourceApplicationError::PreconditionConflict);
             }
             self.network_service
-                .delete_network(auth, resource_id)
+                .delete_canonical_network(auth, resource_id)
                 .await
-                .map_err(|_| ResourceApplicationError::NotFound)?;
+                .map_err(|_| ResourceApplicationError::Retryable)?;
+            let now = chrono::Utc::now().to_rfc3339();
+            let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                o3k_kernel::OperationState::Succeeded,
+                1,
+                Some(now.clone()),
+                Some(now),
+                None,
+            )
+            .map_err(|_| ResourceApplicationError::Internal)?;
+            self.store
+                .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
             return Ok(MutationResult {
-                operation_id: Uuid::new_v5(
-                    &Uuid::NAMESPACE_URL,
-                    format!("network:delete:{id}").as_bytes(),
-                )
-                .to_string(),
+                operation_id: operation_id.to_string(),
                 resource_id: Some(id.to_owned()),
                 complete: true,
                 resource: None,

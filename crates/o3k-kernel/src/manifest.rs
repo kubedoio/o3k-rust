@@ -1283,6 +1283,71 @@ impl ManifestRegistry {
         Ok(())
     }
 
+    /// Registers the runtime readiness of a first-party in-process service.
+    ///
+    /// In-process services have no transport session to register, but they
+    /// still participate in the same lifecycle state used by native
+    /// discovery and mutation dispatch.  The composition root supplies the
+    /// result of the service's real dependency checks; an unavailable
+    /// dependency therefore remains fail-closed as `NotReady`.
+    pub fn register_in_process_controller(
+        &mut self,
+        service_id: &str,
+        ready: bool,
+        detail: Option<String>,
+    ) -> Result<(), ManifestError> {
+        let manifest = self
+            .manifests
+            .get(service_id)
+            .ok_or(ManifestError::InvalidField("service_id"))?;
+        let controller = manifest
+            .controller
+            .as_ref()
+            .ok_or(ManifestError::InvalidField("controller"))?;
+        if manifest.ownership != ServiceOwnership::O3kImplemented
+            || controller.mode != "in-process"
+            || controller.protocol != "in-process"
+        {
+            return Err(ManifestError::InvalidField(
+                "service is not an in-process first-party service",
+            ));
+        }
+        if self
+            .controllers
+            .get(service_id)
+            .is_some_and(|registration| registration.session.is_some())
+        {
+            return Err(ManifestError::InvalidField(
+                "external controller session already registered",
+            ));
+        }
+        let (major, minor) = controller
+            .protocol_version
+            .split_once('.')
+            .and_then(|(major, minor)| Some((major.parse().ok()?, minor.parse().ok()?)))
+            .ok_or(ManifestError::InvalidField("controller.protocol_version"))?;
+
+        self.controllers.insert(
+            service_id.to_owned(),
+            ControllerRegistration {
+                service_id: service_id.to_owned(),
+                namespace: manifest.namespace.clone(),
+                session: None,
+                state: if ready {
+                    ControllerState::Ready
+                } else {
+                    ControllerState::NotReady
+                },
+                health: Some(ControllerHealth {
+                    healthy: ready,
+                    detail,
+                    protocol_version: crate::controller::ProtocolVersion::new(major, minor),
+                }),
+            },
+        );
+        Ok(())
+    }
+
     /// Transitions a controller from `Declared` to `Ready` after health checks
     /// pass. This is a separate step because SPEC-0031 requires protocol
     /// negotiation, manifest verification and health confirmation before Ready.
@@ -2202,6 +2267,72 @@ mod tests {
         assert!(reg.get("network").is_some());
         assert!(reg.get("volume").is_some());
         assert!(reg.get("placement").is_none());
+    }
+
+    #[test]
+    fn in_process_controller_readiness_uses_shared_lifecycle_state() {
+        let mut reg = ManifestRegistry::new();
+        reg.seed_core().unwrap();
+
+        reg.register_in_process_controller("network", true, Some("network store ready".into()))
+            .unwrap();
+        assert_eq!(
+            reg.controller("network").unwrap().state,
+            ControllerState::Ready
+        );
+        assert!(reg.controller("network").unwrap().session.is_none());
+
+        reg.register_in_process_controller("volume", false, Some("storage provider absent".into()))
+            .unwrap();
+        assert_eq!(
+            reg.controller("volume").unwrap().state,
+            ControllerState::NotReady
+        );
+        assert!(
+            !reg.controller("volume")
+                .unwrap()
+                .health
+                .as_ref()
+                .unwrap()
+                .healthy
+        );
+    }
+
+    #[test]
+    fn in_process_controller_registration_rejects_external_service() {
+        let mut reg = ManifestRegistry::new();
+        let mut manifest = valid_database_manifest();
+        manifest.ownership = ServiceOwnership::ExternalController;
+        manifest.controller = Some(ManifestController {
+            mode: "external".to_owned(),
+            protocol: "grpc".to_owned(),
+            protocol_version: "1.0".to_owned(),
+            service_principal: Some("database-controller".to_owned()),
+        });
+        reg.register(manifest).unwrap();
+        assert!(
+            reg.register_in_process_controller("database-example", true, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn in_process_controller_health_reports_manifest_protocol_version() {
+        let mut reg = ManifestRegistry::new();
+        let mut manifest = valid_database_manifest();
+        manifest.controller.as_mut().unwrap().protocol_version = "1.5".to_owned();
+        reg.register(manifest).unwrap();
+        reg.register_in_process_controller("database-example", true, None)
+            .unwrap();
+        assert_eq!(
+            reg.controller("database-example")
+                .unwrap()
+                .health
+                .as_ref()
+                .unwrap()
+                .protocol_version,
+            crate::controller::ProtocolVersion::new(1, 5)
+        );
     }
 
     #[test]
