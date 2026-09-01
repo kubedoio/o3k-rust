@@ -1225,7 +1225,7 @@ cat >"$work_dir/router-interface-import-parent.json" <<EOF
 EOF
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X PUT \
   "http://127.0.0.1:$port/v2.0/routers/$router_interface_import_router_id/remove_router_interface" \
-  --data "{\"port_id\":\"$router_interface_unrelated_id\"}" >/dev/null
+  --data "{\"port_id\":\"$router_interface_unrelated_id\"}" >/dev/null || true
 curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/routers/$router_interface_import_router_id" >/dev/null || true
 curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_interface_import_subnet_id" >/dev/null || true
 curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/subnets/$router_interface_unrelated_subnet_id" >/dev/null || true
