@@ -996,10 +996,6 @@ impl ResourceApplication for GenericResourceApplication {
                     )
                     .await
                     .map_err(|_| ResourceApplicationError::Internal)?;
-                self.store
-                    .delete_volume(auth.effective_scope().id().as_str(), resource_id)
-                    .await
-                    .map_err(|_| ResourceApplicationError::Internal)?;
                 let now = chrono::Utc::now().to_rfc3339();
                 let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
                     o3k_kernel::OperationState::Succeeded,
@@ -1011,6 +1007,13 @@ impl ResourceApplication for GenericResourceApplication {
                 .map_err(|_| ResourceApplicationError::Internal)?;
                 self.store
                     .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                // Keep the Deleting row until the canonical operation is
+                // terminal. If cleanup fails, restart recovery still owns the
+                // durable provider inventory and can finish the deletion.
+                self.store
+                    .delete_volume(auth.effective_scope().id().as_str(), resource_id)
                     .await
                     .map_err(|_| ResourceApplicationError::Internal)?;
                 return Ok(MutationResult {
