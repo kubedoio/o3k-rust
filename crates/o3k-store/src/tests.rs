@@ -1792,6 +1792,17 @@ mod tests {
     #[tokio::test]
     async fn transaction_rolls_back_when_operation_insert_fails() -> Result<(), StoreError> {
         let store = SqliteStore::connect("sqlite::memory:").await?;
+        let anchor = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "server".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "requested".to_owned(),
+            observed_state: "unknown".to_owned(),
+            provider_id: None,
+        };
+        store.insert_resource(&anchor).await?;
         let resource = ResourceRecord {
             id: Uuid::now_v7(),
             kind: "server".to_owned(),
@@ -1804,7 +1815,7 @@ mod tests {
         };
         let operation = OperationRecord {
             id: Uuid::now_v7(),
-            resource_id: Uuid::now_v7(),
+            resource_id: anchor.id,
             kind: "test".to_owned(),
             state: OperationState::Pending,
             provider_operation_id: None,
