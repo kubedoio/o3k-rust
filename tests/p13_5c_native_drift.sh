@@ -30,7 +30,9 @@ for item in contract["resources"]:
     resource = item["resource"]
     for attribute in item.get("mutable_attributes", []):
         reason = (
-            "native_update_unsupported: registered native resource has no update operation"
+            "native_update_route_unavailable: manifest declares update but the native route/application is missing"
+            if resource == "openstack_networking_network_v2"
+            else "native_update_unsupported: registered native resource has no update operation"
             if resource in native_resources
             else "native_resource_unavailable: resource is not registered on the current /o3k/v1 surface"
         )
