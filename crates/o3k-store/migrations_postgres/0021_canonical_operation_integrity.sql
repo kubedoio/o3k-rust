@@ -6,9 +6,9 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM resources WHERE id = NEW.resource_id)
-       AND NOT EXISTS (SELECT 1 FROM canonical_networks WHERE id = NEW.resource_id)
-       AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE id = NEW.resource_id)
+    IF NOT EXISTS (SELECT 1 FROM resources WHERE id = NEW.resource_id FOR KEY SHARE)
+       AND NOT EXISTS (SELECT 1 FROM canonical_networks WHERE id = NEW.resource_id FOR KEY SHARE)
+       AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE id = NEW.resource_id FOR KEY SHARE)
     THEN
         RAISE EXCEPTION 'operation resource not found';
     END IF;

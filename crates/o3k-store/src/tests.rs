@@ -863,6 +863,17 @@ mod tests {
                 .await?,
             IdempotencyReservation::ExistingEquivalent(operation.id)
         );
+        sqlx::query(
+            "UPDATE canonical_operation_metadata SET owner_scope = 'project-b' WHERE operation_id = ?",
+        )
+        .bind(operation.id.to_string())
+        .execute(&store.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        assert!(matches!(
+            store.get_canonical_operation(operation.id).await,
+            Err(StoreError::Corrupt(_))
+        ));
         drop(store);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));

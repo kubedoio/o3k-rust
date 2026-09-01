@@ -692,6 +692,66 @@ impl DurableStore for PostgresStore {
             error: row.try_get("error").map_err(StoreError::Database)?,
             request_id: row.try_get("request_id").map_err(StoreError::Database)?,
         };
+        match canonical.resource_type.as_str() {
+            "network:network" => {
+                let owner = sqlx::query_scalar::<_, String>(
+                    "SELECT project_id FROM canonical_networks WHERE id = $1",
+                )
+                .bind(operation.resource_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+                if let Some(owner) = owner {
+                    if owner != canonical.owner_scope {
+                        return Err(StoreError::Corrupt(
+                            "canonical network operation owner differs from network owner".into(),
+                        ));
+                    }
+                } else if sqlx::query_scalar::<_, String>(
+                    "SELECT project_id FROM canonical_address_realms WHERE id = $1",
+                )
+                .bind(operation.resource_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?
+                .is_some()
+                {
+                    return Err(StoreError::Corrupt(
+                        "canonical network operation references an address realm".into(),
+                    ));
+                }
+            }
+            "network:address_realm" => {
+                let owner = sqlx::query_scalar::<_, String>(
+                    "SELECT project_id FROM canonical_address_realms WHERE id = $1",
+                )
+                .bind(operation.resource_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+                if let Some(owner) = owner {
+                    if owner != canonical.owner_scope {
+                        return Err(StoreError::Corrupt(
+                            "canonical address realm operation owner differs from realm owner"
+                                .into(),
+                        ));
+                    }
+                } else if sqlx::query_scalar::<_, String>(
+                    "SELECT project_id FROM canonical_networks WHERE id = $1",
+                )
+                .bind(operation.resource_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?
+                .is_some()
+                {
+                    return Err(StoreError::Corrupt(
+                        "canonical address realm operation references a network".into(),
+                    ));
+                }
+            }
+            _ => {}
+        }
         match self.get_resource(operation.resource_id).await {
             Ok(resource) => {
                 crate::validate_canonical_operation_read(&operation, &canonical, &resource)?
