@@ -1,7 +1,8 @@
 {
   "artifact_type": "o3k-p13-5c-canonical-out-of-band-drift-evidence",
   "baseline": {
-    "source_commit": "97ca7ee17577482adf74cfc2192f2f11a2c90c8c",
+    "evidence_sha256": "f386e6e96c304ceee0740c0c9f6e35027cf0439763fdfd86de27f688f1dae4cb",
+    "source_commit": "8f2dc885328eaaa69428226f458b473d3b48cf4a",
     "status": "verified"
   },
   "canonical_authority": "o3k",
@@ -11,9 +12,9 @@
   "profile": "p13-iac-compatibility-v1",
   "provider_modified": false,
   "scenario": {
-    "canonical_id_after_mutation": "01a05c41-3724-7512-822c-d612a5ee5c59",
-    "canonical_id_after_reapply": "01a05c41-3724-7512-822c-d612a5ee5c59",
-    "canonical_id_before": "01a05c41-3724-7512-822c-d612a5ee5c59",
+    "canonical_id_after_mutation": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
+    "canonical_id_after_reapply": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
+    "canonical_id_before": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
     "canonical_observations": {
       "after_cleanup": {
         "count": 0,
@@ -21,7 +22,7 @@
         "phase": "after_cleanup",
         "project_resource_count": 0,
         "records": [],
-        "requested_id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+        "requested_id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
         "source": "canonical_store",
         "store": "canonical_store:sqlite:canonical_networks"
       },
@@ -34,11 +35,11 @@
           {
             "name": "p13-5c-network-drifted",
             "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
-            "resource_id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+            "resource_id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
             "state": "active"
           }
         ],
-        "requested_id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+        "requested_id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
         "source": "canonical_store",
         "store": "canonical_store:sqlite:canonical_networks"
       },
@@ -51,11 +52,11 @@
           {
             "name": "p13-5c-network-desired",
             "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
-            "resource_id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+            "resource_id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
             "state": "active"
           }
         ],
-        "requested_id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+        "requested_id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
         "source": "canonical_store",
         "store": "canonical_store:sqlite:canonical_networks"
       },
@@ -68,22 +69,26 @@
           {
             "name": "p13-5c-network-desired",
             "owner_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
-            "resource_id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+            "resource_id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
             "state": "active"
           }
         ],
-        "requested_id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+        "requested_id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
         "source": "canonical_store",
         "store": "canonical_store:sqlite:canonical_networks"
       }
     },
+    "canonical_project_resource_count_after_cleanup": 0,
+    "canonical_project_resource_count_after_mutation": 1,
+    "canonical_project_resource_count_after_reapply": 1,
+    "canonical_project_resource_count_before": 1,
     "canonical_same_id_count": 1,
     "cleanup_http_status": 404,
     "compatibility_observations": {
       "after_mutation": {
         "network": {
           "admin_state_up": true,
-          "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+          "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
           "mtu": 1500,
           "name": "p13-5c-network-drifted",
           "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -95,7 +100,7 @@
       "after_reapply": {
         "network": {
           "admin_state_up": true,
-          "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+          "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
           "mtu": 1500,
           "name": "p13-5c-network-desired",
           "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -128,7 +133,7 @@
             "openstack": {
               "expressions": {
                 "auth_url": {
-                  "constant_value": "http://127.0.0.1:34403"
+                  "constant_value": "http://127.0.0.1:52083"
                 },
                 "max_retries": {
                   "constant_value": 0
@@ -195,7 +200,7 @@
                   "description": "",
                   "dns_domain": "",
                   "external": false,
-                  "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                  "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                   "mtu": 1500,
                   "name": "p13-5c-network-desired",
                   "port_security_enabled": false,
@@ -239,7 +244,7 @@
                     "description": "",
                     "dns_domain": "",
                     "external": false,
-                    "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                    "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                     "mtu": 1500,
                     "name": "p13-5c-network-desired",
                     "port_security_enabled": false,
@@ -272,7 +277,7 @@
                 "description": "",
                 "dns_domain": "",
                 "external": false,
-                "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                 "mtu": 1500,
                 "name": "p13-5c-network-desired",
                 "port_security_enabled": false,
@@ -300,7 +305,7 @@
                 "description": "",
                 "dns_domain": "",
                 "external": false,
-                "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                 "mtu": 1500,
                 "name": "p13-5c-network-desired",
                 "port_security_enabled": false,
@@ -328,7 +333,7 @@
           }
         ],
         "terraform_version": "1.12.6",
-        "timestamp": "2026-09-01T09:16:30Z"
+        "timestamp": "2026-09-01T09:36:43Z"
       },
       "initial_normal": {
         "configuration": {
@@ -336,7 +341,7 @@
             "openstack": {
               "expressions": {
                 "auth_url": {
-                  "constant_value": "http://127.0.0.1:34403"
+                  "constant_value": "http://127.0.0.1:52083"
                 },
                 "max_retries": {
                   "constant_value": 0
@@ -403,7 +408,7 @@
                   "description": "",
                   "dns_domain": "",
                   "external": false,
-                  "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                  "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                   "mtu": 1500,
                   "name": "p13-5c-network-desired",
                   "port_security_enabled": false,
@@ -447,7 +452,7 @@
                     "description": "",
                     "dns_domain": "",
                     "external": false,
-                    "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                    "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                     "mtu": 1500,
                     "name": "p13-5c-network-desired",
                     "port_security_enabled": false,
@@ -480,7 +485,7 @@
                 "description": "",
                 "dns_domain": "",
                 "external": false,
-                "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                 "mtu": 1500,
                 "name": "p13-5c-network-desired",
                 "port_security_enabled": false,
@@ -508,7 +513,7 @@
                 "description": "",
                 "dns_domain": "",
                 "external": false,
-                "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                 "mtu": 1500,
                 "name": "p13-5c-network-desired",
                 "port_security_enabled": false,
@@ -549,7 +554,7 @@
                 "description": "",
                 "dns_domain": "",
                 "external": false,
-                "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                 "mtu": 1500,
                 "name": "p13-5c-network-desired",
                 "port_security_enabled": false,
@@ -577,7 +582,7 @@
                 "description": "",
                 "dns_domain": "",
                 "external": false,
-                "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                 "mtu": 1500,
                 "name": "p13-5c-network-desired",
                 "port_security_enabled": false,
@@ -604,7 +609,7 @@
           }
         ],
         "terraform_version": "1.12.6",
-        "timestamp": "2026-09-01T09:16:13Z"
+        "timestamp": "2026-09-01T09:36:26Z"
       },
       "normal": {
         "configuration": {
@@ -612,7 +617,7 @@
             "openstack": {
               "expressions": {
                 "auth_url": {
-                  "constant_value": "http://127.0.0.1:34403"
+                  "constant_value": "http://127.0.0.1:52083"
                 },
                 "max_retries": {
                   "constant_value": 0
@@ -679,7 +684,7 @@
                   "description": "",
                   "dns_domain": "",
                   "external": false,
-                  "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                  "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                   "mtu": 1500,
                   "name": "p13-5c-network-desired",
                   "port_security_enabled": false,
@@ -723,7 +728,7 @@
                     "description": "",
                     "dns_domain": "",
                     "external": false,
-                    "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                    "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                     "mtu": 1500,
                     "name": "p13-5c-network-drifted",
                     "port_security_enabled": false,
@@ -756,7 +761,7 @@
                 "description": "",
                 "dns_domain": "",
                 "external": false,
-                "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                 "mtu": 1500,
                 "name": "p13-5c-network-desired",
                 "port_security_enabled": false,
@@ -784,7 +789,7 @@
                 "description": "",
                 "dns_domain": "",
                 "external": false,
-                "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                 "mtu": 1500,
                 "name": "p13-5c-network-drifted",
                 "port_security_enabled": false,
@@ -825,7 +830,7 @@
                 "description": "",
                 "dns_domain": "",
                 "external": false,
-                "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                 "mtu": 1500,
                 "name": "p13-5c-network-drifted",
                 "port_security_enabled": false,
@@ -853,7 +858,7 @@
                 "description": "",
                 "dns_domain": "",
                 "external": false,
-                "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                 "mtu": 1500,
                 "name": "p13-5c-network-desired",
                 "port_security_enabled": false,
@@ -880,7 +885,7 @@
           }
         ],
         "terraform_version": "1.12.6",
-        "timestamp": "2026-09-01T09:16:20Z"
+        "timestamp": "2026-09-01T09:36:33Z"
       },
       "refresh_only": {
         "configuration": {
@@ -888,7 +893,7 @@
             "openstack": {
               "expressions": {
                 "auth_url": {
-                  "constant_value": "http://127.0.0.1:34403"
+                  "constant_value": "http://127.0.0.1:52083"
                 },
                 "max_retries": {
                   "constant_value": 0
@@ -961,7 +966,7 @@
                     "description": "",
                     "dns_domain": "",
                     "external": false,
-                    "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                    "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                     "mtu": 1500,
                     "name": "p13-5c-network-drifted",
                     "port_security_enabled": false,
@@ -994,7 +999,7 @@
                 "description": "",
                 "dns_domain": "",
                 "external": false,
-                "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                 "mtu": 1500,
                 "name": "p13-5c-network-drifted",
                 "port_security_enabled": false,
@@ -1022,7 +1027,7 @@
                 "description": "",
                 "dns_domain": "",
                 "external": false,
-                "id": "01a05c41-3724-7512-822c-d612a5ee5c59",
+                "id": "01a05c53-bad9-7230-8563-d90c5c4b6ff9",
                 "mtu": 1500,
                 "name": "p13-5c-network-desired",
                 "port_security_enabled": false,
@@ -1049,7 +1054,7 @@
           }
         ],
         "terraform_version": "1.12.6",
-        "timestamp": "2026-09-01T09:16:17Z"
+        "timestamp": "2026-09-01T09:36:30Z"
       }
     },
     "refresh_only_actions": [
@@ -1067,7 +1072,7 @@
   "schema_version": 1,
   "status": "passed",
   "surface": "canonical_out_of_band",
-  "tested_o3k_head_sha": "97ca7ee17577482adf74cfc2192f2f11a2c90c8c",
+  "tested_o3k_head_sha": "8f2dc885328eaaa69428226f458b473d3b48cf4a",
   "toolchain": {
     "opentofu": "1.12.6",
     "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
