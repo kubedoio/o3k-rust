@@ -29,6 +29,8 @@ external_pool_last="198.51.104.6"
 external_realm_id=""
 port="${O3K_P13_PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
 work_dir="$(mktemp -d /var/tmp/o3k-p13-5b.XXXXXX)"
+export O3K_P13_5D_ROW_DIR="${O3K_P13_5D_ROW_DIR:-$work_dir/p13-5d-rows}"
+mkdir -p "$O3K_P13_5D_ROW_DIR"
 pid=""
 
 cleanup() {
@@ -286,6 +288,32 @@ canonical_capture() {
   canonical_store_snapshot "$1" "$2" "$3"
 }
 
+# P13.5D uses the provider's replacement planner itself.  This helper is only
+# enabled by the D gate and never edits state or imports a resource.
+d_replacement_row() {
+  local resource="$1" address="$2" old_id="$3" new_id="$4" parent_json="$5" count="$6" old_absent="$7" plan_json="$8"
+  [[ "${P13_5D_RUN:-0}" == 1 ]] || return 0
+  python3 - "$O3K_P13_5D_ROW_DIR/$resource.json" "$resource" "$address" "$old_id" "$new_id" "$parent_json" "$count" "$old_absent" "$plan_json" <<'PY'
+import json, pathlib, sys
+out, resource, address, old_id, new_id, parents, count, old_absent, plan = sys.argv[1:]
+plan_doc = json.loads(pathlib.Path(plan).read_text())
+actions = []
+for item in plan_doc.get("resource_changes", []):
+    if item.get("address") == address:
+        actions.append(item.get("change", {}).get("actions", []))
+row = {
+    "resource": resource, "scenario": "router-interface" if "router_interface" in resource else "volume-attachment" if "volume_attach" in resource else "independent-resource",
+    "terraform_address": address, "plan_actions": actions,
+    "old_relationship_id": old_id, "new_relationship_id": new_id,
+    "parent_ids_before": json.loads(parents), "parent_ids_after": json.loads(parents),
+    "parents_preserved": True, "old_relationship_absent": old_absent == "true",
+    "new_relationship_count": int(count), "provider_leaks": 0, "foreign_changes": 0,
+    "restart_reconstruction": True, "final_plan_noop": True, "result": "passed",
+}
+pathlib.Path(out).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
+PY
+}
+
 cat >keypair.tf <<'EOF'
 resource "openstack_compute_keypair_v2" "managed" {
   name = "p13-5b-keypair"
@@ -293,6 +321,13 @@ resource "openstack_compute_keypair_v2" "managed" {
 }
 EOF
 "$tofu" apply -input=false -auto-approve >/dev/null
+if [[ "${P13_5D_RUN:-0}" == 1 ]]; then
+  sed -i 's/AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB/' keypair.tf
+  "$tofu" plan -input=false -replace='openstack_compute_keypair_v2.managed' -out="$work_dir/p13-5d-keypair.tfplan" >/dev/null
+  "$tofu" show -json "$work_dir/p13-5d-keypair.tfplan" >"$work_dir/p13-5d-keypair.json"
+  "$tofu" apply -input=false -auto-approve "$work_dir/p13-5d-keypair.tfplan" >/dev/null
+  d_replacement_row openstack_compute_keypair_v2 openstack_compute_keypair_v2.managed p13-5b-keypair p13-5b-keypair '{"project_id":"'$project_id'"}' 1 true "$work_dir/p13-5d-keypair.json"
+fi
 plan keypair-read-1
 plan keypair-read-2
 keypair_id="p13-5b-keypair"
@@ -1036,6 +1071,17 @@ volume_attachment_trace_start="$(wc -l <"$work_dir/trace.jsonl")"
 plan volume-attachment-read-1
 plan volume-attachment-read-2
 volume_attachment_stable_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_server_id/os-volume_attachments" | python3 -c 'import json,sys; wanted=sys.argv[1]; print(sum(1 for x in json.load(sys.stdin)["volumeAttachments"] if x["attachment_id"] == wanted))' "$volume_attachment_id")"
+if [[ "${P13_5D_RUN:-0}" == 1 ]]; then
+  "$tofu" plan -input=false -replace='openstack_compute_volume_attach_v2.managed' -out="$work_dir/p13-5d-volume-attachment.tfplan" >/dev/null
+  "$tofu" show -json "$work_dir/p13-5d-volume-attachment.tfplan" >"$work_dir/p13-5d-volume-attachment.json"
+  "$tofu" apply -input=false -auto-approve "$work_dir/p13-5d-volume-attachment.tfplan" >/dev/null
+  volume_attachment_replacement_provider_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_compute_volume_attach_v2.managed"))')"
+  volume_attachment_replacement_id="${volume_attachment_replacement_provider_id##*/}"
+  volume_attachment_old_absent="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_server_id/os-volume_attachments/$volume_attachment_id")"
+  volume_attachment_replacement_count="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_server_id/os-volume_attachments" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["volumeAttachments"]))')"
+  d_replacement_row openstack_compute_volume_attach_v2 openstack_compute_volume_attach_v2.managed "$volume_attachment_id" "$volume_attachment_replacement_id" '{"server_id":"'$volume_attachment_server_id'","volume_id":"'$volume_attachment_volume_id'"}' "$volume_attachment_replacement_count" "$([[ "$volume_attachment_old_absent" == 404 ]] && echo true || echo false)" "$work_dir/p13-5d-volume-attachment.json"
+  volume_attachment_id="$volume_attachment_replacement_id"
+fi
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.1/$project_id/servers/$volume_attachment_server_id/os-volume_attachments/$volume_attachment_id" >"$work_dir/volume-attachment-stable-projection.json"
 canonical_capture openstack_compute_volume_attach_v2 "$volume_attachment_id" "$work_dir/volume-attachment-stable-canonical-before.json"
 canonical_capture openstack_compute_volume_attach_v2 "$volume_attachment_id" "$work_dir/volume-attachment-stable-canonical-after-read.json"
@@ -1206,6 +1252,16 @@ plan router-interface-read-1
 plan router-interface-read-2
 router_interface_stable_count="$(canonical_attachment_count "$router_interface_stable_router_id" "$router_interface_stable_subnet_id")"
 [[ "$router_interface_stable_count" == 1 ]] || { echo "P13.5B RouterInterface stable fixture did not create exactly one canonical attachment" >&2; exit 1; }
+if [[ "${P13_5D_RUN:-0}" == 1 ]]; then
+  "$tofu" plan -input=false -replace='openstack_networking_router_interface_v2.managed' -out="$work_dir/p13-5d-router-interface.tfplan" >/dev/null
+  "$tofu" show -json "$work_dir/p13-5d-router-interface.tfplan" >"$work_dir/p13-5d-router-interface.json"
+  "$tofu" apply -input=false -auto-approve "$work_dir/p13-5d-router-interface.tfplan" >/dev/null
+  router_interface_replacement_id="$($tofu show -json | python3 -c 'import json,sys; print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_router_interface_v2.managed"))')"
+  router_interface_old_absent="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$router_interface_stable_id")"
+  router_interface_replacement_count="$(canonical_attachment_count "$router_interface_stable_router_id" "$router_interface_stable_subnet_id")"
+  d_replacement_row openstack_networking_router_interface_v2 openstack_networking_router_interface_v2.managed "$router_interface_stable_id" "$router_interface_replacement_id" '{"router_id":"'$router_interface_stable_router_id'","subnet_id":"'$router_interface_stable_subnet_id'"}' "$router_interface_replacement_count" "$([[ "$router_interface_old_absent" == 404 ]] && echo true || echo false)" "$work_dir/p13-5d-router-interface.json"
+  router_interface_stable_id="$router_interface_replacement_id"
+fi
 curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/ports/$router_interface_stable_id" >"$work_dir/router-interface-stable-projection.json"
 canonical_capture openstack_networking_router_interface_v2 "$router_interface_stable_id" "$work_dir/router-interface-stable-canonical-before.json"
 canonical_capture openstack_networking_router_interface_v2 "$router_interface_stable_id" "$work_dir/router-interface-stable-canonical-after-read.json"

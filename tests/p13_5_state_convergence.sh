@@ -74,4 +74,11 @@ if [[ "${P13_5C_RUN:-0}" == 1 ]]; then
   bash "$root_dir/tests/p13_5c_native_drift.sh"
   exit $?
 fi
+if [[ "${P13_5D_RUN:-0}" == 1 ]]; then
+  export P13_5D_BASELINE_MANIFEST="$baseline_manifest"
+  bash "$root_dir/tests/p13_5d_replacement_relationships.sh"
+  python3 "$root_dir/scripts/validate_p13_5d_evidence.py" \
+    "${O3K_P13_5D_EVIDENCE_OUTPUT:-$root_dir/target/p13-5d/replacement-relationship-evidence.json}"
+  exit $?
+fi
 echo "P13.5A existing P13 baseline: PASS"
