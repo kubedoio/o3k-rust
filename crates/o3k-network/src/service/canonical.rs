@@ -1006,7 +1006,13 @@ impl NetworkService {
             | Err(o3k_store::StoreError::ResourceNotFound)
             | Err(o3k_store::StoreError::NetworkNotFound) => Ok(()),
             Err(error) => Err(map_store_error(error)),
-        }
+        }?;
+        self.inner
+            .repository
+            .release_reservation_for_operation(&format!("o3k:network:create:{}:{}", project_id, id))
+            .await
+            .map_err(map_store_error)?;
+        Ok(())
     }
 
     pub async fn delete_canonical_network(

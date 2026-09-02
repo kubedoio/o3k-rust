@@ -57,6 +57,18 @@ def validate(document: dict) -> None:
         require(path.is_file(), f"missing {name} evidence artifact: {reference}")
         require(path.suffix == ".json", f"{name} evidence reference is not JSON: {reference}")
 
+    if document.get("final_aggregate_verdict") == "passed":
+        parity_reference = document.get("postgres_provider_parity_evidence")
+        require(isinstance(parity_reference, str), "PG1-PG7 evidence reference is missing")
+        parity_path = repository / parity_reference
+        require(parity_path.is_file(), "missing PG1-PG7 provider parity evidence")
+        parity = json.loads(parity_path.read_text(encoding="utf-8"))
+        require(parity.get("artifact_type") == "o3k-p13-5f-postgres-provider-parity", "invalid PG1-PG7 evidence artifact")
+        require(parity.get("backend") == "postgresql", "PG1-PG7 evidence is not PostgreSQL-backed")
+        require(parity.get("tested_o3k_head_sha") == document.get("source_head_sha"), "PG1-PG7 evidence is not bound to aggregate source")
+        rows = parity.get("scenarios", [])
+        require(len(rows) == 7 and all(row.get("result") == "passed" for row in rows), "PG1-PG7 evidence does not pass every scenario")
+
     matrix = document.get("scenario_matrix", [])
     require(len(matrix) == len(SCENARIOS), "scenario matrix contains duplicate or missing rows")
     require({row.get("scenario") for row in matrix} == SCENARIOS, "scenario matrix does not cover P13.5 scenarios")

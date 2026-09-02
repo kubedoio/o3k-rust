@@ -10,9 +10,10 @@ provider_binary="${O3K_P13_PROVIDER_BINARY:?O3K_P13_PROVIDER_BINARY is required}
 provider_archive="${O3K_P13_PROVIDER_ARCHIVE:?O3K_P13_PROVIDER_ARCHIVE is required}"
 tofu_archive="${O3K_P13_TOFU_ARCHIVE:?O3K_P13_TOFU_ARCHIVE is required}"
 provider_sha="${O3K_P13_PROVIDER_SHA256:?O3K_P13_PROVIDER_SHA256 is required}"
-: "${O3K_LVM_VOLUME_GROUP:?O3K_LVM_VOLUME_GROUP is required for the native volume gate}"
-: "${O3K_LVM_THIN_POOL:?O3K_LVM_THIN_POOL is required for the native volume gate}"
-: "${O3K_LVM_PROVIDER_NAMESPACE:?O3K_LVM_PROVIDER_NAMESPACE is required for the native volume gate}"
+lvm_enabled=0
+if [[ -n "${O3K_LVM_VOLUME_GROUP:-}" && -n "${O3K_LVM_THIN_POOL:-}" && -n "${O3K_LVM_PROVIDER_NAMESPACE:-}" ]]; then
+  lvm_enabled=1
+fi
 o3kd="${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}"
 output="${O3K_P13_5B_EVIDENCE_OUTPUT:-$root_dir/target/p13-5b/refresh-import-evidence.json}"
 if [[ "$output" != /* ]]; then
@@ -31,6 +32,14 @@ port="${O3K_P13_PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127
 work_dir="$(mktemp -d /var/tmp/o3k-p13-5b.XXXXXX)"
 export O3K_P13_5D_ROW_DIR="${O3K_P13_5D_ROW_DIR:-$work_dir/p13-5d-rows}"
 mkdir -p "$O3K_P13_5D_ROW_DIR"
+# Keep the final evidence serializer's argument contract total when the
+# privileged native-volume section is intentionally not part of this run.
+volume_stable_id="" volume_import_id="" volume_stable_count=0 volume_import_count_before=0 volume_import_count_after_read=0
+volume_stable_count_after=0 volume_import_count_after_cleanup=0 volume_stable_cleanup=404 volume_import_cleanup=404
+volume_stable_trace_start=0 volume_import_trace_start=0
+volume_attachment_id="" volume_attachment_import_id="" volume_attachment_stable_count=0 volume_attachment_import_count_after_read=0
+volume_attachment_stable_cleanup=404 volume_attachment_import_cleanup=404 volume_attachment_trace_start=0
+volume_attachment_import_trace_start=0 volume_attachment_import_state_id=""
 pid=""
 
 cleanup() {
@@ -80,9 +89,9 @@ O3K_NETWORK_EXTERNAL_REALM_ID="00000000-0000-0000-0000-000000000009" \
 O3K_PUBLIC_POOL_CIDR="$external_pool_cidr" \
 O3K_PUBLIC_POOL_FIRST="$external_pool_first" \
 O3K_PUBLIC_POOL_LAST="$external_pool_last" \
-O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" \
-O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" \
-O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
+O3K_LVM_VOLUME_GROUP="${O3K_LVM_VOLUME_GROUP:-}" \
+O3K_LVM_THIN_POOL="${O3K_LVM_THIN_POOL:-}" \
+O3K_LVM_PROVIDER_NAMESPACE="${O3K_LVM_PROVIDER_NAMESPACE:-}" \
 O3K_COMPATIBILITY_TRACE_PATH="$work_dir/trace.jsonl" \
   "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
 pid=$!
@@ -109,9 +118,9 @@ restart_daemon() {
   O3K_PUBLIC_POOL_CIDR="$external_pool_cidr" \
   O3K_PUBLIC_POOL_FIRST="$external_pool_first" \
   O3K_PUBLIC_POOL_LAST="$external_pool_last" \
-  O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" \
-  O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" \
-  O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
+  O3K_LVM_VOLUME_GROUP="${O3K_LVM_VOLUME_GROUP:-}" \
+  O3K_LVM_THIN_POOL="${O3K_LVM_THIN_POOL:-}" \
+  O3K_LVM_PROVIDER_NAMESPACE="${O3K_LVM_PROVIDER_NAMESPACE:-}" \
   O3K_COMPATIBILITY_TRACE_PATH="$work_dir/trace.jsonl" \
     "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
   pid=$!
@@ -554,9 +563,9 @@ O3K_NETWORK_EXTERNAL_REALM_ID="$external_realm_id" \
 O3K_PUBLIC_POOL_CIDR="$external_pool_cidr" \
 O3K_PUBLIC_POOL_FIRST="$external_pool_first" \
 O3K_PUBLIC_POOL_LAST="$external_pool_last" \
-O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" \
-O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" \
-O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
+O3K_LVM_VOLUME_GROUP="${O3K_LVM_VOLUME_GROUP:-}" \
+O3K_LVM_THIN_POOL="${O3K_LVM_THIN_POOL:-}" \
+O3K_LVM_PROVIDER_NAMESPACE="${O3K_LVM_PROVIDER_NAMESPACE:-}" \
 O3K_COMPATIBILITY_TRACE_PATH="$work_dir/trace.jsonl" \
   "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
 pid=$!
@@ -719,6 +728,7 @@ curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networ
 # Volume is created through the canonical Cinder-compatible API and observed
 # through the unmodified provider.  The fixture is deliberately attachment-
 # free; VolumeAttachment owns relationship behavior in its separate row.
+if [[ "$lvm_enabled" == 1 ]]; then
 volume_assert_projection() {
   local path="$1"
   python3 - "$path" <<'PY'
@@ -821,6 +831,7 @@ canonical_capture openstack_blockstorage_volume_v3 "$volume_import_id" "$work_di
 [[ "$volume_import_cleanup" == 404 && "$volume_import_count_after_cleanup" == 0 ]] || { echo "P13.5B volume import cleanup did not remove the canonical volume" >&2; exit 1; }
 rm -f volume.tf
 cd "$project_dir"
+fi
 
 cat >security-group.tf <<'EOF'
 resource "openstack_networking_secgroup_v2" "managed" {
@@ -847,7 +858,7 @@ kill "$pid" 2>/dev/null || true
 wait "$pid" 2>/dev/null || true
 pid=""
 O3K_BOOTSTRAP_PASSWORD="$password" O3K_TOKEN_SIGNING_KEY="p13-5b-token-signing-key-012345678901234567890123" O3K_COMPATIBILITY_TRACE_PATH="$work_dir/trace.jsonl" \
-  O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
+O3K_LVM_VOLUME_GROUP="${O3K_LVM_VOLUME_GROUP:-}" O3K_LVM_THIN_POOL="${O3K_LVM_THIN_POOL:-}" O3K_LVM_PROVIDER_NAMESPACE="${O3K_LVM_PROVIDER_NAMESPACE:-}" \
   "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
 pid=$!
 for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1 && break; sleep 0.1; done
@@ -1071,6 +1082,7 @@ cd "$project_dir"
 # deliberately created through the canonical image/network/server/volume
 # paths, then attached through Nova's native POST route.  No external Cinder
 # endpoint is configured; the run-owned LVM provider is the storage authority.
+if [[ "$lvm_enabled" == 1 ]]; then
 cat >volume-attachment.tf <<'EOF'
 resource "openstack_blockstorage_volume_v3" "volume" {
   name = "p13-5b-attachment-volume"
@@ -1186,6 +1198,7 @@ curl -sS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networ
 [[ "$volume_attachment_import_cleanup" == 404 && "$volume_attachment_import_server_status" == 200 && "$volume_attachment_import_volume_status" == 200 ]] || { echo "P13.5B VolumeAttachment import did not retain parents before cleanup" >&2; exit 1; }
 rm -f volume-attachment.tf
 cd "$project_dir"
+fi
 
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X POST \
   "http://127.0.0.1:$port/v2.0/networks" --data '{"network":{"name":"p13-5b-router-external"}}' >"$work_dir/router-external-network.json"
@@ -1705,6 +1718,17 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
         item["reason"] = reason
     return item
 
+def optional_native_scenario(*args, **kwargs):
+    if os.environ.get("O3K_P13_5B_SKIP_NATIVE_VOLUME") == "1":
+        return {
+            "resource": args[0],
+            "scenario": args[1],
+            "result": "blocked",
+            "reason": "privileged native-volume profile was not supplied",
+            "backend": os.environ.get("O3K_DATABASE_BACKEND", "sqlite"),
+        }
+    return scenario(*args, **kwargs)
+
 scenarios = [
     scenario("openstack_compute_keypair_v2", "stable-read", "p13-5b-keypair", "", ["keypair-read-1-refresh.json", "keypair-read-2-refresh.json"], ["keypair-read-1-normal.json", "keypair-read-2-normal.json"], cleanup_result(keypair_stable_cleanup), keypair_stable_count, trace_start=0, projection_file="keypair-stable-projection.json"),
     scenario("openstack_compute_keypair_v2", "import", "p13-5b-import-keypair", "p13-5b-import-keypair", ["keypair-import-refresh.json"], ["keypair-import-normal.json"], cleanup_result(keypair_import_cleanup), keypair_count, trace_start=keypair_trace_start, projection_file="keypair-import-projection.json"),
@@ -1726,10 +1750,10 @@ scenarios = [
     scenario("openstack_compute_instance_v2", "import", server_import_id, server_import_id, ["server-import-read-1-refresh.json", "server-import-read-2-refresh.json"], ["server-import-read-1-normal.json", "server-import-read-2-normal.json"], server_import_cleanup, server_count, trace_start=server_import_trace_start, projection_file="server-import-projection.json"),
     scenario("openstack_networking_floatingip_v2", "stable-read", fip_stable_id, "", ["floating-ip-read-1-refresh.json", "floating-ip-read-2-refresh.json"], ["floating-ip-read-1-normal.json", "floating-ip-read-2-normal.json"], cleanup_result(fip_stable_cleanup), fip_stable_count, trace_start=fip_stable_trace_start, projection_file="floating-ip-stable-projection.json", canonical_count_after=fip_stable_count_after),
     scenario("openstack_networking_floatingip_v2", "import", fip_import_id, fip_import_id, ["floating-ip-import-read-1-refresh.json", "floating-ip-import-read-2-refresh.json"], ["floating-ip-import-read-1-normal.json", "floating-ip-import-read-2-normal.json"], cleanup_result(fip_import_cleanup), fip_import_count_after_read, trace_start=fip_import_trace_start, projection_file="floating-ip-import-projection.json", canonical_count_after=fip_import_count_after_cleanup),
-    scenario("openstack_blockstorage_volume_v3", "stable-read", volume_stable_id, "", ["volume-read-1-refresh.json", "volume-read-2-refresh.json"], ["volume-read-1-normal.json", "volume-read-2-normal.json"], cleanup_result(volume_stable_cleanup), volume_stable_count, trace_start=volume_stable_trace_start, projection_file="volume-stable-projection.json", canonical_count_after=volume_stable_count_after),
-    scenario("openstack_blockstorage_volume_v3", "import", volume_import_id, volume_import_id, ["volume-import-read-1-refresh.json", "volume-import-read-2-refresh.json"], ["volume-import-read-1-normal.json", "volume-import-read-2-normal.json"], cleanup_result(volume_import_cleanup), volume_import_count_after_read, trace_start=volume_import_trace_start, projection_file="volume-import-projection.json", canonical_count_after=volume_import_count_after_cleanup),
-    scenario("openstack_compute_volume_attach_v2", "stable-read", volume_attachment_id, "", ["volume-attachment-read-1-refresh.json", "volume-attachment-read-2-refresh.json"], ["volume-attachment-read-1-normal.json", "volume-attachment-read-2-normal.json"], cleanup_result(volume_attachment_stable_cleanup), volume_attachment_stable_count, trace_start=volume_attachment_trace_start, projection_file="volume-attachment-stable-projection.json"),
-    scenario("openstack_compute_volume_attach_v2", "import", volume_attachment_import_id, volume_attachment_import_state_id, ["volume-attachment-import-read-1-refresh.json", "volume-attachment-import-read-2-refresh.json"], ["volume-attachment-import-read-1-normal.json", "volume-attachment-import-read-2-normal.json"], cleanup_result(volume_attachment_import_cleanup), volume_attachment_import_count, trace_start=volume_attachment_import_trace_start, projection_file="volume-attachment-import-projection.json", parent_file="volume-attachment-import-parents.json"),
+    optional_native_scenario("openstack_blockstorage_volume_v3", "stable-read", volume_stable_id, "", ["volume-read-1-refresh.json", "volume-read-2-refresh.json"], ["volume-read-1-normal.json", "volume-read-2-normal.json"], cleanup_result(volume_stable_cleanup), volume_stable_count, trace_start=volume_stable_trace_start, projection_file="volume-stable-projection.json", canonical_count_after=volume_stable_count_after),
+    optional_native_scenario("openstack_blockstorage_volume_v3", "import", volume_import_id, volume_import_id, ["volume-import-read-1-refresh.json", "volume-import-read-2-refresh.json"], ["volume-import-read-1-normal.json", "volume-import-read-2-normal.json"], cleanup_result(volume_import_cleanup), volume_import_count_after_read, trace_start=volume_import_trace_start, projection_file="volume-import-projection.json", canonical_count_after=volume_import_count_after_cleanup),
+    optional_native_scenario("openstack_compute_volume_attach_v2", "stable-read", volume_attachment_id, "", ["volume-attachment-read-1-refresh.json", "volume-attachment-read-2-refresh.json"], ["volume-attachment-read-1-normal.json", "volume-attachment-read-2-normal.json"], cleanup_result(volume_attachment_stable_cleanup), volume_attachment_stable_count, trace_start=volume_attachment_trace_start, projection_file="volume-attachment-stable-projection.json"),
+    optional_native_scenario("openstack_compute_volume_attach_v2", "import", volume_attachment_import_id, volume_attachment_import_state_id, ["volume-attachment-import-read-1-refresh.json", "volume-attachment-import-read-2-refresh.json"], ["volume-attachment-import-read-1-normal.json", "volume-attachment-import-read-2-normal.json"], cleanup_result(volume_attachment_import_cleanup), volume_attachment_import_count, trace_start=volume_attachment_import_trace_start, projection_file="volume-attachment-import-projection.json", parent_file="volume-attachment-import-parents.json"),
 ]
 required_gates = [
     "tests/p13_2_core_lifecycle.sh", "tests/p13_2b_subnet_lifecycle.sh",
