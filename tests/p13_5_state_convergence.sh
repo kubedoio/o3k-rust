@@ -29,6 +29,24 @@ if [[ "${P13_5B_SELF_TEST:-0}" == 1 ]]; then
   echo "P13.5B harness self-test: PASS"
   exit 0
 fi
+if [[ "${P13_5E_SELF_TEST:-0}" == 1 ]]; then
+  python3 "$root_dir/scripts/p13_5e_fault_proxy.py" --self-test
+  python3 - "$root_dir/docs/compatibility/p13-5/p13-5e-retry-replay-evidence.json" <<'PY'
+import json, pathlib, sys
+evidence = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert evidence["artifact_type"] == "o3k-p13-5e-retry-replay-evidence"
+assert evidence["execution_profile"] == "portable-contract-and-proxy-self-test"
+assert evidence["canonical_authority"] == "o3k"
+assert evidence["toolchain"]["opentofu"] == "1.12.6"
+assert evidence["toolchain"]["provider"] == "terraform-provider-openstack/openstack 3.4.0"
+assert evidence["toolchain"]["provider_modified"] is False
+ambiguous = [row for row in evidence["scenarios"] if row.get("classification") == "AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS"]
+assert len(ambiguous) == 1 and ambiguous[0]["result"] == "expected_ambiguous"
+assert evidence["aggregate_verdict"] == "INCOMPLETE"
+print("P13.5E evidence boundary: PASS (claims remain fail-closed)")
+PY
+  exit 0
+fi
 if [[ -z "$tofu" || -z "$tofu_archive" || -z "$provider_archive" || -z "$provider_binary" || -z "$provider_sha" ]]; then
   echo "P13.5A baseline: BLOCKED (set O3K_P13_TOFU, O3K_P13_TOFU_ARCHIVE, O3K_P13_PROVIDER_ARCHIVE, O3K_P13_PROVIDER_BINARY, and O3K_P13_PROVIDER_SHA256)" >&2
   exit 2
