@@ -55,7 +55,7 @@ terraform {
   }
 }
 provider "openstack" {
-  auth_url = "http://127.0.0.1:$proxy_port"
+  auth_url = "http://127.0.0.1:$proxy_port/v3"
   user_name = "admin"
   password = "$password"
   tenant_id = "$project"
