@@ -96,7 +96,12 @@ class FaultProxy:
             except (TypeError, ValueError):
                 request_shape = {"malformed_json": True}
         connection = HTTPConnection(self._target[0], self._target[1], timeout=10)
-        connection.request(request.command, self._target[2] + request.path, body=body)
+        headers = {
+            key: value
+            for key, value in request.headers.items()
+            if key.lower() not in {"connection", "host", "transfer-encoding"}
+        }
+        connection.request(request.command, self._target[2] + request.path, body=body, headers=headers)
         response = connection.getresponse()
         payload = response.read()
         record = ProxyRecord(number, request.command, request.path, True, response.status, "delivered", None, None, request_shape)

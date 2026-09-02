@@ -61,6 +61,8 @@ provider "openstack" {
   tenant_id = "$project"
   user_domain_name = "Default"
   project_domain_name = "Default"
+  region = "RegionOne"
+  endpoint_overrides = { network = "http://127.0.0.1:$proxy_port/v2.0/" }
   max_retries = 0
 }
 resource "openstack_networking_network_v2" "network" { name = "p13-5e-network-a" }

@@ -17,6 +17,12 @@ if [[ "${1:-}" == "--self-test" ]]; then
   ! check_hash "$self_test_dir/missing" "$expected" 2>/dev/null
   cp "$self_test_dir/asset" "$self_test_dir/cache"
   check_hash "$self_test_dir/cache" "$expected"
+  printf 'corrupt\n' >"$self_test_dir/cache"
+  ! check_hash "$self_test_dir/cache" "$expected"
+  ! check_hash "$self_test_dir/asset" "$(printf 'wrong-open-tofu-archive' | sha256sum | awk '{print $1}')"
+  ! check_hash "$self_test_dir/asset" "$(printf 'wrong-provider-archive' | sha256sum | awk '{print $1}')"
+  platform_supported() { [[ "${O3K_P13_TEST_OS:-$(uname -s)}" == Linux && "${O3K_P13_TEST_ARCH:-$(uname -m)}" == x86_64 ]]; }
+  ! O3K_P13_TEST_OS=Darwin O3K_P13_TEST_ARCH=arm64 platform_supported
   printf '%s\n' 'P13 toolchain bootstrap self-test: PASS'
   exit 0
 fi
