@@ -241,7 +241,7 @@ jobs:
           O3K_P13_EVIDENCE_DIR: ${{ runner.temp }}/p13-5e-evidence
         run: |
           mkdir -p "$O3K_P13_EVIDENCE_DIR"
-          bash tests/p13_5e_real_provider_fault_proxy.sh
+          timeout --foreground 10m bash tests/p13_5e_real_provider_fault_proxy.sh
       - name: Upload P13.5E fault-proxy evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
