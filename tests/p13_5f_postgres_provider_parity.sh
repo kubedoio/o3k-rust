@@ -177,10 +177,9 @@ if pathlib.Path(b_output).is_file():
     for row in document["scenarios"]:
         if row["scenario"] == "PG1-import-read-reconstruction" and ("openstack_networking_network_v2", "import") in passed:
             row.update(result="passed", externally_equivalent=True, evidence=evidence)
-        elif row["scenario"] == "PG5-router-interface-relationship" and ("openstack_networking_router_interface_v2", "import") in passed:
-            row.update(result="passed", externally_equivalent=True, evidence=evidence)
-        elif row["scenario"] == "PG6-volume-attachment-relationship" and ("openstack_compute_volume_attach_v2", "import") in passed:
-            row.update(result="passed", externally_equivalent=True, evidence=evidence)
+        # Import/read coverage does not prove relationship lifecycle parity.
+        # PG5 and PG6 require their dedicated relationship journeys below;
+        # never promote them from a generic import result.
     if all(row["result"] == "passed" for row in document["scenarios"]):
         document["final_verdict"] = "passed"
     c = json.loads(pathlib.Path(c_output).read_text(encoding="utf-8")) if pathlib.Path(c_output).is_file() else {}
@@ -189,8 +188,9 @@ if pathlib.Path(b_output).is_file():
         deletion = c.get("scenario", {}).get("remote_deletion_recreation", {})
         if deletion.get("result") == "passed" and deletion.get("old_resource_absent") is True and deletion.get("identity_changed") is True:
             document["scenarios"][2].update(result="passed", externally_equivalent=True, evidence=str(pathlib.Path(c_output).resolve()))
-    if e_status == "passed":
-        document["scenarios"][6].update(result="passed", externally_equivalent=True, evidence=str(pathlib.Path(e_dir).resolve()))
+    # P13.5E proves fault-proxy recovery, but does not by itself prove the
+    # PostgreSQL durable Operation replay/unknown-outcome contract required by
+    # PG7. Keep PG7 blocked until that dedicated journey emits evidence.
     if d_status == "passed" and pathlib.Path(d_output).is_file():
         d = json.loads(pathlib.Path(d_output).read_text(encoding="utf-8"))
         if d.get("status") == "passed":
