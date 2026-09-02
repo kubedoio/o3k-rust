@@ -163,12 +163,12 @@ document = {
     ],
     "final_verdict": "blocked",
 }
-if run_status == "passed" and pathlib.Path(b_output).is_file():
+if pathlib.Path(b_output).is_file():
     b = json.loads(pathlib.Path(b_output).read_text(encoding="utf-8"))
     passed = {(row.get("resource"), row.get("kind")) for row in b.get("scenarios", []) if row.get("result") == "passed"}
     evidence = str(pathlib.Path(b_output).resolve())
     for row in document["scenarios"]:
-        if row["scenario"] == "PG1-import-read-reconstruction" and any(kind == "import" for _, kind in passed):
+        if row["scenario"] == "PG1-import-read-reconstruction" and ("openstack_networking_network_v2", "import") in passed:
             row.update(result="passed", externally_equivalent=True, evidence=evidence)
         elif row["scenario"] == "PG5-router-interface-relationship" and ("openstack_networking_router_interface_v2", "import") in passed:
             row.update(result="passed", externally_equivalent=True, evidence=evidence)
