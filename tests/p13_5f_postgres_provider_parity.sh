@@ -60,7 +60,33 @@ else
   echo "P13.5F: P13.5B prerequisites unavailable; retaining preflight evidence" >"$log"
 fi
 
-python3 - "$output" "$root_dir" "$run_status" "$b_output" "$log" "$baseline" <<'PY'
+run_child() {
+  local label="$1" log_path="$2"
+  shift 2
+  set +e
+  env O3K_DATABASE_BACKEND=postgres "$@" >"$log_path" 2>&1
+  local rc=$?
+  set -e
+  [[ $rc -eq 0 ]]
+}
+
+c_output="$work_dir/p13-5c-canonical-drift.json"
+c_log="$work_dir/p13-5c-canonical-drift.log"
+c_status=blocked
+if run_child p13-5c "$c_log" env P13_5A_RUN_BASELINE=1 P13_5B_BASELINE_MANIFEST="$baseline" \
+  O3K_P13_5C_OUT_OF_BAND_EVIDENCE_OUTPUT="$c_output" bash "$root_dir/tests/p13_5c_canonical_out_of_band_drift.sh"; then
+  c_status=passed
+fi
+
+e_dir="$work_dir/p13-5e-evidence"
+e_log="$work_dir/p13-5e-fault-proxy.log"
+e_status=blocked
+mkdir -p "$e_dir"
+if run_child p13-5e "$e_log" O3K_P13_EVIDENCE_DIR="$e_dir" bash "$root_dir/tests/p13_5e_real_provider_fault_proxy.sh"; then
+  e_status=passed
+fi
+
+python3 - "$output" "$root_dir" "$run_status" "$b_output" "$log" "$baseline" "$c_status" "$c_output" "$e_status" "$e_dir" <<'PY'
 import json
 import pathlib
 import sys
@@ -68,7 +94,7 @@ from datetime import datetime, timezone
 
 output = pathlib.Path(sys.argv[1])
 root = pathlib.Path(sys.argv[2])
-run_status, b_output, log, baseline = sys.argv[3:]
+run_status, b_output, log, baseline, c_status, c_output, e_status, e_dir = sys.argv[3:]
 head = __import__("subprocess").check_output(
     ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
 ).strip()
@@ -97,6 +123,10 @@ document = {
         "evidence": str(pathlib.Path(b_output).resolve()),
         "log": str(pathlib.Path(log).resolve()),
         "baseline_manifest": str(pathlib.Path(baseline).resolve()),
+        "child_runs": {
+            "P13.5C": {"status": c_status, "evidence": str(pathlib.Path(c_output).resolve()), "log": str(pathlib.Path(c_log).resolve())},
+            "P13.5E": {"status": e_status, "evidence": str(pathlib.Path(e_dir).resolve()), "log": str(pathlib.Path(e_log).resolve())},
+        },
     },
     "scenarios": [
         {
@@ -122,6 +152,11 @@ if run_status == "passed" and pathlib.Path(b_output).is_file():
             row.update(result="passed", externally_equivalent=True, evidence=evidence)
     if all(row["result"] == "passed" for row in document["scenarios"]):
         document["final_verdict"] = "passed"
+    c = json.loads(pathlib.Path(c_output).read_text(encoding="utf-8")) if pathlib.Path(c_output).is_file() else {}
+    if c_status == "passed" and c.get("scenario", {}).get("result") == "passed":
+        document["scenarios"][1].update(result="passed", externally_equivalent=True, evidence=str(pathlib.Path(c_output).resolve()))
+    if e_status == "passed":
+        document["scenarios"][6].update(result="passed", externally_equivalent=True, evidence=str(pathlib.Path(e_dir).resolve()))
 output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
 print(json.dumps({"output": str(output), "status": document["final_verdict"], "execution": run_status}))
 PY
