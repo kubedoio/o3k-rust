@@ -1036,9 +1036,7 @@ impl DurableStore for PostgresStore {
                 let id: String = row.get("command_id");
                 self.get_agent_command(&id).await
             }
-            None => Err(StoreError::Corrupt(format!(
-                "agent command with idempotency key `{idempotency_key}` not found"
-            ))),
+            None => Err(StoreError::OperationNotFound),
         }
     }
 
@@ -1058,9 +1056,7 @@ impl DurableStore for PostgresStore {
                 let id: String = row.get("command_id");
                 self.get_agent_command(&id).await
             }
-            None => Err(StoreError::Corrupt(format!(
-                "agent command for operation `{operation_id}` not found"
-            ))),
+            None => Err(StoreError::OperationNotFound),
         }
     }
 
