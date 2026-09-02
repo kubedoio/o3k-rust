@@ -61,18 +61,18 @@
   },
   "scenario_matrix": [
     {"scenario": "stable_read", "sqlite": "passed", "postgresql": "passed"},
-    {"scenario": "import", "sqlite": "passed", "postgresql": "passed"},
-    {"scenario": "mutable_drift_reconvergence", "sqlite": "passed", "postgresql": "passed"},
-    {"scenario": "native_deletion_recreation", "sqlite": "passed", "postgresql": "passed"},
-    {"scenario": "independent_replacement", "sqlite": "passed", "postgresql": "passed"},
-    {"scenario": "router_interface_relationship", "sqlite": "passed", "postgresql": "passed"},
-    {"scenario": "volume_attachment_relationship", "sqlite": "passed", "postgresql": "passed"},
-    {"scenario": "read_retry", "sqlite": "passed", "postgresql": "passed"},
-    {"scenario": "pre_commit_retry", "sqlite": "passed", "postgresql": "passed"},
-    {"scenario": "committed_update_response_loss", "sqlite": "passed", "postgresql": "passed"},
-    {"scenario": "committed_delete_response_loss", "sqlite": "passed", "postgresql": "passed"},
-    {"scenario": "operation_replay", "sqlite": "passed", "postgresql": "passed"},
-    {"scenario": "relationship_replay", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "import", "sqlite": "passed", "postgresql": "blocked"},
+    {"scenario": "mutable_drift_reconvergence", "sqlite": "passed", "postgresql": "blocked"},
+    {"scenario": "native_deletion_recreation", "sqlite": "passed", "postgresql": "blocked"},
+    {"scenario": "independent_replacement", "sqlite": "passed", "postgresql": "blocked"},
+    {"scenario": "router_interface_relationship", "sqlite": "passed", "postgresql": "blocked"},
+    {"scenario": "volume_attachment_relationship", "sqlite": "passed", "postgresql": "blocked"},
+    {"scenario": "read_retry", "sqlite": "passed", "postgresql": "blocked"},
+    {"scenario": "pre_commit_retry", "sqlite": "passed", "postgresql": "blocked"},
+    {"scenario": "committed_update_response_loss", "sqlite": "passed", "postgresql": "blocked"},
+    {"scenario": "committed_delete_response_loss", "sqlite": "passed", "postgresql": "blocked"},
+    {"scenario": "operation_replay", "sqlite": "passed", "postgresql": "blocked"},
+    {"scenario": "relationship_replay", "sqlite": "passed", "postgresql": "blocked"},
     {"scenario": "lost_create_response", "sqlite": "expected_ambiguous", "postgresql": "expected_ambiguous"}
   ],
   "postgresql_store_tests": {
@@ -94,5 +94,5 @@
   ],
   "deferred_p13_6": ["multi-project isolation", "controller crash/failure matrix", "lost-create-response adversarial treatment"],
   "cleanup": {"local_server": "passed", "provider_matrix": "passed", "lvm_profile": "passed"},
-  "final_aggregate_verdict": "passed"
+  "final_aggregate_verdict": "blocked"
 }

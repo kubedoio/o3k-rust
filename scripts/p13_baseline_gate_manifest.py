@@ -179,11 +179,13 @@ def restore_generated_artifacts(root: Path) -> None:
 
 
 def reset_postgres_schema() -> None:
-    """Give each PostgreSQL gate an empty schema in the same disposable DB."""
+    """Give each PostgreSQL gate an empty explicitly opted-in disposable DB."""
 
     database_url = os.environ.get("O3K_DATABASE_URL")
     if os.environ.get("O3K_DATABASE_BACKEND", "sqlite") != "postgres" or not database_url:
         return
+    if os.environ.get("O3K_P13_ALLOW_DESTRUCTIVE_POSTGRES_RESET") != "1":
+        raise RuntimeError("postgres_schema_reset_requires_explicit_opt_in")
     result = subprocess.run(
         [
             "psql",
@@ -215,9 +217,13 @@ def build_manifest(root: Path, output: Path, timeout_seconds: int | None) -> dic
         if head_changed:
             gates.append(blocked_record(gate_path, source_commit, log_dir / (Path(gate_path).stem + ".log"), "head_changed_during_run"))
             continue
+        if git(root, "rev-parse", "HEAD") != source_commit:
+            head_changed = True
+            gates.append(blocked_record(gate_path, source_commit, log_dir / (Path(gate_path).stem + ".log"), "head_changed_before_gate"))
+            continue
         try:
             reset_postgres_schema()
-        except RuntimeError as exc:
+        except (OSError, RuntimeError) as exc:
             gates.append(
                 blocked_record(
                     gate_path,

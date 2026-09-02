@@ -258,12 +258,13 @@ profiles:
       - generic cross-cloud connectivity
   p13-iac-compatibility-v1:
     implementation_state: >-
-      Specified and bounded P13.5 implementation-complete. This profile extends
+      Specified and bounded P13.5 evidence is incomplete. This profile extends
       native-rust-testlab for Terraform/OpenTofu IaC compatibility. ADR-0175
       and SPEC-0032 are accepted. The bounded P13.2-P13.4 provider lifecycle
-      gates and P13.5 state-convergence evidence are verified with OpenTofu
-      1.12.6 and the unmodified upstream OpenStack provider 3.4.0 across the
-      tested SQLite and PostgreSQL persistence profiles. This is not a claim
+      gates are verified with OpenTofu 1.12.6 and the unmodified upstream
+      OpenStack provider 3.4.0 across the tested SQLite and PostgreSQL
+      persistence profiles. Full P13.5 backend parity remains blocked pending
+      committed PG1-PG7 evidence. This is not a claim
       of general OpenStack or Terraform compatibility.
       ADR-0176 and SPEC-0033 were accepted on 2026-08-24 against reviewed
       proposal baseline 9b5a74d9e470278c77907a5c3ca22a56af4fe64a. P13.1
@@ -312,12 +313,12 @@ profiles:
           lifecycle changes require the protected policy traffic and recovery
           gate to be rerun before this claim can be restored.
       - name: p13-5-state-convergence-backend-parity
-        state: passed
+        state: not-proven
         note: >-
           docs/compatibility/p13-5/p13-5f-backend-parity-aggregate-evidence.json
-          records exact-head SQLite and PostgreSQL provider matrices, bounded
-          retry/replay, relationship, replacement, deletion, and cleanup
-          results. The lost-create-response case remains explicitly ambiguous.
+          records the 11-gate provider baseline. Scenario-level PostgreSQL
+          parity remains blocked until PG1-PG7 evidence is committed. The
+          lost-create-response case remains explicitly ambiguous.
     full_profile_evidence:
       - name: iac-full-lifecycle-gate
         state: not-proven

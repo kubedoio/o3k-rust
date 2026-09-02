@@ -29,7 +29,7 @@ def validate(document: dict) -> None:
     require(document.get("artifact_type") == "o3k-p13-5f-backend-parity-aggregate-evidence", "invalid artifact_type")
     require(document.get("schema_version") == 1, "unsupported schema_version")
     require(document.get("phase") == "P13.5", "invalid phase")
-    require(document.get("final_aggregate_verdict") == "passed", "aggregate verdict is not passed")
+    require(document.get("final_aggregate_verdict") in {"passed", "blocked"}, "invalid aggregate verdict")
     require(SHA1.fullmatch(document.get("source_head_sha", "")) is not None, "invalid source_head_sha")
     toolchain = document.get("toolchain", {})
     require(toolchain.get("opentofu") == "1.12.6", "unexpected OpenTofu version")
@@ -46,8 +46,19 @@ def validate(document: dict) -> None:
         passed = run.get("passed_gates", run.get("passed", run.get("final_plan_noop")))
         require(gates == BASELINE_GATES, f"{name} gate count is not {BASELINE_GATES}")
         require(passed == BASELINE_GATES, f"{name} does not pass every baseline gate")
+        if name == "postgresql":
+            require(run.get("database_isolation") == "fresh public schema before every gate", "PostgreSQL isolation evidence is missing")
+
+    references = document.get("evidence_references", {})
+    require(set(references) == {"p13_5a", "p13_5b", "p13_5c", "p13_5d", "p13_5e"}, "A-E evidence references are incomplete")
+    repository = Path(__file__).resolve().parents[1]
+    for name, reference in references.items():
+        path = repository / reference
+        require(path.is_file(), f"missing {name} evidence artifact: {reference}")
+        require(path.suffix == ".json", f"{name} evidence reference is not JSON: {reference}")
 
     matrix = document.get("scenario_matrix", [])
+    require(len(matrix) == len(SCENARIOS), "scenario matrix contains duplicate or missing rows")
     require({row.get("scenario") for row in matrix} == SCENARIOS, "scenario matrix does not cover P13.5 scenarios")
     for cells in matrix:
         scenario = cells["scenario"]
@@ -55,6 +66,8 @@ def validate(document: dict) -> None:
         require(set(cells) == {"sqlite", "postgresql"}, f"{scenario} is missing a backend")
         for backend, result in cells.items():
             expected = "expected_ambiguous" if scenario == "lost_create_response" else "passed"
+            if document.get("final_aggregate_verdict") == "blocked" and result == "blocked":
+                continue
             require(result == expected, f"{scenario}/{backend} result is {result!r}, expected {expected!r}")
 
     cleanup = document.get("cleanup", {})
