@@ -91,7 +91,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y unzip
           bash scripts/p13_prepare_toolchain.sh > "$RUNNER_TEMP/p13-toolchain.env"
-          cat "$RUNNER_TEMP/p13-toolchain.env" >> "$GITHUB_ENV"
+          sed 's/^export //' "$RUNNER_TEMP/p13-toolchain.env" >> "$GITHUB_ENV"
       - name: Install pinned actionlint
         run: |
           install_dir="${RUNNER_TEMP}/actionlint/bin"
