@@ -99,16 +99,56 @@ class FaultProxy:
 
 
 def self_test():
-    # Unit-test the rule accounting without requiring a backend or network.
-    proxy = FaultProxy("http://127.0.0.1:1")
-    rule = FaultRule("GET", "/v1/resource", "before_forward", "connection_reset")
-    proxy.rules.append(rule)
-    assert rule.remaining == 1
-    rule.remaining -= 1
-    proxy.records.append(ProxyRecord(1, "GET", "/v1/resource", False, None, "error", rule.location, rule.kind))
-    assert proxy.evidence()[0]["forwarded"] is False
-    assert proxy.evidence()[0]["fault_kind"] == "connection_reset"
-    assert rule.remaining == 0
+    class BackendHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def do_PUT(self):
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args): pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), BackendHandler)
+    backend_thread = threading.Thread(target=backend.serve_forever, daemon=True)
+    backend_thread.start()
+    proxy = FaultProxy(
+        f"http://127.0.0.1:{backend.server_port}",
+        [
+            FaultRule("GET", "/before", "before_forward", "connection_reset"),
+            FaultRule("GET", "/drop", "read_response_drop", "response_drop"),
+            FaultRule("PUT", "/commit", "after_commit_before_response", "response_drop"),
+        ],
+    )
+    proxy.start()
+    try:
+        for path in ("/before", "/drop"):
+            connection = HTTPConnection("127.0.0.1", proxy.server.server_port, timeout=2)
+            connection.request("GET", path)
+            assert connection.getresponse().status == 503
+            connection.close()
+        connection = HTTPConnection("127.0.0.1", proxy.server.server_port, timeout=2)
+        connection.request("PUT", "/commit")
+        assert connection.getresponse().status == 503
+        connection.close()
+        records = proxy.evidence()
+        assert records[0]["forwarded"] is False
+        assert records[0]["fault_location"] == "before_forward"
+        assert records[1]["forwarded"] is True
+        assert records[1]["backend_status"] == 200
+        assert records[1]["response_to_client"] == "dropped"
+        assert records[2]["forwarded"] is True
+        assert records[2]["backend_status"] == 204
+        assert records[2]["fault_location"] == "after_commit_before_response"
+    finally:
+        proxy.close()
+        backend.shutdown()
+        backend.server_close()
+        backend_thread.join()
     print("P13.5E fault proxy self-test: PASS")
 
 
