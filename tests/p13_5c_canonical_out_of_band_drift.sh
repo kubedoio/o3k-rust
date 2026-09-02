@@ -167,13 +167,32 @@ open(path, "w").write(json.dumps(redact(document), sort_keys=True))
 PY
 }
 canonical_snapshot() {
-  python3 - "$work_dir/data/o3k.sqlite" "$project_id" "$1" "$2" <<'PY'
-import json, sqlite3, sys
-db, project, identity, phase = sys.argv[1:]
-c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-rows = c.execute("SELECT id, project_id, name, state FROM canonical_networks WHERE id=? AND project_id=? AND state <> 'deleted'", (identity, project)).fetchall()
-project_count = c.execute("SELECT count(*) FROM canonical_networks WHERE project_id=? AND state <> 'deleted'", (project,)).fetchone()[0]
-print(json.dumps({"source":"canonical_store","store":"canonical_store:sqlite:canonical_networks","phase":phase,"requested_id":identity,"owner_scope":project,"count":len(rows),"project_resource_count":project_count,"records":[{"resource_id":r[0],"owner_scope":r[1],"name":r[2],"state":r[3]} for r in rows]}, sort_keys=True))
+  python3 - "${O3K_DATABASE_BACKEND:-sqlite}" "${O3K_DATABASE_URL:-}" "$work_dir/data/o3k.sqlite" "$project_id" "$1" "$2" <<'PY'
+import json, sqlite3, subprocess, sys
+backend, database_url, db, project, identity, phase = sys.argv[1:]
+if backend == "postgres":
+    def literal(value):
+        return "'" + value.replace("'", "''") + "'"
+    query = (
+        "SELECT id, project_id, name, state FROM canonical_networks "
+        f"WHERE id = {literal(identity)} AND project_id = {literal(project)} AND state <> 'deleted'; "
+        f"SELECT count(*) FROM canonical_networks WHERE project_id = {literal(project)} AND state <> 'deleted'"
+    )
+    result = subprocess.run(
+        ["psql", database_url, "-At", "-v", "ON_ERROR_STOP=1", "-c", query],
+        check=True, capture_output=True, text=True,
+    )
+    values = result.stdout.splitlines()
+    rows = [tuple(line.split("|", 3)) for line in values[:-1] if line]
+    project_count = int(values[-1]) if values else 0
+    store = "canonical_store:postgres:canonical_networks"
+else:
+    c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    rows = c.execute("SELECT id, project_id, name, state FROM canonical_networks WHERE id=? AND project_id=? AND state <> 'deleted'", (identity, project)).fetchall()
+    project_count = c.execute("SELECT count(*) FROM canonical_networks WHERE project_id=? AND state <> 'deleted'", (project,)).fetchone()[0]
+    c.close()
+    store = "canonical_store:sqlite:canonical_networks"
+print(json.dumps({"source":"canonical_store","store":store,"phase":phase,"requested_id":identity,"owner_scope":project,"count":len(rows),"project_resource_count":project_count,"records":[{"resource_id":r[0],"owner_scope":r[1],"name":r[2],"state":r[3]} for r in rows]}, sort_keys=True))
 PY
 }
 
@@ -209,6 +228,7 @@ PY
   [[ "$remote_deletion_new_id" != "$remote_deletion_old_id" ]] || { echo "remote deletion recreation reused the old identity" >&2; exit 1; }
   remote_deletion_result="passed"
   network_id="$remote_deletion_new_id"
+  canonical_before="$(canonical_snapshot "$network_id" before-recreation)"
 fi
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X PUT \
   "http://127.0.0.1:$port/v2.0/networks/$network_id" \
@@ -279,7 +299,7 @@ cleanup_observation=s(after_cleanup)
 refresh_document = j(refresh)
 normal_document = j(normal)
 normal_changes = [x for x in normal_document.get("resource_changes", []) if x.get("address") == "openstack_networking_network_v2.managed"]
-d={"artifact_type":"o3k-p13-5c-canonical-out-of-band-drift-evidence","schema_version":1,"phase":"P13.5C","profile":"p13-iac-compatibility-v1","status":"passed","surface":"canonical_out_of_band","native_claim":False,"canonical_authority":"o3k","provider_modified":False,"p13_5a_contract_sha256":hashlib.sha256(pathlib.Path(contract).read_bytes()).hexdigest(),"tested_o3k_head_sha":head,"baseline":{"status":json.loads(pathlib.Path(baseline_manifest).read_text())["status"],"source_commit":json.loads(pathlib.Path(baseline_manifest).read_text())["source_commit"]},"toolchain":{"opentofu":c["toolchain"]["opentofu"],"opentofu_version_output":tofu_version,"opentofu_archive_sha256":digest(tofu_archive),"provider":c["toolchain"]["provider"],"provider_archive_sha256":digest(provider_archive),"provider_binary_sha256":digest(provider_binary),"provider_sha256_expected":provider_sha,"provider_modified":False},"scenario":{"resource":"openstack_networking_network_v2","scenario":"canonical_out_of_band_mutable_drift","operation":"mutable","surface":"canonical_out_of_band","native_claim":False,"terraform_address":"openstack_networking_network_v2.managed","canonical_id_before":network_id,"canonical_id_after_mutation":a["records"][0]["resource_id"],"canonical_id_after_reapply":r["records"][0]["resource_id"],"owner_scope":b["owner_scope"],"native_change":"name","mutation_route":"PUT /v2.0/networks/{id}","remote_deletion_recreation":{"result":remote_result,"old_resource_id":remote_old_id,"old_http_status":remote_old_status,"new_resource_id":remote_new_id,"old_resource_absent":remote_old_status == "404","identity_changed":bool(remote_old_id and remote_new_id and remote_new_id != remote_old_id)},"refresh_only_actions":[x.get("change",{}).get("actions",[]) for x in refresh_document.get("resource_drift",[])],"normal_plan_actions":[{"address":x.get("address"),"actions":x.get("change",{}).get("actions",[]),"replacement":x.get("change",{}).get("replace",False)} for x in normal_changes],"unrelated_changes_count":0,"old_resource_absent":False,"new_resource_count":1,"canonical_same_id_count":1,"final_plan_noop":True,"cleanup_http_status":int(cleanup),"canonical_observations":{"before":b,"after_mutation":a,"after_reapply":r,"after_cleanup":s(after_cleanup)},"compatibility_observations":{"after_mutation":s(compat_mutation),"after_reapply":s(compat_reapply)},"plan_observation":{"initial_normal":j(initial),"refresh_only":refresh_document,"normal":normal_document,"final_normal":j(final)},"result":"passed"}}
+d={"artifact_type":"o3k-p13-5c-canonical-out-of-band-drift-evidence","schema_version":1,"phase":"P13.5C","profile":"p13-iac-compatibility-v1","status":"passed","surface":"canonical_out_of_band","native_claim":False,"canonical_authority":"o3k","provider_modified":False,"p13_5a_contract_sha256":hashlib.sha256(pathlib.Path(contract).read_bytes()).hexdigest(),"tested_o3k_head_sha":head,"baseline":{"status":json.loads(pathlib.Path(baseline_manifest).read_text())["status"],"source_commit":json.loads(pathlib.Path(baseline_manifest).read_text())["source_commit"]},"toolchain":{"opentofu":c["toolchain"]["opentofu"],"opentofu_version_output":tofu_version,"opentofu_archive_sha256":digest(tofu_archive),"provider":c["toolchain"]["provider"],"provider_archive_sha256":digest(provider_archive),"provider_binary_sha256":digest(provider_binary),"provider_sha256_expected":provider_sha,"provider_modified":False},"scenario":{"resource":"openstack_networking_network_v2","scenario":"canonical_out_of_band_mutable_drift","operation":"mutable","surface":"canonical_out_of_band","native_claim":False,"terraform_address":"openstack_networking_network_v2.managed","canonical_id_before":initial_network_id,"canonical_id_after_mutation":a["records"][0]["resource_id"],"canonical_id_after_reapply":r["records"][0]["resource_id"],"owner_scope":b["owner_scope"],"native_change":"name","mutation_route":"PUT /v2.0/networks/{id}","remote_deletion_recreation":{"result":remote_result,"old_resource_id":remote_old_id,"old_http_status":remote_old_status,"new_resource_id":remote_new_id,"old_resource_absent":remote_old_status == "404","identity_changed":bool(remote_old_id and remote_new_id and remote_new_id != remote_old_id)},"refresh_only_actions":[x.get("change",{}).get("actions",[]) for x in refresh_document.get("resource_drift",[])],"normal_plan_actions":[{"address":x.get("address"),"actions":x.get("change",{}).get("actions",[]),"replacement":x.get("change",{}).get("replace",False)} for x in normal_changes],"unrelated_changes_count":0,"old_resource_absent":remote_old_status == "404","new_resource_count":1,"canonical_same_id_count":1 if not remote_new_id else 0,"final_plan_noop":True,"cleanup_http_status":int(cleanup),"canonical_observations":{"before":b,"after_mutation":a,"after_reapply":r,"after_cleanup":s(after_cleanup)},"compatibility_observations":{"after_mutation":s(compat_mutation),"after_reapply":s(compat_reapply)},"plan_observation":{"initial_normal":j(initial),"refresh_only":refresh_document,"normal":normal_document,"final_normal":j(final)},"result":"passed"}}
 pathlib.Path(output).write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
 PY
 python3 - "$output" "$baseline_manifest" <<'PY'
