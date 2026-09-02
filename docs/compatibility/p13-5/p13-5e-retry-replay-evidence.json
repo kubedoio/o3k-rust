@@ -27,7 +27,7 @@
       "fault_location": "read_response_drop",
       "fault_kind": "response_drop",
       "result": "passed",
-      "evidence": "CI run 33619350318 artifact E1-read-response-loss.json and E1-rerun.json; canonical network ID unchanged and final refresh succeeded."
+      "evidence": "CI run 33623012019 artifact E1-read-response-loss.json and E1-rerun.json; canonical network ID unchanged and final refresh succeeded."
     },
     {
       "scenario": "E2-update-rejected-before-commit",
@@ -35,7 +35,7 @@
       "fault_location": "before_forward",
       "fault_kind": "connection_reset",
       "result": "passed",
-      "evidence": "CI run 33619350318 artifact E2-pre-forward-update.json and E2-rerun.json; failed PUT was not forwarded and rerun completed."
+      "evidence": "CI run 33623012019 artifact E2-pre-forward-update.json and E2-rerun.json; failed PUT was not forwarded and rerun completed."
     },
     {
       "scenario": "E3-update-committed-response-lost",
@@ -43,7 +43,7 @@
       "fault_location": "after_commit_before_response",
       "fault_kind": "response_drop",
       "result": "passed",
-      "evidence": "CI run 33619350318 artifact E3-committed-update-response-loss.json and E3-rerun.json; backend PUT returned 200 before response loss and rerun observed state."
+      "evidence": "CI run 33623012019 artifact E3-committed-update-response-loss.json and E3-rerun.json; backend PUT returned 200 before response loss and rerun observed state."
     },
     {
       "scenario": "E4-delete-committed-response-lost",
@@ -51,7 +51,7 @@
       "fault_location": "after_commit_before_response",
       "fault_kind": "response_drop",
       "result": "passed",
-      "evidence": "CI run 33619350318 artifact E4-committed-delete-response-loss.json and E4-rerun.json; backend DELETE returned 204 before response loss and rerun observed absence."
+      "evidence": "CI run 33623012019 artifact E4-committed-delete-response-loss.json and E4-rerun.json; backend DELETE returned 204 before response loss and rerun observed absence."
     },
     {
       "scenario": "E5-same-accepted-operation-replay",
