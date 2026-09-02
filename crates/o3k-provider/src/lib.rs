@@ -1187,6 +1187,137 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn read_retry_is_side_effect_free() -> Result<(), ProviderError> {
+        let provider = FakeComputeProvider::new();
+        let created = provider.create_instance(request("read-only")).await?;
+        let id = created.provider_resource_id.ok_or(ProviderError::Storage)?;
+        let before = provider.lock()?.operations.len();
+        let first = provider.get_instance(&id).await?;
+        let second = provider.get_instance(&id).await?;
+        assert_eq!(first, second);
+        assert_eq!(provider.lock()?.operations.len(), before);
+        assert_eq!(provider.instance_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_update_can_be_retried_once() -> Result<(), ProviderError> {
+        let provider = FakeComputeProvider::new();
+        let created = provider
+            .create_instance(request("update-before-commit"))
+            .await?;
+        let id = created.provider_resource_id.ok_or(ProviderError::Storage)?;
+        provider.set_failure(FailureInjection::Transient)?;
+        assert_eq!(
+            provider
+                .action_instance(
+                    &id,
+                    InstanceAction::Stop,
+                    Uuid::now_v7(),
+                    "update-before-commit"
+                )
+                .await,
+            Err(ProviderError::Retryable)
+        );
+        assert_eq!(
+            provider.get_instance(&id).await?.state,
+            InstanceState::Running
+        );
+        provider.set_failure(FailureInjection::None)?;
+        let operation = provider
+            .action_instance(
+                &id,
+                InstanceAction::Stop,
+                Uuid::now_v7(),
+                "update-before-commit",
+            )
+            .await?;
+        assert_eq!(operation.state, OperationState::Succeeded);
+        assert_eq!(
+            provider.get_instance(&id).await?.state,
+            InstanceState::Stopped
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn committed_update_response_loss_replays_same_operation() -> Result<(), ProviderError> {
+        let provider = FakeComputeProvider::new();
+        let created = provider
+            .create_instance(request("update-response-loss"))
+            .await?;
+        let id = created.provider_resource_id.ok_or(ProviderError::Storage)?;
+        provider.set_failure(FailureInjection::Timeout)?;
+        let operation_id = match provider
+            .action_instance(
+                &id,
+                InstanceAction::Stop,
+                Uuid::now_v7(),
+                "update-response-loss",
+            )
+            .await
+        {
+            Err(ProviderError::UnknownOutcome { operation_id }) => operation_id,
+            _ => return Err(ProviderError::InvalidRequest),
+        };
+        assert_eq!(
+            provider.get_instance(&id).await?.state,
+            InstanceState::Stopped
+        );
+        provider.set_failure(FailureInjection::None)?;
+        let replay = provider
+            .action_instance(
+                &id,
+                InstanceAction::Stop,
+                Uuid::now_v7(),
+                "update-response-loss",
+            )
+            .await?;
+        assert_eq!(replay.provider_operation_id, operation_id);
+        assert_eq!(
+            provider.get_instance(&id).await?.state,
+            InstanceState::Stopped
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn committed_delete_response_loss_replays_to_absence() -> Result<(), ProviderError> {
+        let provider = FakeComputeProvider::new();
+        let created = provider
+            .create_instance(request("delete-response-loss"))
+            .await?;
+        let id = created.provider_resource_id.ok_or(ProviderError::Storage)?;
+        provider.set_failure(FailureInjection::Timeout)?;
+        let operation_id = match provider
+            .delete_instance(DeleteInstanceRequest {
+                operation_id: Uuid::now_v7(),
+                provider_instance_id: id.clone(),
+                idempotency_key: "delete-response-loss-operation".to_owned(),
+            })
+            .await
+        {
+            Err(ProviderError::UnknownOutcome { operation_id }) => operation_id,
+            _ => return Err(ProviderError::InvalidRequest),
+        };
+        assert_eq!(provider.instance_count(), 0);
+        provider.set_failure(FailureInjection::None)?;
+        let replay = provider
+            .delete_instance(DeleteInstanceRequest {
+                operation_id: Uuid::now_v7(),
+                provider_instance_id: id.clone(),
+                idempotency_key: "delete-response-loss-operation".to_owned(),
+            })
+            .await?;
+        assert_eq!(replay.provider_operation_id, operation_id);
+        assert_eq!(
+            provider.get_instance(&id).await,
+            Err(ProviderError::NotFound)
+        );
+        Ok(())
+    }
+
     #[test]
     fn disabled_config_drive_is_omitted_and_legacy_json_defaults_to_none()
     -> Result<(), serde_json::Error> {
