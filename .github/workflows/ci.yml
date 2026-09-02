@@ -236,6 +236,20 @@ jobs:
           cargo build --bin o3kd --locked
           cargo build --bin o3k-compute-bin --features libvirt --locked
           python3 scripts/emit-build-manifest.py target/ci-artifacts/build-manifest.json "${GITHUB_SHA}"
+      - name: Run PostgreSQL P13.5F provider parity orchestrator
+        env:
+          O3K_DATABASE_BACKEND: postgres
+          O3K_P13_5F_POSTGRES_EVIDENCE_OUTPUT: ${{ runner.temp }}/p13-5f-postgres/provider-parity.json
+        run: |
+          mkdir -p "$RUNNER_TEMP/p13-5f-postgres"
+          timeout --foreground 20m bash tests/p13_5f_postgres_provider_parity.sh
+      - name: Upload PostgreSQL P13.5F provider evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: p13-5f-postgres-provider-evidence
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/p13-5f-postgres
       - name: Run P13.5E real upstream provider fault-proxy gate
         # Keep this gate bounded so a hosted-runner fault cannot hide its result.
         env:
