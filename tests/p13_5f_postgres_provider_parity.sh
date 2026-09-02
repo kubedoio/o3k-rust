@@ -43,6 +43,12 @@ if [[ ! "${O3K_P13_PROVIDER_SHA256:-}" =~ ^[[:xdigit:]]{64}$ ]]; then
 fi
 python3 "$root_dir/scripts/p13_provider_contract.py" --verify-tools
 
+# The accepted P13.3 router gate consumes this shared harness credential.  CI
+# only supplies the database URL, so provide the same disposable default used
+# by the reused P13.5 journeys instead of allowing `set -u` to abort the
+# baseline before it can execute.
+export O3K_P13_PASSWORD="${O3K_P13_PASSWORD:-p13-5b-refresh-import-password}"
+
 work_dir="${O3K_P13_5F_WORK_DIR:-$(mktemp -d /var/tmp/o3k-p13-5f-postgres.XXXXXX)}"
 mkdir -p "$work_dir"
 log="$work_dir/p13-5b-refresh-import.log"
