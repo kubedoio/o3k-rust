@@ -76,6 +76,9 @@
     {"scenario": "lost_create_response", "sqlite": "expected_ambiguous", "postgresql": "expected_ambiguous"}
   ],
   "postgresql_store_tests": {
+    "artifact": "docs/compatibility/p13-5/p13-5f-postgres-store-conformance-evidence.json",
+    "tested_o3k_head_sha": "cb1fec579ab50070848b307501f8fa5354d471f6",
+    "aggregate_passed": 10,
     "postgres_p13_f1": {"command": "cargo test -p o3k-store --test postgres_p13_f1 -- --ignored", "passed": 5},
     "postgres_p13_b1": {"command": "cargo test -p o3k-store --test postgres_p13_b1 -- --ignored", "passed": 4},
     "postgres_p13_4_storage": {"command": "cargo test -p o3k-store --test postgres_p13_4_storage -- --ignored", "passed": 1}
