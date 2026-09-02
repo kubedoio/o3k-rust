@@ -109,7 +109,7 @@ if [[ -n "${O3K_LVM_VOLUME_GROUP:-}" && -n "${O3K_LVM_THIN_POOL:-}" && -n "${O3K
   fi
 fi
 
-python3 - "$output" "$root_dir" "$run_status" "$b_output" "$log" "$baseline" "$c_status" "$c_output" "$e_status" "$e_dir" "$d_status" "$d_output" <<'PY'
+python3 - "$output" "$root_dir" "$run_status" "$b_output" "$log" "$baseline" "$c_status" "$c_output" "$c_log" "$e_status" "$e_dir" "$e_log" "$d_status" "$d_output" "$d_log" <<'PY'
 import json
 import pathlib
 import sys
@@ -117,7 +117,7 @@ from datetime import datetime, timezone
 
 output = pathlib.Path(sys.argv[1])
 root = pathlib.Path(sys.argv[2])
-run_status, b_output, log, baseline, c_status, c_output, e_status, e_dir, d_status, d_output = sys.argv[3:]
+run_status, b_output, log, baseline, c_status, c_output, c_log, e_status, e_dir, e_log, d_status, d_output, d_log = sys.argv[3:]
 head = __import__("subprocess").check_output(
     ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
 ).strip()
