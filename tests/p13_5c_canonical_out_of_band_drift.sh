@@ -186,6 +186,29 @@ import json, sys
 p=json.load(open(sys.argv[1]))
 if [x for x in p.get("resource_changes",[]) if x.get("change",{}).get("actions") != ["no-op"]]: raise SystemExit("initial plan was not no-op")
 PY
+remote_deletion_result="not_run"
+remote_deletion_old_id=""
+remote_deletion_old_status=""
+remote_deletion_new_id=""
+if [[ "${P13_5C_REMOTE_DELETE:-0}" == 1 ]]; then
+  remote_deletion_old_id="$network_id"
+  curl -fsS -H "X-Auth-Token: $token" -X DELETE "http://127.0.0.1:$port/v2.0/networks/$network_id" >/dev/null
+  remote_deletion_old_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$network_id")"
+  [[ "$remote_deletion_old_status" == 404 ]] || { echo "remote deletion did not remove the network: $remote_deletion_old_status" >&2; exit 1; }
+  plan_json remote-deletion normal
+  python3 - "$work_dir/remote-deletion.json" <<'PY'
+import json, sys
+p=json.load(open(sys.argv[1]))
+rows=[x for x in p.get("resource_changes",[]) if x.get("address")=="openstack_networking_network_v2.managed"]
+if len(rows) != 1 or rows[0].get("change",{}).get("actions") != ["create"]:
+    raise SystemExit("remote deletion did not produce a single create action")
+PY
+  "$tofu" apply -input=false -auto-approve >/dev/null
+  remote_deletion_new_id="$($tofu show -json | python3 -c 'import json,sys;print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_network_v2.managed"))')"
+  [[ "$remote_deletion_new_id" != "$remote_deletion_old_id" ]] || { echo "remote deletion recreation reused the old identity" >&2; exit 1; }
+  remote_deletion_result="passed"
+  network_id="$remote_deletion_new_id"
+fi
 curl -fsS -H "X-Auth-Token: $token" -H 'Content-Type: application/json' -X PUT \
   "http://127.0.0.1:$port/v2.0/networks/$network_id" \
   --data '{"network":{"name":"p13-5c-network-drifted"}}' >"$work_dir/mutation-response.json"
@@ -239,9 +262,9 @@ import json, sys
 if json.loads(sys.argv[1])["count"] != 0: raise SystemExit("canonical cleanup left a resource")
 PY
 
-python3 - "$contract" "$output" "$head_sha" "$tofu_version" "$provider_binary" "$provider_archive" "$tofu_archive" "$provider_sha" "$network_id" "$canonical_before" "$canonical_after_mutation" "$canonical_after_reapply" "$canonical_after_cleanup" "$compat_after_mutation" "$compat_after_reapply" "$work_dir/initial-normal.json" "$work_dir/drift-refresh-only.json" "$work_dir/drift-normal.json" "$work_dir/final-normal.json" "$cleanup_status" "$baseline_manifest" <<'PY'
+python3 - "$contract" "$output" "$head_sha" "$tofu_version" "$provider_binary" "$provider_archive" "$tofu_archive" "$provider_sha" "$network_id" "$canonical_before" "$canonical_after_mutation" "$canonical_after_reapply" "$canonical_after_cleanup" "$compat_after_mutation" "$compat_after_reapply" "$work_dir/initial-normal.json" "$work_dir/drift-refresh-only.json" "$work_dir/drift-normal.json" "$work_dir/final-normal.json" "$cleanup_status" "$baseline_manifest" "$remote_deletion_result" "$remote_deletion_old_id" "$remote_deletion_old_status" "$remote_deletion_new_id" <<'PY'
 import hashlib, json, pathlib, sys
-(contract, output, head, tofu_version, provider_binary, provider_archive, tofu_archive, provider_sha, network_id, before, after_mutation, after_reapply, after_cleanup, compat_mutation, compat_reapply, initial, refresh, normal, final, cleanup, baseline_manifest) = sys.argv[1:]
+(contract, output, head, tofu_version, provider_binary, provider_archive, tofu_archive, provider_sha, network_id, before, after_mutation, after_reapply, after_cleanup, compat_mutation, compat_reapply, initial, refresh, normal, final, cleanup, baseline_manifest, remote_result, remote_old_id, remote_old_status, remote_new_id) = sys.argv[1:]
 c=json.loads(pathlib.Path(contract).read_text())
 def digest(p):
  h=hashlib.sha256()
@@ -255,7 +278,7 @@ cleanup_observation=s(after_cleanup)
 refresh_document = j(refresh)
 normal_document = j(normal)
 normal_changes = [x for x in normal_document.get("resource_changes", []) if x.get("address") == "openstack_networking_network_v2.managed"]
-d={"artifact_type":"o3k-p13-5c-canonical-out-of-band-drift-evidence","schema_version":1,"phase":"P13.5C","profile":"p13-iac-compatibility-v1","status":"passed","surface":"canonical_out_of_band","native_claim":False,"canonical_authority":"o3k","provider_modified":False,"p13_5a_contract_sha256":hashlib.sha256(pathlib.Path(contract).read_bytes()).hexdigest(),"tested_o3k_head_sha":head,"baseline":{"status":json.loads(pathlib.Path(baseline_manifest).read_text())["status"],"source_commit":json.loads(pathlib.Path(baseline_manifest).read_text())["source_commit"]},"toolchain":{"opentofu":c["toolchain"]["opentofu"],"opentofu_version_output":tofu_version,"opentofu_archive_sha256":digest(tofu_archive),"provider":c["toolchain"]["provider"],"provider_archive_sha256":digest(provider_archive),"provider_binary_sha256":digest(provider_binary),"provider_sha256_expected":provider_sha,"provider_modified":False},"scenario":{"resource":"openstack_networking_network_v2","scenario":"canonical_out_of_band_mutable_drift","operation":"mutable","surface":"canonical_out_of_band","native_claim":False,"terraform_address":"openstack_networking_network_v2.managed","canonical_id_before":network_id,"canonical_id_after_mutation":a["records"][0]["resource_id"],"canonical_id_after_reapply":r["records"][0]["resource_id"],"owner_scope":b["owner_scope"],"native_change":"name","mutation_route":"PUT /v2.0/networks/{id}","refresh_only_actions":[x.get("change",{}).get("actions",[]) for x in refresh_document.get("resource_drift",[])],"normal_plan_actions":[{"address":x.get("address"),"actions":x.get("change",{}).get("actions",[]),"replacement":x.get("change",{}).get("replace",False)} for x in normal_changes],"unrelated_changes_count":0,"old_resource_absent":False,"new_resource_count":1,"canonical_same_id_count":1,"final_plan_noop":True,"cleanup_http_status":int(cleanup),"canonical_observations":{"before":b,"after_mutation":a,"after_reapply":r,"after_cleanup":s(after_cleanup)},"compatibility_observations":{"after_mutation":s(compat_mutation),"after_reapply":s(compat_reapply)},"plan_observation":{"initial_normal":j(initial),"refresh_only":refresh_document,"normal":normal_document,"final_normal":j(final)},"result":"passed"}}
+d={"artifact_type":"o3k-p13-5c-canonical-out-of-band-drift-evidence","schema_version":1,"phase":"P13.5C","profile":"p13-iac-compatibility-v1","status":"passed","surface":"canonical_out_of_band","native_claim":False,"canonical_authority":"o3k","provider_modified":False,"p13_5a_contract_sha256":hashlib.sha256(pathlib.Path(contract).read_bytes()).hexdigest(),"tested_o3k_head_sha":head,"baseline":{"status":json.loads(pathlib.Path(baseline_manifest).read_text())["status"],"source_commit":json.loads(pathlib.Path(baseline_manifest).read_text())["source_commit"]},"toolchain":{"opentofu":c["toolchain"]["opentofu"],"opentofu_version_output":tofu_version,"opentofu_archive_sha256":digest(tofu_archive),"provider":c["toolchain"]["provider"],"provider_archive_sha256":digest(provider_archive),"provider_binary_sha256":digest(provider_binary),"provider_sha256_expected":provider_sha,"provider_modified":False},"scenario":{"resource":"openstack_networking_network_v2","scenario":"canonical_out_of_band_mutable_drift","operation":"mutable","surface":"canonical_out_of_band","native_claim":False,"terraform_address":"openstack_networking_network_v2.managed","canonical_id_before":network_id,"canonical_id_after_mutation":a["records"][0]["resource_id"],"canonical_id_after_reapply":r["records"][0]["resource_id"],"owner_scope":b["owner_scope"],"native_change":"name","mutation_route":"PUT /v2.0/networks/{id}","remote_deletion_recreation":{"result":remote_result,"old_resource_id":remote_old_id,"old_http_status":remote_old_status,"new_resource_id":remote_new_id,"old_resource_absent":remote_old_status == "404","identity_changed":bool(remote_old_id and remote_new_id and remote_new_id != remote_old_id)},"refresh_only_actions":[x.get("change",{}).get("actions",[]) for x in refresh_document.get("resource_drift",[])],"normal_plan_actions":[{"address":x.get("address"),"actions":x.get("change",{}).get("actions",[]),"replacement":x.get("change",{}).get("replace",False)} for x in normal_changes],"unrelated_changes_count":0,"old_resource_absent":False,"new_resource_count":1,"canonical_same_id_count":1,"final_plan_noop":True,"cleanup_http_status":int(cleanup),"canonical_observations":{"before":b,"after_mutation":a,"after_reapply":r,"after_cleanup":s(after_cleanup)},"compatibility_observations":{"after_mutation":s(compat_mutation),"after_reapply":s(compat_reapply)},"plan_observation":{"initial_normal":j(initial),"refresh_only":refresh_document,"normal":normal_document,"final_normal":j(final)},"result":"passed"}}
 pathlib.Path(output).write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
 PY
 python3 - "$output" "$baseline_manifest" <<'PY'

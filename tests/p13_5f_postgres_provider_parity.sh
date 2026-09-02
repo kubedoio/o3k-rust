@@ -86,7 +86,7 @@ run_child() {
 c_output="$work_dir/p13-5c-canonical-drift.json"
 c_log="$work_dir/p13-5c-canonical-drift.log"
 c_status=blocked
-if run_child p13-5c "$c_log" env P13_5A_RUN_BASELINE=1 P13_5B_BASELINE_MANIFEST="$baseline" \
+if run_child p13-5c "$c_log" env P13_5A_RUN_BASELINE=1 P13_5B_BASELINE_MANIFEST="$baseline" P13_5C_REMOTE_DELETE=1 \
   O3K_P13_5C_OUT_OF_BAND_EVIDENCE_OUTPUT="$c_output" bash "$root_dir/tests/p13_5c_canonical_out_of_band_drift.sh"; then
   c_status=passed
 fi
@@ -179,6 +179,9 @@ if pathlib.Path(b_output).is_file():
     c = json.loads(pathlib.Path(c_output).read_text(encoding="utf-8")) if pathlib.Path(c_output).is_file() else {}
     if c_status == "passed" and c.get("scenario", {}).get("result") == "passed":
         document["scenarios"][1].update(result="passed", externally_equivalent=True, evidence=str(pathlib.Path(c_output).resolve()))
+        deletion = c.get("scenario", {}).get("remote_deletion_recreation", {})
+        if deletion.get("result") == "passed" and deletion.get("old_resource_absent") is True and deletion.get("identity_changed") is True:
+            document["scenarios"][2].update(result="passed", externally_equivalent=True, evidence=str(pathlib.Path(c_output).resolve()))
     if e_status == "passed":
         document["scenarios"][6].update(result="passed", externally_equivalent=True, evidence=str(pathlib.Path(e_dir).resolve()))
     if d_status == "passed" and pathlib.Path(d_output).is_file():
