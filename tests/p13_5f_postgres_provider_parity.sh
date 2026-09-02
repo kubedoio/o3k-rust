@@ -10,7 +10,7 @@ output="${O3K_P13_5F_POSTGRES_EVIDENCE_OUTPUT:-$root_dir/target/p13-5f/postgres-
 mkdir -p "$(dirname "$output")"
 
 write_abort_artifact() {
-  [[ -f "$output" ]] && return 0
+  [[ -s "$output" ]] && return 0
   python3 - "$output" "$root_dir" <<'PY'
 import json, os, pathlib, subprocess, sys
 out, root = sys.argv[1:]
