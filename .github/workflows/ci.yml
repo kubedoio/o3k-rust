@@ -79,6 +79,10 @@ jobs:
         run: |
           for file in packaging/*.sh tests/*.sh scripts/*.sh; do bash -n "$file"; done
           python3 -m compileall -q scripts
+      - name: Test P13.5E deterministic fault proxy and evidence artifact
+        run: |
+          python3 scripts/p13_5e_fault_proxy.py --self-test
+          python3 -m json.tool docs/compatibility/p13-5/p13-5e-retry-replay-evidence.json >/dev/null
       - name: Install pinned actionlint
         run: |
           install_dir="${RUNNER_TEMP}/actionlint/bin"
