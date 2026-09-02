@@ -239,6 +239,7 @@ jobs:
       - name: Run PostgreSQL P13.5F provider parity orchestrator
         env:
           O3K_DATABASE_BACKEND: postgres
+          O3K_P13_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           O3K_P13_5F_POSTGRES_EVIDENCE_OUTPUT: ${{ runner.temp }}/p13-5f-postgres/provider-parity.json
         run: |
           mkdir -p "$RUNNER_TEMP/p13-5f-postgres"

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -36,7 +37,10 @@ def validate(document: dict, artifact: Path) -> None:
     head = document.get("tested_o3k_head_sha", "")
     require(SHA1.fullmatch(head) is not None, "invalid tested_o3k_head_sha")
     repository = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
-    expected_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+    expected_head = os.environ.get(
+        "O3K_P13_SOURCE_HEAD_SHA",
+        subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip(),
+    )
     require(head == expected_head, "artifact is not bound to the current exact source head")
 
     execution = document.get("execution", {})

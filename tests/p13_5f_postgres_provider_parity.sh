@@ -12,9 +12,10 @@ mkdir -p "$(dirname "$output")"
 write_abort_artifact() {
   [[ -f "$output" ]] && return 0
   python3 - "$output" "$root_dir" <<'PY'
-import json, pathlib, subprocess, sys
+import json, os, pathlib, subprocess, sys
 out, root = sys.argv[1:]
 head = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip()
+head = os.environ.get("O3K_P13_SOURCE_HEAD_SHA", head)
 names = ["PG1-import-read-reconstruction", "PG2-mutable-drift-reconvergence", "PG3-remote-deletion-recreation", "PG4-independent-replacement", "PG5-router-interface-relationship", "PG6-volume-attachment-relationship", "PG7-operation-replay-unknown-outcome"]
 document = {"artifact_type": "o3k-p13-5f-postgres-provider-parity", "schema_version": 1, "phase": "P13.5F", "tested_o3k_head_sha": head, "backend": "postgresql", "provider_modified": False, "execution": {"orchestrator": "tests/p13_5f_postgres_provider_parity.sh", "status": "failed", "failure_artifact": True}, "scenarios": [{"scenario": name, "result": "blocked", "externally_equivalent": False, "reason": "orchestrator exited before scenario completion"} for name in names], "final_verdict": "blocked"}
 pathlib.Path(out).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
@@ -121,6 +122,7 @@ run_status, b_output, log, baseline, c_status, c_output, c_log, e_status, e_dir,
 head = __import__("subprocess").check_output(
     ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
 ).strip()
+source_head = __import__("os").environ.get("O3K_P13_SOURCE_HEAD_SHA", head)
 
 scenarios = [
     "PG1-import-read-reconstruction",
@@ -135,7 +137,7 @@ document = {
     "artifact_type": "o3k-p13-5f-postgres-provider-parity",
     "schema_version": 1,
     "phase": "P13.5F",
-    "tested_o3k_head_sha": head,
+    "tested_o3k_head_sha": source_head,
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "backend": "postgresql",
     "provider_modified": False,
