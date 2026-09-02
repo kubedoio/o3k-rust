@@ -563,9 +563,9 @@ O3K_NETWORK_EXTERNAL_REALM_ID="$external_realm_id" \
 O3K_PUBLIC_POOL_CIDR="$external_pool_cidr" \
 O3K_PUBLIC_POOL_FIRST="$external_pool_first" \
 O3K_PUBLIC_POOL_LAST="$external_pool_last" \
-O3K_LVM_VOLUME_GROUP="$O3K_LVM_VOLUME_GROUP" \
-O3K_LVM_THIN_POOL="$O3K_LVM_THIN_POOL" \
-O3K_LVM_PROVIDER_NAMESPACE="$O3K_LVM_PROVIDER_NAMESPACE" \
+O3K_LVM_VOLUME_GROUP="${O3K_LVM_VOLUME_GROUP:-}" \
+O3K_LVM_THIN_POOL="${O3K_LVM_THIN_POOL:-}" \
+O3K_LVM_PROVIDER_NAMESPACE="${O3K_LVM_PROVIDER_NAMESPACE:-}" \
 O3K_COMPATIBILITY_TRACE_PATH="$work_dir/trace.jsonl" \
   "$o3kd" --listen-addr "127.0.0.1:$port" --data-dir "$work_dir/data" >"$work_dir/o3kd.log" 2>&1 &
 pid=$!
