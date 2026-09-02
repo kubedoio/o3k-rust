@@ -54,9 +54,24 @@ mkdir -p "$work_dir"
 log="$work_dir/p13-5b-refresh-import.log"
 b_output="$work_dir/p13-5b-refresh-import-evidence.json"
 baseline="$work_dir/p13-baseline-manifest.json"
-if O3K_DATABASE_BACKEND=postgres \
-   O3K_P13_ALLOW_DESTRUCTIVE_POSTGRES_RESET=1 \
-   python3 "$root_dir/scripts/p13_baseline_gate_manifest.py" --output "$baseline" >"$work_dir/baseline.log" 2>&1; then
+if [[ -n "${O3K_P13_5F_BASELINE_MANIFEST:-}" ]]; then
+  baseline="${O3K_P13_5F_BASELINE_MANIFEST}"
+  if python3 - "$baseline" "$root_dir" <<'PY' >"$work_dir/baseline.log" 2>&1
+import json, subprocess, sys
+manifest, root = sys.argv[1:]
+d = json.load(open(manifest, encoding="utf-8"))
+head = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip()
+if d.get("status") != "verified" or d.get("source_commit") != head:
+    raise SystemExit("baseline manifest is not verified for the exact runtime HEAD")
+PY
+  then
+    baseline_result=verified
+  else
+    baseline_result=blocked
+  fi
+elif O3K_DATABASE_BACKEND=postgres \
+     O3K_P13_ALLOW_DESTRUCTIVE_POSTGRES_RESET=1 \
+     python3 "$root_dir/scripts/p13_baseline_gate_manifest.py" --output "$baseline" >"$work_dir/baseline.log" 2>&1; then
   baseline_result=verified
 else
   baseline_result=blocked
@@ -114,7 +129,9 @@ fi
 d_output="$work_dir/p13-5d-replacement.json"
 d_log="$work_dir/p13-5d-replacement.log"
 d_status=blocked
-if [[ -n "${O3K_LVM_VOLUME_GROUP:-}" && -n "${O3K_LVM_THIN_POOL:-}" && -n "${O3K_LVM_PROVIDER_NAMESPACE:-}" ]]; then
+if [[ -n "${O3K_P13_5F_D_SCENARIOS:-}" ]]; then
+  d_scenarios="${O3K_P13_5F_D_SCENARIOS}"
+elif [[ -n "${O3K_LVM_VOLUME_GROUP:-}" && -n "${O3K_LVM_THIN_POOL:-}" && -n "${O3K_LVM_PROVIDER_NAMESPACE:-}" ]]; then
   d_scenarios=all
 else
   d_scenarios=independent-resource,router-interface
