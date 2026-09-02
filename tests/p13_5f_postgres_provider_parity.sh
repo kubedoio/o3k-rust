@@ -57,7 +57,11 @@ else
 fi
 
 run_status=blocked
-if [[ -x "${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}" ]] && [[ -n "${O3K_LVM_VOLUME_GROUP:-}" && -n "${O3K_LVM_THIN_POOL:-}" && -n "${O3K_LVM_PROVIDER_NAMESPACE:-}" ]]; then
+native_volume_skip=0
+if [[ -z "${O3K_LVM_VOLUME_GROUP:-}" || -z "${O3K_LVM_THIN_POOL:-}" || -z "${O3K_LVM_PROVIDER_NAMESPACE:-}" ]]; then
+  native_volume_skip=1
+fi
+if [[ -x "${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}" ]]; then
   set +e
   O3K_DATABASE_BACKEND=postgres \
   O3K_P13_5B_EVIDENCE_OUTPUT="$b_output" \
@@ -65,6 +69,7 @@ if [[ -x "${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}" ]] && [[ -n "${O3K_LVM_V
   P13_5A_RUN_BASELINE=1 \
   P13_5B_BASELINE_RESULT="$baseline_result" \
   P13_5B_BASELINE_MANIFEST="$baseline" \
+  O3K_P13_5B_SKIP_NATIVE_VOLUME="$native_volume_skip" \
   O3K_P13_5B_KEEP_WORK_DIR=1 \
     "$root_dir/tests/p13_5b_refresh_import.sh" >"$log" 2>&1
   rc=$?
