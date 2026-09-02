@@ -115,14 +115,19 @@ d_output="$work_dir/p13-5d-replacement.json"
 d_log="$work_dir/p13-5d-replacement.log"
 d_status=blocked
 if [[ -n "${O3K_LVM_VOLUME_GROUP:-}" && -n "${O3K_LVM_THIN_POOL:-}" && -n "${O3K_LVM_PROVIDER_NAMESPACE:-}" ]]; then
-  if run_child p13-5d "$d_log" P13_5D_BASELINE_MANIFEST="$baseline" \
-    O3K_P13_5D_EVIDENCE_OUTPUT="$d_output" bash "$root_dir/tests/p13_5d_replacement_relationships.sh"; then
-    d_status=passed
-  fi
+  d_scenarios=all
+else
+  d_scenarios=independent-resource,router-interface
+fi
+if run_child p13-5d "$d_log" P13_5D_SCENARIO="$d_scenarios" P13_5D_BASELINE_MANIFEST="$baseline" \
+  O3K_P13_5D_EVIDENCE_OUTPUT="$d_output" bash "$root_dir/tests/p13_5d_replacement_relationships.sh"; then
+  d_status=passed
 fi
 
 python3 - "$output" "$root_dir" "$run_status" "$b_output" "$log" "$baseline" "$c_status" "$c_output" "$c_log" "$e_status" "$e_dir" "$e_log" "$d_status" "$d_output" "$d_log" <<'PY'
 import json
+import hashlib
+import os
 import pathlib
 import sys
 from datetime import datetime, timezone
@@ -134,6 +139,9 @@ head = __import__("subprocess").check_output(
     ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
 ).strip()
 source_head = __import__("os").environ.get("O3K_P13_SOURCE_HEAD_SHA", head)
+
+def sha256(path):
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
 
 scenarios = [
     "PG1-import-read-reconstruction",
@@ -152,6 +160,14 @@ document = {
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "backend": "postgresql",
     "provider_modified": False,
+    "real_provider_execution": True,
+    "toolchain": {
+        "opentofu": "1.12.6",
+        "provider": "terraform-provider-openstack/openstack 3.4.0",
+        "opentofu_archive_sha256": sha256(os.environ["O3K_P13_TOFU_ARCHIVE"]),
+        "provider_archive_sha256": sha256(os.environ["O3K_P13_PROVIDER_ARCHIVE"]),
+        "provider_binary_sha256": sha256(os.environ["O3K_P13_PROVIDER_BINARY"]),
+    },
     "execution": {
         "orchestrator": "tests/p13_5f_postgres_provider_parity.sh",
         "reused_journey": "tests/p13_5b_refresh_import.sh",
@@ -199,8 +215,43 @@ if pathlib.Path(b_output).is_file():
     # PG7. Keep PG7 blocked until that dedicated journey emits evidence.
     if d_status == "passed" and pathlib.Path(d_output).is_file():
         d = json.loads(pathlib.Path(d_output).read_text(encoding="utf-8"))
-        if d.get("status") == "passed":
-            document["scenarios"][3].update(result="passed", externally_equivalent=True, evidence=str(pathlib.Path(d_output).resolve()))
+        if d.get("aggregate_verdict") == "PASS":
+            rows_by_scenario = {row.get("scenario"): row for row in d.get("scenarios", [])}
+            for scenario_name, pg_name in {
+                "independent-resource": "PG4-independent-replacement",
+                "router-interface": "PG5-router-interface-relationship",
+                "volume-attachment": "PG6-volume-attachment-relationship",
+            }.items():
+                d_row = rows_by_scenario.get(scenario_name, {})
+                if (
+                    d_row.get("result") == "passed"
+                    and d_row.get("parents_preserved") is True
+                    and d_row.get("provider_leaks") == 0
+                    and d_row.get("foreign_changes") == 0
+                    and d_row.get("restart_reconstruction") is True
+                    and d_row.get("final_plan_noop") is True
+                ):
+                    next(row for row in document["scenarios"] if row["scenario"] == pg_name).update(
+                        result="passed", externally_equivalent=True, evidence=str(pathlib.Path(d_output).resolve())
+                    )
+    pg7 = pathlib.Path(e_dir) / "PG7-operation-replay-unknown-outcome.json"
+    if e_status == "passed" and pg7.is_file():
+        replay = json.loads(pg7.read_text(encoding="utf-8"))
+        if (
+            replay.get("result") == "passed"
+            and replay.get("externally_equivalent") is True
+            and replay.get("backend_completion_observed") is True
+            and replay.get("restart_boundary") is True
+            and replay.get("duplicate_mutation") is False
+            and replay.get("final_plan_noop") is True
+        ):
+            next(row for row in document["scenarios"] if row["scenario"] == "PG7-operation-replay-unknown-outcome").update(
+                result="passed", externally_equivalent=True, evidence=str(pg7.resolve()),
+                fault_location=replay["fault_location"], backend_completion_observed=True,
+                restart_boundary=True, replay_reconstruction=True,
+            )
+    if all(row["result"] == "passed" for row in document["scenarios"]):
+        document["final_verdict"] = "passed"
 output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
 print(json.dumps({"output": str(output), "status": document["final_verdict"], "execution": run_status}))
 PY

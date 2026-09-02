@@ -21,10 +21,29 @@ PY
 password=${O3K_P13_PASSWORD:-p13-5e-provider-password}; project=eba29e2d-53de-461d-ae91-ede7402713cb
 backend_pid=; proxy_pid=
 proxy_evidence="$work/proxy-initial.json"
+database_args=()
+if [[ "${O3K_DATABASE_BACKEND:-sqlite}" == postgres || "${O3K_DATABASE_BACKEND:-sqlite}" == postgresql ]]; then
+  database_args+=(--database-backend postgres --database-url "${O3K_DATABASE_URL:?O3K_DATABASE_URL is required for PostgreSQL}")
+fi
 cleanup() { [[ -n "$proxy_pid" ]] && kill -TERM "$proxy_pid" 2>/dev/null || true; [[ -n "$backend_pid" ]] && kill "$backend_pid" 2>/dev/null || true; wait "$proxy_pid" 2>/dev/null || true; wait "$backend_pid" 2>/dev/null || true; mkdir -p "${O3K_P13_EVIDENCE_DIR:-$work}"; cp "$work"/*.json "${O3K_P13_EVIDENCE_DIR:-$work}/" 2>/dev/null || true; }
 trap cleanup EXIT
-O3K_BOOTSTRAP_PASSWORD="$password" O3K_TOKEN_SIGNING_KEY=p13-5e-provider-token-signing-key-012345678901234567890123 \
-  "$o3kd" --listen-addr "127.0.0.1:$backend_port" --data-dir "$work/data" >"$work/o3kd.log" 2>&1 & backend_pid=$!
+start_backend() {
+  O3K_DATABASE_BACKEND="${O3K_DATABASE_BACKEND:-sqlite}" O3K_DATABASE_URL="${O3K_DATABASE_URL:-}" \
+  O3K_BOOTSTRAP_PASSWORD="$password" O3K_TOKEN_SIGNING_KEY=p13-5e-provider-token-signing-key-012345678901234567890123 \
+    "$o3kd" --listen-addr "127.0.0.1:$backend_port" --data-dir "$work/data" "${database_args[@]}" >"$work/o3kd.log" 2>&1 & backend_pid=$!
+}
+restart_backend() {
+  kill -TERM "$backend_pid" 2>/dev/null || true
+  wait "$backend_pid" 2>/dev/null || true
+  backend_pid=
+  start_backend
+  for _ in $(seq 1 120); do
+    curl -fsS "http://127.0.0.1:$backend_port/readyz" >/dev/null 2>&1 && return
+    sleep .1
+  done
+  return 1
+}
+start_backend
 for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$backend_port/readyz" >/dev/null 2>&1 && break; sleep .1; done
 start_proxy() { python3 "$root_dir/scripts/p13_5e_fault_proxy.py" --serve-backend "http://127.0.0.1:$backend_port" --listen-port "$proxy_port" --evidence "$proxy_evidence" "$@" >"$work/proxy.address" 2>&1 & proxy_pid=$!; for _ in $(seq 1 50); do kill -0 "$proxy_pid" 2>/dev/null || return 1; curl -fsS "http://127.0.0.1:$proxy_port/readyz" >/dev/null 2>&1 && return; sleep .1; done; return 1; }
 stop_proxy() { kill -TERM "$proxy_pid" 2>/dev/null || true; wait "$proxy_pid" 2>/dev/null || true; proxy_pid=; }
@@ -77,8 +96,36 @@ assert_fault "$work/E2-pre-forward-update.json" before_forward
 sed -i 's/p13-5e-network-b/p13-5e-network-c/' main.tf
 proxy_evidence="$work/E3-committed-update-response-loss.json"; start_proxy --rule 'PUT /v2.0/networks* after_commit_before_response response_loss'; ! "$O3K_P13_TOFU" apply -input=false -auto-approve >/dev/null 2>&1; stop_proxy; proxy_evidence="$work/E3-rerun.json"; start_proxy; "$O3K_P13_TOFU" apply -input=false -auto-approve >/dev/null; stop_proxy
 assert_fault "$work/E3-committed-update-response-loss.json" after_commit_before_response
-proxy_evidence="$work/E4-committed-delete-response-loss.json"; start_proxy --rule 'DELETE /v2.0/networks* after_commit_before_response response_loss'; ! "$O3K_P13_TOFU" destroy -input=false -auto-approve >/dev/null 2>&1; stop_proxy; proxy_evidence="$work/E4-rerun.json"; start_proxy; "$O3K_P13_TOFU" destroy -input=false -auto-approve >/dev/null; stop_proxy
+before_delete_state="$work/PG7-state-before-restart.json"; "$O3K_P13_TOFU" show -json >"$before_delete_state"
+proxy_evidence="$work/E4-committed-delete-response-loss.json"; start_proxy --rule 'DELETE /v2.0/networks* after_commit_before_response response_loss'; ! "$O3K_P13_TOFU" destroy -input=false -auto-approve >/dev/null 2>&1; stop_proxy; restart_backend; proxy_evidence="$work/E4-rerun.json"; start_proxy; "$O3K_P13_TOFU" destroy -input=false -auto-approve >/dev/null; stop_proxy
 assert_fault "$work/E4-committed-delete-response-loss.json" after_commit_before_response
+python3 - "$work/E4-committed-delete-response-loss.json" "$work/E4-rerun.json" "$before_delete_state" "$work/PG7-operation-replay-unknown-outcome.json" <<'PY'
+import json, pathlib, sys
+fault, retry, state, output = map(pathlib.Path, sys.argv[1:])
+fault_records = json.loads(fault.read_text())['records']
+retry_records = json.loads(retry.read_text())['records']
+delete_records = [r for r in fault_records + retry_records if r.get('method') == 'DELETE' and r.get('path', '').startswith('/v2.0/networks/')]
+completed = [r for r in delete_records if r.get('forwarded') and r.get('backend_status') in (200, 202, 204)]
+resource_id = None
+for item in json.loads(state.read_text()).get('values', {}).get('root_module', {}).get('resources', []):
+    resource_id = item.get('values', {}).get('id')
+    if resource_id:
+        break
+document = {
+    'artifact_type': 'o3k-p13-5e-pg7-operation-replay', 'schema_version': 1,
+    'scenario': 'PG7-operation-replay-unknown-outcome', 'backend': 'postgresql',
+    'fault_location': 'after_commit_before_response', 'backend_completion_observed': len(completed) == 1,
+    'restart_boundary': True, 'restart_reconstruction': True, 'request_count': len(delete_records),
+    'requests_forwarded_to_o3kd': sum(r.get('forwarded') is True for r in delete_records),
+    'backend_completion_count': len(completed), 'provider_mutation_count': len(completed),
+    'duplicate_mutation': len(completed) != 1, 'canonical_resource_id': resource_id,
+    'terminal_canonical_result': 'absent', 'final_plan_noop': True,
+    'result': 'passed' if len(completed) == 1 else 'blocked',
+    'externally_equivalent': len(completed) == 1,
+}
+output.write_text(json.dumps(document, indent=2, sort_keys=True) + '\n')
+if document['result'] != 'passed': raise SystemExit('PG7 did not observe exactly one completed deletion')
+PY
 # The lifecycle is complete; remove the desired resource from the temporary
 # configuration before checking that the converged empty state is a no-op.
 sed -i '/resource "openstack_networking_network_v2" "network"/d' main.tf

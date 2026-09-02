@@ -12,6 +12,7 @@ from pathlib import Path
 
 
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 SCENARIOS = {
     "PG1-import-read-reconstruction",
     "PG2-mutable-drift-reconvergence",
@@ -34,6 +35,13 @@ def validate(document: dict, artifact: Path) -> None:
     require(document.get("phase") == "P13.5F", "invalid phase")
     require(document.get("backend") == "postgresql", "backend identity is not PostgreSQL")
     require(document.get("provider_modified") is False, "provider must be unmodified")
+    toolchain = document.get("toolchain", {})
+    require(toolchain.get("opentofu") == "1.12.6", "OpenTofu pin is missing")
+    require(toolchain.get("provider") == "terraform-provider-openstack/openstack 3.4.0", "provider pin is missing")
+    require(SHA256.fullmatch(toolchain.get("provider_archive_sha256", "")) is not None, "provider archive SHA256 is missing")
+    require(SHA256.fullmatch(toolchain.get("provider_binary_sha256", "")) is not None, "provider binary SHA256 is missing")
+    require(SHA256.fullmatch(toolchain.get("opentofu_archive_sha256", "")) is not None, "OpenTofu archive SHA256 is missing")
+    require(document.get("real_provider_execution") is True, "real provider execution is not proven")
     head = document.get("tested_o3k_head_sha", "")
     require(SHA1.fullmatch(head) is not None, "invalid tested_o3k_head_sha")
     repository = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
@@ -53,8 +61,23 @@ def validate(document: dict, artifact: Path) -> None:
         require(row.get("result") in {"not_run", "blocked", "failed", "passed"}, f"invalid result: {row}")
         if row["result"] == "passed":
             require(row.get("externally_equivalent") is True, f"passed row lacks parity equivalence: {row['scenario']}")
-            evidence = Path(row.get("evidence", ""))
+            evidence_name = row.get("evidence", "")
+            require(evidence_name and not Path(evidence_name).is_absolute(), f"evidence must be repository-relative: {row['scenario']}")
+            evidence = repository / evidence_name
             require(evidence.is_file(), f"passed row lacks evidence: {row['scenario']}")
+            require(row.get("backend") == "postgresql", f"row backend is not PostgreSQL: {row['scenario']}")
+            require(row.get("provider_modified") is False, f"row provider provenance is incomplete: {row['scenario']}")
+            require(row.get("restart_reconstruction") is True, f"row lacks restart reconstruction: {row['scenario']}")
+            require(row.get("final_plan_noop") is True, f"row lacks final no-op: {row['scenario']}")
+            if row["scenario"] in {"PG5-router-interface-relationship", "PG6-volume-attachment-relationship"}:
+                require(row.get("parents_preserved") is True, f"parents were not preserved: {row['scenario']}")
+                require(row.get("provider_leaks") == 0 and row.get("foreign_changes") == 0, f"relationship isolation failed: {row['scenario']}")
+            if row["scenario"] == "PG4-independent-replacement":
+                require(row.get("replacement_actions") or row.get("plan_actions"), "replacement actions are missing")
+            if row["scenario"] == "PG7-operation-replay-unknown-outcome":
+                require(row.get("fault_location") == "after_commit_before_response", "PG7 fault location is missing")
+                require(row.get("backend_completion_observed") is True, "PG7 backend completion is missing")
+                require(row.get("restart_boundary") is True, "PG7 restart boundary is missing")
     expected_verdict = "passed" if all(row["result"] == "passed" for row in rows) else "blocked"
     require(document.get("final_verdict") == expected_verdict, "final verdict does not match scenario results")
 
