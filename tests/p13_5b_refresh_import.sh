@@ -38,7 +38,11 @@ cleanup() {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   fi
-  rm -rf "$work_dir"
+  if [[ "${O3K_P13_5B_KEEP_WORK_DIR:-0}" == 1 ]]; then
+    echo "P13.5B diagnostic work directory preserved: $work_dir" >&2
+  else
+    rm -rf "$work_dir"
+  fi
 }
 trap cleanup EXIT
 
