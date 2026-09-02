@@ -82,7 +82,16 @@ jobs:
       - name: Test P13.5E deterministic fault proxy and evidence artifact
         run: |
           python3 scripts/p13_5e_fault_proxy.py --self-test
+          bash scripts/p13_prepare_toolchain.sh --self-test
           python3 -m json.tool docs/compatibility/p13-5/p13-5e-retry-replay-evidence.json >/dev/null
+      - name: Prepare and verify pinned P13 provider toolchain
+        id: p13-toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y unzip
+          bash scripts/p13_prepare_toolchain.sh > "$RUNNER_TEMP/p13-toolchain.env"
+          sed 's/^export //' "$RUNNER_TEMP/p13-toolchain.env" >> "$GITHUB_ENV"
       - name: Install pinned actionlint
         run: |
           install_dir="${RUNNER_TEMP}/actionlint/bin"
@@ -227,6 +236,20 @@ jobs:
           cargo build --bin o3kd --locked
           cargo build --bin o3k-compute-bin --features libvirt --locked
           python3 scripts/emit-build-manifest.py target/ci-artifacts/build-manifest.json "${GITHUB_SHA}"
+      - name: Run P13.5E real upstream provider fault-proxy gate
+        # Keep this gate bounded so a hosted-runner fault cannot hide its result.
+        env:
+          O3K_P13_EVIDENCE_DIR: ${{ runner.temp }}/p13-5e-evidence
+        run: |
+          mkdir -p "$O3K_P13_EVIDENCE_DIR"
+          timeout --foreground 10m bash tests/p13_5e_real_provider_fault_proxy.sh
+      - name: Upload P13.5E fault-proxy evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: p13-5e-real-provider-evidence
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/p13-5e-evidence
       - name: Upload exact-source build manifest
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
