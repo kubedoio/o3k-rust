@@ -291,9 +291,9 @@ import json, sys
 if json.loads(sys.argv[1])["count"] != 0: raise SystemExit("canonical cleanup left a resource")
 PY
 
-python3 - "$contract" "$output" "$head_sha" "$tofu_version" "$provider_binary" "$provider_archive" "$tofu_archive" "$provider_sha" "$network_id" "$canonical_before" "$canonical_after_mutation" "$canonical_after_reapply" "$canonical_after_cleanup" "$compat_after_mutation" "$compat_after_reapply" "$work_dir/initial-normal.json" "$work_dir/drift-refresh-only.json" "$work_dir/drift-normal.json" "$work_dir/final-normal.json" "$cleanup_status" "$baseline_manifest" "$remote_deletion_result" "$remote_deletion_old_id" "$remote_deletion_old_status" "$remote_deletion_new_id" <<'PY'
+python3 - "$contract" "$output" "$head_sha" "$tofu_version" "$provider_binary" "$provider_archive" "$tofu_archive" "$provider_sha" "$network_id" "$initial_network_id" "$canonical_before" "$canonical_after_mutation" "$canonical_after_reapply" "$canonical_after_cleanup" "$compat_after_mutation" "$compat_after_reapply" "$work_dir/initial-normal.json" "$work_dir/drift-refresh-only.json" "$work_dir/drift-normal.json" "$work_dir/final-normal.json" "$cleanup_status" "$baseline_manifest" "$remote_deletion_result" "$remote_deletion_old_id" "$remote_deletion_old_status" "$remote_deletion_new_id" <<'PY'
 import hashlib, json, pathlib, sys
-(contract, output, head, tofu_version, provider_binary, provider_archive, tofu_archive, provider_sha, network_id, before, after_mutation, after_reapply, after_cleanup, compat_mutation, compat_reapply, initial, refresh, normal, final, cleanup, baseline_manifest, remote_result, remote_old_id, remote_old_status, remote_new_id) = sys.argv[1:]
+(contract, output, head, tofu_version, provider_binary, provider_archive, tofu_archive, provider_sha, network_id, initial_network_id, before, after_mutation, after_reapply, after_cleanup, compat_mutation, compat_reapply, initial, refresh, normal, final, cleanup, baseline_manifest, remote_result, remote_old_id, remote_old_status, remote_new_id) = sys.argv[1:]
 c=json.loads(pathlib.Path(contract).read_text())
 def digest(p):
  h=hashlib.sha256()

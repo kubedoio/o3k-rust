@@ -1801,9 +1801,11 @@ impl NetworkRepository for PostgresStore {
             return Err(StoreError::NetworkInUse);
         }
 
+        // The canonical row is the durable deletion record. Remove the
+        // compatibility projection as well so its unique (project, name)
+        // constraint cannot prevent a later recreation with the same name.
         let res = sqlx::query(
-            "UPDATE network_networks
-             SET status = 'deleted'
+            "DELETE FROM network_networks
              WHERE id = $1 AND project_id = $2 AND status != 'deleted'",
         )
         .bind(&id_str)
