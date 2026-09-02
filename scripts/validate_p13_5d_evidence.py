@@ -58,6 +58,8 @@ def validate(doc: dict) -> None:
             for key in ("old_relationship_absent", "new_relationship_count", "provider_leaks", "foreign_changes", "final_plan_noop"):
                 if key not in row:
                     fail(f"passed scenario lacks {key}")
+            if row["old_relationship_absent"] is not True:
+                fail("passed scenario still observes the old relationship")
             if row["new_relationship_count"] != 1 or row["provider_leaks"] != 0 or row["foreign_changes"] != 0:
                 fail("passed scenario has cardinality/leak/foreign-state failure")
             if row["final_plan_noop"] is not True:
