@@ -58,7 +58,7 @@ provider "openstack" {
   auth_url = "http://127.0.0.1:$proxy_port/v3"
   user_name = "admin"
   password = "$password"
-  tenant_name = "admin"
+  tenant_id = "$project"
   user_domain_name = "Default"
   project_domain_name = "Default"
   max_retries = 0
