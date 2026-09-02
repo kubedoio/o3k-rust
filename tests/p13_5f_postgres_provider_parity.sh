@@ -9,6 +9,22 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 output="${O3K_P13_5F_POSTGRES_EVIDENCE_OUTPUT:-$root_dir/target/p13-5f/postgres-provider-parity.json}"
 mkdir -p "$(dirname "$output")"
 
+if [[ -z "${O3K_DATABASE_URL:-}" ]]; then
+  echo "P13.5F PostgreSQL parity BLOCKED: O3K_DATABASE_URL is required" >&2
+  exit 2
+fi
+if ! command -v pg_isready >/dev/null 2>&1 || ! pg_isready -d "$O3K_DATABASE_URL" >/dev/null 2>&1; then
+  echo "P13.5F PostgreSQL parity BLOCKED: PostgreSQL is not ready" >&2
+  exit 2
+fi
+for required in O3K_P13_TOFU O3K_P13_PROVIDER_BINARY O3K_P13_PROVIDER_ARCHIVE O3K_P13_TOFU_ARCHIVE O3K_P13_PROVIDER_SHA256; do
+  if [[ -z "${!required:-}" || ! -f "${!required}" ]]; then
+    echo "P13.5F PostgreSQL parity BLOCKED: missing pinned toolchain input $required" >&2
+    exit 2
+  fi
+done
+python3 "$root_dir/scripts/p13_provider_contract.py" --verify-tools
+
 python3 - "$output" "$root_dir" <<'PY'
 import json
 import pathlib
