@@ -58,7 +58,7 @@ provider "openstack" {
   auth_url = "http://127.0.0.1:$proxy_port/v3"
   user_name = "admin"
   password = "$password"
-  tenant_id = "$project"
+  tenant_name = "admin"
   max_retries = 0
 }
 resource "openstack_networking_network_v2" "network" { name = "p13-5e-network-a" }
