@@ -3,7 +3,7 @@
   "schema_version": 1,
   "phase": "P13.5E",
   "profile": "p13-iac-compatibility-v1",
-  "tested_o3k_head_sha": "1830ce5f5f70d4b6332dd52dbdb11292a7bc1d48",
+  "tested_o3k_head_sha": "06b56c12c39ed17cb384032204f23fcae070f780",
   "toolchain": {
     "opentofu": "1.12.6",
     "provider": "terraform-provider-openstack/openstack 3.4.0",
