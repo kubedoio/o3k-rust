@@ -179,6 +179,7 @@ PY
 
 "$tofu" apply -input=false -auto-approve >/dev/null
 network_id="$("$tofu" show -json | python3 -c 'import json,sys;print(next(x["values"]["id"] for x in json.load(sys.stdin)["values"]["root_module"]["resources"] if x["address"]=="openstack_networking_network_v2.managed"))')"
+initial_network_id="$network_id"
 canonical_before="$(canonical_snapshot "$network_id" before)"
 plan_json initial-normal normal
 python3 - "$work_dir/initial-normal.json" <<'PY'
