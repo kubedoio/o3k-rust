@@ -42,7 +42,7 @@ else
   baseline_result=blocked
 fi
 
-run_status=not_run
+run_status=blocked
 if [[ -x "${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}" ]] && [[ -n "${O3K_LVM_VOLUME_GROUP:-}" && -n "${O3K_LVM_THIN_POOL:-}" && -n "${O3K_LVM_PROVIDER_NAMESPACE:-}" ]]; then
   set +e
   O3K_DATABASE_BACKEND=postgres \
@@ -103,7 +103,7 @@ document = {
             "scenario": name,
             "result": "not_run",
             "externally_equivalent": False,
-            "reason": "dedicated PostgreSQL parity journey is not implemented",
+            "reason": "dedicated PostgreSQL parity journey is not implemented or was not executable",
         }
         for name in scenarios
     ],
@@ -123,5 +123,5 @@ if run_status == "passed" and pathlib.Path(b_output).is_file():
     if all(row["result"] == "passed" for row in document["scenarios"]):
         document["final_verdict"] = "passed"
 output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
-print(json.dumps({"output": str(output), "status": "blocked"}))
+print(json.dumps({"output": str(output), "status": document["final_verdict"], "execution": run_status}))
 PY
