@@ -8,7 +8,16 @@ set -euo pipefail
 root_dir=$(cd "$(dirname "$0")/.." && pwd)
 o3kd=${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}
 [[ -x "$o3kd" ]] || { echo "missing o3kd: $o3kd" >&2; exit 2; }
-work=$(mktemp -d /tmp/o3k-p13-5e-real.XXXXXX); backend_port=19081; proxy_port=19082
+work=$(mktemp -d /tmp/o3k-p13-5e-real.XXXXXX)
+read -r backend_port proxy_port < <(python3 - <<'PY'
+import socket
+sockets=[]
+for _ in range(2):
+    s=socket.socket(); s.bind(('127.0.0.1', 0)); sockets.append(s)
+print(sockets[0].getsockname()[1], sockets[1].getsockname()[1])
+for s in sockets: s.close()
+PY
+)
 password=${O3K_P13_PASSWORD:-p13-5e-provider-password}; project=eba29e2d-53de-461d-ae91-ede7402713cb
 backend_pid=; proxy_pid=
 proxy_evidence="$work/proxy-initial.json"
@@ -17,7 +26,7 @@ trap cleanup EXIT
 O3K_BOOTSTRAP_PASSWORD="$password" O3K_TOKEN_SIGNING_KEY=p13-5e-provider-token-signing-key-012345678901234567890123 \
   "$o3kd" --listen-addr "127.0.0.1:$backend_port" --data-dir "$work/data" >"$work/o3kd.log" 2>&1 & backend_pid=$!
 for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$backend_port/readyz" >/dev/null 2>&1 && break; sleep .1; done
-start_proxy() { python3 "$root_dir/scripts/p13_5e_fault_proxy.py" --serve-backend "http://127.0.0.1:$backend_port" --listen-port "$proxy_port" --evidence "$proxy_evidence" "$@" >"$work/proxy.address" 2>&1 & proxy_pid=$!; for _ in $(seq 1 50); do curl -fsS "http://127.0.0.1:$proxy_port/readyz" >/dev/null 2>&1 && return; sleep .1; done; }
+start_proxy() { python3 "$root_dir/scripts/p13_5e_fault_proxy.py" --serve-backend "http://127.0.0.1:$backend_port" --listen-port "$proxy_port" --evidence "$proxy_evidence" "$@" >"$work/proxy.address" 2>&1 & proxy_pid=$!; for _ in $(seq 1 50); do kill -0 "$proxy_pid" 2>/dev/null || return 1; curl -fsS "http://127.0.0.1:$proxy_port/readyz" >/dev/null 2>&1 && return; sleep .1; done; return 1; }
 stop_proxy() { kill -TERM "$proxy_pid" 2>/dev/null || true; wait "$proxy_pid" 2>/dev/null || true; proxy_pid=; }
 mirror="$work/mirror/registry.terraform.io/terraform-provider-openstack/openstack/3.4.0/linux_amd64"; mkdir -p "$mirror"; cp "$O3K_P13_PROVIDER_BINARY" "$mirror/terraform-provider-openstack_v3.4.0"; chmod 755 "$mirror/terraform-provider-openstack_v3.4.0"
 cat >"$work/tofu.tfrc" <<EOF
