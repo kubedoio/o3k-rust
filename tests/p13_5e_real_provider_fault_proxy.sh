@@ -59,6 +59,8 @@ provider "openstack" {
   user_name = "admin"
   password = "$password"
   tenant_name = "admin"
+  user_domain_name = "Default"
+  project_domain_name = "Default"
   max_retries = 0
 }
 resource "openstack_networking_network_v2" "network" { name = "p13-5e-network-a" }
