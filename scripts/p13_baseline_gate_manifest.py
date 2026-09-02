@@ -178,6 +178,31 @@ def restore_generated_artifacts(root: Path) -> None:
     )
 
 
+def reset_postgres_schema() -> None:
+    """Give each PostgreSQL gate an empty schema in the same disposable DB."""
+
+    database_url = os.environ.get("O3K_DATABASE_URL")
+    if os.environ.get("O3K_DATABASE_BACKEND", "sqlite") != "postgres" or not database_url:
+        return
+    result = subprocess.run(
+        [
+            "psql",
+            database_url,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            "DROP SCHEMA public CASCADE; CREATE SCHEMA public;",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip().replace("\n", " ")
+        raise RuntimeError(f"postgres_schema_reset_failed: {detail}")
+
+
 def build_manifest(root: Path, output: Path, timeout_seconds: int | None) -> dict[str, object]:
     run_id = str(uuid.uuid4())
     source_commit = git(root, "rev-parse", "HEAD")
@@ -189,6 +214,18 @@ def build_manifest(root: Path, output: Path, timeout_seconds: int | None) -> dic
     for gate_path in BASELINE_GATES:
         if head_changed:
             gates.append(blocked_record(gate_path, source_commit, log_dir / (Path(gate_path).stem + ".log"), "head_changed_during_run"))
+            continue
+        try:
+            reset_postgres_schema()
+        except RuntimeError as exc:
+            gates.append(
+                blocked_record(
+                    gate_path,
+                    source_commit,
+                    log_dir / (Path(gate_path).stem + ".log"),
+                    str(exc),
+                )
+            )
             continue
         record = run_gate(root, gate_path, source_commit, log_dir / (Path(gate_path).stem + ".log"), timeout_seconds)
         gates.append(record)
@@ -222,6 +259,8 @@ def build_manifest(root: Path, output: Path, timeout_seconds: int | None) -> dic
             "head_after_run": current_commit,
             "environment_inherited": True,
             "timeout_seconds": timeout_seconds,
+            "postgres_schema_reset_between_gates": os.environ.get("O3K_DATABASE_BACKEND", "sqlite")
+            == "postgres",
         },
         "consumer": {
             "p13_5b_field": "existing_p13_baseline",
