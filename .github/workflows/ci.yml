@@ -237,6 +237,7 @@ jobs:
           cargo build --bin o3k-compute-bin --features libvirt --locked
           python3 scripts/emit-build-manifest.py target/ci-artifacts/build-manifest.json "${GITHUB_SHA}"
       - name: Run P13.5E real upstream provider fault-proxy gate
+        # Keep this gate bounded so a hosted-runner fault cannot hide its result.
         env:
           O3K_P13_EVIDENCE_DIR: ${{ runner.temp }}/p13-5e-evidence
         run: |
