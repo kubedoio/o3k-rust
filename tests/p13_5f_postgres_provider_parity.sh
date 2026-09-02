@@ -17,12 +17,16 @@ if ! command -v pg_isready >/dev/null 2>&1 || ! pg_isready -d "$O3K_DATABASE_URL
   echo "P13.5F PostgreSQL parity BLOCKED: PostgreSQL is not ready" >&2
   exit 2
 fi
-for required in O3K_P13_TOFU O3K_P13_PROVIDER_BINARY O3K_P13_PROVIDER_ARCHIVE O3K_P13_TOFU_ARCHIVE O3K_P13_PROVIDER_SHA256; do
+for required in O3K_P13_TOFU O3K_P13_PROVIDER_BINARY O3K_P13_PROVIDER_ARCHIVE O3K_P13_TOFU_ARCHIVE; do
   if [[ -z "${!required:-}" || ! -f "${!required}" ]]; then
     echo "P13.5F PostgreSQL parity BLOCKED: missing pinned toolchain input $required" >&2
     exit 2
   fi
 done
+if [[ ! "${O3K_P13_PROVIDER_SHA256:-}" =~ ^[[:xdigit:]]{64}$ ]]; then
+  echo "P13.5F PostgreSQL parity BLOCKED: O3K_P13_PROVIDER_SHA256 must be a 64-hex digest" >&2
+  exit 2
+fi
 python3 "$root_dir/scripts/p13_provider_contract.py" --verify-tools
 
 work_dir="${O3K_P13_5F_WORK_DIR:-$(mktemp -d /var/tmp/o3k-p13-5f-postgres.XXXXXX)}"
@@ -30,7 +34,9 @@ mkdir -p "$work_dir"
 log="$work_dir/p13-5b-refresh-import.log"
 b_output="$work_dir/p13-5b-refresh-import-evidence.json"
 baseline="$work_dir/p13-baseline-manifest.json"
-if python3 "$root_dir/scripts/p13_baseline_gate_manifest.py" --output "$baseline" >"$work_dir/baseline.log" 2>&1; then
+if O3K_DATABASE_BACKEND=postgres \
+   O3K_P13_ALLOW_DESTRUCTIVE_POSTGRES_RESET=1 \
+   python3 "$root_dir/scripts/p13_baseline_gate_manifest.py" --output "$baseline" >"$work_dir/baseline.log" 2>&1; then
   baseline_result=verified
 else
   baseline_result=blocked
@@ -39,6 +45,7 @@ fi
 run_status=not_run
 if [[ -x "${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}" ]] && [[ -n "${O3K_LVM_VOLUME_GROUP:-}" && -n "${O3K_LVM_THIN_POOL:-}" && -n "${O3K_LVM_PROVIDER_NAMESPACE:-}" ]]; then
   set +e
+  O3K_DATABASE_BACKEND=postgres \
   O3K_P13_5B_EVIDENCE_OUTPUT="$b_output" \
   P13_5B_EXPLORATORY=1 \
   P13_5A_RUN_BASELINE=1 \
