@@ -25,7 +25,35 @@ for required in O3K_P13_TOFU O3K_P13_PROVIDER_BINARY O3K_P13_PROVIDER_ARCHIVE O3
 done
 python3 "$root_dir/scripts/p13_provider_contract.py" --verify-tools
 
-python3 - "$output" "$root_dir" <<'PY'
+work_dir="${O3K_P13_5F_WORK_DIR:-$(mktemp -d /var/tmp/o3k-p13-5f-postgres.XXXXXX)}"
+mkdir -p "$work_dir"
+log="$work_dir/p13-5b-refresh-import.log"
+b_output="$work_dir/p13-5b-refresh-import-evidence.json"
+baseline="$work_dir/p13-baseline-manifest.json"
+if python3 "$root_dir/scripts/p13_baseline_gate_manifest.py" --output "$baseline" >"$work_dir/baseline.log" 2>&1; then
+  baseline_result=verified
+else
+  baseline_result=blocked
+fi
+
+run_status=not_run
+if [[ -x "${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}" ]] && [[ -n "${O3K_LVM_VOLUME_GROUP:-}" && -n "${O3K_LVM_THIN_POOL:-}" && -n "${O3K_LVM_PROVIDER_NAMESPACE:-}" ]]; then
+  set +e
+  O3K_P13_5B_EVIDENCE_OUTPUT="$b_output" \
+  P13_5B_EXPLORATORY=1 \
+  P13_5A_RUN_BASELINE=1 \
+  P13_5B_BASELINE_RESULT="$baseline_result" \
+  P13_5B_BASELINE_MANIFEST="$baseline" \
+  O3K_P13_5B_KEEP_WORK_DIR=1 \
+    "$root_dir/tests/p13_5b_refresh_import.sh" >"$log" 2>&1
+  rc=$?
+  set -e
+  if [[ $rc -eq 0 ]]; then run_status=passed; else run_status=failed; fi
+else
+  echo "P13.5F: P13.5B prerequisites unavailable; retaining preflight evidence" >"$log"
+fi
+
+python3 - "$output" "$root_dir" "$run_status" "$b_output" "$log" "$baseline" <<'PY'
 import json
 import pathlib
 import sys
@@ -33,6 +61,7 @@ from datetime import datetime, timezone
 
 output = pathlib.Path(sys.argv[1])
 root = pathlib.Path(sys.argv[2])
+run_status, b_output, log, baseline = sys.argv[3:]
 head = __import__("subprocess").check_output(
     ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
 ).strip()
@@ -57,19 +86,35 @@ document = {
     "execution": {
         "orchestrator": "tests/p13_5f_postgres_provider_parity.sh",
         "reused_journey": "tests/p13_5b_refresh_import.sh",
-        "status": "not_run",
+        "status": run_status,
+        "evidence": str(pathlib.Path(b_output).resolve()),
+        "log": str(pathlib.Path(log).resolve()),
+        "baseline_manifest": str(pathlib.Path(baseline).resolve()),
     },
     "scenarios": [
         {
             "scenario": name,
             "result": "not_run",
             "externally_equivalent": False,
-            "reason": "provider-level journey has not executed",
+            "reason": "dedicated PostgreSQL parity journey is not implemented",
         }
         for name in scenarios
     ],
     "final_verdict": "blocked",
 }
+if run_status == "passed" and pathlib.Path(b_output).is_file():
+    b = json.loads(pathlib.Path(b_output).read_text(encoding="utf-8"))
+    passed = {(row.get("resource"), row.get("kind")) for row in b.get("scenarios", []) if row.get("result") == "passed"}
+    evidence = str(pathlib.Path(b_output).resolve())
+    for row in document["scenarios"]:
+        if row["scenario"] == "PG1-import-read-reconstruction" and any(kind == "import" for _, kind in passed):
+            row.update(result="passed", externally_equivalent=True, evidence=evidence)
+        elif row["scenario"] == "PG5-router-interface-relationship" and ("openstack_networking_router_interface_v2", "import") in passed:
+            row.update(result="passed", externally_equivalent=True, evidence=evidence)
+        elif row["scenario"] == "PG6-volume-attachment-relationship" and ("openstack_compute_volume_attach_v2", "import") in passed:
+            row.update(result="passed", externally_equivalent=True, evidence=evidence)
+    if all(row["result"] == "passed" for row in document["scenarios"]):
+        document["final_verdict"] = "passed"
 output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
 print(json.dumps({"output": str(output), "status": "blocked"}))
 PY
