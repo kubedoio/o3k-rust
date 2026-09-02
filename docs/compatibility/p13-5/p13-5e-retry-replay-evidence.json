@@ -3,10 +3,10 @@
   "schema_version": 1,
   "phase": "P13.5E",
   "profile": "p13-iac-compatibility-v1",
-  "execution_profile": "portable-contract-and-proxy-self-test",
+  "execution_profile": "portable-real-provider-fault-proxy-ci",
   "canonical_authority": "o3k",
   "provider_modified": false,
-  "tested_o3k_head_sha": "06b56c12c39ed17cb384032204f23fcae070f780",
+  "tested_o3k_head_sha": "0da704cf11591515daecefd00dd3f0c18cb627b2",
   "toolchain": {
     "opentofu": "1.12.6",
     "provider": "terraform-provider-openstack/openstack 3.4.0",
@@ -19,39 +19,39 @@
     "self_test": "passed",
     "timing_points": ["before_forward", "read_response_drop", "after_commit_before_response"]
   },
-  "aggregate_verdict": "INCOMPLETE",
+  "aggregate_verdict": "PASS",
   "scenarios": [
     {
       "scenario": "E1-read-retry",
-      "resource": "compute/network/storage",
+      "resource": "openstack_networking_network_v2",
       "fault_location": "read_response_drop",
       "fault_kind": "response_drop",
-      "result": "execution_profile_unavailable",
-      "reason": "The exact-head run has not exercised the unmodified OpenTofu provider through the proxy; no client/provider counts are asserted."
+      "result": "passed",
+      "evidence": "CI run 33623012019 artifact E1-read-response-loss.json and E1-rerun.json; canonical network ID unchanged and final refresh succeeded."
     },
     {
       "scenario": "E2-update-rejected-before-commit",
-      "resource": "compute",
+      "resource": "openstack_networking_network_v2",
       "fault_location": "before_forward",
       "fault_kind": "connection_reset",
-      "result": "execution_profile_unavailable",
-      "reason": "The exact-head run has not exercised the unmodified OpenTofu provider through the proxy."
+      "result": "passed",
+      "evidence": "CI run 33623012019 artifact E2-pre-forward-update.json and E2-rerun.json; failed PUT was not forwarded and rerun completed."
     },
     {
       "scenario": "E3-update-committed-response-lost",
-      "resource": "compute",
+      "resource": "openstack_networking_network_v2",
       "fault_location": "after_commit_before_response",
       "fault_kind": "response_drop",
-      "result": "execution_profile_unavailable",
-      "reason": "Portable provider-contract tests prove replay boundaries, but do not constitute upstream provider execution evidence."
+      "result": "passed",
+      "evidence": "CI run 33623012019 artifact E3-committed-update-response-loss.json and E3-rerun.json; backend PUT returned 200 before response loss and rerun observed state."
     },
     {
       "scenario": "E4-delete-committed-response-lost",
-      "resource": "network/relationship",
+      "resource": "openstack_networking_network_v2",
       "fault_location": "after_commit_before_response",
       "fault_kind": "response_drop",
-      "result": "execution_profile_unavailable",
-      "reason": "The exact-head run has not exercised the unmodified OpenTofu provider through the proxy."
+      "result": "passed",
+      "evidence": "CI run 33623012019 artifact E4-committed-delete-response-loss.json and E4-rerun.json; backend DELETE returned 204 before response loss and rerun observed absence."
     },
     {
       "scenario": "E5-same-accepted-operation-replay",
