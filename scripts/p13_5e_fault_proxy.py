@@ -155,6 +155,28 @@ def self_test():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--serve-backend")
+    parser.add_argument("--evidence")
+    parser.add_argument("--rule", action="append", default=[], help="METHOD PATH LOCATION KIND")
     args = parser.parse_args()
     if args.self_test: self_test()
+    elif args.serve_backend:
+        rules = []
+        for value in args.rule:
+            fields = value.split(" ", 3)
+            if len(fields) != 4:
+                parser.error("--rule must be: METHOD PATH LOCATION KIND")
+            rules.append(FaultRule(*fields))
+        proxy = FaultProxy(args.serve_backend, rules)
+        proxy.start()
+        print(proxy.address, flush=True)
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if args.evidence:
+                with open(args.evidence, "w", encoding="utf-8") as stream:
+                    json.dump({"records": proxy.evidence()}, stream, indent=2)
+            proxy.close()
     else: parser.error("the proxy is test infrastructure; use --self-test or import it")

@@ -82,7 +82,16 @@ jobs:
       - name: Test P13.5E deterministic fault proxy and evidence artifact
         run: |
           python3 scripts/p13_5e_fault_proxy.py --self-test
+          bash scripts/p13_prepare_toolchain.sh --self-test
           python3 -m json.tool docs/compatibility/p13-5/p13-5e-retry-replay-evidence.json >/dev/null
+      - name: Prepare and verify pinned P13 provider toolchain
+        id: p13-toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y unzip
+          bash scripts/p13_prepare_toolchain.sh > "$RUNNER_TEMP/p13-toolchain.env"
+          cat "$RUNNER_TEMP/p13-toolchain.env" >> "$GITHUB_ENV"
       - name: Install pinned actionlint
         run: |
           install_dir="${RUNNER_TEMP}/actionlint/bin"
