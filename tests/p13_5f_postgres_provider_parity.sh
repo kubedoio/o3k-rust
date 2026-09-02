@@ -125,3 +125,4 @@ if run_status == "passed" and pathlib.Path(b_output).is_file():
 output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
 print(json.dumps({"output": str(output), "status": document["final_verdict"], "execution": run_status}))
 PY
+python3 "$root_dir/scripts/validate_p13_5f_postgres_provider_parity.py" "$output"
