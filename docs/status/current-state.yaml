@@ -258,20 +258,18 @@ profiles:
       - generic cross-cloud connectivity
   p13-iac-compatibility-v1:
     implementation_state: >-
-      Specified and bounded P13.3 implementation-complete. This profile extends native-rust-testlab for Terraform/OpenTofu
-      IaC compatibility. ADR-0175 and SPEC-0032 are accepted. The bounded P13.2
-      core managed-resource slice is complete and provider-lifecycle-verified
-      from committed real-provider evidence at
-      cee2a8e892588a7b27ea8585d6843b71360908f8 for keypair, Network, Subnet,
-      Port, and Server. This is not a claim of general OpenStack or Terraform
-      compatibility.
+      Specified and bounded P13.5 implementation-complete. This profile extends
+      native-rust-testlab for Terraform/OpenTofu IaC compatibility. ADR-0175
+      and SPEC-0032 are accepted. The bounded P13.2-P13.4 provider lifecycle
+      gates and P13.5 state-convergence evidence are verified with OpenTofu
+      1.12.6 and the unmodified upstream OpenStack provider 3.4.0 across the
+      tested SQLite and PostgreSQL persistence profiles. This is not a claim
+      of general OpenStack or Terraform compatibility.
       ADR-0176 and SPEC-0033 were accepted on 2026-08-24 against reviewed
       proposal baseline 9b5a74d9e470278c77907a5c3ca22a56af4fe64a. P13.1
       provider discovery and canonical Network/AddressRealm runtime closure
-      are complete through P13.1F3. No Terraform managed-resource lifecycle
-      support claim is made; remaining provider failures are frozen P13.2
-      requirements.
-    source_commit: 9b5a74d9e470278c77907a5c3ca22a56af4fe64a
+      are complete through P13.1F3. P13.6 and P13.7 remain unproven.
+    source_commit: b10b5cb2faf7734cebe46fbe19c1dcca8b387443
     portable_evidence:
       - name: adr-0175-accepted
         state: passed
@@ -302,19 +300,24 @@ profiles:
           docs/compatibility/p13-2/p13-2c-provider-port-lifecycle-evidence.json;
           docs/compatibility/p13-2/p13-2d-provider-server-lifecycle-evidence.json.
       - name: p13-3-bounded-provider-lifecycle
-        state: not-proven
+        state: passed
         note: >-
-          Historical evidence exists for the bounded Security Group, Port
-          security-group attachment, Floating IP, and L3Gateway/Router
-          projection paths, but the gateway lifecycle/provider changes on the
-          current branch require those protected real-provider gates to be
-          rerun before this claim can be restored.
+          Exact-head isolated PostgreSQL and SQLite baseline manifests verify
+          the bounded Security Group, Port security-group attachment,
+          Floating IP, and Router provider lifecycle paths.
       - name: p13-3-native-policy-real-traffic
         state: not-proven
         note: >-
           Historical real-QEMU evidence exists, but current gateway/provider
           lifecycle changes require the protected policy traffic and recovery
           gate to be rerun before this claim can be restored.
+      - name: p13-5-state-convergence-backend-parity
+        state: passed
+        note: >-
+          docs/compatibility/p13-5/p13-5f-backend-parity-aggregate-evidence.json
+          records exact-head SQLite and PostgreSQL provider matrices, bounded
+          retry/replay, relationship, replacement, deletion, and cleanup
+          results. The lost-create-response case remains explicitly ambiguous.
     full_profile_evidence:
       - name: iac-full-lifecycle-gate
         state: not-proven
@@ -322,10 +325,10 @@ profiles:
       Non-blocking for the first native alpha (v0.2.0-alpha.1). This profile
       extends native-rust-testlab but does not alter its release gate.
     blockers:
-      - protected P13.3 provider, privileged, traffic, and recovery gates must be rerun from the current implementation
+      - P13.6 multi-project adversarial and controller failure evidence remains unproven
+      - P13.7 full-stack real-host acceptance remains unproven
     next_evidence_action: >-
-      Rerun the protected P13.3 provider, privileged, traffic, and recovery
-      gates from the current implementation before restoring completion claims.
+      Open an accepted P13.6 issue before expanding the compatibility claim.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)

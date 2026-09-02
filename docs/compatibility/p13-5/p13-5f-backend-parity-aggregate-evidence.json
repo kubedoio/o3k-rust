@@ -1,0 +1,98 @@
+{
+  "artifact_type": "o3k-p13-5f-backend-parity-aggregate-evidence",
+  "schema_version": 1,
+  "phase": "P13.5",
+  "source_head_sha": "b10b5cb2faf7734cebe46fbe19c1dcca8b387443",
+  "starting_main_sha": "41f60cf742cc48ea6d4a0655ede4cfe5d0038a51",
+  "profile": "p13-iac-compatibility-v1",
+  "canonical_authority": "o3k",
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_modified": false,
+    "provider_source_tag": "v3.4.0",
+    "provider_source_commit": "4fd8eba1f85edfdc7aed2d17bae3f3c814abad41",
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc"
+  },
+  "evidence_references": {
+    "p13_5a": "docs/compatibility/p13-5/p13-5a-convergence-contract.json",
+    "p13_5b": "docs/compatibility/p13-5/p13-5b-refresh-import-evidence.json",
+    "p13_5c": "docs/compatibility/p13-5/p13-5c-canonical-out-of-band-drift-evidence.json",
+    "p13_5d": "docs/compatibility/p13-5/p13-5d-replacement-relationship-evidence.json",
+    "p13_5e": "docs/compatibility/p13-5/p13-5e-retry-replay-evidence.json"
+  },
+  "backend_results": {
+    "sqlite": {
+      "provider_matrix": "passed",
+      "gated_provider_run": {
+        "artifact": "docs/compatibility/p13-5/p13-5b-refresh-import-evidence.json",
+        "execution_mode": "gated",
+        "tested_head_sha": "b10b5cb2faf7734cebe46fbe19c1dcca8b387443",
+        "scenarios": 11,
+        "final_plan_noop": 11,
+        "cleanup_passed": 11,
+        "gated_provider_manifest": "/var/tmp/p13-5f-sqlite-exact.json",
+        "database_isolation": "fresh disposable SQLite data directory per gate"
+      },
+      "exploratory_provider_run": {
+        "artifact": "target/p13-5b/refresh-import-evidence.json",
+        "scenarios": 24,
+        "scenario_results": "passed",
+        "cleanup_results": "passed",
+        "execution_mode": "exploratory_blocked_baseline"
+      },
+      "reason": "exact-head isolated provider baseline verified; prior historical artifacts are retained only as provenance"
+      ,"gated_baseline_attempts": [
+        {"artifact": "/var/tmp/p13-5f-baseline-clean-3.json", "status": "blocked", "passed_gates": 9, "failed_gates": 2, "reason": "router endpoint and attachment temporary server were unavailable"},
+        {"artifact": "/var/tmp/p13-5f-baseline-clean-4.json", "status": "blocked", "passed_gates": 10, "failed_gates": 1, "reason": "subnet deletion returned HTTP 500 network storage is unavailable"}
+      ],
+      "direct_subnet_reproduction": {"execution": "clean disposable worktree", "lifecycle_before_delete": "passed", "failure": "final subnet delete returned HTTP 500 network storage is unavailable", "result": "blocked"}
+    },
+    "postgresql": {
+      "store_reconstruction": "passed",
+      "store_relationships": "passed",
+      "store_storage_reopen": "passed",
+      "provider_retry_replay": "passed",
+      "provider_matrix": "passed",
+      "gated_provider_run": {"artifact": "/var/tmp/p13-5f-pg-isolated.json", "gates": 11, "passed": 11, "blocked": 0, "database_isolation": "fresh public schema before every gate", "source_commit": "4d684f2991edfaf9f48d37f945520c960632f7c0", "runner_fix_commit": "b10b5cb2faf7734cebe46fbe19c1dcca8b387443"},
+      "isolated_attachment_gate": {"command": "tests/p13_4_provider_volume_attachment_smoke.sh", "database": "o3k_p13_gate_attach", "result": "passed", "apply": "passed", "plan_noop": "passed", "destroy": "passed", "cleanup": "passed", "log": "/tmp/o3k-p13-4-attachment.NK6BHG"},
+      "reason": "All 11 P13.2-P13.4 real-provider gates passed on PostgreSQL with a fresh schema before each gate; the prior shared-database contamination is retained only as historical blocked evidence."
+    }
+  },
+  "scenario_matrix": [
+    {"scenario": "stable_read", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "import", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "mutable_drift_reconvergence", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "native_deletion_recreation", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "independent_replacement", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "router_interface_relationship", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "volume_attachment_relationship", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "read_retry", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "pre_commit_retry", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "committed_update_response_loss", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "committed_delete_response_loss", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "operation_replay", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "relationship_replay", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "lost_create_response", "sqlite": "expected_ambiguous", "postgresql": "expected_ambiguous"}
+  ],
+  "postgresql_store_tests": {
+    "postgres_p13_f1": {"command": "cargo test -p o3k-store --test postgres_p13_f1 -- --ignored", "passed": 5},
+    "postgres_p13_b1": {"command": "cargo test -p o3k-store --test postgres_p13_b1 -- --ignored", "passed": 4},
+    "postgres_p13_4_storage": {"command": "cargo test -p o3k-store --test postgres_p13_4_storage -- --ignored", "passed": 1}
+  },
+  "postgresql_provider_tests": {
+    "p13_5e_real_provider_fault_proxy": {
+      "command": "O3K_DATABASE_BACKEND=postgres O3K_DATABASE_URL=postgres://o3k:password@127.0.0.1:5432/o3k_test bash tests/p13_5e_real_provider_fault_proxy.sh",
+      "result": "passed",
+      "scope": "retry/replay fault-proxy lifecycle"
+    }
+  },
+  "known_deviations": [
+    "P13.5B and canonical P13.5C artifacts are not valid exact-HEAD F evidence and are retained as historical references.",
+    "P13.5E preserves AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS; client-level exactly-once create is not claimed.",
+    "The historical shared PostgreSQL baseline was contaminated by cross-gate state; the exact-head isolated rerun resets the disposable schema before every gate and supersedes that blocked attempt."
+  ],
+  "deferred_p13_6": ["multi-project isolation", "controller crash/failure matrix", "lost-create-response adversarial treatment"],
+  "cleanup": {"local_server": "passed", "provider_matrix": "passed", "lvm_profile": "passed"},
+  "final_aggregate_verdict": "passed"
+}
