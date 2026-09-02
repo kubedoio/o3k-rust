@@ -58,6 +58,14 @@ if json.load(open(sys.argv[1])).get("status") != "verified": raise SystemExit(1)
 PY
 then blocked "P13.2-P13.4 baseline manifest is not verified"; fi
 
+if [[ "${O3K_DATABASE_BACKEND:-sqlite}" == postgres ]]; then
+  if [[ "${O3K_P13_ALLOW_DESTRUCTIVE_POSTGRES_RESET:-0}" != 1 ]]; then
+    blocked "PostgreSQL scenario isolation requires explicit disposable-schema reset opt-in"
+  fi
+  psql "$O3K_DATABASE_URL" -v ON_ERROR_STOP=1 -c \
+    'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' >/dev/null
+fi
+
 tofu="$(printenv O3K_P13_TOFU)"
 provider_binary="$(printenv O3K_P13_PROVIDER_BINARY)"
 provider_archive="$(printenv O3K_P13_PROVIDER_ARCHIVE)"
