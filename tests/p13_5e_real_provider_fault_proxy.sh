@@ -79,6 +79,10 @@ proxy_evidence="$work/E3-committed-update-response-loss.json"; start_proxy --rul
 assert_fault "$work/E3-committed-update-response-loss.json" after_commit_before_response
 proxy_evidence="$work/E4-committed-delete-response-loss.json"; start_proxy --rule 'DELETE /v2.0/networks* after_commit_before_response response_loss'; ! "$O3K_P13_TOFU" destroy -input=false -auto-approve >/dev/null 2>&1; stop_proxy; proxy_evidence="$work/E4-rerun.json"; start_proxy; "$O3K_P13_TOFU" destroy -input=false -auto-approve >/dev/null; stop_proxy
 assert_fault "$work/E4-committed-delete-response-loss.json" after_commit_before_response
-"$O3K_P13_TOFU" plan -input=false -detailed-exitcode >/dev/null
+if ! "$O3K_P13_TOFU" plan -input=false -detailed-exitcode >/dev/null; then
+  echo 'P13.5E final plan was not a no-op; diagnostic plan follows' >&2
+  "$O3K_P13_TOFU" plan -input=false
+  exit 1
+fi
 cp "$work"/E*.json "${O3K_P13_EVIDENCE_DIR:-$work}/" 2>/dev/null || true
 echo 'P13.5E real-provider fault-proxy lifecycle passed'
