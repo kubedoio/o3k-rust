@@ -48,12 +48,15 @@ python3 "$root_dir/scripts/p13_provider_contract.py" --verify-tools
 # by the reused P13.5 journeys instead of allowing `set -u` to abort the
 # baseline before it can execute.
 export O3K_P13_PASSWORD="${O3K_P13_PASSWORD:-p13-5b-refresh-import-password}"
+export O3K_P13_SOURCE_HEAD_SHA="${O3K_P13_SOURCE_HEAD_SHA:-$(git -C "$root_dir" rev-parse HEAD)}"
 
 work_dir="${O3K_P13_5F_WORK_DIR:-$(mktemp -d /var/tmp/o3k-p13-5f-postgres.XXXXXX)}"
 mkdir -p "$work_dir"
 log="$work_dir/p13-5b-refresh-import.log"
 b_output="$work_dir/p13-5b-refresh-import-evidence.json"
 baseline="$work_dir/p13-baseline-manifest.json"
+replacement_row_dir="$work_dir/p13-5d-rows"
+mkdir -p "$replacement_row_dir"
 if O3K_DATABASE_BACKEND=postgres \
    O3K_P13_ALLOW_DESTRUCTIVE_POSTGRES_RESET=1 \
    python3 "$root_dir/scripts/p13_baseline_gate_manifest.py" --output "$baseline" >"$work_dir/baseline.log" 2>&1; then
@@ -76,6 +79,8 @@ if [[ -x "${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}" ]]; then
   P13_5B_BASELINE_RESULT="$baseline_result" \
   P13_5B_BASELINE_MANIFEST="$baseline" \
   O3K_P13_5B_SKIP_NATIVE_VOLUME="$native_volume_skip" \
+  P13_5D_RUN=1 \
+  O3K_P13_5D_ROW_DIR="$replacement_row_dir" \
   O3K_P13_5B_KEEP_WORK_DIR=1 \
     bash "$root_dir/tests/p13_5b_refresh_import.sh" >"$log" 2>&1
   rc=$?
@@ -114,11 +119,31 @@ fi
 d_output="$work_dir/p13-5d-replacement.json"
 d_log="$work_dir/p13-5d-replacement.log"
 d_status=blocked
-if [[ -n "${O3K_LVM_VOLUME_GROUP:-}" && -n "${O3K_LVM_THIN_POOL:-}" && -n "${O3K_LVM_PROVIDER_NAMESPACE:-}" ]]; then
-  if run_child p13-5d "$d_log" P13_5D_BASELINE_MANIFEST="$baseline" \
-    O3K_P13_5D_EVIDENCE_OUTPUT="$d_output" bash "$root_dir/tests/p13_5d_replacement_relationships.sh"; then
-    d_status=passed
-  fi
+if python3 - "$d_output" "$replacement_row_dir" "$O3K_P13_SOURCE_HEAD_SHA" >"$d_log" 2>&1 <<'PY'
+import json
+import pathlib
+import sys
+
+output, row_dir, head = sys.argv[1:]
+rows = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(pathlib.Path(row_dir).glob("*.json"))]
+if not rows:
+    raise SystemExit("no executed replacement rows were emitted")
+if any(row.get("result") != "passed" for row in rows):
+    raise SystemExit("an executed replacement row did not pass")
+document = {
+    "artifact_type": "o3k-p13-5d-replacement-relationship-evidence",
+    "schema_version": 1,
+    "phase": "P13.5D",
+    "profile": "p13-iac-compatibility-v1",
+    "tested_o3k_head_sha": head,
+    "provider_modified": False,
+    "aggregate_verdict": "PASS",
+    "scenarios": rows,
+}
+pathlib.Path(output).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+then
+  d_status=passed
 fi
 
 python3 - "$output" "$root_dir" "$run_status" "$b_output" "$log" "$baseline" "$c_status" "$c_output" "$c_log" "$e_status" "$e_dir" "$e_log" "$d_status" "$d_output" "$d_log" <<'PY'
@@ -201,6 +226,19 @@ if pathlib.Path(b_output).is_file():
         d = json.loads(pathlib.Path(d_output).read_text(encoding="utf-8"))
         if d.get("status") == "passed":
             document["scenarios"][3].update(result="passed", externally_equivalent=True, evidence=str(pathlib.Path(d_output).resolve()))
+        elif d.get("aggregate_verdict") == "PASS":
+            replacement_evidence = str(pathlib.Path(d_output).resolve())
+            for replacement in d.get("scenarios", []):
+                scenario = replacement.get("scenario")
+                if scenario == "router-interface":
+                    document["scenarios"][4].update(result="passed", externally_equivalent=True, evidence=replacement_evidence)
+                elif scenario == "volume-attachment":
+                    document["scenarios"][5].update(result="passed", externally_equivalent=True, evidence=replacement_evidence)
+                elif scenario == "independent-resource":
+                    document["scenarios"][3].update(result="passed", externally_equivalent=True, evidence=replacement_evidence)
+            # The locally assembled D artifact uses aggregate_verdict rather
+            # than the legacy child-run status field; its rows are the
+            # authoritative structured evidence for PG4–PG6.
 output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
 print(json.dumps({"output": str(output), "status": document["final_verdict"], "execution": run_status}))
 PY
