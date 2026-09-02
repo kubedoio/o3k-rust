@@ -38,7 +38,11 @@ cleanup() {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   fi
-  rm -rf "$work_dir"
+  if [[ "${O3K_P13_5B_KEEP_WORK_DIR:-0}" == 1 ]]; then
+    echo "P13.5B diagnostic work directory preserved: $work_dir" >&2
+  else
+    rm -rf "$work_dir"
+  fi
 }
 trap cleanup EXIT
 
@@ -187,11 +191,28 @@ PY
 }
 
 canonical_attachment_count() {
-  python3 - "$work_dir/data/o3k.sqlite" "$project_id" "$1" "$2" <<'PY'
+  python3 - "${O3K_DATABASE_BACKEND:-sqlite}" "${O3K_DATABASE_URL:-}" "$work_dir/data/o3k.sqlite" "$project_id" "$1" "$2" <<'PY'
+import os
+import subprocess
 import sqlite3
 import sys
 
-database, project, gateway, realm = sys.argv[1:]
+backend, database_url, database, project, gateway, realm = sys.argv[1:]
+query = """
+    SELECT COUNT(*)
+    FROM canonical_l3_gateway_attachments
+    WHERE project_id = :'project' AND gateway_id = :'gateway' AND realm_id = :'realm' AND state = 'active'
+"""
+if backend == "postgres":
+    def literal(value):
+        return "'" + value.replace("'", "''") + "'"
+    query = query.replace(":'project'", literal(project)).replace(":'gateway'", literal(gateway)).replace(":'realm'", literal(realm))
+    result = subprocess.run(
+        ["psql", database_url, "-At", "-v", "ON_ERROR_STOP=1", "-c", query],
+        check=True, capture_output=True, text=True,
+    )
+    print(result.stdout.strip())
+    raise SystemExit
 connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
 count = connection.execute(
     """
@@ -216,13 +237,15 @@ canonical_store_snapshot() {
   local resource="$1"
   local identity="$2"
   local output_path="$3"
-  python3 - "$work_dir/data/o3k.sqlite" "$work_dir/data/public-addresses/public-addresses.json" "$project_id" "$resource" "$identity" >"$output_path" <<'PY'
+  python3 - "${O3K_DATABASE_BACKEND:-sqlite}" "${O3K_DATABASE_URL:-}" "$work_dir/data/o3k.sqlite" "$work_dir/data/public-addresses/public-addresses.json" "$project_id" "$resource" "$identity" >"$output_path" <<'PY'
 import json
+import os
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
-database, public_state, project, resource, identity = sys.argv[1:]
+backend, database_url, database, public_state, project, resource, identity = sys.argv[1:]
 
 table_specs = {
     "openstack_compute_keypair_v2": ("keypairs", "name", "project_id", None),
@@ -255,17 +278,30 @@ else:
         table, id_column, owner_column, predicate = table_specs[resource]
     except KeyError as error:
         raise SystemExit(f"no canonical SQLite mapping for {resource}") from error
-    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     where = f"{id_column} = ? AND {owner_column} = ?"
     if predicate:
         where += f" AND {predicate}"
-    rows = connection.execute(
-        f"SELECT {id_column}, {owner_column} FROM {table} WHERE {where}",
-        (identity, project),
-    ).fetchall()
+    if backend == "postgres":
+        def literal(value):
+            return "'" + value.replace("'", "''") + "'"
+        postgres_where = f"{id_column} = {literal(identity)} AND {owner_column} = {literal(project)}"
+        if predicate:
+            postgres_where += f" AND {predicate}"
+        result = subprocess.run(
+            ["psql", database_url, "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-c", f"SELECT {id_column}, {owner_column} FROM {table} WHERE {postgres_where}"],
+            check=True, capture_output=True, text=True,
+        )
+        rows = [tuple(line.split("\t", 1)) for line in result.stdout.splitlines() if line]
+        source_detail = f"canonical_store:postgres:{table}"
+    else:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+        rows = connection.execute(
+            f"SELECT {id_column}, {owner_column} FROM {table} WHERE {where}",
+            (identity, project),
+        ).fetchall()
+        connection.close()
+        source_detail = f"canonical_store:sqlite:{table}"
     records = [{"resource_id": row[0], "owner_scope": row[1]} for row in rows]
-    source_detail = f"canonical_store:sqlite:{table}"
-    connection.close()
 
 owners = {item["owner_scope"] for item in records}
 if len(owners) > 1:
@@ -1651,7 +1687,7 @@ def scenario(resource, kind, canonical, import_id, refresh_files, normal_files, 
         "canonical_resource_count_after_cleanup": canonical_after_cleanup_count if result == "passed" else None,
         "canonical_parent_observation": parent_observation,
         "cleanup_result": cleanup,
-        "backend": "sqlite",
+        "backend": os.environ.get("O3K_DATABASE_BACKEND", "sqlite"),
         "head_sha": __import__("subprocess").check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip(),
         "result": result,
     }

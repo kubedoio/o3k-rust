@@ -1296,6 +1296,11 @@ pub(crate) struct NetworkPolicyQuery {
 }
 
 #[derive(serde::Deserialize)]
+pub(crate) struct NetworkQuery {
+    id: Option<Uuid>,
+}
+
+#[derive(serde::Deserialize)]
 pub(crate) struct NetworkPolicyRequestBody {
     policy: NetworkPolicyRequest,
 }
@@ -2983,6 +2988,7 @@ pub(crate) async fn create_network(
 pub(crate) async fn list_networks(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    Query(query): Query<NetworkQuery>,
 ) -> axum::response::Response {
     let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
@@ -2996,6 +3002,9 @@ pub(crate) async fn list_networks(
         Ok(values) => {
             let mut networks = Vec::with_capacity(values.len());
             for value in values {
+                if query.id.is_some_and(|id| id != value.id) {
+                    continue;
+                }
                 match canonical_network_response(service, value).await {
                     Ok(network) => networks.push(network),
                     Err(error) => return network_error(error),

@@ -1,0 +1,34 @@
+{
+  "artifact_type": "o3k-p13-5f-postgres-store-conformance-evidence",
+  "schema_version": 1,
+  "phase": "P13.5",
+  "tested_o3k_head_sha": "cb1fec579ab50070848b307501f8fa5354d471f6",
+  "profile": "p13-iac-compatibility-v1",
+  "backend": "postgresql",
+  "database_isolation": "dedicated disposable database; removed after execution",
+  "provider_modified": false,
+  "scope": "store and persistence conformance only; not provider-level PG1-PG7 parity",
+  "suites": {
+    "postgres_p13_f1": {
+      "command": "cargo test -p o3k-store --test postgres_p13_f1 -- --ignored",
+      "passed": 5,
+      "failed": 0
+    },
+    "postgres_p13_b1": {
+      "command": "cargo test -p o3k-store --test postgres_p13_b1 -- --ignored",
+      "passed": 4,
+      "failed": 0
+    },
+    "postgres_p13_4_storage": {
+      "command": "cargo test -p o3k-store --test postgres_p13_4_storage -- --ignored",
+      "passed": 1,
+      "failed": 0
+    }
+  },
+  "aggregate": {
+    "passed": 10,
+    "failed": 0,
+    "result": "passed"
+  },
+  "parity_claim": "blocked_pending_provider_level_pg1_pg7_evidence"
+}

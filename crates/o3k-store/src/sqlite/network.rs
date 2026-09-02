@@ -1546,7 +1546,7 @@ impl SqliteStore {
             .execute(&mut *tx)
             .await
             .map_err(StoreError::Database)?;
-            let result = sqlx::query("DELETE FROM canonical_address_realms WHERE id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id)")
+            let result = sqlx::query("DELETE FROM canonical_address_realms WHERE id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM canonical_address_pools WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_endpoints WHERE realm_id = canonical_address_realms.id) AND NOT EXISTS (SELECT 1 FROM canonical_realm_encapsulation_bindings WHERE realm_id = canonical_address_realms.id)")
                 .bind(id.to_string()).bind(project_id).execute(&mut *tx).await.map_err(StoreError::Database)?;
             if result.rows_affected() == 0 {
                 return Err(StoreError::NetworkInUse);
