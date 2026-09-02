@@ -58,5 +58,5 @@ provider=$(find "$extract_dir/provider" -type f -name 'terraform-provider-openst
 [[ "$provider" == *"${provider_version}"* ]] || { echo 'provider version mismatch' >&2; exit 1; }
 printf '%s  %s\n' "$provider_hash" "$provider" | sha256sum --check --status || { echo 'provider binary checksum mismatch' >&2; exit 1; }
 export O3K_P13_TOFU="$tofu" O3K_P13_TOFU_ARCHIVE="$tofu_archive" O3K_P13_PROVIDER_ARCHIVE="$provider_archive" O3K_P13_PROVIDER_BINARY="$provider" O3K_P13_PROVIDER_SHA256="$provider_hash"
-python3 "$root_dir/scripts/p13_provider_contract.py" --verify-tools
-printf 'O3K_P13_TOFU=%q\nO3K_P13_TOFU_ARCHIVE=%q\nO3K_P13_PROVIDER_ARCHIVE=%q\nO3K_P13_PROVIDER_BINARY=%q\nO3K_P13_PROVIDER_SHA256=%q\n' "$O3K_P13_TOFU" "$O3K_P13_TOFU_ARCHIVE" "$O3K_P13_PROVIDER_ARCHIVE" "$O3K_P13_PROVIDER_BINARY" "$O3K_P13_PROVIDER_SHA256"
+python3 "$root_dir/scripts/p13_provider_contract.py" --verify-tools >/dev/null
+printf 'export O3K_P13_TOFU=%q\nexport O3K_P13_TOFU_ARCHIVE=%q\nexport O3K_P13_PROVIDER_ARCHIVE=%q\nexport O3K_P13_PROVIDER_BINARY=%q\nexport O3K_P13_PROVIDER_SHA256=%q\n' "$O3K_P13_TOFU" "$O3K_P13_TOFU_ARCHIVE" "$O3K_P13_PROVIDER_ARCHIVE" "$O3K_P13_PROVIDER_BINARY" "$O3K_P13_PROVIDER_SHA256"

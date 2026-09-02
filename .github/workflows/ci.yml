@@ -236,6 +236,8 @@ jobs:
           cargo build --bin o3kd --locked
           cargo build --bin o3k-compute-bin --features libvirt --locked
           python3 scripts/emit-build-manifest.py target/ci-artifacts/build-manifest.json "${GITHUB_SHA}"
+      - name: Run P13.5E real upstream provider fault-proxy gate
+        run: bash tests/p13_5e_real_provider_fault_proxy.sh
       - name: Upload exact-source build manifest
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

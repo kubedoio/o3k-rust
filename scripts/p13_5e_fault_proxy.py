@@ -38,7 +38,7 @@ class ProxyRecord:
 
 
 class FaultProxy:
-    def __init__(self, backend: str, rules: list[FaultRule] | None = None):
+    def __init__(self, backend: str, rules: list[FaultRule] | None = None, listen_port: int = 0):
         self.backend = backend
         self.rules = rules or []
         self.records: list[ProxyRecord] = []
@@ -53,7 +53,7 @@ class FaultProxy:
             def do_DELETE(self): owner._handle(self)
             def log_message(self, *_args): pass
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = ThreadingHTTPServer(("127.0.0.1", listen_port), Handler)
         self._target = (target.hostname, target.port or 80, target.path.rstrip("/"))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
@@ -67,7 +67,9 @@ class FaultProxy:
     def _handle(self, request):
         with self._lock:
             number = len(self.records) + 1
-            rule = next((r for r in self.rules if r.remaining and r.method == request.command and r.path == request.path.split("?", 1)[0]), None)
+            request_path = request.path.split("?", 1)[0]
+            matches = lambda pattern: pattern == "*" or (pattern.endswith("*") and request_path.startswith(pattern[:-1])) or pattern == request_path
+            rule = next((r for r in self.rules if r.remaining and r.method == request.command and matches(r.path)), None)
             if rule: rule.remaining -= 1
         if rule and rule.location == "before_forward":
             record = ProxyRecord(number, request.command, request.path, False, None, "error", rule.location, rule.kind)
@@ -158,6 +160,7 @@ if __name__ == "__main__":
     parser.add_argument("--serve-backend")
     parser.add_argument("--evidence")
     parser.add_argument("--rule", action="append", default=[], help="METHOD PATH LOCATION KIND")
+    parser.add_argument("--listen-port", type=int, default=0)
     args = parser.parse_args()
     if args.self_test: self_test()
     elif args.serve_backend:
@@ -167,7 +170,7 @@ if __name__ == "__main__":
             if len(fields) != 4:
                 parser.error("--rule must be: METHOD PATH LOCATION KIND")
             rules.append(FaultRule(*fields))
-        proxy = FaultProxy(args.serve_backend, rules)
+        proxy = FaultProxy(args.serve_backend, rules, args.listen_port)
         proxy.start()
         print(proxy.address, flush=True)
         try:
