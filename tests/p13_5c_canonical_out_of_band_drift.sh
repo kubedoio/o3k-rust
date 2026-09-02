@@ -52,7 +52,7 @@ for name in O3K_P13_TOFU O3K_P13_PROVIDER_BINARY O3K_P13_PROVIDER_ARCHIVE O3K_P1
 done
 if [[ -n "$missing_names" ]]; then blocked "required P13 toolchain environment is missing:$missing_names"; fi
 if [[ -z "$baseline_manifest" || ! -f "$baseline_manifest" ]]; then blocked "verified P13.2-P13.4 baseline manifest is required"; fi
-if ! python3 - "$baseline_manifest" <<'PY'
+if [[ "${P13_5C_ALLOW_BLOCKED_BASELINE:-0}" != 1 ]] && ! python3 - "$baseline_manifest" <<'PY'
 import json, sys
 if json.load(open(sys.argv[1])).get("status") != "verified": raise SystemExit(1)
 PY

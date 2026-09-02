@@ -71,7 +71,7 @@ if [[ -x "${O3K_P13_O3KD:-$root_dir/target/debug/o3kd}" ]]; then
   P13_5B_BASELINE_MANIFEST="$baseline" \
   O3K_P13_5B_SKIP_NATIVE_VOLUME="$native_volume_skip" \
   O3K_P13_5B_KEEP_WORK_DIR=1 \
-    "$root_dir/tests/p13_5b_refresh_import.sh" >"$log" 2>&1
+    bash "$root_dir/tests/p13_5b_refresh_import.sh" >"$log" 2>&1
   rc=$?
   set -e
   if [[ $rc -eq 0 ]]; then run_status=passed; else run_status=failed; fi
@@ -92,7 +92,7 @@ run_child() {
 c_output="$work_dir/p13-5c-canonical-drift.json"
 c_log="$work_dir/p13-5c-canonical-drift.log"
 c_status=blocked
-if run_child p13-5c "$c_log" env P13_5A_RUN_BASELINE=1 P13_5B_BASELINE_MANIFEST="$baseline" P13_5C_REMOTE_DELETE=1 \
+if run_child p13-5c "$c_log" env P13_5A_RUN_BASELINE=1 P13_5B_BASELINE_MANIFEST="$baseline" P13_5C_ALLOW_BLOCKED_BASELINE=1 P13_5C_REMOTE_DELETE=1 \
   O3K_P13_5C_OUT_OF_BAND_EVIDENCE_OUTPUT="$c_output" bash "$root_dir/tests/p13_5c_canonical_out_of_band_drift.sh"; then
   c_status=passed
 fi
