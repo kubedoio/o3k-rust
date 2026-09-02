@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import threading
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -173,6 +174,13 @@ if __name__ == "__main__":
         proxy = FaultProxy(args.serve_backend, rules, args.listen_port)
         proxy.start()
         print(proxy.address, flush=True)
+        def shutdown(_signum, _frame):
+            if args.evidence:
+                with open(args.evidence, "w", encoding="utf-8") as stream:
+                    json.dump({"records": proxy.evidence()}, stream, indent=2)
+            proxy.close()
+            raise SystemExit(0)
+        signal.signal(signal.SIGTERM, shutdown)
         try:
             threading.Event().wait()
         except KeyboardInterrupt:
