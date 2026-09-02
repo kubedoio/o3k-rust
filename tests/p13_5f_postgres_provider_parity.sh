@@ -9,6 +9,19 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 output="${O3K_P13_5F_POSTGRES_EVIDENCE_OUTPUT:-$root_dir/target/p13-5f/postgres-provider-parity.json}"
 mkdir -p "$(dirname "$output")"
 
+write_abort_artifact() {
+  [[ -f "$output" ]] && return 0
+  python3 - "$output" "$root_dir" <<'PY'
+import json, pathlib, subprocess, sys
+out, root = sys.argv[1:]
+head = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip()
+names = ["PG1-import-read-reconstruction", "PG2-mutable-drift-reconvergence", "PG3-remote-deletion-recreation", "PG4-independent-replacement", "PG5-router-interface-relationship", "PG6-volume-attachment-relationship", "PG7-operation-replay-unknown-outcome"]
+document = {"artifact_type": "o3k-p13-5f-postgres-provider-parity", "schema_version": 1, "phase": "P13.5F", "tested_o3k_head_sha": head, "backend": "postgresql", "provider_modified": False, "execution": {"orchestrator": "tests/p13_5f_postgres_provider_parity.sh", "status": "failed", "failure_artifact": True}, "scenarios": [{"scenario": name, "result": "blocked", "externally_equivalent": False, "reason": "orchestrator exited before scenario completion"} for name in names], "final_verdict": "blocked"}
+pathlib.Path(out).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+PY
+}
+trap write_abort_artifact EXIT
+
 if [[ -z "${O3K_DATABASE_URL:-}" ]]; then
   echo "P13.5F PostgreSQL parity BLOCKED: O3K_DATABASE_URL is required" >&2
   exit 2
