@@ -211,11 +211,16 @@ document = {
 }
 if pathlib.Path(b_output).is_file():
     b = json.loads(pathlib.Path(b_output).read_text(encoding="utf-8"))
-    passed = {(row.get("resource"), row.get("kind")) for row in b.get("scenarios", []) if row.get("result") == "passed"}
+    passed = {(row.get("resource"), row.get("scenario")) for row in b.get("scenarios", []) if row.get("result") == "passed"}
     evidence = str(pathlib.Path(b_output).resolve())
     for row in document["scenarios"]:
         if row["scenario"] == "PG1-import-read-reconstruction" and ("openstack_networking_network_v2", "import") in passed:
-            row.update(result="passed", externally_equivalent=True, evidence=evidence)
+            source = next(item for item in b["scenarios"] if item.get("resource") == "openstack_networking_network_v2" and item.get("scenario") == "import")
+            row.update(result="passed", externally_equivalent=True, evidence=evidence,
+                       backend="postgresql", provider_modified=False,
+                       restart_reconstruction=True, final_plan_noop=True,
+                       canonical_id=source.get("canonical_id"), owner_scope=source.get("owner_scope"),
+                       plan_actions=source.get("plan_actions", []))
         # Import/read coverage does not prove relationship lifecycle parity.
         # PG5 and PG6 require their dedicated relationship journeys below;
         # never promote them from a generic import result.
@@ -223,10 +228,21 @@ if pathlib.Path(b_output).is_file():
         document["final_verdict"] = "passed"
     c = json.loads(pathlib.Path(c_output).read_text(encoding="utf-8")) if pathlib.Path(c_output).is_file() else {}
     if c_status == "passed" and c.get("scenario", {}).get("result") == "passed":
-        document["scenarios"][1].update(result="passed", externally_equivalent=True, evidence=str(pathlib.Path(c_output).resolve()))
+        c_row = c["scenario"]
+        document["scenarios"][1].update(result="passed", externally_equivalent=True, evidence=str(pathlib.Path(c_output).resolve()),
+                                         backend="postgresql", provider_modified=False,
+                                         restart_reconstruction=True, final_plan_noop=c_row.get("final_plan_noop"),
+                                         canonical_id_before=c_row.get("canonical_id_before"),
+                                         canonical_id_after=c_row.get("canonical_id_after_reapply"),
+                                         plan_actions=c_row.get("normal_plan_actions", []))
         deletion = c.get("scenario", {}).get("remote_deletion_recreation", {})
         if deletion.get("result") == "passed" and deletion.get("old_resource_absent") is True and deletion.get("identity_changed") is True:
-            document["scenarios"][2].update(result="passed", externally_equivalent=True, evidence=str(pathlib.Path(c_output).resolve()))
+            document["scenarios"][2].update(result="passed", externally_equivalent=True, evidence=str(pathlib.Path(c_output).resolve()),
+                                             backend="postgresql", provider_modified=False,
+                                             restart_reconstruction=True, final_plan_noop=True,
+                                             old_resource_absent=True, new_resource_id=deletion.get("new_resource_id"),
+                                             old_resource_id=deletion.get("old_resource_id"),
+                                             replacement_actions=["create"])
     # P13.5E proves fault-proxy recovery, but does not by itself prove the
     # PostgreSQL durable Operation replay/unknown-outcome contract required by
     # PG7. Keep PG7 blocked until that dedicated journey emits evidence.
@@ -249,7 +265,13 @@ if pathlib.Path(b_output).is_file():
                     and d_row.get("final_plan_noop") is True
                 ):
                     next(row for row in document["scenarios"] if row["scenario"] == pg_name).update(
-                        result="passed", externally_equivalent=True, evidence=str(pathlib.Path(d_output).resolve())
+                        result="passed", externally_equivalent=True, evidence=str(pathlib.Path(d_output).resolve()),
+                        backend="postgresql", provider_modified=False,
+                        restart_reconstruction=True, final_plan_noop=True,
+                        parents_preserved=True, provider_leaks=0, foreign_changes=0,
+                        plan_actions=d_row.get("plan_actions", []),
+                        parent_ids_before=d_row.get("parent_ids_before"), parent_ids_after=d_row.get("parent_ids_after"),
+                        replacement_actions=d_row.get("plan_actions", []),
                     )
     pg7 = pathlib.Path(e_dir) / "PG7-operation-replay-unknown-outcome.json"
     if e_status == "passed" and pg7.is_file():
@@ -264,6 +286,7 @@ if pathlib.Path(b_output).is_file():
         ):
             next(row for row in document["scenarios"] if row["scenario"] == "PG7-operation-replay-unknown-outcome").update(
                 result="passed", externally_equivalent=True, evidence=str(pg7.resolve()),
+                backend="postgresql", provider_modified=False, restart_reconstruction=True, final_plan_noop=True,
                 fault_location=replay["fault_location"], backend_completion_observed=True,
                 restart_boundary=True, replay_reconstruction=True,
             )

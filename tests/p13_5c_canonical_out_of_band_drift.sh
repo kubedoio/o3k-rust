@@ -127,6 +127,17 @@ curl -fsS -D "$work_dir/auth.headers" -o /dev/null -H 'Content-Type: application
 token="$(awk 'tolower($1)=="x-subject-token:" {print $2}' "$work_dir/auth.headers" | tr -d '\r')"
 [[ -n "$token" ]] || blocked "authentication did not return X-Subject-Token"
 
+restart_backend() {
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  O3K_BOOTSTRAP_PASSWORD="$password" O3K_TOKEN_SIGNING_KEY="p13-5c-out-of-band-token-signing-key-012345678901234567890123" \
+    O3K_COMPATIBILITY_TRACE_PATH="$trace_path" "$o3kd" --listen-addr "127.0.0.1:$port" \
+    --data-dir "$work_dir/data" >"$work_dir/o3kd-restart.log" 2>&1 &
+  pid=$!
+  for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1 && break; sleep 0.1; done
+  curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null
+}
+
 cat >"$project_dir/main.tf" <<EOF
 terraform {
   required_version = "= 1.12.6"
@@ -274,6 +285,7 @@ PY
 canonical_after_reapply="$(canonical_snapshot "$network_id" after_reapply)"
 canonical_after_cleanup=""
 compat_after_reapply="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$network_id")"
+restart_backend
 plan_json final-normal normal
 python3 - "$work_dir/final-normal.json" "$canonical_before" "$canonical_after_reapply" "$compat_after_reapply" <<'PY'
 import json, sys
@@ -314,6 +326,7 @@ d={"artifact_type":"o3k-p13-5c-canonical-out-of-band-drift-evidence","schema_ver
 d["scenario"]["canonical_id_before"] = b["records"][0]["resource_id"]
 d["scenario"]["old_resource_absent"] = False
 d["scenario"]["canonical_same_id_count"] = 1
+d["scenario"]["restart_reconstruction"] = True
 pathlib.Path(output).write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
 PY
 python3 - "$output" "$baseline_manifest" <<'PY'
