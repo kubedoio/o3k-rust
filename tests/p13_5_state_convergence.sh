@@ -35,15 +35,16 @@ if [[ "${P13_5E_SELF_TEST:-0}" == 1 ]]; then
 import json, pathlib, sys
 evidence = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 assert evidence["artifact_type"] == "o3k-p13-5e-retry-replay-evidence"
-assert evidence["execution_profile"] == "portable-contract-and-proxy-self-test"
+assert evidence["execution_profile"] == "portable-real-provider-fault-proxy-ci"
 assert evidence["canonical_authority"] == "o3k"
 assert evidence["toolchain"]["opentofu"] == "1.12.6"
 assert evidence["toolchain"]["provider"] == "terraform-provider-openstack/openstack 3.4.0"
 assert evidence["toolchain"]["provider_modified"] is False
 ambiguous = [row for row in evidence["scenarios"] if row.get("classification") == "AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS"]
 assert len(ambiguous) == 1 and ambiguous[0]["result"] == "expected_ambiguous"
-assert evidence["aggregate_verdict"] == "INCOMPLETE"
-print("P13.5E evidence boundary: PASS (claims remain fail-closed)")
+assert evidence["aggregate_verdict"] == "PASS"
+assert all(row["result"] == "passed" for row in evidence["scenarios"] if row["scenario"].startswith("E"))
+print("P13.5E evidence boundary: PASS (real-provider evidence recorded)")
 PY
   exit 0
 fi
