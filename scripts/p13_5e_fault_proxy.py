@@ -36,6 +36,7 @@ class ProxyRecord:
     response_to_client: str
     fault_location: str | None
     fault_kind: str | None
+    request_shape: dict | None = None
 
 
 class FaultProxy:
@@ -78,11 +79,27 @@ class FaultProxy:
             request.send_error(503, "deterministic fault")
             return
         body = request.rfile.read(int(request.headers.get("Content-Length", "0")))
+        request_shape = None
+        if request.command == "POST" and request.path.split("?", 1)[0] == "/v3/auth/tokens":
+            try:
+                auth = json.loads(body).get("auth", {})
+                identity = auth.get("identity", {})
+                password = identity.get("password", {}).get("user", {})
+                project = auth.get("scope", {}).get("project", {})
+                request_shape = {
+                    "methods": identity.get("methods"),
+                    "user_fields": sorted(password),
+                    "user_non_secret": {key: value for key, value in password.items() if key != "password"},
+                    "project_fields": sorted(project),
+                    "project_non_secret": project,
+                }
+            except (TypeError, ValueError):
+                request_shape = {"malformed_json": True}
         connection = HTTPConnection(self._target[0], self._target[1], timeout=10)
         connection.request(request.command, self._target[2] + request.path, body=body)
         response = connection.getresponse()
         payload = response.read()
-        record = ProxyRecord(number, request.command, request.path, True, response.status, "delivered", None, None)
+        record = ProxyRecord(number, request.command, request.path, True, response.status, "delivered", None, None, request_shape)
         if rule and rule.location in {"after_commit_before_response", "read_response_drop"}:
             record.response_to_client = "dropped"
             record.fault_location, record.fault_kind = rule.location, rule.kind

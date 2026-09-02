@@ -21,7 +21,7 @@ PY
 password=${O3K_P13_PASSWORD:-p13-5e-provider-password}; project=eba29e2d-53de-461d-ae91-ede7402713cb
 backend_pid=; proxy_pid=
 proxy_evidence="$work/proxy-initial.json"
-cleanup() { [[ -n "$proxy_pid" ]] && kill -TERM "$proxy_pid" 2>/dev/null || true; [[ -n "$backend_pid" ]] && kill "$backend_pid" 2>/dev/null || true; wait "$proxy_pid" 2>/dev/null || true; wait "$backend_pid" 2>/dev/null || true; }
+cleanup() { [[ -n "$proxy_pid" ]] && kill -TERM "$proxy_pid" 2>/dev/null || true; [[ -n "$backend_pid" ]] && kill "$backend_pid" 2>/dev/null || true; wait "$proxy_pid" 2>/dev/null || true; wait "$backend_pid" 2>/dev/null || true; mkdir -p "${O3K_P13_EVIDENCE_DIR:-$work}"; cp "$work"/*.json "${O3K_P13_EVIDENCE_DIR:-$work}/" 2>/dev/null || true; }
 trap cleanup EXIT
 O3K_BOOTSTRAP_PASSWORD="$password" O3K_TOKEN_SIGNING_KEY=p13-5e-provider-token-signing-key-012345678901234567890123 \
   "$o3kd" --listen-addr "127.0.0.1:$backend_port" --data-dir "$work/data" >"$work/o3kd.log" 2>&1 & backend_pid=$!
