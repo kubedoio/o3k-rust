@@ -1,0 +1,77 @@
+{
+  "artifact_type": "o3k-p13-5e-retry-replay-evidence",
+  "schema_version": 1,
+  "phase": "P13.5E",
+  "profile": "p13-iac-compatibility-v1",
+  "tested_o3k_head_sha": "1830ce5f5f70d4b6332dd52dbdb11292a7bc1d48",
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_modified": false
+  },
+  "fault_proxy": {
+    "source": "scripts/p13_5e_fault_proxy.py",
+    "self_test": "passed",
+    "timing_points": ["before_forward", "read_response_drop", "after_commit_before_response"]
+  },
+  "aggregate_verdict": "INCOMPLETE",
+  "scenarios": [
+    {
+      "scenario": "E1-read-retry",
+      "resource": "compute/network/storage",
+      "fault_location": "read_response_drop",
+      "fault_kind": "response_drop",
+      "result": "execution_profile_unavailable",
+      "reason": "The exact-head run has not exercised the unmodified OpenTofu provider through the proxy; no client/provider counts are asserted."
+    },
+    {
+      "scenario": "E2-update-rejected-before-commit",
+      "resource": "compute",
+      "fault_location": "before_forward",
+      "fault_kind": "connection_reset",
+      "result": "execution_profile_unavailable",
+      "reason": "The exact-head run has not exercised the unmodified OpenTofu provider through the proxy."
+    },
+    {
+      "scenario": "E3-update-committed-response-lost",
+      "resource": "compute",
+      "fault_location": "after_commit_before_response",
+      "fault_kind": "response_drop",
+      "result": "execution_profile_unavailable",
+      "reason": "Portable provider-contract tests prove replay boundaries, but do not constitute upstream provider execution evidence."
+    },
+    {
+      "scenario": "E4-delete-committed-response-lost",
+      "resource": "network/relationship",
+      "fault_location": "after_commit_before_response",
+      "fault_kind": "response_drop",
+      "result": "execution_profile_unavailable",
+      "reason": "The exact-head run has not exercised the unmodified OpenTofu provider through the proxy."
+    },
+    {
+      "scenario": "E5-same-accepted-operation-replay",
+      "resource": "compute",
+      "fault_location": "none",
+      "fault_kind": "operation-replay",
+      "result": "passed",
+      "evidence": "crates/o3k-provider/src/lib.rs: committed_update_response_loss_replays_same_operation"
+    },
+    {
+      "scenario": "E6-relationship-replay",
+      "resource": "volume-attachment",
+      "fault_location": "none",
+      "fault_kind": "operation-replay",
+      "result": "passed",
+      "evidence": "crates/o3k-provider/src/block_device_tests.rs: attach_detach_observe_is_idempotent_and_clean"
+    },
+    {
+      "scenario": "lost-create-response-boundary",
+      "resource": "representative-create",
+      "fault_location": "after_commit_before_response",
+      "fault_kind": "response_drop",
+      "result": "expected_ambiguous",
+      "classification": "AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS",
+      "reason": "OpenStack create carries no durable client identity that can correlate a retry after Terraform loses the resource ID; this is not an exactly-once claim."
+    }
+  ]
+}
