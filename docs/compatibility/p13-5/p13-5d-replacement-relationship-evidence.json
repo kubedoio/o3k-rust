@@ -1,0 +1,69 @@
+{
+  "artifact_type": "o3k-p13-5d-replacement-relationship-evidence",
+  "schema_version": 1,
+  "phase": "P13.5D",
+  "profile": "p13-iac-compatibility-v1",
+  "tested_o3k_head_sha": "0f4457f06be0550e18b8f47ae0ea338fe7a0aab3",
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "provider": "terraform-provider-openstack/openstack 3.4.0"
+  },
+  "provider_modified": false,
+  "aggregate_verdict": "PASS",
+  "scenarios": [
+    {
+      "resource": "openstack_compute_keypair_v2",
+      "scenario": "independent-resource",
+      "terraform_address": "openstack_compute_keypair_v2.managed",
+      "plan_actions": [["delete", "create"]],
+      "old_relationship_id": "p13-5b-keypair",
+      "new_relationship_id": "p13-5b-keypair",
+      "parent_ids_before": {"project_id": "eba29e2d-53de-461d-ae91-ede7402713cb"},
+      "parent_ids_after": {"project_id": "eba29e2d-53de-461d-ae91-ede7402713cb"},
+      "parents_preserved": true,
+      "old_relationship_absent": true,
+      "new_relationship_count": 1,
+      "provider_leaks": 0,
+      "foreign_changes": 0,
+      "restart_reconstruction": true,
+      "final_plan_noop": true,
+      "result": "passed"
+    },
+    {
+      "resource": "openstack_compute_volume_attach_v2",
+      "scenario": "volume-attachment",
+      "terraform_address": "openstack_compute_volume_attach_v2.managed",
+      "plan_actions": [["delete", "create"]],
+      "old_relationship_id": "77f18232-085b-4162-be07-8a799ed4bfab",
+      "new_relationship_id": "15f5e1a3-ab5f-48d6-89e2-e0e55736ff82",
+      "parent_ids_before": {"server_id": "e69cd0b8-493d-56a4-bf84-1811f2404142", "volume_id": "79abeed7-1f6d-4974-a988-9cca4a0023ad"},
+      "parent_ids_after": {"server_id": "e69cd0b8-493d-56a4-bf84-1811f2404142", "volume_id": "79abeed7-1f6d-4974-a988-9cca4a0023ad"},
+      "parents_preserved": true,
+      "old_relationship_absent": true,
+      "new_relationship_count": 1,
+      "provider_leaks": 0,
+      "foreign_changes": 0,
+      "restart_reconstruction": true,
+      "final_plan_noop": true,
+      "result": "passed"
+    },
+    {
+      "resource": "openstack_networking_router_interface_v2",
+      "scenario": "router-interface",
+      "terraform_address": "openstack_networking_router_interface_v2.managed",
+      "plan_actions": [["delete", "create"]],
+      "old_relationship_id": "01a05f6d-01ad-7b40-bf99-5b2771caf6ee",
+      "new_relationship_id": "01a05f6d-553d-70b1-a1ee-f509abfed3d5",
+      "parent_ids_before": {"router_id": "01a05f6d-017c-7c20-9b80-2b16650602df", "subnet_id": "01a05f6d-0190-7890-9f86-9e237406ad37"},
+      "parent_ids_after": {"router_id": "01a05f6d-017c-7c20-9b80-2b16650602df", "subnet_id": "01a05f6d-0190-7890-9f86-9e237406ad37"},
+      "parents_preserved": true,
+      "old_relationship_absent": true,
+      "new_relationship_count": 1,
+      "provider_leaks": 0,
+      "foreign_changes": 0,
+      "restart_reconstruction": true,
+      "final_plan_noop": true,
+      "result": "passed"
+    }
+  ]
+}
