@@ -156,7 +156,7 @@ document = {
     "artifact_type": "o3k-p13-5f-postgres-provider-parity",
     "schema_version": 1,
     "phase": "P13.5F",
-    "tested_o3k_head_sha": source_head,
+    "tested_runtime_head_sha": source_head,
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "backend": "postgresql",
     "provider_modified": False,
