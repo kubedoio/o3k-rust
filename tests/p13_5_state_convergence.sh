@@ -35,6 +35,8 @@ if [[ "${P13_5E_SELF_TEST:-0}" == 1 ]]; then
 import json, pathlib, sys
 evidence = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 assert evidence["artifact_type"] == "o3k-p13-5e-retry-replay-evidence"
+assert evidence["execution_profile"] == "portable-contract-and-proxy-self-test"
+assert evidence["canonical_authority"] == "o3k"
 assert evidence["toolchain"]["opentofu"] == "1.12.6"
 assert evidence["toolchain"]["provider"] == "terraform-provider-openstack/openstack 3.4.0"
 assert evidence["toolchain"]["provider_modified"] is False

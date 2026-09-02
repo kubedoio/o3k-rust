@@ -3,11 +3,16 @@
   "schema_version": 1,
   "phase": "P13.5E",
   "profile": "p13-iac-compatibility-v1",
+  "execution_profile": "portable-contract-and-proxy-self-test",
+  "canonical_authority": "o3k",
+  "provider_modified": false,
   "tested_o3k_head_sha": "06b56c12c39ed17cb384032204f23fcae070f780",
   "toolchain": {
     "opentofu": "1.12.6",
     "provider": "terraform-provider-openstack/openstack 3.4.0",
-    "provider_modified": false
+    "provider_modified": false,
+    "provider_source_tag": "v3.4.0",
+    "provider_source_commit": "4fd8eba1f85edfdc7aed2d17bae3f3c814abad41"
   },
   "fault_proxy": {
     "source": "scripts/p13_5e_fault_proxy.py",
