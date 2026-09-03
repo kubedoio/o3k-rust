@@ -450,7 +450,7 @@
         "class": "existence_oracle"
       }
     ],
-    "production_semantic_changes": "none beyond the two non-disclosure fixes above",
+    "production_semantic_changes": "none beyond the three non-disclosure fixes above",
     "public_sources_reused_as_code": false
   }
 }
