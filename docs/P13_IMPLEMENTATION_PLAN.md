@@ -156,7 +156,7 @@ P13.6A delivers:
 - 12-resource security matrix with enforcement paths
 - 7-operation-class failure matrix with 5 boundaries each
 - Two-project identity model (admin + extra tenant)
-- Non-disclosure contract with 2 security fixes (FIP NotOwner→404, SG OwnershipConflict→404)
+- Non-disclosure contract with 3 security fixes (FIP NotOwner→404, SG OwnershipConflict→404, KeypairOwnershipConflict→404)
 - Operation/idempotency scope matrix (scope-bound reservations confirmed)
 - Evidence schema and result vocabulary
 - Reusable harness skeleton (`tests/p13_6_multiproject_security.sh`)
