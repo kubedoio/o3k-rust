@@ -819,21 +819,26 @@ print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_n
         -d '{"network":{"name":"p13-idem-network"}}' \
         | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['id'])" 2>/dev/null || echo "")
 
-    # Within-scope replay: same project, same key, same payload must
-    # canonicalize to the same resource (existing P12/P13 replay contract).
-    local idem_replay_a_id
-    idem_replay_a_id=$(curl -sf -X POST "$auth_url/v2.0/networks" \
+    # Within-scope replay after terminal completion: the accepted contract
+    # rejects a duplicate submission with 409 and must NOT create a second
+    # resource (P13.5 covered in-flight convergence via the fault proxy).
+    local replay_status
+    replay_status=$(curl -s -X POST "$auth_url/v2.0/networks" \
         -H "Content-Type: application/json" \
         -H "X-Auth-Token: $token_a" \
         -H "OpenStack-API-Idempotency-Key: $idem_key" \
         -d '{"network":{"name":"p13-idem-network"}}' \
-        | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['id'])" 2>/dev/null || echo "")
+        -o /dev/null -w "%{http_code}" || true)
+    local idem_count_a
+    idem_count_a=$(curl -sf -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks" \
+        | python3 -c "import json,sys; nets=[n for n in json.load(sys.stdin).get('networks',[]) if n.get('name')=='p13-idem-network']; print(len(nets))" 2>/dev/null || echo "?")
 
-    [[ "$idem_replay_a_id" == "$idem_net_a_id" && -n "$idem_net_a_id" ]] || {
+    if [[ "$replay_status" != "409" || "$idem_count_a" != "1" || -z "$idem_net_a_id" ]]; then
         emit_scenario_row "P13.6B" "B7_idempotency_key" "failed" \
-            "{\"details\":{\"idem_key\":\"$idem_key\",\"net_a_id\":\"$idem_net_a_id\",\"replay_a_id\":\"$idem_replay_a_id\",\"reason\":\"in_scope_replay_diverged\"}}" >> "$evidence_rows"
+            "{\"details\":{\"idem_key\":\"$idem_key\",\"net_a_id\":\"$idem_net_a_id\",\"replay_status\":\"$replay_status\",\"idem_count_a\":\"$idem_count_a\",\"reason\":\"in_scope_replay_contract_violated\"}}" >> "$evidence_rows"
+        echo "P13.6B: FAIL - in-scope replay after completion: status=$replay_status count=$idem_count_a" >&2
         exit 2
-    }
+    fi
 
     idem_net_b_id=$(curl -sf -X POST "$auth_url/v2.0/networks" \
         -H "Content-Type: application/json" \
@@ -849,7 +854,7 @@ print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_n
     fi
 
     emit_scenario_row "P13.6B" "B7_idempotency_key" "passed" \
-        "{\"resource_type\":\"openstack_networking_network_v2\",\"operation\":\"create\",\"target_owner\":\"project_a\",\"caller_owner\":\"project_a\",\"expected_authorization_outcome\":\"allow\",\"actual_http_status\":200,\"details\":{\"idem_key\":\"$idem_key\",\"net_a_id\":\"$idem_net_a_id\",\"replay_a_id\":\"$idem_replay_a_id\",\"net_b_id\":\"$idem_net_b_id\",\"ids_distinct\":true,\"in_scope_replay_converged\":true},\"resources_created\":[\"openstack_networking_network_v2\"],\"resource_types_coverage\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_floatingip_v2\"]}" >> "$evidence_rows"
+        "{\"resource_type\":\"openstack_networking_network_v2\",\"operation\":\"create\",\"target_owner\":\"project_a\",\"caller_owner\":\"project_a\",\"expected_authorization_outcome\":\"allow\",\"actual_http_status\":200,\"details\":{\"idem_key\":\"$idem_key\",\"net_a_id\":\"$idem_net_a_id\",\"replay_status_after_completion\":\"$replay_status\",\"idem_resource_count_a\":$idem_count_a,\"net_b_id\":\"$idem_net_b_id\",\"ids_distinct\":true,\"in_scope_replay_no_duplicate\":true},\"resources_created\":[\"openstack_networking_network_v2\"],\"resource_types_coverage\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_floatingip_v2\"]}" >> "$evidence_rows"
     echo "P13.6B: B7 PASS"
 
     # Clean idempotency test networks
