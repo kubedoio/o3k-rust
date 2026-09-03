@@ -320,11 +320,12 @@ pub(crate) fn compute_error(error: ComputeError) -> axum::response::Response {
             "Conflict",
             "keypair is still attached to a server",
         ),
-        ComputeError::Store(o3k_store::StoreError::KeypairOwnershipConflict) => keystone_error(
-            StatusCode::CONFLICT,
-            "Conflict",
-            "keypair and server ownership do not match",
-        ),
+        ComputeError::Store(o3k_store::StoreError::KeypairOwnershipConflict) => {
+            // Concealed: foreign keypairs are already indistinguishable from
+            // missing ones at the project-scoped lookup (lifecycle keypair
+            // resolution), so this mapping must not disclose ownership either.
+            keystone_error(StatusCode::NOT_FOUND, "Not Found", "keypair was not found")
+        }
         ComputeError::Store(o3k_store::StoreError::InvalidKeypair(_)) => {
             keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "invalid public key")
         }

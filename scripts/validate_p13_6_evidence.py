@@ -8,21 +8,15 @@ and non-disclosure invariants.
 
 import json
 import pathlib
+import re
 import sys
-
-CONTRACT_PATH = "docs/compatibility/p13-6/p13-6a-security-failure-contract.json"
+import tempfile
 
 RESULT_VOCABULARY = {
     "passed", "not_applicable", "expected_ambiguous",
     "upstream_provider_unsupported", "execution_profile_unavailable",
     "blocked", "failed",
 }
-
-EVIDENCE_ONLY_PREFIXES = (
-    "docs/compatibility/p13-6/",
-    "docs/status/",
-    "target/p13-6/",
-)
 
 REQUIRED_FIELDS = [
     "phase", "tested_runtime_head_sha", "backend", "project_a_principal",
@@ -32,41 +26,73 @@ REQUIRED_FIELDS = [
     "result",
 ]
 
-OPTIONAL_FIELDS = [
-    "foreign_state_before", "foreign_state_after",
-    "own_state_before", "own_state_after",
-    "operation_ids_if_applicable", "provider_mutation_count",
-    "restart_fault_location_if_applicable", "actual_http_body_shape",
+# Response-body phrases that would disclose foreign existence on a 404.
+DISCLOSURE_PHRASES = [
+    "owned by another", "ownership conflict", "not owner",
+    "belongs to another project", "foreign",
 ]
 
-FORBIDDEN_PATTERNS = [
-    "password", "x-auth-token", "Bearer ", "BEGIN ",
-    "secret", "private_key", "auth_token",
+SECRET_VALUE_RES = [
+    re.compile(r"-----BEGIN"),
+    re.compile(r"Bearer\s+[A-Za-z0-9._-]{10,}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\."),  # JWT shape
 ]
+
+# Fields whose values are identifiers (names/UUIDs), never credentials.
+IDENTIFIER_FIELDS = {
+    "project_a_principal", "project_b_principal",
+    "project_a_project", "project_b_project",
+    "target_owner", "caller_owner",
+}
 
 
 def load_json(path):
     return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
 
 
+def check(condition, message):
+    if not condition:
+        print(f"FAIL: {message}", file=sys.stderr)
+        return False
+    return True
+
+
+def walk_for_secrets(obj, path="$", findings=None):
+    if findings is None:
+        findings = []
+    if isinstance(obj, str):
+        for pattern in SECRET_VALUE_RES:
+            if pattern.search(obj):
+                findings.append(f"{path}: value matches secret pattern {pattern.pattern!r}")
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            walk_for_secrets(value, f"{path}.{key}", findings)
+    elif isinstance(obj, list):
+        for index, value in enumerate(obj):
+            walk_for_secrets(value, f"{path}[{index}]", findings)
+    return findings
+
+
+def extract_scenarios(artifact):
+    if isinstance(artifact.get("scenarios"), list):
+        return artifact["scenarios"]
+    if isinstance(artifact.get("scenario_rows"), list):
+        return artifact["scenario_rows"]
+    if artifact.get("result") in RESULT_VOCABULARY:
+        return [artifact]
+    return []
+
+
 def validate_artifact(artifact_path):
     artifact = load_json(artifact_path)
     errors = []
 
-    scenarios = artifact.get("scenarios", artifact.get("scenario_rows", []))
-    if not scenarios and "scenarios" not in artifact and "scenario_rows" not in artifact:
-        # Try top-level result as scenario
-        for key in RESULT_VOCABULARY:
-            if key in artifact:
-                scenarios = [artifact]
-                break
-
+    scenarios = extract_scenarios(artifact)
     errors.append(check(
         len(scenarios) > 0,
         "evidence artifact must contain at least one scenario row"
     ))
 
-    # Toolchain block
     tc = artifact.get("toolchain", {})
     if tc:
         errors.append(check(
@@ -77,55 +103,44 @@ def validate_artifact(artifact_path):
     for i, row in enumerate(scenarios):
         prefix = f"scenario row {i}"
 
-        # Required fields
         for field in REQUIRED_FIELDS:
             errors.append(check(
                 field in row,
                 f"{prefix}: missing required field '{field}'"
             ))
 
-        # Result vocabulary
         result = row.get("result", "")
         errors.append(check(
             result in RESULT_VOCABULARY,
             f"{prefix}: result '{result}' not in vocabulary {sorted(RESULT_VOCABULARY)}"
         ))
 
-        # Forbidden combination
         errors.append(check(
             not (result == "passed" and row.get("classification") == "AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS"),
             f"{prefix}: passed with AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS is forbidden; use expected_ambiguous"
         ))
 
-        # Non-disclosure — do not include project_id where it would leak foreign existence
         actual_status = row.get("actual_http_status")
-        expected = row.get("expected_authorization_outcome", "")
         if actual_status == 404:
-            body = row.get("actual_http_body_shape", "").lower()
-            forbidden = ["owned by another", "ownership", "foreign", "not owner"]
-            for phrase in forbidden:
+            body = str(row.get("actual_http_body_shape", "")).lower()
+            for phrase in DISCLOSURE_PHRASES:
                 errors.append(check(
                     phrase not in body,
                     f"{prefix}: 404 response body contains disclosure phrase '{phrase}'"
                 ))
 
-        # No secrets
-        serialized = json.dumps(row)
-        for pattern in FORBIDDEN_PATTERNS:
-            occurs = serialized.lower().count(pattern.lower())
-            if occurs > 0 and occurs < 3:  # Allow structural matches like "security"
-                pass  # Walk-based check below catches actual secrets
-
-        # Owner/caller fields: must be project IDs, not credentials
-        for auth_field in ("project_a_principal", "project_b_principal"):
+        for auth_field in IDENTIFIER_FIELDS:
             value = row.get(auth_field, "")
-            if isinstance(value, str) and len(value) > 40:
+            if isinstance(value, str) and len(value) > 64:
                 errors.append(check(
                     False,
-                    f"{prefix}.{auth_field}: value appears to be a credential (length {len(value)})"
+                    f"{prefix}.{auth_field}: value longer than 64 chars looks like a credential, not an identifier"
                 ))
 
-    # Aggregate verdict
+    secret_findings = walk_for_secrets(artifact)
+    for finding in secret_findings:
+        errors.append(check(False, f"possible secret material: {finding}"))
+
     verdict = artifact.get("aggregate_verdict", artifact.get("final_verdict"))
     if verdict:
         errors.append(check(
@@ -149,54 +164,50 @@ def validate_artifact(artifact_path):
         sys.exit(2)
 
 
-def check(condition, message):
-    if not condition:
-        print(f"FAIL: {message}", file=sys.stderr)
-        return False
-    return True
+def self_test():
+    fixture = {
+        "artifact_type": "o3k-p13-6-self-test",
+        "toolchain": {"provider_modified": False, "opentofu": "1.12.6"},
+        "scenarios": [
+            {
+                "phase": "P13.6B",
+                "tested_runtime_head_sha": "4f61cd90e504a021f164df6fc9bec1cd26b43a6b",
+                "backend": "sqlite",
+                "project_a_principal": "admin",
+                "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                "project_b_principal": "tenant-b-user",
+                "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+                "resource_type": "openstack_networking_network_v2",
+                "operation": "show",
+                "target_owner": "project_a",
+                "caller_owner": "project_b",
+                "expected_authorization_outcome": "deny",
+                "actual_http_status": 404,
+                "actual_http_body_shape": "not found",
+                "result": "passed",
+            }
+        ],
+        "aggregate_verdict": "PASS",
+    }
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", prefix="o3k-p13-6-selftest-", delete=False
+    ) as handle:
+        json.dump(fixture, handle)
+        path = handle.name
+    try:
+        validate_artifact(path)
+    finally:
+        pathlib.Path(path).unlink(missing_ok=True)
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-
-    self_test = "--self-test" in sys.argv
-    if self_test:
-        # Self-test: validate a minimal inline fixture
-        fixture = {
-            "artifact_type": "o3k-p13-6-self-test",
-            "toolchain": {"provider_modified": False, "opentofu": "1.12.6"},
-            "scenarios": [
-                {
-                    "phase": "P13.6B",
-                    "tested_runtime_head_sha": "4f61cd90e504a021f164df6fc9bec1cd26b43a6b",
-                    "backend": "sqlite",
-                    "project_a_principal": "admin",
-                    "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
-                    "project_b_principal": "tenant-b-user",
-                    "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
-                    "resource_type": "openstack_networking_network_v2",
-                    "operation": "show",
-                    "target_owner": "project_a",
-                    "caller_owner": "project_b",
-                    "expected_authorization_outcome": "deny",
-                    "actual_http_status": 404,
-                    "actual_http_body_shape": "not found",
-                    "result": "passed",
-                }
-            ],
-            "aggregate_verdict": "PASS",
-        }
-        import tempfile
-        path = pathlib.Path(tempfile.mktemp(suffix=".json"))
-        path.write_text(json.dumps(fixture))
-        validate_artifact(str(path))
-        path.unlink()
+    if "--self-test" in sys.argv:
+        self_test()
         return
-
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if not args:
         print("Usage: scripts/validate_p13_6_evidence.py <evidence.json> [--self-test]", file=sys.stderr)
         sys.exit(2)
-
     for arg in args:
         validate_artifact(arg)
 

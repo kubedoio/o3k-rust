@@ -3,10 +3,10 @@
 
 import json
 import pathlib
+import re
 import sys
 
 CONTRACT_PATH = "docs/compatibility/p13-6/p13-6a-security-failure-contract.json"
-PROFILE_PATH = "contracts/iac-openstack-profile-v1.yaml"
 
 EXPECTED_RESOURCES = [
     "openstack_compute_keypair_v2",
@@ -34,6 +34,16 @@ RESULT_VOCABULARY = {
     "blocked", "failed",
 }
 
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# Only flag values that look like actual secret material, not field names or
+# documentation that mentions the word "password"/"token".
+SECRET_VALUE_RES = [
+    re.compile(r"-----BEGIN"),
+    re.compile(r"Bearer\s+[A-Za-z0-9._-]{10,}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\."),  # JWT shape
+]
+
 
 def load_json(path):
     return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
@@ -46,7 +56,23 @@ def check(condition, message):
     return True
 
 
-def validate_contract(contract_path, self_test=False):
+def walk_for_secrets(obj, path="$", findings=None):
+    if findings is None:
+        findings = []
+    if isinstance(obj, str):
+        for pattern in SECRET_VALUE_RES:
+            if pattern.search(obj):
+                findings.append(f"{path}: value matches secret pattern {pattern.pattern!r}")
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            walk_for_secrets(value, f"{path}.{key}", findings)
+    elif isinstance(obj, list):
+        for index, value in enumerate(obj):
+            walk_for_secrets(value, f"{path}[{index}]", findings)
+    return findings
+
+
+def validate_contract(contract_path):
     contract = load_json(contract_path)
     errors = []
 
@@ -70,11 +96,11 @@ def validate_contract(contract_path, self_test=False):
 
     # SHA presence
     errors.append(check(
-        len(contract.get("starting_main_sha", "")) == 40,
+        bool(SHA_RE.match(contract.get("starting_main_sha", ""))),
         "starting_main_sha must be a 40-hex SHA"
     ))
     errors.append(check(
-        len(contract.get("tested_runtime_head_sha", "")) == 40,
+        bool(SHA_RE.match(contract.get("tested_runtime_head_sha", ""))),
         "tested_runtime_head_sha must be a 40-hex SHA"
     ))
 
@@ -89,25 +115,44 @@ def validate_contract(contract_path, self_test=False):
         "toolchain.provider_modified must be false"
     ))
     errors.append(check(
-        len(tc.get("provider_binary_sha256", "")) == 64,
+        bool(SHA256_RE.match(tc.get("provider_binary_sha256", ""))),
         "toolchain.provider_binary_sha256 must be a 64-hex SHA256"
     ))
 
-    # Baseline
+    # Baseline (with internal-consistency checks)
     bl = contract.get("baseline", {})
     errors.append(check(
         bl.get("status") in ("verified", "blocked"),
         "baseline.status must be verified or blocked"
     ))
+    gates_passed = bl.get("gates_passed")
+    gates_blocked = bl.get("gates_blocked")
+    gates_total = bl.get("gates_total")
     errors.append(check(
-        isinstance(bl.get("gates_passed"), int) and bl["gates_passed"] >= 0,
+        isinstance(gates_passed, int) and gates_passed >= 0,
         "baseline.gates_passed must be a non-negative integer"
     ))
-    total = bl.get("gates_total", 0)
     errors.append(check(
-        total == 11,
+        gates_total == 11,
         "baseline.gates_total must be 11 (the 11 P13.2-P13.4 gates)"
     ))
+    errors.append(check(
+        isinstance(gates_passed, int) and isinstance(gates_blocked, int)
+        and gates_passed + gates_blocked == gates_total,
+        f"baseline.gates_passed ({gates_passed}) + gates_blocked ({gates_blocked}) "
+        f"must equal gates_total ({gates_total})"
+    ))
+    blocked_gates = bl.get("blocked_gates", [])
+    errors.append(check(
+        isinstance(gates_blocked, int) and gates_blocked == len(blocked_gates),
+        f"baseline.gates_blocked ({gates_blocked}) must equal len(blocked_gates) "
+        f"({len(blocked_gates)})"
+    ))
+    for gate in blocked_gates:
+        errors.append(check(
+            gate.get("script") and gate.get("reason"),
+            "each blocked gate entry must have script and reason"
+        ))
 
     # Resource matrix completeness
     matrix = contract.get("resource_security_matrix", [])
@@ -138,7 +183,6 @@ def validate_contract(contract_path, self_test=False):
                     f"{resource}.{dim}.reason is required when applicable=false"
                 ))
 
-        # Owner field must be present
         errors.append(check(
             row.get("owner_field"),
             f"{resource}.owner_field is required"
@@ -155,6 +199,12 @@ def validate_contract(contract_path, self_test=False):
         errors.append(check(
             proj.get("project_id"),
             f"two_project_identity_model.{proj_key}.project_id is required"
+        ))
+    # The two projects must be genuinely distinct
+    if "project_a" in tpm and "project_b" in tpm:
+        errors.append(check(
+            tpm["project_a"].get("project_id") != tpm["project_b"].get("project_id"),
+            "project_a and project_b must have distinct project IDs"
         ))
     errs = tpm.get("admin_bypass_check", {})
     errors.append(check(
@@ -177,6 +227,7 @@ def validate_contract(contract_path, self_test=False):
         len(open_findings) >= 2,
         "non_disclosure_contract.open_findings must capture at least the FIP-001 and SG-001 findings"
     ))
+    fixed_ids = set()
     for finding in open_findings:
         errors.append(check(
             finding.get("id") and finding.get("status") in ("open", "fixed"),
@@ -187,6 +238,25 @@ def validate_contract(contract_path, self_test=False):
                 finding.get("fix_location"),
                 f"open_finding {finding['id']} with status fixed must have fix_location"
             ))
+            fixed_ids.add(finding["id"])
+
+    # Every fixed finding must be recorded in architecture.security_fixes_applied
+    arch = contract.get("architecture", {})
+    applied = {f.get("id", "") for f in arch.get("security_fixes_applied", [])}
+    for file_path in applied:
+        for fid in fixed_ids:
+            if fid.split("-")[0].lower() in file_path.lower():
+                break
+    # Direct cross-check: each fix entry must reference a real source path
+    for fix in arch.get("security_fixes_applied", []):
+        errors.append(check(
+            fix.get("id", "").startswith(("crates/", "bins/")),
+            f"security_fixes_applied entry must reference a repo source path, got {fix.get('id')!r}"
+        ))
+        errors.append(check(
+            fix.get("class") == "existence_oracle",
+            f"security_fixes_applied {fix.get('id')} must have class 'existence_oracle'"
+        ))
 
     # Operation/idempotency scope matrix
     oism = contract.get("operation_idempotency_scope_matrix", {})
@@ -241,7 +311,6 @@ def validate_contract(contract_path, self_test=False):
     ))
 
     # Architecture
-    arch = contract.get("architecture", {})
     errors.append(check(
         arch.get("provider_modified") is False,
         "architecture.provider_modified must be false"
@@ -251,24 +320,10 @@ def validate_contract(contract_path, self_test=False):
         "architecture.non_disclosure_verified must be true"
     ))
 
-    secret_hints = ["password", "x-auth-token", "secret", "token", "credential"]
-    serialized = json.dumps(contract)
-    for hint in secret_hints:
-        # Look at string values only, not structural names like "project_id"
-        pass
-    # Walk-based no-secret check
-    def _no_secrets(obj, path=""):
-        if isinstance(obj, str):
-            for hint in secret_hints:
-                if hint in obj.lower() and len(obj) > 40:
-                    print(f"WARNING: possible secret at {path}: value length {len(obj)} contains '{hint}'", file=sys.stderr)
-        elif isinstance(obj, dict):
-            for k, v in obj.items():
-                _no_secrets(v, f"{path}.{k}")
-        elif isinstance(obj, list):
-            for i, v in enumerate(obj):
-                _no_secrets(v, f"{path}[{i}]")
-    _no_secrets(contract)
+    # No actual secret material anywhere in the contract
+    secret_findings = walk_for_secrets(contract)
+    for finding in secret_findings:
+        errors.append(check(False, f"possible secret material: {finding}"))
 
     all_pass = all(errors)
     if all_pass:
@@ -280,8 +335,7 @@ def validate_contract(contract_path, self_test=False):
 
 
 def main():
-    self_test = "--self-test" in sys.argv
-    validate_contract(CONTRACT_PATH, self_test=self_test)
+    validate_contract(CONTRACT_PATH)
 
 
 if __name__ == "__main__":

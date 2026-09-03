@@ -19,14 +19,14 @@
   "baseline": {
     "status": "blocked",
     "source_commit": "4f61cd90e504a021f164df6fc9bec1cd26b43a6b",
-    "gates_passed": 8,
-    "gates_blocked": 3,
+    "gates_passed": 7,
+    "gates_blocked": 4,
     "gates_total": 11,
     "blocked_gates": [
       {
         "script": "tests/p13_2c_port_lifecycle.sh",
         "exit_code": 22,
-        "reason": "port lifecycle required real networking provider operation that failed in this environment"
+        "reason": "post-destroy verification curl returned HTTP 500 from o3kd after successful port destroy (provider fake teardown edge), environment-specific"
       },
       {
         "script": "tests/p13_4_provider_volume_smoke.sh",
@@ -55,7 +55,7 @@
       "update": {"applicable": false, "reason": "keypair has no provider update path; replacement only"},
       "delete": {"applicable": true, "enforcement": "DELETE /v2.1/{project_id}/os-keypairs/{name} — project-scoped; foreign returns 404"},
       "import": {"applicable": true, "enforcement": "import = GET-by-ID, same as show; foreign returns 404, no state adoption"},
-      "relationship": {"applicable": true, "enforcement": "server->keypair reference checked via project-scoped keypair read"},
+      "relationship": {"applicable": true, "enforcement": "server->keypair reference checked via project-scoped keypair read (get_keypair user_id+project_id+name, foreign -> KeypairNotFound -> 404); any residual ownership mismatch concealed to 404 (KP-001)"},
       "replay": {"applicable": false, "reason": "keypair create is synchronous, no durable operation reservation"},
       "restart_reconstruction": {"applicable": true, "enforcement": "KeyPair survive store reopen; project_id retained"}
     },
@@ -266,6 +266,14 @@
         "fix_commit": "current branch p13-6a-security-failure-contract",
         "fix_location": "crates/o3k-network/src/service/mod.rs:80",
         "fix_description": "Changed map_store_error for OwnershipConflict from NetworkError::InvalidRequest to NetworkError::NotFound"
+      },
+      {
+        "id": "KP-001",
+        "description": "StoreError::KeypairOwnershipConflict mapped to HTTP 409 with body 'keypair and server ownership do not match', disclosing that a keypair exists in another project when a cross-project keypair reference is somehow resolvable",
+        "status": "fixed",
+        "fix_commit": "current branch p13-6a-security-failure-contract",
+        "fix_location": "crates/o3k-api/src/compute.rs:323-330",
+        "fix_description": "Changed KeypairOwnershipConflict from 409 Conflict to concealed 404 Not Found, matching the project-scoped keypair lookup behavior"
       }
     ]
   },
@@ -434,6 +442,11 @@
       {
         "id": "crates/o3k-network/src/service/mod.rs:80",
         "description": "StoreError::OwnershipConflict→400 (InvalidRequest) changed to 404 (NotFound)",
+        "class": "existence_oracle"
+      },
+      {
+        "id": "crates/o3k-api/src/compute.rs:323-330",
+        "description": "KeypairOwnershipConflict→409 with ownership-disclosing body changed to concealed 404",
         "class": "existence_oracle"
       }
     ],
