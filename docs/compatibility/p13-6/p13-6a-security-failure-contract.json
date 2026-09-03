@@ -5,7 +5,7 @@
   "status": "contract_frozen",
   "profile": "p13-iac-compatibility-v1",
   "starting_main_sha": "4f61cd90e504a021f164df6fc9bec1cd26b43a6b",
-  "tested_runtime_head_sha": "4f61cd90e504a021f164df6fc9bec1cd26b43a6b",
+  "tested_runtime_head_sha": "933cf4109bbc690181485510b19472d0f4ed4649",
   "toolchain": {
     "opentofu": "1.12.6",
     "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",

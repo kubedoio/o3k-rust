@@ -243,10 +243,14 @@ def validate_contract(contract_path):
     # Every fixed finding must be recorded in architecture.security_fixes_applied
     arch = contract.get("architecture", {})
     applied = {f.get("id", "") for f in arch.get("security_fixes_applied", [])}
-    for file_path in applied:
-        for fid in fixed_ids:
-            if fid.split("-")[0].lower() in file_path.lower():
-                break
+    for finding in open_findings:
+        if finding.get("status") == "fixed":
+            fix_loc = finding.get("fix_location", "")
+            errors.append(check(
+                fix_loc in applied,
+                f"fixed finding {finding['id']} has fix_location '{fix_loc}' "
+                f"not found in architecture.security_fixes_applied {sorted(applied)}"
+            ))
     # Direct cross-check: each fix entry must reference a real source path
     for fix in arch.get("security_fixes_applied", []):
         errors.append(check(
