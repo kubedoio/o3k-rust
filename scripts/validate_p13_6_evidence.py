@@ -26,6 +26,26 @@ REQUIRED_FIELDS = [
     "result",
 ]
 
+# The 12 contract resource types from the P13.6A contract.
+EXPECTED_RESOURCES = [
+    "openstack_compute_keypair_v2",
+    "openstack_networking_network_v2",
+    "openstack_networking_subnet_v2",
+    "openstack_networking_port_v2",
+    "openstack_compute_instance_v2",
+    "openstack_networking_secgroup_v2",
+    "openstack_networking_secgroup_rule_v2",
+    "openstack_networking_router_v2",
+    "openstack_networking_router_interface_v2",
+    "openstack_networking_floatingip_v2",
+    "openstack_blockstorage_volume_v3",
+    "openstack_compute_volume_attach_v2",
+]
+
+# B-scenario field requirements: when phase starts with P13.6B, each row must
+# carry a "resources_created" list.
+B_PHASE_PREFIX = "P13.6B"
+
 # Response-body phrases that would disclose foreign existence on a 404.
 DISCLOSURE_PHRASES = [
     "owned by another", "ownership conflict", "not owner",
@@ -100,6 +120,12 @@ def validate_artifact(artifact_path):
             "toolchain.provider_modified must be false"
         ))
 
+    # Collect resource types for 12-resource coverage validation
+    covered_resource_types = set()
+    is_b_evidence = artifact.get("phase", "").startswith(B_PHASE_PREFIX) or any(
+        r.get("phase", "").startswith(B_PHASE_PREFIX) for r in scenarios
+    )
+
     for i, row in enumerate(scenarios):
         prefix = f"scenario row {i}"
 
@@ -120,6 +146,38 @@ def validate_artifact(artifact_path):
             f"{prefix}: passed with AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS is forbidden; use expected_ambiguous"
         ))
 
+        # B-specific: require resources_created field
+        if is_b_evidence:
+            errors.append(check(
+                "resources_created" in row,
+                f"{prefix}: missing 'resources_created' field (required for P13.6B evidence)"
+            ))
+            if "resources_created" in row:
+                errors.append(check(
+                    isinstance(row["resources_created"], list),
+                    f"{prefix}: 'resources_created' must be a list"
+                ))
+            if "resource_types_coverage" in row:
+                errors.append(check(
+                    isinstance(row["resource_types_coverage"], list),
+                    f"{prefix}: 'resource_types_coverage' must be a list"
+                ))
+                covered_resource_types.update(row["resource_types_coverage"])
+            # A row whose own resource_type is a contract type accounts for
+            # that type even without an explicit coverage list (e.g. the
+            # execution_profile_unavailable classification rows).
+            if row.get("resource_type") in EXPECTED_RESOURCES:
+                covered_resource_types.add(row["resource_type"])
+
+        # Reject "passed" results that don't have actual_http_status set properly
+        if result == "passed":
+            errors.append(check(
+                row.get("actual_http_status") is not None
+                and isinstance(row.get("actual_http_status"), (int, float))
+                and row.get("actual_http_status") != 0,
+                f"{prefix}: 'passed' result requires non-zero actual_http_status (got {row.get('actual_http_status')})"
+            ))
+
         actual_status = row.get("actual_http_status")
         if actual_status == 404:
             body = str(row.get("actual_http_body_shape", "")).lower()
@@ -136,6 +194,17 @@ def validate_artifact(artifact_path):
                     False,
                     f"{prefix}.{auth_field}: value longer than 64 chars looks like a credential, not an identifier"
                 ))
+
+    # Validate that all 12 contract resource types are accounted for. For B
+    # evidence this is unconditional: an artifact with no coverage data at all
+    # must fail, not slip through.
+    if is_b_evidence:
+        missing = sorted(set(EXPECTED_RESOURCES) - covered_resource_types)
+        errors.append(check(
+            len(missing) == 0,
+            f"resource types not covered in B evidence: {missing}. All 12 contract types must be accounted for "
+            f"(some via execution_profile_unavailable classification)"
+        ))
 
     secret_findings = walk_for_secrets(artifact)
     for finding in secret_findings:
@@ -168,6 +237,7 @@ def self_test():
     fixture = {
         "artifact_type": "o3k-p13-6-self-test",
         "toolchain": {"provider_modified": False, "opentofu": "1.12.6"},
+        "phase": "P13.6B",
         "scenarios": [
             {
                 "phase": "P13.6B",
@@ -185,6 +255,21 @@ def self_test():
                 "actual_http_status": 404,
                 "actual_http_body_shape": "not found",
                 "result": "passed",
+                "resources_created": [],
+                "resource_types_coverage": [
+                    "openstack_compute_keypair_v2",
+                    "openstack_networking_network_v2",
+                    "openstack_networking_subnet_v2",
+                    "openstack_networking_port_v2",
+                    "openstack_compute_instance_v2",
+                    "openstack_networking_secgroup_v2",
+                    "openstack_networking_secgroup_rule_v2",
+                    "openstack_networking_router_v2",
+                    "openstack_networking_router_interface_v2",
+                    "openstack_networking_floatingip_v2",
+                    "openstack_blockstorage_volume_v3",
+                    "openstack_compute_volume_attach_v2",
+                ],
             }
         ],
         "aggregate_verdict": "PASS",
