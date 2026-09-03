@@ -23,6 +23,10 @@ SCENARIOS = {
     "PG7-operation-replay-unknown-outcome",
 }
 EVIDENCE_ONLY_PREFIXES = (
+    # CI routing changes do not alter the tested runtime or harness semantics;
+    # they only select the already committed evidence-validation gate.
+    ".github/workflows/ci.yml",
+    "scripts/validate_p13_5f_postgres_provider_parity.py",
     "docs/compatibility/p13-5/postgres-provider-parity/",
     "docs/compatibility/p13-5/p13-5f-backend-parity-aggregate-evidence.json",
     "docs/status/",
