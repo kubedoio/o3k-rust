@@ -3,7 +3,7 @@
   "schema_version": 1,
   "phase": "P13.5F",
   "scenario": "PG4-independent-replacement",
-  "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+  "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
   "backend": "postgresql",
   "execution_profile": "postgresql-provider-local-pinned-lvm",
   "real_provider_execution": true,
