@@ -142,6 +142,11 @@ does not claim broad OpenStack parity or production readiness.
 - Destroy-recreate — verify replacement semantics
 - Retry/replay — verify Terraform retry behavior against O3K operation model
 
+P13.5F is verified for the bounded PostgreSQL provider-parity profile. The
+committed PG1-PG7 evidence preserves O3K as canonical authority; the
+lost-create-response case remains explicitly ambiguous. P13.6 and P13.7 are
+not proven by this result.
+
 ### P13.6 — Multi-project security and failure evidence
 
 - Two independent OpenTofu projects targeting separate O3K projects

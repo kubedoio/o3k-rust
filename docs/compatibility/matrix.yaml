@@ -1,6 +1,9 @@
 schema_version: 2
 matrix_version: 0.2.0-alpha.1
 source_accessed: 2026-07-30
+# P13.5 bounded IaC state-convergence parity is verified separately by
+# docs/compatibility/p13-5/p13-5f-backend-parity-aggregate-evidence.json.
+# This matrix continues to advertise only its operation-level entries.
 profile: testlab-alpha
 target_manifest: ../../compatibility/openstack-targets.yaml
 openstack_release:

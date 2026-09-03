@@ -1,0 +1,33 @@
+{
+  "artifact_type": "o3k-p13-5f-postgres-provider-parity-scenario",
+  "schema_version": 1,
+  "phase": "P13.5F",
+  "scenario": "PG6-volume-attachment-relationship",
+  "tested_runtime_head_sha": "c5298c7ef1d0c845bc5162e52ea269768c1209d6",
+  "backend": "postgresql",
+  "execution_profile": "privileged-lvm-testlab-pinned",
+  "real_provider_execution": true,
+  "provider_modified": false,
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc"
+  },
+  "parent_ids_before": {"server_id": "e69cd0b8-493d-56a4-bf84-1811f2404142", "volume_id": "5e99c14e-deca-4352-bf62-4d42219ca9ad"},
+  "parent_ids_after": {"server_id": "e69cd0b8-493d-56a4-bf84-1811f2404142", "volume_id": "5e99c14e-deca-4352-bf62-4d42219ca9ad"},
+  "parents_preserved": true,
+  "old_relationship_absent": true,
+  "relationship_count": 1,
+  "provider_leaks": 0,
+  "foreign_changes": 0,
+  "underlying_volume_realization_preserved": true,
+  "lvm_testlab_cleanup": "passed",
+  "plan_actions": [["delete", "create"]],
+  "restart_reconstruction": true,
+  "final_plan_noop": true,
+  "cleanup": "passed",
+  "externally_equivalent": true,
+  "result": "passed"
+}

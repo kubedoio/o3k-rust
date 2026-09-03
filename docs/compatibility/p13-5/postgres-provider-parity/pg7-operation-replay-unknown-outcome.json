@@ -9,7 +9,7 @@
   "fault_location": "after_commit_before_response",
   "final_plan_noop": true,
   "phase": "P13.5F",
-  "pinned_toolchain": {
+  "toolchain": {
     "opentofu": "1.12.6",
     "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
     "provider": "terraform-provider-openstack/openstack 3.4.0",
@@ -26,6 +26,6 @@
   "result": "passed",
   "scenario": "PG7-operation-replay-unknown-outcome",
   "schema_version": 1,
-  "tested_runtime_head_sha": "d595266e7422b572bbf1620e9cefe0b3aff46d29",
+  "tested_runtime_head_sha": "c5298c7ef1d0c845bc5162e52ea269768c1209d6",
   "terminal_canonical_result": "absent"
 }

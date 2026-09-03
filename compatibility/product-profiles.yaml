@@ -42,7 +42,7 @@ profiles:
       production_target: postgres
     release_blocking_for_first_alpha: false
     footprint_claim: unmeasured
-    evidence_state: specified
+    evidence_state: bounded-p13-5-verified
     normative_adr: docs/adr/ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md
     normative_spec: docs/specs/SPEC-0032-openstack-terraform-opentofu-compatibility-profile-v1.md
     contract: contracts/iac-openstack-profile-v1.yaml

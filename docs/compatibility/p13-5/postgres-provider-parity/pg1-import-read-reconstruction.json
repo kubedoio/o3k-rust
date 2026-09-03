@@ -1,0 +1,28 @@
+{
+  "artifact_type": "o3k-p13-5f-postgres-provider-parity-scenario",
+  "schema_version": 1,
+  "phase": "P13.5F",
+  "scenario": "PG1-import-read-reconstruction",
+  "tested_runtime_head_sha": "c5298c7ef1d0c845bc5162e52ea269768c1209d6",
+  "backend": "postgresql",
+  "execution_profile": "postgresql-provider-local-pinned-lvm",
+  "real_provider_execution": true,
+  "provider_modified": false,
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc"
+  },
+  "canonical_id_before": "01a06474-2b2a-77b2-989f-70aa029afb34",
+  "canonical_id_after_restart": "01a06474-2b2a-77b2-989f-70aa029afb34",
+  "project_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
+  "provider_import_id": "01a06474-2b2a-77b2-989f-70aa029afb34",
+  "plan_actions": [],
+  "restart_reconstruction": true,
+  "final_plan_noop": true,
+  "cleanup": "passed",
+  "externally_equivalent": true,
+  "result": "passed"
+}
