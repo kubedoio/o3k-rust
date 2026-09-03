@@ -149,6 +149,7 @@ def validate_canonical_evidence(document: dict, repository: Path) -> None:
     require(row.get("canonical_project_resource_count_after_cleanup") == 0, "canonical project cleanup left resources")
     require(row.get("unrelated_changes_count") == 0, "unrelated plan changes are present")
     require(row.get("final_plan_noop") is True, "canonical final plan is not no-op")
+    require(row.get("restart_reconstruction") is True, "canonical drift lacks restart reconstruction")
     require(row.get("cleanup_http_status") == 404, "canonical drift cleanup did not remove the fixture")
     observations = row.get("canonical_observations")
     require(isinstance(observations, dict), "canonical observations are missing")

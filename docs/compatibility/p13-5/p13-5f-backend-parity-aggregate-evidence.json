@@ -2,8 +2,8 @@
   "artifact_type": "o3k-p13-5f-backend-parity-aggregate-evidence",
   "schema_version": 1,
   "phase": "P13.5",
-  "source_head_sha": "b10b5cb2faf7734cebe46fbe19c1dcca8b387443",
-  "starting_main_sha": "41f60cf742cc48ea6d4a0655ede4cfe5d0038a51",
+  "source_head_sha": "c5298c7ef1d0c845bc5162e52ea269768c1209d6",
+  "starting_main_sha": "631d96d532d8eb3da82646621fdd299cc4ac222a",
   "profile": "p13-iac-compatibility-v1",
   "canonical_authority": "o3k",
   "toolchain": {
@@ -12,6 +12,8 @@
     "provider_modified": false,
     "provider_source_tag": "v3.4.0",
     "provider_source_commit": "4fd8eba1f85edfdc7aed2d17bae3f3c814abad41",
+    "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
     "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc"
   },
   "evidence_references": {
@@ -27,7 +29,7 @@
       "gated_provider_run": {
         "artifact": "docs/compatibility/p13-5/p13-5b-refresh-import-evidence.json",
         "execution_mode": "gated",
-        "tested_head_sha": "b10b5cb2faf7734cebe46fbe19c1dcca8b387443",
+      "tested_head_sha": "c5298c7ef1d0c845bc5162e52ea269768c1209d6",
         "scenarios": 11,
         "final_plan_noop": 11,
         "cleanup_passed": 11,
@@ -54,25 +56,25 @@
       "store_storage_reopen": "passed",
       "provider_retry_replay": "passed",
       "provider_matrix": "passed",
-      "gated_provider_run": {"artifact": "/var/tmp/p13-5f-pg-isolated.json", "gates": 11, "passed": 11, "blocked": 0, "database_isolation": "fresh public schema before every gate", "source_commit": "4d684f2991edfaf9f48d37f945520c960632f7c0", "runner_fix_commit": "b10b5cb2faf7734cebe46fbe19c1dcca8b387443"},
+      "gated_provider_run": {"artifact": "docs/compatibility/p13-5/p13-5f-postgres-provider-parity.json", "gates": 11, "passed": 11, "blocked": 0, "database_isolation": "fresh public schema before every gate", "source_commit": "c5298c7ef1d0c845bc5162e52ea269768c1209d6"},
       "isolated_attachment_gate": {"command": "tests/p13_4_provider_volume_attachment_smoke.sh", "database": "o3k_p13_gate_attach", "result": "passed", "apply": "passed", "plan_noop": "passed", "destroy": "passed", "cleanup": "passed", "log": "/tmp/o3k-p13-4-attachment.NK6BHG"},
       "reason": "All 11 P13.2-P13.4 real-provider gates passed on PostgreSQL with a fresh schema before each gate; the prior shared-database contamination is retained only as historical blocked evidence."
     }
   },
   "scenario_matrix": [
     {"scenario": "stable_read", "sqlite": "passed", "postgresql": "passed"},
-    {"scenario": "import", "sqlite": "passed", "postgresql": "blocked"},
-    {"scenario": "mutable_drift_reconvergence", "sqlite": "passed", "postgresql": "blocked"},
-    {"scenario": "native_deletion_recreation", "sqlite": "passed", "postgresql": "blocked"},
-    {"scenario": "independent_replacement", "sqlite": "passed", "postgresql": "blocked"},
-    {"scenario": "router_interface_relationship", "sqlite": "passed", "postgresql": "blocked"},
-    {"scenario": "volume_attachment_relationship", "sqlite": "passed", "postgresql": "blocked"},
-    {"scenario": "read_retry", "sqlite": "passed", "postgresql": "blocked"},
-    {"scenario": "pre_commit_retry", "sqlite": "passed", "postgresql": "blocked"},
-    {"scenario": "committed_update_response_loss", "sqlite": "passed", "postgresql": "blocked"},
-    {"scenario": "committed_delete_response_loss", "sqlite": "passed", "postgresql": "blocked"},
-    {"scenario": "operation_replay", "sqlite": "passed", "postgresql": "blocked"},
-    {"scenario": "relationship_replay", "sqlite": "passed", "postgresql": "blocked"},
+    {"scenario": "import", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "mutable_drift_reconvergence", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "native_deletion_recreation", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "independent_replacement", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "router_interface_relationship", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "volume_attachment_relationship", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "read_retry", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "pre_commit_retry", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "committed_update_response_loss", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "committed_delete_response_loss", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "operation_replay", "sqlite": "passed", "postgresql": "passed"},
+    {"scenario": "relationship_replay", "sqlite": "passed", "postgresql": "passed"},
     {"scenario": "lost_create_response", "sqlite": "expected_ambiguous", "postgresql": "expected_ambiguous"}
   ],
   "postgresql_store_tests": {
@@ -97,5 +99,6 @@
   ],
   "deferred_p13_6": ["multi-project isolation", "controller crash/failure matrix", "lost-create-response adversarial treatment"],
   "cleanup": {"local_server": "passed", "provider_matrix": "passed", "lvm_profile": "passed"},
-  "final_aggregate_verdict": "blocked"
+  "postgres_provider_parity_evidence": "docs/compatibility/p13-5/postgres-provider-parity/p13-5f-postgres-provider-parity.json",
+  "final_aggregate_verdict": "passed"
 }

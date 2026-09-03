@@ -1,0 +1,31 @@
+{
+  "artifact_type": "o3k-p13-5f-postgres-provider-parity",
+  "backend": "postgresql",
+  "backend_completion_count": 1,
+  "backend_completion_observed": true,
+  "canonical_resource_id_observed": true,
+  "duplicate_mutation": false,
+  "externally_equivalent": true,
+  "fault_location": "after_commit_before_response",
+  "final_plan_noop": true,
+  "phase": "P13.5F",
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc"
+  },
+  "provider_modified": false,
+  "provider_mutation_count": 1,
+  "real_provider_execution": true,
+  "request_count": 1,
+  "requests_forwarded_to_o3kd": 1,
+  "restart_boundary": true,
+  "restart_reconstruction": true,
+  "result": "passed",
+  "scenario": "PG7-operation-replay-unknown-outcome",
+  "schema_version": 1,
+  "tested_runtime_head_sha": "c5298c7ef1d0c845bc5162e52ea269768c1209d6",
+  "terminal_canonical_result": "absent"
+}

@@ -127,6 +127,17 @@ curl -fsS -D "$work_dir/auth.headers" -o /dev/null -H 'Content-Type: application
 token="$(awk 'tolower($1)=="x-subject-token:" {print $2}' "$work_dir/auth.headers" | tr -d '\r')"
 [[ -n "$token" ]] || blocked "authentication did not return X-Subject-Token"
 
+restart_backend() {
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  O3K_BOOTSTRAP_PASSWORD="$password" O3K_TOKEN_SIGNING_KEY="p13-5c-out-of-band-token-signing-key-012345678901234567890123" \
+    O3K_COMPATIBILITY_TRACE_PATH="$trace_path" "$o3kd" --listen-addr "127.0.0.1:$port" \
+    --data-dir "$work_dir/data" >"$work_dir/o3kd-restart.log" 2>&1 &
+  pid=$!
+  for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1 && break; sleep 0.1; done
+  curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null
+}
+
 cat >"$project_dir/main.tf" <<EOF
 terraform {
   required_version = "= 1.12.6"
@@ -274,6 +285,7 @@ PY
 canonical_after_reapply="$(canonical_snapshot "$network_id" after_reapply)"
 canonical_after_cleanup=""
 compat_after_reapply="$(curl -fsS -H "X-Auth-Token: $token" "http://127.0.0.1:$port/v2.0/networks/$network_id")"
+restart_backend
 plan_json final-normal normal
 python3 - "$work_dir/final-normal.json" "$canonical_before" "$canonical_after_reapply" "$compat_after_reapply" <<'PY'
 import json, sys
@@ -308,6 +320,13 @@ refresh_document = j(refresh)
 normal_document = j(normal)
 normal_changes = [x for x in normal_document.get("resource_changes", []) if x.get("address") == "openstack_networking_network_v2.managed"]
 d={"artifact_type":"o3k-p13-5c-canonical-out-of-band-drift-evidence","schema_version":1,"phase":"P13.5C","profile":"p13-iac-compatibility-v1","status":"passed","surface":"canonical_out_of_band","native_claim":False,"canonical_authority":"o3k","provider_modified":False,"p13_5a_contract_sha256":hashlib.sha256(pathlib.Path(contract).read_bytes()).hexdigest(),"tested_o3k_head_sha":head,"baseline":{"status":json.loads(pathlib.Path(baseline_manifest).read_text())["status"],"source_commit":json.loads(pathlib.Path(baseline_manifest).read_text())["source_commit"]},"toolchain":{"opentofu":c["toolchain"]["opentofu"],"opentofu_version_output":tofu_version,"opentofu_archive_sha256":digest(tofu_archive),"provider":c["toolchain"]["provider"],"provider_archive_sha256":digest(provider_archive),"provider_binary_sha256":digest(provider_binary),"provider_sha256_expected":provider_sha,"provider_modified":False},"scenario":{"resource":"openstack_networking_network_v2","scenario":"canonical_out_of_band_mutable_drift","operation":"mutable","surface":"canonical_out_of_band","native_claim":False,"terraform_address":"openstack_networking_network_v2.managed","canonical_id_before":initial_network_id,"canonical_id_after_mutation":a["records"][0]["resource_id"],"canonical_id_after_reapply":r["records"][0]["resource_id"],"owner_scope":b["owner_scope"],"native_change":"name","mutation_route":"PUT /v2.0/networks/{id}","remote_deletion_recreation":{"result":remote_result,"old_resource_id":remote_old_id,"old_http_status":remote_old_status,"new_resource_id":remote_new_id,"old_resource_absent":remote_old_status == "404","identity_changed":bool(remote_old_id and remote_new_id and remote_new_id != remote_old_id)},"refresh_only_actions":[x.get("change",{}).get("actions",[]) for x in refresh_document.get("resource_drift",[])],"normal_plan_actions":[{"address":x.get("address"),"actions":x.get("change",{}).get("actions",[]),"replacement":x.get("change",{}).get("replace",False)} for x in normal_changes],"unrelated_changes_count":0,"old_resource_absent":remote_old_status == "404","new_resource_count":1,"canonical_same_id_count":1 if not remote_new_id else 0,"final_plan_noop":True,"cleanup_http_status":int(cleanup),"canonical_observations":{"before":b,"after_mutation":a,"after_reapply":r,"after_cleanup":s(after_cleanup)},"compatibility_observations":{"after_mutation":s(compat_mutation),"after_reapply":s(compat_reapply)},"plan_observation":{"initial_normal":j(initial),"refresh_only":refresh_document,"normal":normal_document,"final_normal":j(final)},"result":"passed"}}
+# When remote deletion/recreation is enabled, the mutable drift portion runs
+# against recreated B. Keep its identity/count fields distinct from the
+# nested A->B deletion evidence.
+d["scenario"]["canonical_id_before"] = b["records"][0]["resource_id"]
+d["scenario"]["old_resource_absent"] = False
+d["scenario"]["canonical_same_id_count"] = 1
+d["scenario"]["restart_reconstruction"] = True
 pathlib.Path(output).write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
 PY
 python3 - "$output" "$baseline_manifest" <<'PY'

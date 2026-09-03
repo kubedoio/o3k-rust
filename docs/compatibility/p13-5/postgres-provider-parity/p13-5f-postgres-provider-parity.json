@@ -1,0 +1,35 @@
+{
+  "artifact_type": "o3k-p13-5f-postgres-provider-parity",
+  "schema_version": 1,
+  "phase": "P13.5F",
+  "backend": "postgresql",
+  "execution_profile": "postgresql-provider-parity-local-and-lvm-testlab",
+  "tested_runtime_head_sha": "c5298c7ef1d0c845bc5162e52ea269768c1209d6",
+  "tested_o3k_head_sha": "c5298c7ef1d0c845bc5162e52ea269768c1209d6",
+  "real_provider_execution": true,
+  "provider_modified": false,
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc"
+  },
+  "execution": {
+    "orchestrator": "tests/p13_5f_postgres_provider_parity.sh",
+    "status": "passed",
+    "portable_scenarios": ["PG1", "PG2", "PG3", "PG4", "PG5", "PG7"],
+    "privileged_scenario": "PG6"
+  },
+  "scenarios": [
+    {"scenario": "PG1-import-read-reconstruction", "result": "passed", "externally_equivalent": true, "evidence": "docs/compatibility/p13-5/postgres-provider-parity/pg1-import-read-reconstruction.json", "backend": "postgresql", "provider_modified": false, "restart_reconstruction": true, "final_plan_noop": true},
+    {"scenario": "PG2-mutable-drift-reconvergence", "result": "passed", "externally_equivalent": true, "evidence": "docs/compatibility/p13-5/postgres-provider-parity/pg2-mutable-drift-reconvergence.json", "backend": "postgresql", "provider_modified": false, "restart_reconstruction": true, "final_plan_noop": true},
+    {"scenario": "PG3-remote-deletion-recreation", "result": "passed", "externally_equivalent": true, "evidence": "docs/compatibility/p13-5/postgres-provider-parity/pg3-remote-deletion-recreation.json", "backend": "postgresql", "provider_modified": false, "restart_reconstruction": true, "final_plan_noop": true},
+    {"scenario": "PG4-independent-replacement", "result": "passed", "externally_equivalent": true, "evidence": "docs/compatibility/p13-5/postgres-provider-parity/pg4-independent-replacement.json", "backend": "postgresql", "provider_modified": false, "restart_reconstruction": true, "final_plan_noop": true, "replacement_actions": ["delete", "create"]},
+    {"scenario": "PG5-router-interface-relationship", "result": "passed", "externally_equivalent": true, "evidence": "docs/compatibility/p13-5/postgres-provider-parity/pg5-router-interface-relationship.json", "backend": "postgresql", "provider_modified": false, "restart_reconstruction": true, "final_plan_noop": true, "parents_preserved": true, "provider_leaks": 0, "foreign_changes": 0},
+    {"scenario": "PG6-volume-attachment-relationship", "result": "passed", "externally_equivalent": true, "evidence": "docs/compatibility/p13-5/postgres-provider-parity/pg6-volume-attachment-relationship.json", "backend": "postgresql", "provider_modified": false, "restart_reconstruction": true, "final_plan_noop": true, "parents_preserved": true, "provider_leaks": 0, "foreign_changes": 0},
+    {"scenario": "PG7-operation-replay-unknown-outcome", "result": "passed", "externally_equivalent": true, "evidence": "docs/compatibility/p13-5/postgres-provider-parity/pg7-operation-replay-unknown-outcome.json", "backend": "postgresql", "provider_modified": false, "restart_reconstruction": true, "final_plan_noop": true, "fault_location": "after_commit_before_response", "backend_completion_observed": true, "restart_boundary": true}
+  ],
+  "final_verdict": "passed",
+  "cleanup": {"portable_profiles": "passed", "lvm_testlab": "passed"}
+}

@@ -236,21 +236,14 @@ jobs:
           cargo build --bin o3kd --locked
           cargo build --bin o3k-compute-bin --features libvirt --locked
           python3 scripts/emit-build-manifest.py target/ci-artifacts/build-manifest.json "${GITHUB_SHA}"
-      - name: Run PostgreSQL P13.5F provider parity orchestrator
-        env:
-          O3K_DATABASE_BACKEND: postgres
-          O3K_P13_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          O3K_P13_5F_POSTGRES_EVIDENCE_OUTPUT: ${{ runner.temp }}/p13-5f-postgres/provider-parity.json
-        run: |
-          mkdir -p "$RUNNER_TEMP/p13-5f-postgres"
-          timeout --foreground 20m bash tests/p13_5f_postgres_provider_parity.sh
-      - name: Upload PostgreSQL P13.5F provider evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: p13-5f-postgres-provider-evidence
-          if-no-files-found: warn
-          path: ${{ runner.temp }}/p13-5f-postgres
+      - name: Validate committed PostgreSQL P13.5F provider parity evidence
+        # The hosted Rust runner has no disposable LVM TestLab.  Provider
+        # execution evidence is produced by the accepted PostgreSQL/TestLab
+        # tiers; this job must validate the exact committed artifact instead
+        # of starting an impossible full 11-gate baseline locally.
+        run: >-
+          python3 scripts/validate_p13_5f_postgres_provider_parity.py
+          docs/compatibility/p13-5/postgres-provider-parity/p13-5f-postgres-provider-parity.json
       - name: Run P13.5E real upstream provider fault-proxy gate
         # Keep this gate bounded so a hosted-runner fault cannot hide its result.
         env:
