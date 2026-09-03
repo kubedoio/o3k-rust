@@ -1706,6 +1706,679 @@ PY_EVIDENCE
     echo "P13.6C: ALL PASS"
 }
 
+# ---------------------------------------------------------------------------
+# P13.6D — restart and durable recovery matrix
+# ---------------------------------------------------------------------------
+
+run_slice_d() {
+    echo "P13.6D: restart and durable recovery matrix"
+
+    local state_dir evidence_file evidence_rows
+    state_dir=$(mktemp -d /tmp/p13-6d-XXXXXX)
+    evidence_file="$evidence_dir/p13-6d-evidence.json"
+    evidence_rows="$state_dir/evidence-rows.jsonl"
+    mkdir -p "$(dirname "$evidence_file")" "$state_dir"
+
+    P13_6B_STATE_DIR="$state_dir"
+    _p13_6b_cleanup_done=0
+
+    local o3kd_port proxy_port auth_url proxy_url token_a token_b
+    # Intentionally global: the EXIT trap calls stop_proxy after this
+    # function has returned, so a function-local would be unbound there.
+    proxy_pid=""
+    o3kd_port=$(find_free_port)
+    proxy_port=$(find_free_port)
+    auth_url="http://127.0.0.1:$o3kd_port"
+    proxy_url="http://127.0.0.1:$proxy_port"
+
+    if [[ -z "${O3K_DATABASE_BACKEND:-}" ]]; then
+        case "${O3K_DATABASE_URL:-}" in
+            postgres*|postgresql*) export O3K_DATABASE_BACKEND="postgresql" ;;
+            *) export O3K_DATABASE_BACKEND="sqlite" ;;
+        esac
+    fi
+    echo "P13.6D: database backend: $O3K_DATABASE_BACKEND"
+
+    # Fault proxy lifecycle. Each proxy instance carries at most one one-shot
+    # rule; scenarios restart the proxy per matrix cell.
+    start_proxy() { # evidence_file [--rule 'METHOD PATH LOCATION KIND']
+        local evidence_file="$1"; shift
+        python3 "$root_dir/scripts/p13_5e_fault_proxy.py" \
+            --serve-backend "$auth_url" \
+            --listen-port "$proxy_port" \
+            --evidence "$evidence_file" "$@" \
+            >"$state_dir/proxy.log" 2>&1 &
+        proxy_pid=$!
+        local attempt
+        for attempt in $(seq 1 50); do
+            kill -0 "$proxy_pid" 2>/dev/null || return 1
+            curl -sf "$proxy_url/readyz" >/dev/null 2>&1 && return 0
+            sleep 0.1
+        done
+        echo "P13.6D: proxy failed to become ready" >&2
+        return 1
+    }
+    stop_proxy() {
+        [[ -n "$proxy_pid" ]] || return 0
+        kill -TERM "$proxy_pid" 2>/dev/null || true
+        wait "$proxy_pid" 2>/dev/null || true
+        proxy_pid=""
+    }
+    trap 'stop_proxy 2>/dev/null || true; _cleanup_6b' EXIT
+
+    # Same external-pool restart dance as slices B/C.
+    export O3K_NETWORK_EXTERNAL_REALM_ID="00000000-0000-0000-0000-000000000009"
+    export O3K_PUBLIC_POOL_CIDR="198.51.104.0/29"
+    export O3K_PUBLIC_POOL_FIRST="198.51.104.2"
+    export O3K_PUBLIC_POOL_LAST="198.51.104.6"
+    start_o3kd "$state_dir" "$o3kd_port"
+
+    local external_realm_id
+    external_realm_id=$(curl -sf -X POST "$auth_url/v2.0/networks" \
+        -H "Content-Type: application/json" \
+        -H "X-Auth-Token: $(get_token "$auth_url" "$proja_user" "$password" "$proja_name")" \
+        -d '{"network":{"name":"p13-6-public-pool","router:external":true,"shared":true}}' \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['id'])" 2>/dev/null || echo "")
+    [[ -n "$external_realm_id" ]] || { echo "P13.6D: FAILED - no external pool" >&2; exit 2; }
+    stop_o3kd "$state_dir"; sleep 1
+    export O3K_NETWORK_EXTERNAL_REALM_ID="$external_realm_id"
+    start_o3kd "$state_dir" "$o3kd_port"
+
+    token_a=$(get_token "$auth_url" "$proja_user" "$password" "$proja_name")
+    token_b=$(get_token "$auth_url" "$tenb_username" "$tenb_pass" "$tenb_name")
+    [[ -n "$token_a" && -n "$token_b" && "$token_a" != "$token_b" ]] || { echo "P13.6D: FAILED - tokens" >&2; exit 2; }
+
+    d_token() { if [[ "$1" == b ]]; then printf '%s' "$token_b"; else printf '%s' "$token_a"; fi; }
+    d_proj_id() { if [[ "$1" == b ]]; then printf '%s' "$tenb_project"; else printf '%s' "$proja_id"; fi; }
+
+    tofu_a() { (cd "$dir_a" && TF_CLI_CONFIG_FILE="$dir_a/tofu.tfrc" TF_IN_AUTOMATION=1 "$tofu" "$@"); }
+    tofu_b() { (cd "$dir_b" && TF_CLI_CONFIG_FILE="$dir_b/tofu.tfrc" TF_IN_AUTOMATION=1 "$tofu" "$@"); }
+    local dir_a="$state_dir/project-a" dir_b="$state_dir/project-b"
+
+    # Per-project OpenTofu workdir whose provider points at the fault proxy
+    # (auth and Neutron endpoint both proxied; copied from setup_tofu_workdir
+    # to keep slices B/C untouched).
+    d_setup_workdir() { # work_dir tenant_id user_name user_password
+        local work_dir="$1" tenant_id="$2" user_name="$3" user_password="$4"
+
+        mkdir -p "$work_dir"
+        local mirror_dir="$work_dir/mirror/registry.terraform.io/terraform-provider-openstack/openstack/3.4.0/linux_amd64"
+        mkdir -p "$mirror_dir"
+        cp "$provider_binary" "$mirror_dir/terraform-provider-openstack_v3.4.0"
+
+        cat > "$work_dir/tofu.tfrc" <<TFRC
+provider_installation {
+  filesystem_mirror {
+    path = "${work_dir}/mirror"
+    include = ["registry.terraform.io/terraform-provider-openstack/openstack"]
+  }
+  direct {
+    exclude = ["registry.terraform.io/terraform-provider-openstack/openstack"]
+  }
+}
+TFRC
+
+        cat > "$work_dir/provider.tf" <<PROV
+terraform {
+  required_version = "= 1.12.6"
+  required_providers {
+    openstack = {
+      source  = "terraform-provider-openstack/openstack"
+      version = "= 3.4.0"
+    }
+  }
+}
+provider "openstack" {
+  auth_url    = "${proxy_url}"
+  user_name   = "${user_name}"
+  password    = "${user_password}"
+  tenant_id   = "${tenant_id}"
+  endpoint_overrides = { network = "${proxy_url}/v2.0/" }
+  max_retries = 0
+}
+PROV
+
+        (cd "$work_dir" && \
+            TF_CLI_CONFIG_FILE="$work_dir/tofu.tfrc" \
+            TF_IN_AUTOMATION=1 \
+            "$tofu" init -input=false -upgrade=false -no-color 2>&1 | tail -3)
+    }
+
+    d_setup_workdir "$dir_a" "$proja_id" "$proja_user" "$password"
+    d_setup_workdir "$dir_b" "$tenb_project" "$tenb_username" "$tenb_pass"
+
+    # Minimal identical graph per project (same names in both). Applied with
+    # a rule-less proxy so one-shot fault rules never fire on setup traffic.
+    cat > "$dir_a/graph.tf" <<'TOFU_G'
+resource "openstack_networking_network_v2" "main" {
+  name = "p13-6d-net"
+  tags = []
+}
+resource "openstack_networking_subnet_v2" "main" {
+  name            = "p13-6d-subnet"
+  network_id      = openstack_networking_network_v2.main.id
+  cidr            = "10.6.0.0/24"
+  ip_version      = 4
+  enable_dhcp     = false
+  dns_nameservers = []
+}
+resource "openstack_networking_router_v2" "main" {
+  name = "p13-6d-router"
+  tags = []
+}
+resource "openstack_networking_router_interface_v2" "main" {
+  router_id = openstack_networking_router_v2.main.id
+  subnet_id = openstack_networking_subnet_v2.main.id
+}
+TOFU_G
+    cp "$dir_a/graph.tf" "$dir_b/graph.tf"
+
+    start_proxy "$state_dir/d0-baseline.json"
+    tofu_a apply -input=false -auto-approve >/dev/null \
+        || { stop_proxy; echo "P13.6D: FAILED - project A baseline apply failed" >&2; exit 2; }
+    tofu_b apply -input=false -auto-approve >/dev/null \
+        || { stop_proxy; echo "P13.6D: FAILED - project B baseline apply failed" >&2; exit 2; }
+    stop_proxy
+
+    extract_id() { # dir address
+        local dir="$1" addr="$2"
+        (cd "$dir" && TF_CLI_CONFIG_FILE="$dir/tofu.tfrc" "$tofu" show -json | python3 -c "
+import json,sys
+r=json.load(sys.stdin)['values']['root_module']['resources']
+print(next(x['values']['id'] for x in r if x['address']=='$addr'))")
+    }
+    local net_a subnet_a router_a net_b subnet_b router_b
+    net_a=$(extract_id "$dir_a" "openstack_networking_network_v2.main")
+    subnet_a=$(extract_id "$dir_a" "openstack_networking_subnet_v2.main")
+    router_a=$(extract_id "$dir_a" "openstack_networking_router_v2.main")
+    net_b=$(extract_id "$dir_b" "openstack_networking_network_v2.main")
+    subnet_b=$(extract_id "$dir_b" "openstack_networking_subnet_v2.main")
+    router_b=$(extract_id "$dir_b" "openstack_networking_router_v2.main")
+    echo "P13.6D: baseline — A net=$net_a router=$router_a; B net=$net_b router=$router_b"
+
+    # Row helper: every D matrix cell is a legitimate same-project operation,
+    # so target_owner == caller_owner and the expected outcome is allow. For
+    # response-loss cells the recorded actual_http_status is the observed
+    # backend_status (backend completion), not the lost client response.
+    d_row() { # scenario result http_status resource operation owner details_json
+        emit_scenario_row "P13.6D" "$1" "$2" \
+            "{\"resource_type\":\"$4\",\"operation\":\"$5\",\"target_owner\":\"$6\",\"caller_owner\":\"$6\",\"expected_authorization_outcome\":\"allow\",\"actual_http_status\":$3,$7}" >> "$evidence_rows"
+    }
+
+    d1_fail() { # project reason
+        d_row "D1_pre_acceptance_loss_$1" failed 0 openstack_networking_network_v2 create "project_$1" \
+            "\"details\":{\"reason\":\"$2\"}"
+        echo "P13.6D: FAIL - D1 ($1): $2" >&2
+        exit 2
+    }
+
+    # ------------------------------------------------------------------
+    # D1 — pre-acceptance loss, per project (A then B)
+    # ------------------------------------------------------------------
+    echo "P13.6D: === D1 - pre-acceptance loss (both projects) ==="
+    for p in a b; do
+        local tok pid d1_name d1_client_status d1_count d1_retry_body d1_retry_status d1_net
+        tok=$(d_token "$p"); pid=$(d_proj_id "$p")
+        d1_name="p13-6d-d1-$p"
+        start_proxy "$state_dir/d1-$p.json" --rule 'POST /v2.0/networks* before_forward pre_forward_failure'
+        d1_client_status=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$proxy_url/v2.0/networks" \
+            -H "Content-Type: application/json" -H "X-Auth-Token: $tok" \
+            -d "{\"network\":{\"name\":\"$d1_name\"}}" || true)
+        stop_proxy
+        [[ "$d1_client_status" != 2* ]] || d1_fail "$p" "faulted_create_unexpectedly_succeeded"
+        python3 - "$state_dir/d1-$p.json" >"$state_dir/d1-$p.check" <<'PY' || d1_fail "$p" "proxy_evidence_mismatch"
+import json, sys
+recs = json.load(open(sys.argv[1], encoding="utf-8"))["records"]
+faults = [r for r in recs if r.get("fault_location") == "before_forward"]
+assert len(faults) == 1, recs
+f = faults[0]
+assert f["method"] == "POST" and f["path"].startswith("/v2.0/networks"), f
+assert f["forwarded"] is False, f
+PY
+        d1_count=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/networks" \
+            | python3 -c "import json,sys; print(len([n for n in json.load(sys.stdin).get('networks',[]) if n.get('name')=='$d1_name']))")
+        [[ "$d1_count" == "0" ]] || d1_fail "$p" "resource_created_despite_pre_forward_fault"
+        # Retry the same create WITHOUT proxy: must succeed exactly once.
+        d1_retry_body=$(curl -s -X POST "$auth_url/v2.0/networks" \
+            -H "Content-Type: application/json" -H "X-Auth-Token: $tok" \
+            -d "{\"network\":{\"name\":\"$d1_name\"}}" -w $'\n%{http_code}')
+        d1_retry_status=$(tail -n1 <<< "$d1_retry_body")
+        d1_net=$(sed '$d' <<< "$d1_retry_body" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['id'])" 2>/dev/null || echo "")
+        [[ "$d1_retry_status" == "201" && -n "$d1_net" ]] || d1_fail "$p" "retry_create_failed_status=$d1_retry_status"
+        printf -v "d1_net_$p" "%s" "$d1_net"
+        printf -v "d1_cur_$p" "%s" "$d1_name"
+        d_row "D1_pre_acceptance_loss_$p" passed 201 openstack_networking_network_v2 create "project_$p" \
+            "\"details\":{\"fault_location\":\"before_forward\",\"forwarded\":false,\"backend_observed_client_status\":$d1_client_status,\"outcome_unknown\":false,\"duplicate_side_effects\":0,\"converged\":true}"
+        echo "P13.6D: D1 ($p) PASS"
+    done
+
+    d2_fail() { # project reason
+        d_row "D2_update_response_loss_$1" failed 0 openstack_networking_network_v2 update "project_$1" \
+            "\"details\":{\"reason\":\"$2\"}"
+        echo "P13.6D: FAIL - D2 ($1): $2" >&2
+        exit 2
+    }
+
+    # ------------------------------------------------------------------
+    # D2 — post-commit response loss on UPDATE, per project
+    # ------------------------------------------------------------------
+    echo "P13.6D: === D2 - post-commit response loss on UPDATE (both projects) ==="
+    for p in a b; do
+        local tok pid o d1_id other_id other_tok other_cur new_name \
+              d2_client_status d2_backend_status d2_name_obs d2_owner \
+              other_name_obs post_name post_owner
+        tok=$(d_token "$p"); pid=$(d_proj_id "$p")
+        o=$([[ "$p" == a ]] && echo b || echo a)
+        d1_id=$(eval echo "\$d1_net_$p")
+        other_id=$(eval echo "\$d1_net_$o")
+        other_tok=$(d_token "$o")
+        other_cur=$(eval echo "\$d1_cur_$o")
+        new_name="p13-6d-d2-$p"
+        start_proxy "$state_dir/d2-$p.json" --rule 'PUT /v2.0/networks* after_commit_before_response response_loss'
+        d2_client_status=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$proxy_url/v2.0/networks/$d1_id" \
+            -H "Content-Type: application/json" -H "X-Auth-Token: $tok" \
+            -d "{\"network\":{\"name\":\"$new_name\"}}" || true)
+        stop_proxy
+        [[ "$d2_client_status" != 2* ]] || d2_fail "$p" "faulted_update_unexpectedly_succeeded"
+        d2_backend_status=$(python3 - "$state_dir/d2-$p.json" <<'PY'
+import json, sys
+recs = json.load(open(sys.argv[1], encoding="utf-8"))["records"]
+faults = [r for r in recs if r.get("fault_location") == "after_commit_before_response"]
+assert len(faults) == 1, recs
+f = faults[0]
+assert f["method"] == "PUT" and f["path"].startswith("/v2.0/networks/"), f
+assert f["forwarded"] is True, f
+assert f["backend_status"] in (200, 202), f
+print(f["backend_status"])
+PY
+) || d2_fail "$p" "proxy_evidence_mismatch"
+        # Direct GET: the rename DID apply even though the client response was lost.
+        d2_name_obs=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/networks/$d1_id" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['name'])")
+        d2_owner=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/networks/$d1_id" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['tenant_id'])")
+        [[ "$d2_name_obs" == "$new_name" ]] || d2_fail "$p" "rename_not_applied"
+        [[ "$d2_owner" == "$pid" ]] || d2_fail "$p" "owner_mismatch"
+        # The other project's network must be untouched by this operation.
+        other_name_obs=$(curl -sf -H "X-Auth-Token: $other_tok" "$auth_url/v2.0/networks/$other_id" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['name'])")
+        [[ "$other_name_obs" == "$other_cur" ]] || d2_fail "$p" "foreign_network_mutated"
+        # Clean restart; the terminal state must be durable and owner preserved.
+        restart_daemon "$state_dir" "$o3kd_port"
+        token_a=$(get_token "$auth_url" "$proja_user" "$password" "$proja_name")
+        token_b=$(get_token "$auth_url" "$tenb_username" "$tenb_pass" "$tenb_name")
+        tok=$(d_token "$p")
+        post_name=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/networks/$d1_id" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['name'])")
+        post_owner=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/networks/$d1_id" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['tenant_id'])")
+        [[ "$post_name" == "$new_name" && "$post_owner" == "$pid" ]] || d2_fail "$p" "terminal_state_not_durable_after_restart"
+        printf -v "d1_cur_$p" "%s" "$new_name"
+        d_row "D2_update_response_loss_$p" passed "$d2_backend_status" openstack_networking_network_v2 update "project_$p" \
+            "\"details\":{\"fault_location\":\"after_commit_before_response\",\"observed_client_status\":$d2_client_status,\"recorded_status_is_backend_completion\":true,\"backend_completion_observed\":true,\"terminal_state_converged\":true,\"foreign_state_unchanged\":true,\"ownership_preserved_after_restart\":true}"
+        echo "P13.6D: D2 ($p) PASS"
+    done
+
+    d3_fail() { # project reason
+        d_row "D3_delete_response_loss_$1" failed 0 openstack_networking_network_v2 delete "project_$1" \
+            "\"details\":{\"reason\":\"$2\"}"
+        echo "P13.6D: FAIL - D3 ($1): $2" >&2
+        exit 2
+    }
+
+    # ------------------------------------------------------------------
+    # D3 — post-commit response loss on DELETE, per project
+    # ------------------------------------------------------------------
+    echo "P13.6D: === D3 - post-commit response loss on DELETE (both projects) ==="
+    for p in a b; do
+        local tok o d1_id other_base other_base_tok d3_client_status d3_backend_status \
+              d3_get_status d3_foreign_status d3_foreign_d1_status d3_foreign_d1_observed \
+              d3_post_status d3_post_foreign_status
+        tok=$(d_token "$p")
+        o=$([[ "$p" == a ]] && echo b || echo a)
+        d1_id=$(eval echo "\$d1_net_$p")
+        # Foreign-unchanged proof: the other project's baseline network must be
+        # intact. When the other project's D1 network has not been deleted yet
+        # (only true while p == a, since D3(a) deletes A's D1 network), it must
+        # still exist as well.
+        other_base=$(eval echo "\$net_$o")
+        other_base_tok=$(d_token "$o")
+        d3_foreign_d1_observed=false
+        start_proxy "$state_dir/d3-$p.json" --rule 'DELETE /v2.0/networks* after_commit_before_response response_loss'
+        d3_client_status=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$proxy_url/v2.0/networks/$d1_id" \
+            -H "X-Auth-Token: $tok" || true)
+        stop_proxy
+        [[ "$d3_client_status" != 2* ]] || d3_fail "$p" "faulted_delete_unexpectedly_succeeded"
+        d3_backend_status=$(python3 - "$state_dir/d3-$p.json" <<'PY'
+import json, sys
+recs = json.load(open(sys.argv[1], encoding="utf-8"))["records"]
+faults = [r for r in recs if r.get("fault_location") == "after_commit_before_response"]
+assert len(faults) == 1, recs
+f = faults[0]
+assert f["method"] == "DELETE" and f["path"].startswith("/v2.0/networks/"), f
+assert f["forwarded"] is True, f
+assert f["backend_status"] in (200, 202, 204), f
+print(f["backend_status"])
+PY
+) || d3_fail "$p" "proxy_evidence_mismatch"
+        # The delete actually committed.
+        d3_get_status=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Auth-Token: $tok" "$auth_url/v2.0/networks/$d1_id" || true)
+        [[ "$d3_get_status" == "404" ]] || d3_fail "$p" "network_not_deleted"
+        # Other project unaffected (baseline network always; sibling D1 network
+        # only while it still legitimately exists).
+        d3_foreign_status=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Auth-Token: $other_base_tok" "$auth_url/v2.0/networks/$other_base" || true)
+        [[ "$d3_foreign_status" == "200" ]] || d3_fail "$p" "foreign_baseline_network_affected"
+        if [[ "$p" == a ]]; then
+            d3_foreign_d1_status=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Auth-Token: $other_base_tok" "$auth_url/v2.0/networks/$(eval echo "\$d1_net_$o")" || true)
+            [[ "$d3_foreign_d1_status" == "200" ]] || d3_fail "$p" "foreign_d1_network_affected"
+            d3_foreign_d1_observed=true
+        fi
+        # Clean restart; no resurrection.
+        restart_daemon "$state_dir" "$o3kd_port"
+        token_a=$(get_token "$auth_url" "$proja_user" "$password" "$proja_name")
+        token_b=$(get_token "$auth_url" "$tenb_username" "$tenb_pass" "$tenb_name")
+        tok=$(d_token "$p"); other_base_tok=$(d_token "$o")
+        d3_post_status=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Auth-Token: $tok" "$auth_url/v2.0/networks/$d1_id" || true)
+        d3_post_foreign_status=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Auth-Token: $other_base_tok" "$auth_url/v2.0/networks/$other_base" || true)
+        [[ "$d3_post_status" == "404" && "$d3_post_foreign_status" == "200" ]] \
+            || d3_fail "$p" "resurrection_or_foreign_loss_after_restart"
+        d_row "D3_delete_response_loss_$p" passed "$d3_backend_status" openstack_networking_network_v2 delete "project_$p" \
+            "\"details\":{\"fault_location\":\"after_commit_before_response\",\"observed_client_status\":$d3_client_status,\"recorded_status_is_backend_completion\":true,\"backend_completion_observed\":true,\"deleted\":true,\"no_resurrection_after_restart\":true,\"foreign_unchanged\":true,\"foreign_d1_network_checked\":$d3_foreign_d1_observed}"
+        echo "P13.6D: D3 ($p) PASS"
+    done
+
+    d4_fail() { # project reason
+        d_row "D4_relationship_add_response_loss_$1" failed 0 openstack_networking_router_interface_v2 create "project_$1" \
+            "\"details\":{\"reason\":\"$2\"}"
+        echo "P13.6D: FAIL - D4 ($1): $2" >&2
+        exit 2
+    }
+
+    # ------------------------------------------------------------------
+    # D4 — relationship add under response loss, per project
+    # ------------------------------------------------------------------
+    echo "P13.6D: === D4 - relationship add under response loss (both projects) ==="
+    for p in a b; do
+        local tok pid net_id router_id o other_router_tok other_router_status \
+              d4_sub d4_client_status d4_backend_status d4_attached d4_repost_status \
+              d4_attached_post
+        tok=$(d_token "$p"); pid=$(d_proj_id "$p")
+        net_id=$(eval echo "\$net_$p")
+        router_id=$(eval echo "\$router_$p")
+        o=$([[ "$p" == a ]] && echo b || echo a)
+        # Dedicated D4 network + subnet (this profile allows one realm per
+        # network); the subnet is attached to the baseline router below.
+        local d4_net
+        d4_net=$(curl -sf -X POST "$auth_url/v2.0/networks" \
+            -H "Content-Type: application/json" -H "X-Auth-Token: $tok" \
+            -d "{\"network\":{\"name\":\"p13-6d-d4-net-$p\"}}" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['id'])" 2>/dev/null || echo "")
+        [[ -n "$d4_net" ]] || d4_fail "$p" "d4_network_create_failed"
+        printf -v "d4_net_$p" "%s" "$d4_net"
+        d4_sub=$(curl -sf -X POST "$auth_url/v2.0/subnets" \
+            -H "Content-Type: application/json" -H "X-Auth-Token: $tok" \
+            -d "{\"subnet\":{\"name\":\"p13-6d-d4-subnet-$p\",\"network_id\":\"$d4_net\",\"cidr\":\"10.6.1.0/24\",\"ip_version\":4}}" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['subnet']['id'])" 2>/dev/null || echo "")
+        [[ -n "$d4_sub" ]] || d4_fail "$p" "d4_subnet_create_failed"
+        printf -v "d4_sub_$p" "%s" "$d4_sub"
+        start_proxy "$state_dir/d4-$p.json" --rule 'PUT /v2.0/routers* after_commit_before_response response_loss'
+        d4_client_status=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$proxy_url/v2.0/routers/$router_id/add_router_interface" \
+            -H "Content-Type: application/json" -H "X-Auth-Token: $tok" \
+            -d "{\"subnet_id\":\"$d4_sub\"}" || true)
+        stop_proxy
+        [[ "$d4_client_status" != 2* ]] || d4_fail "$p" "faulted_attach_unexpectedly_succeeded"
+        d4_backend_status=$(python3 - "$state_dir/d4-$p.json" <<'PY'
+import json, sys
+recs = json.load(open(sys.argv[1], encoding="utf-8"))["records"]
+faults = [r for r in recs if r.get("fault_location") == "after_commit_before_response"]
+assert len(faults) == 1, recs
+f = faults[0]
+assert f["method"] == "PUT" and f["path"].startswith("/v2.0/routers/"), f
+assert f["path"].endswith("/add_router_interface"), f
+assert f["forwarded"] is True, f
+assert f["backend_status"] in (200, 202), f
+print(f["backend_status"])
+PY
+) || d4_fail "$p" "proxy_evidence_mismatch"
+        # The attachment actually committed. The add response itself was lost,
+        # so existence is proven by re-POSTing the same add directly: O3K
+        # answers 409 Conflict when the realm is already attached to the
+        # gateway (attach_l3_gateway_realm), while an unattached subnet
+        # attaches with 200 (observed for the baseline router_interface).
+        d4_repost_status=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$auth_url/v2.0/routers/$router_id/add_router_interface" \
+            -H "Content-Type: application/json" -H "X-Auth-Token: $tok" \
+            -d "{\"subnet_id\":\"$d4_sub\"}" || true)
+        [[ "$d4_repost_status" == "409" ]] || d4_fail "$p" "existing_attachment_repost_status=$d4_repost_status"
+        # Other project's router unaffected.
+        other_router_tok=$(d_token "$o")
+        other_router_status=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Auth-Token: $other_router_tok" \
+            "$auth_url/v2.0/routers/$(eval echo "\$router_$o")" || true)
+        [[ "$other_router_status" == "200" ]] || d4_fail "$p" "foreign_router_affected"
+        # Clean restart; the attachment must persist (still 409 on re-POST).
+        restart_daemon "$state_dir" "$o3kd_port"
+        token_a=$(get_token "$auth_url" "$proja_user" "$password" "$proja_name")
+        token_b=$(get_token "$auth_url" "$tenb_username" "$tenb_pass" "$tenb_name")
+        tok=$(d_token "$p")
+        d4_attached_post=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$auth_url/v2.0/routers/$router_id/add_router_interface" \
+            -H "Content-Type: application/json" -H "X-Auth-Token: $tok" \
+            -d "{\"subnet_id\":\"$d4_sub\"}" || true)
+        [[ "$d4_attached_post" == "409" ]] || d4_fail "$p" "attachment_lost_after_restart_repost=$d4_attached_post"
+        d_row "D4_relationship_add_response_loss_$p" passed "$d4_backend_status" openstack_networking_router_interface_v2 create "project_$p" \
+            "\"details\":{\"fault_location\":\"after_commit_before_response\",\"observed_client_status\":$d4_client_status,\"recorded_status_is_backend_completion\":true,\"backend_completion_observed\":true,\"attachment_observed\":true,\"existing_attachment_repost_status\":$d4_repost_status,\"attachment_repost_status_after_restart\":$d4_attached_post,\"attachment_persists_after_restart\":true,\"foreign_unchanged\":true}"
+        echo "P13.6D: D4 ($p) PASS"
+    done
+
+    # ------------------------------------------------------------------
+    # D5 — concurrent same-operation, both projects, no fault
+    # ------------------------------------------------------------------
+    echo "P13.6D: === D5 - concurrent same-operation, both projects ==="
+    local d5_out_a="$state_dir/d5-a.json" d5_out_b="$state_dir/d5-b.json" d5_rc_a=0 d5_rc_b=0
+    curl -s -X POST "$auth_url/v2.0/networks" \
+        -H "Content-Type: application/json" -H "X-Auth-Token: $token_a" \
+        -d '{"network":{"name":"p13-6d-d5-a"}}' -o "$d5_out_a" -w "%{http_code}" > "$d5_out_a.status" &
+    local d5_pid_a=$!
+    curl -s -X POST "$auth_url/v2.0/networks" \
+        -H "Content-Type: application/json" -H "X-Auth-Token: $token_b" \
+        -d '{"network":{"name":"p13-6d-d5-b"}}' -o "$d5_out_b" -w "%{http_code}" > "$d5_out_b.status" &
+    local d5_pid_b=$!
+    wait "$d5_pid_a" || d5_rc_a=$?
+    wait "$d5_pid_b" || d5_rc_b=$?
+    [[ "$d5_rc_a" == 0 && "$d5_rc_b" == 0 ]] || {
+        d_row "D5_concurrent_create" failed 0 openstack_networking_network_v2 create project_a \
+            "\"details\":{\"reason\":\"concurrent_create_failed\",\"a_exit\":$d5_rc_a,\"b_exit\":$d5_rc_b}"
+        echo "P13.6D: FAIL - D5 concurrent create failed (a=$d5_rc_a b=$d5_rc_b)" >&2; exit 2; }
+    local d5_status_a d5_status_b d5_net_a d5_net_b
+    d5_status_a=$(cat "$d5_out_a.status"); d5_status_b=$(cat "$d5_out_b.status")
+    d5_net_a=$(python3 -c "import json; print(json.load(open('$d5_out_a'))['network']['id'])" 2>/dev/null || echo "")
+    d5_net_b=$(python3 -c "import json; print(json.load(open('$d5_out_b'))['network']['id'])" 2>/dev/null || echo "")
+    local d5_ok=1
+    [[ "$d5_status_a" == "201" && "$d5_status_b" == "201" ]] || d5_ok=0
+    [[ -n "$d5_net_a" && -n "$d5_net_b" && "$d5_net_a" != "$d5_net_b" ]] || d5_ok=0
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks/$d5_net_a")" == "200" ]] || d5_ok=0
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token_b" "$auth_url/v2.0/networks/$d5_net_b")" == "200" ]] || d5_ok=0
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks/$d5_net_b")" == "404" ]] || d5_ok=0
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token_b" "$auth_url/v2.0/networks/$d5_net_a")" == "404" ]] || d5_ok=0
+    [[ "$d5_ok" == 1 ]] || {
+        d_row "D5_concurrent_create" failed 0 openstack_networking_network_v2 create project_a \
+            "\"details\":{\"reason\":\"postcondition_failed\",\"status_a\":\"$d5_status_a\",\"status_b\":\"$d5_status_b\",\"net_a\":\"$d5_net_a\",\"net_b\":\"$d5_net_b\"}"
+        echo "P13.6D: FAIL - D5 postconditions" >&2; exit 2; }
+    d_row "D5_concurrent_create" passed 201 openstack_networking_network_v2 create project_a \
+        "\"details\":{\"concurrent\":true,\"ids_distinct\":true,\"a_id\":\"$d5_net_a\",\"b_id\":\"$d5_net_b\",\"isolation_verified\":true}"
+    echo "P13.6D: D5 PASS"
+
+    # ------------------------------------------------------------------
+    # D6 — restart with durable state present (clean SIGTERM while idle)
+    # ------------------------------------------------------------------
+    echo "P13.6D: === D6 - restart with durable state present ==="
+    restart_daemon "$state_dir" "$o3kd_port"
+    token_a=$(get_token "$auth_url" "$proja_user" "$password" "$proja_name")
+    token_b=$(get_token "$auth_url" "$tenb_username" "$tenb_pass" "$tenb_name")
+    [[ -n "$token_a" && -n "$token_b" ]] || {
+        d_row "D6_restart_durable_state" failed 0 multi read project_a \
+            '"details":{"reason":"reauthentication_after_restart_failed"}'
+        echo "P13.6D: FAIL - D6 reauthentication" >&2; exit 2; }
+    # Provider refresh/plan for both projects through the rule-less proxy.
+    start_proxy "$state_dir/d6-plan.json"
+    local plan_a plan_b
+    plan_a=$(tofu_a plan -input=false -no-color 2>&1 || true)
+    plan_b=$(tofu_b plan -input=false -no-color 2>&1 || true)
+    stop_proxy
+    local d6_ok=1
+    echo "$plan_a" | grep -q "No changes" || { echo "P13.6D: FAIL - A plan not no-op after restart" >&2; echo "$plan_a" | tail -15 >&2; d6_ok=0; }
+    echo "$plan_b" | grep -q "No changes" || { echo "P13.6D: FAIL - B plan not no-op after restart" >&2; echo "$plan_b" | tail -15 >&2; d6_ok=0; }
+    # Spot-check ids and owners survived the restart.
+    for p in a b; do
+        local tok pid chk_net chk_router
+        tok=$(d_token "$p"); pid=$(d_proj_id "$p")
+        chk_net=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/networks/$(eval echo "\$net_$p")" \
+            | python3 -c "import json,sys; n=json.load(sys.stdin)['network']; print(n['id'], n['tenant_id'])" 2>/dev/null || echo "missing")
+        chk_router=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/routers/$(eval echo "\$router_$p")" \
+            | python3 -c "import json,sys; r=json.load(sys.stdin)['router']; print(r['id'], r.get('tenant_id',''))" 2>/dev/null || echo "missing")
+        [[ "$chk_net" == "$(eval echo "\$net_$p") $pid" ]] || d6_ok=0
+        [[ "$chk_router" == "$(eval echo "\$router_$p") $pid" ]] || d6_ok=0
+    done
+    [[ "$d6_ok" == 1 ]] || {
+        d_row "D6_restart_durable_state" failed 0 multi read project_a \
+            '"details":{"reason":"plan_not_noop_or_owner_mismatch_after_restart"}'
+        echo "P13.6D: FAIL - D6 postconditions" >&2; exit 2; }
+    d_row "D6_restart_durable_state" passed 200 multi plan project_a \
+        '"details":{"owners_reconstructed":true,"a_plan_noop":true,"b_plan_noop":true,"networks_and_routers_owner_verified":true}'
+    echo "P13.6D: D6 PASS"
+
+    # ------------------------------------------------------------------
+    # Cleanup: remove D4 router interfaces, destroy both graphs, delete D5
+    # networks, verify zero leftovers per project (excluding A's shared
+    # external pool network).
+    # ------------------------------------------------------------------
+    echo "P13.6D: === Cleanup ==="
+    local cleanup_ok=1
+    for p in a b; do
+        local tok router_id d4_sub d4_net
+        tok=$(d_token "$p")
+        router_id=$(eval echo "\$router_$p")
+        d4_sub=$(eval echo "\$d4_sub_$p")
+        d4_net=$(eval echo "\$d4_net_$p")
+        curl -sf -X PUT "$auth_url/v2.0/routers/$router_id/remove_router_interface" \
+            -H "Content-Type: application/json" -H "X-Auth-Token: $tok" \
+            -d "{\"subnet_id\":\"$d4_sub\"}" >/dev/null 2>&1 \
+            || { echo "P13.6D: FAIL - could not remove D4 interface ($p)" >&2; cleanup_ok=0; }
+        curl -sf -X DELETE -H "X-Auth-Token: $tok" "$auth_url/v2.0/subnets/$d4_sub" >/dev/null 2>&1 \
+            || { echo "P13.6D: FAIL - could not delete D4 subnet ($p)" >&2; cleanup_ok=0; }
+        curl -sf -X DELETE -H "X-Auth-Token: $tok" "$auth_url/v2.0/networks/$d4_net" >/dev/null 2>&1 \
+            || { echo "P13.6D: FAIL - could not delete D4 network ($p)" >&2; cleanup_ok=0; }
+    done
+    local destroy_a_output destroy_b_output
+    # The providers point at the proxy port; destroy runs through a rule-less
+    # proxy instance.
+    start_proxy "$state_dir/d7-cleanup.json"
+    destroy_a_output=$(tofu_a destroy -input=false -auto-approve 2>&1 || true)
+    destroy_b_output=$(tofu_b destroy -input=false -auto-approve 2>&1 || true)
+    stop_proxy
+    if ! printf '%s' "$destroy_a_output" | grep -q "Destroy complete"; then
+        echo "P13.6D: FAIL - project A destroy did not complete" >&2
+        printf '%s\n' "$destroy_a_output" | tail -15 >&2
+        cleanup_ok=0
+    fi
+    if ! printf '%s' "$destroy_b_output" | grep -q "Destroy complete"; then
+        echo "P13.6D: FAIL - project B destroy did not complete" >&2
+        printf '%s\n' "$destroy_b_output" | tail -15 >&2
+        cleanup_ok=0
+    fi
+    curl -sf -X DELETE -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks/$d5_net_a" >/dev/null 2>&1 || true
+    curl -sf -X DELETE -H "X-Auth-Token: $token_b" "$auth_url/v2.0/networks/$d5_net_b" >/dev/null 2>&1 || true
+    for p in a b; do
+        local tok leftover
+        tok=$(d_token "$p")
+        leftover=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/networks" \
+            | python3 -c "import json,sys; nets=[n for n in json.load(sys.stdin).get('networks',[]) if n.get('name')!='p13-6-public-pool']; print(len(nets))" 2>/dev/null || echo "?")
+        [[ "$leftover" == "0" ]] || { echo "P13.6D: FAIL - leftover networks ($p): $leftover" >&2; cleanup_ok=0; }
+        leftover=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/subnets" \
+            | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('subnets',[])))" 2>/dev/null || echo "?")
+        [[ "$leftover" == "0" ]] || { echo "P13.6D: FAIL - leftover subnets ($p): $leftover" >&2; cleanup_ok=0; }
+        leftover=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/routers" \
+            | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('routers',[])))" 2>/dev/null || echo "?")
+        [[ "$leftover" == "0" ]] || { echo "P13.6D: FAIL - leftover routers ($p): $leftover" >&2; cleanup_ok=0; }
+        leftover=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/ports" \
+            | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('ports',[])))" 2>/dev/null || echo "?")
+        [[ "$leftover" == "0" ]] || { echo "P13.6D: FAIL - leftover ports ($p): $leftover" >&2; cleanup_ok=0; }
+    done
+    [[ "$cleanup_ok" == 1 ]] || { echo "P13.6D: cleanup FAILED" >&2; exit 2; }
+    export P13_6B_CLEANUP_RESULT="passed"
+    echo "P13.6D: Cleanup PASS"
+
+    # ------------------------------------------------------------------
+    # Write evidence artifact
+    # ------------------------------------------------------------------
+    local head_sha
+    head_sha=$(git -C "$root_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
+
+    python3 - "$evidence_rows" "$evidence_file" "$head_sha" <<'PY_EVIDENCE'
+import hashlib, json, os, pathlib, sys
+
+rows_path, out_path, head_sha = sys.argv[1:]
+rows = []
+if pathlib.Path(rows_path).exists():
+    text = pathlib.Path(rows_path).read_text()
+    decoder = json.JSONDecoder()
+    pos = 0
+    while pos < len(text):
+        while pos < len(text) and text[pos] in ' \t\n\r':
+            pos += 1
+        if pos >= len(text):
+            break
+        obj, end = decoder.raw_decode(text, pos)
+        rows.append(obj)
+        pos = end
+
+def sha256_digest(path):
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest() if path and pathlib.Path(path).exists() else ""
+
+result_counts = {}
+for r in rows:
+    k = r.get("result", "unknown")
+    result_counts[k] = result_counts.get(k, 0) + 1
+
+ACCEPTABLE = {"passed", "not_applicable", "execution_profile_unavailable"}
+all_ok = all(r.get("result") in ACCEPTABLE for r in rows) and any(r.get("result") == "passed" for r in rows)
+
+provider_binary = os.environ.get("O3K_P13_PROVIDER_BINARY", "")
+provider_archive = os.environ.get("O3K_P13_PROVIDER_ARCHIVE", "")
+toolchain = {
+    "opentofu": "1.12.6",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_modified": False,
+}
+if provider_binary:
+    toolchain["provider_binary_sha256"] = sha256_digest(provider_binary)
+if provider_archive:
+    toolchain["provider_archive_sha256"] = sha256_digest(provider_archive)
+
+document = {
+    "artifact_type": "o3k-p13-6d-restart-recovery-evidence",
+    "schema_version": 1,
+    "phase": "P13.6D",
+    "tested_runtime_head_sha": head_sha,
+    "backend": os.environ.get("O3K_DATABASE_BACKEND", "sqlite"),
+    "toolchain": toolchain,
+    "provider_modified": False,
+    "two_project_identity_model": {
+        "project_a": {"name": "admin", "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb"},
+        "project_b": {"name": "tenant-b", "project_id": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f"},
+    },
+    "cleanup_result": os.environ.get("P13_6B_CLEANUP_RESULT", "unknown"),
+    "scenarios": rows,
+    "result_counts": result_counts,
+    "aggregate_verdict": "PASS" if all_ok else "FAILED",
+}
+pathlib.Path(out_path).write_text(json.dumps(document, indent=2) + "\n")
+print(f"P13.6D evidence written to {out_path}")
+print(f"P13.6D evidence: {len(rows)} scenarios, result_counts={json.dumps(result_counts)}")
+PY_EVIDENCE
+
+    echo "P13.6D: ALL PASS"
+}
+
 main() {
     if [[ "${P13_6_SELF_TEST:-0}" == 1 ]]; then
         self_test
@@ -1724,9 +2397,8 @@ main() {
     fi
 
     if [[ "${P13_6D_RUN:-0}" == 1 ]]; then
-        echo "P13.6D: not yet implemented"
-        emit_scenario_row "P13.6D" "restart_recovery_matrix" "blocked" '{"details": {"reason": "slice_not_started"}}'
-        exit 2
+        run_slice_d
+        exit 0
     fi
 
     if [[ "${P13_6E_RUN:-0}" == 1 ]]; then
