@@ -26,6 +26,6 @@
   "result": "passed",
   "scenario": "PG7-operation-replay-unknown-outcome",
   "schema_version": 1,
-  "tested_runtime_head_sha": "b83e0568beb3afdc420668ac74de6de4109572b5",
+  "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
   "terminal_canonical_result": "absent"
 }
