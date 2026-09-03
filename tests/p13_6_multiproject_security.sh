@@ -122,13 +122,15 @@ get_token() {
     local user_password="$3"
     local project_name="$4"
 
+    local header_file
+    header_file=$(mktemp /tmp/p13-6-token-headers.XXXXXX)
     curl -sf -X POST "$auth_url/v3/auth/tokens" \
         -H "Content-Type: application/json" \
         -d "{\"auth\":{\"identity\":{\"methods\":[\"password\"],\"password\":{\"user\":{\"name\":\"$user\",\"password\":\"$user_password\"}}},\"scope\":{\"project\":{\"name\":\"$project_name\"}}}}" \
-        -D /tmp/p13-6-token-headers.$$ \
+        -D "$header_file" \
         -o /dev/null 2>/dev/null
-    grep -i "^x-subject-token:" /tmp/p13-6-token-headers.$$ | awk '{print $2}' | tr -d '\r'
-    rm -f /tmp/p13-6-token-headers.$$
+    grep -i "^x-subject-token:" "$header_file" | awk '{print $2}' | tr -d '\r'
+    rm -f "$header_file"
 }
 
 # Set up an isolated OpenTofu working directory for one project.
@@ -560,8 +562,26 @@ resource "openstack_networking_floatingip_v2" "main" {
 TOFU_G
     cp "$dir_a/graph.tf" "$dir_b/graph.tf"
 
+    # The shared external pool network is only visible to the project that
+    # created it, so the floating IP resource cannot be planned by project B
+    # through the Neutron pool lookup. B's floating IP is created out-of-band
+    # later (B3); drop the resource from B's config here.
+    sed -i '/resource "openstack_networking_floatingip_v2"/,/^}/d' "$dir_b/graph.tf"
+
+    # B2 proves the identical same-name graphs actually plan cleanly in both
+    # projects before any resource is created.
+    local b2_plan_a_rc=0 b2_plan_b_rc=0
+    tofu_a plan -input=false -no-color >/dev/null 2>&1 || b2_plan_a_rc=$?
+    tofu_b plan -input=false -no-color >/dev/null 2>&1 || b2_plan_b_rc=$?
+    if [[ "$b2_plan_a_rc" != 0 || "$b2_plan_b_rc" != 0 ]]; then
+        echo "P13.6B: FAIL - initial plan failed (A=$b2_plan_a_rc B=$b2_plan_b_rc)" >&2
+        emit_scenario_row "P13.6B" "B2_same_name_resources" "failed" \
+            "{\"details\":{\"configs_identical\":true,\"a_plan_exit\":$b2_plan_a_rc,\"b_plan_exit\":$b2_plan_b_rc}}" >> "$evidence_rows"
+        exit 2
+    fi
+
     emit_scenario_row "P13.6B" "B2_same_name_resources" "passed" \
-        '{"resource_type":"configuration","operation":"plan","target_owner":"project_a","caller_owner":"project_a","expected_authorization_outcome":"allow","actual_http_status":200,"details":{"configs_identical":true,"shared_names":["p13-shared-name","p13-shared-subnet","p13-shared-port","p13-shared-router","p13-shared-sg","p13-shared-keypair"]},"resources_created":["openstack_compute_keypair_v2","openstack_networking_network_v2","openstack_networking_subnet_v2","openstack_networking_port_v2","openstack_networking_router_v2","openstack_networking_router_interface_v2","openstack_networking_secgroup_v2","openstack_networking_secgroup_rule_v2","openstack_networking_floatingip_v2"],"resource_types_coverage":["openstack_compute_keypair_v2","openstack_networking_network_v2","openstack_networking_subnet_v2","openstack_networking_port_v2","openstack_networking_secgroup_v2","openstack_networking_secgroup_rule_v2","openstack_networking_router_v2","openstack_networking_router_interface_v2","openstack_networking_floatingip_v2"]}' >> "$evidence_rows"
+        "{\"resource_type\":\"configuration\",\"operation\":\"plan\",\"target_owner\":\"project_a\",\"caller_owner\":\"project_a\",\"expected_authorization_outcome\":\"allow\",\"actual_http_status\":200,\"details\":{\"configs_identical\":true,\"shared_names\":[\"p13-shared-name\",\"p13-shared-subnet\",\"p13-shared-port\",\"p13-shared-router\",\"p13-shared-sg\",\"p13-shared-keypair\"],\"a_plan_exit\":0,\"b_plan_exit\":0},\"resources_created\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_floatingip_v2\"],\"resource_types_coverage\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_floatingip_v2\"]}" >> "$evidence_rows"
     echo "P13.6B: B2 PASS"
 
     # -----------------------------------------------------------------------
@@ -593,10 +613,13 @@ print(next(x["values"]["id"] for x in r if x["address"]=="openstack_compute_keyp
     fip_a_id=$(tofu_a show -json | python3 -c '
 import json,sys; r=json.load(sys.stdin)["values"]["root_module"]["resources"]
 print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_floatingip_v2.main"))')
+    ri_a_id=$(tofu_a show -json | python3 -c '
+import json,sys; r=json.load(sys.stdin)["values"]["root_module"]["resources"]
+print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_router_interface_v2.main"))')
 
-    echo "P13.6B: A resources — net=$net_a_id subnet=$subnet_a_id port=$port_a_id router=$router_a_id sg=$sg_a_id keypair=$keypair_a_id fip=$fip_a_id"
+    echo "P13.6B: A resources — net=$net_a_id subnet=$subnet_a_id port=$port_a_id router=$router_a_id sg=$sg_a_id keypair=$keypair_a_id fip=$fip_a_id ri=$ri_a_id"
     emit_scenario_row "P13.6B" "B3_network_graph_a" "passed" \
-        "{\"resource_type\":\"openstack_networking_network_v2\",\"operation\":\"create\",\"target_owner\":\"project_a\",\"caller_owner\":\"project_a\",\"expected_authorization_outcome\":\"allow\",\"actual_http_status\":200,\"details\":{\"network_id\":\"$net_a_id\",\"subnet_id\":\"$subnet_a_id\",\"port_id\":\"$port_a_id\",\"router_id\":\"$router_a_id\",\"security_group_id\":\"$sg_a_id\",\"keypair_id\":\"$keypair_a_id\",\"floating_ip_id\":\"$fip_a_id\"},\"resources_created\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_floatingip_v2\"],\"resource_types_coverage\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_floatingip_v2\"]}" >> "$evidence_rows"
+        "{\"resource_type\":\"openstack_networking_network_v2\",\"operation\":\"create\",\"target_owner\":\"project_a\",\"caller_owner\":\"project_a\",\"expected_authorization_outcome\":\"allow\",\"actual_http_status\":200,\"details\":{\"network_id\":\"$net_a_id\",\"subnet_id\":\"$subnet_a_id\",\"port_id\":\"$port_a_id\",\"router_id\":\"$router_a_id\",\"router_interface_id\":\"$ri_a_id\",\"security_group_id\":\"$sg_a_id\",\"keypair_id\":\"$keypair_a_id\",\"floating_ip_id\":\"$fip_a_id\"},\"resources_created\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_floatingip_v2\"],\"resource_types_coverage\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_floatingip_v2\"]}" >> "$evidence_rows"
     echo "P13.6B: B3 (A) PASS"
 
     # -----------------------------------------------------------------------
@@ -633,9 +656,9 @@ print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_f
     # -----------------------------------------------------------
     echo "P13.6B: === B3 (continued) - Networking graph (Project B) ==="
 
-    # Remove floating IP resource from B's config since the external
-    # pool network is not visible across projects via Neutron API.
-    sed -i '/resource "openstack_networking_floatingip_v2"/,/^}/d' "$dir_b/graph.tf"
+    # B's config already has the floating IP removed (done in B2 because the
+    # shared external pool is not visible to B via the Neutron pool lookup);
+    # B's floating IP is created out-of-band below with the known realm ID.
 
     tofu_b apply -input=false -auto-approve >/dev/null
 
@@ -669,11 +692,14 @@ print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_s
     keypair_b_id=$(tofu_b show -json | python3 -c '
 import json,sys; r=json.load(sys.stdin)["values"]["root_module"]["resources"]
 print(next(x["values"]["id"] for x in r if x["address"]=="openstack_compute_keypair_v2.main"))')
+    ri_b_id=$(tofu_b show -json | python3 -c '
+import json,sys; r=json.load(sys.stdin)["values"]["root_module"]["resources"]
+print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_router_interface_v2.main"))')
 
 
-    echo "P13.6B: B resources — net=$net_b_id subnet=$subnet_b_id port=$port_b_id router=$router_b_id sg=$sg_b_id keypair=$keypair_b_id fip=$fip_b_id"
+    echo "P13.6B: B resources — net=$net_b_id subnet=$subnet_b_id port=$port_b_id router=$router_b_id sg=$sg_b_id keypair=$keypair_b_id fip=$fip_b_id ri=$ri_b_id"
     emit_scenario_row "P13.6B" "B3_network_graph_b" "passed" \
-        "{\"resource_type\":\"openstack_networking_network_v2\",\"operation\":\"create\",\"target_owner\":\"project_b\",\"caller_owner\":\"project_b\",\"expected_authorization_outcome\":\"allow\",\"actual_http_status\":200,\"details\":{\"network_id\":\"$net_b_id\",\"subnet_id\":\"$subnet_b_id\",\"port_id\":\"$port_b_id\",\"router_id\":\"$router_b_id\",\"security_group_id\":\"$sg_b_id\",\"keypair_id\":\"$keypair_b_id\",\"floating_ip_id\":\"$fip_b_id\"},\"resources_created\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_floatingip_v2\"],\"resource_types_coverage\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_floatingip_v2\"]}" >> "$evidence_rows"
+        "{\"resource_type\":\"openstack_networking_network_v2\",\"operation\":\"create\",\"target_owner\":\"project_b\",\"caller_owner\":\"project_b\",\"expected_authorization_outcome\":\"allow\",\"actual_http_status\":200,\"details\":{\"network_id\":\"$net_b_id\",\"subnet_id\":\"$subnet_b_id\",\"port_id\":\"$port_b_id\",\"router_id\":\"$router_b_id\",\"router_interface_id\":\"$ri_b_id\",\"security_group_id\":\"$sg_b_id\",\"keypair_id\":\"$keypair_b_id\",\"floating_ip_id\":\"$fip_b_id\"},\"resources_created\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_floatingip_v2\"],\"resource_types_coverage\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_floatingip_v2\"]}" >> "$evidence_rows"
     echo "P13.6B: B3 (B) PASS"
 
     # Verify IDs differ between A and B
@@ -684,6 +710,7 @@ print(next(x["values"]["id"] for x in r if x["address"]=="openstack_compute_keyp
     [[ "$router_a_id" != "$router_b_id" ]] || { echo "P13.6B: FAIL - router IDs identical" >&2; b4_ids_ok=0; }
     [[ "$sg_a_id" != "$sg_b_id" ]] || { echo "P13.6B: FAIL - SG IDs identical" >&2; b4_ids_ok=0; }
     [[ "$fip_a_id" != "$fip_b_id" ]] || { echo "P13.6B: FAIL - floating IP IDs identical" >&2; b4_ids_ok=0; }
+    [[ "$ri_a_id" != "$ri_b_id" ]] || { echo "P13.6B: FAIL - router interface IDs identical" >&2; b4_ids_ok=0; }
     # Keypair ID is the name — same name across projects is expected (distinct resources per project).
     # Verify keypair isolation separately via API calls.
     # Keypair isolation: keypairs with the same name exist independently per project.
@@ -698,7 +725,7 @@ print(next(x["values"]["id"] for x in r if x["address"]=="openstack_compute_keyp
 
     if [[ "$b4_ids_ok" != 1 ]]; then
         emit_scenario_row "P13.6B" "B4_ids_distinct" "failed" \
-            "{\"details\":{\"network_a\":\"$net_a_id\",\"network_b\":\"$net_b_id\"}}" >> "$evidence_rows"
+            "{\"details\":{\"network_a\":\"$net_a_id\",\"network_b\":\"$net_b_id\",\"kp_a_list\":\"$kp_a_list\",\"kp_b_list\":\"$kp_b_list\",\"ri_a\":\"$ri_a_id\",\"ri_b\":\"$ri_b_id\"}}" >> "$evidence_rows"
         exit 2
     fi
 
@@ -717,12 +744,12 @@ print(next(x["values"]["id"] for x in r if x["address"]=="openstack_compute_keyp
 
     if [[ "$b4_ids_ok" != 1 ]]; then
         emit_scenario_row "P13.6B" "B4_ids_distinct" "failed" \
-            "{\"details\":{\"a_show_b_status\":$a_show_b_status,\"a_network_count\":$a_count_after,\"b_network_count\":$b_count_after}}" >> "$evidence_rows"
+            "{\"details\":{\"a_show_b_status\":\"$a_show_b_status\",\"a_network_count\":\"$a_count_after\",\"b_network_count\":\"$b_count_after\"}}" >> "$evidence_rows"
         exit 2
     fi
 
     emit_scenario_row "P13.6B" "B4_ids_distinct" "passed" \
-        "{\"resource_type\":\"openstack_networking_network_v2\",\"operation\":\"show\",\"target_owner\":\"project_a\",\"caller_owner\":\"project_b\",\"expected_authorization_outcome\":\"deny\",\"actual_http_status\":404,\"details\":{\"ids_distinct\":true,\"a_network_count\":$a_count_after,\"b_network_count\":$b_count_after},\"resources_created\":[],\"resource_types_coverage\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_floatingip_v2\"]}" >> "$evidence_rows"
+        "{\"resource_type\":\"openstack_networking_network_v2\",\"operation\":\"show\",\"target_owner\":\"project_a\",\"caller_owner\":\"project_b\",\"expected_authorization_outcome\":\"deny\",\"actual_http_status\":404,\"details\":{\"ids_distinct\":true,\"a_network_count\":\"$a_count_after\",\"b_network_count\":\"$b_count_after\"},\"resources_created\":[],\"resource_types_coverage\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_floatingip_v2\"]}" >> "$evidence_rows"
     echo "P13.6B: B4 PASS"
 
     # -----------------------------------------------------------------------
@@ -744,11 +771,14 @@ CONCUR
     tofu_b apply -input=false -auto-approve >/dev/null &
     local pid_b=$!
 
-    wait "$pid_a" "$pid_b" || {
+    local rc_a=0 rc_b=0
+    wait "$pid_a" || rc_a=$?
+    wait "$pid_b" || rc_b=$?
+    if [[ "$rc_a" != 0 || "$rc_b" != 0 ]]; then
         emit_scenario_row "P13.6B" "B6_concurrent_operation" "failed" \
-            '{"details":{"reason":"concurrent_apply_failed"}}' >> "$evidence_rows"
+            "{\"details\":{\"reason\":\"concurrent_apply_failed\",\"a_exit\":$rc_a,\"b_exit\":$rc_b}}" >> "$evidence_rows"
         exit 2
-    }
+    fi
 
     local conc_net_a conc_net_b
     conc_net_a=$(tofu_a show -json | python3 -c '
@@ -765,7 +795,7 @@ print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_n
     fi
 
     emit_scenario_row "P13.6B" "B6_concurrent_operation" "passed" \
-        "{\"resource_type\":\"openstack_networking_network_v2\",\"operation\":\"create\",\"target_owner\":\"project_a\",\"caller_owner\":\"system\",\"expected_authorization_outcome\":\"allow\",\"actual_http_status\":200,\"details\":{\"concurrent_network_a\":\"$conc_net_a\",\"concurrent_network_b\":\"$conc_net_b\"},\"resources_created\":[\"openstack_networking_network_v2\"],\"resource_types_coverage\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_floatingip_v2\"]}" >> "$evidence_rows"
+        "{\"resource_type\":\"openstack_networking_network_v2\",\"operation\":\"create\",\"target_owner\":\"project_a\",\"caller_owner\":\"project_a_and_b\",\"expected_authorization_outcome\":\"allow\",\"actual_http_status\":200,\"details\":{\"concurrent_network_a\":\"$conc_net_a\",\"concurrent_network_b\":\"$conc_net_b\",\"a_apply_exit\":0,\"b_apply_exit\":0},\"resources_created\":[\"openstack_networking_network_v2\"],\"resource_types_coverage\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_floatingip_v2\"]}" >> "$evidence_rows"
     echo "P13.6B: B6 PASS"
 
     # Clean up concurrent networks
@@ -789,6 +819,22 @@ print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_n
         -d '{"network":{"name":"p13-idem-network"}}' \
         | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['id'])" 2>/dev/null || echo "")
 
+    # Within-scope replay: same project, same key, same payload must
+    # canonicalize to the same resource (existing P12/P13 replay contract).
+    local idem_replay_a_id
+    idem_replay_a_id=$(curl -sf -X POST "$auth_url/v2.0/networks" \
+        -H "Content-Type: application/json" \
+        -H "X-Auth-Token: $token_a" \
+        -H "OpenStack-API-Idempotency-Key: $idem_key" \
+        -d '{"network":{"name":"p13-idem-network"}}' \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['id'])" 2>/dev/null || echo "")
+
+    [[ "$idem_replay_a_id" == "$idem_net_a_id" && -n "$idem_net_a_id" ]] || {
+        emit_scenario_row "P13.6B" "B7_idempotency_key" "failed" \
+            "{\"details\":{\"idem_key\":\"$idem_key\",\"net_a_id\":\"$idem_net_a_id\",\"replay_a_id\":\"$idem_replay_a_id\",\"reason\":\"in_scope_replay_diverged\"}}" >> "$evidence_rows"
+        exit 2
+    }
+
     idem_net_b_id=$(curl -sf -X POST "$auth_url/v2.0/networks" \
         -H "Content-Type: application/json" \
         -H "X-Auth-Token: $token_b" \
@@ -803,7 +849,7 @@ print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_n
     fi
 
     emit_scenario_row "P13.6B" "B7_idempotency_key" "passed" \
-        "{\"resource_type\":\"openstack_networking_network_v2\",\"operation\":\"create\",\"target_owner\":\"project_a\",\"caller_owner\":\"project_a\",\"expected_authorization_outcome\":\"allow\",\"actual_http_status\":200,\"details\":{\"idem_key\":\"$idem_key\",\"net_a_id\":\"$idem_net_a_id\",\"net_b_id\":\"$idem_net_b_id\",\"ids_distinct\":true},\"resources_created\":[\"openstack_networking_network_v2\"],\"resource_types_coverage\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_floatingip_v2\"]}" >> "$evidence_rows"
+        "{\"resource_type\":\"openstack_networking_network_v2\",\"operation\":\"create\",\"target_owner\":\"project_a\",\"caller_owner\":\"project_a\",\"expected_authorization_outcome\":\"allow\",\"actual_http_status\":200,\"details\":{\"idem_key\":\"$idem_key\",\"net_a_id\":\"$idem_net_a_id\",\"replay_a_id\":\"$idem_replay_a_id\",\"net_b_id\":\"$idem_net_b_id\",\"ids_distinct\":true,\"in_scope_replay_converged\":true},\"resources_created\":[\"openstack_networking_network_v2\"],\"resource_types_coverage\":[\"openstack_compute_keypair_v2\",\"openstack_networking_network_v2\",\"openstack_networking_subnet_v2\",\"openstack_networking_port_v2\",\"openstack_networking_secgroup_v2\",\"openstack_networking_secgroup_rule_v2\",\"openstack_networking_router_v2\",\"openstack_networking_router_interface_v2\",\"openstack_networking_floatingip_v2\"]}" >> "$evidence_rows"
     echo "P13.6B: B7 PASS"
 
     # Clean idempotency test networks
@@ -866,7 +912,7 @@ print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_n
 
     if [[ "$b8_ok" != 1 ]]; then
         emit_scenario_row "P13.6B" "B8_restart_reconstruction" "failed" \
-            "{\"details\":{\"post_restart_net_a\":\"$post_restart_net_a\",\"post_restart_net_b\":\"$post_restart_net_b\",\"a_count\":$post_restart_counts_a,\"b_count\":$post_restart_counts_b}}" >> "$evidence_rows"
+            "{\"details\":{\"post_restart_net_a\":\"$post_restart_net_a\",\"post_restart_net_b\":\"$post_restart_net_b\",\"a_count\":\"$post_restart_counts_a\",\"b_count\":\"$post_restart_counts_b\"}}" >> "$evidence_rows"
         exit 2
     fi
 
@@ -1021,7 +1067,7 @@ print(next(x["values"]["id"] for x in r if x["address"]=="openstack_networking_n
     head_sha=$(git -C "$root_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
 
     python3 - "$evidence_rows" "$evidence_file" "$head_sha" <<'PY_EVIDENCE'
-import hashlib, json, os, pathlib, subprocess, sys
+import hashlib, json, os, pathlib, sys
 
 rows_path, out_path, head_sha = sys.argv[1:]
 

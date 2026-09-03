@@ -195,8 +195,10 @@ def validate_artifact(artifact_path):
                     f"{prefix}.{auth_field}: value longer than 64 chars looks like a credential, not an identifier"
                 ))
 
-    # Validate that all 12 contract resource types are accounted for
-    if is_b_evidence and covered_resource_types:
+    # Validate that all 12 contract resource types are accounted for. For B
+    # evidence this is unconditional: an artifact with no coverage data at all
+    # must fail, not slip through.
+    if is_b_evidence:
         missing = sorted(set(EXPECTED_RESOURCES) - covered_resource_types)
         errors.append(check(
             len(missing) == 0,
