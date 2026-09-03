@@ -119,6 +119,40 @@ impl PostgresStore {
             .await?
             .ok_or_else(|| StoreError::Corrupt("gateway disappeared".into()))
     }
+    async fn classify_l3_gateway_deletion_failure(
+        &self,
+        p: &str,
+        id: &Uuid,
+        e: u64,
+        required_state: &str,
+    ) -> Result<StoreError, StoreError> {
+        let r = sqlx::query(
+            "SELECT project_id,generation,state FROM canonical_l3_gateways WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let Some(r) = r else {
+            return Ok(StoreError::OwnershipConflict);
+        };
+        let owner: String = r.try_get("project_id").map_err(StoreError::Database)?;
+        if owner != p {
+            return Ok(StoreError::OwnershipConflict);
+        }
+        let generation = crate::checked_generation(
+            r.try_get::<i64, _>("generation")
+                .map_err(StoreError::Database)? as u64,
+        )? as u64;
+        if generation != e {
+            return Ok(StoreError::StaleGeneration);
+        }
+        let state: String = r.try_get("state").map_err(StoreError::Database)?;
+        if state != required_state {
+            return Ok(StoreError::OwnershipConflict);
+        }
+        Ok(StoreError::NetworkInUse)
+    }
     pub async fn begin_canonical_l3_gateway_deletion(
         &self,
         p: &str,
@@ -127,7 +161,9 @@ impl PostgresStore {
     ) -> Result<CanonicalL3GatewayRecord, StoreError> {
         let r=sqlx::query("UPDATE canonical_l3_gateways SET state='deleting',generation=generation+1 WHERE id=$1 AND project_id=$2 AND generation=$3 AND state='active' AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE gateway_id=$1 AND state IN ('active','deleting'))").bind(id).bind(p).bind(e as i64).execute(&self.pool).await.map_err(StoreError::Database)?;
         if r.rows_affected() == 0 {
-            return Err(StoreError::OwnershipConflict);
+            return Err(self
+                .classify_l3_gateway_deletion_failure(p, id, e, "active")
+                .await?);
         }
         self.get_canonical_l3_gateway(p, id)
             .await?
@@ -141,7 +177,9 @@ impl PostgresStore {
     ) -> Result<(), StoreError> {
         let r=sqlx::query("DELETE FROM canonical_l3_gateways WHERE id=$1 AND project_id=$2 AND generation=$3 AND state='deleting' AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE gateway_id=$1 AND state IN ('active','deleting'))").bind(id).bind(p).bind(e as i64).execute(&self.pool).await.map_err(StoreError::Database)?;
         if r.rows_affected() == 0 {
-            Err(StoreError::OwnershipConflict)
+            Err(self
+                .classify_l3_gateway_deletion_failure(p, id, e, "deleting")
+                .await?)
         } else {
             Ok(())
         }

@@ -7,10 +7,11 @@ use axum::{
 };
 use o3k_api::AppState;
 use o3k_compute::ComputeService;
+use o3k_domain::Ipv4Prefix;
 use o3k_identity::{BootstrapConfig, ExtraProjectSeed, Secret, TokenService};
 use o3k_image::ImageService;
 use o3k_kernel::{AuditOutcome, MemoryAuditSink};
-use o3k_network::NetworkService;
+use o3k_network::{NetworkService, PublicAddressAllocator, PublicAddressPool};
 use o3k_provider::FakeComputeProvider;
 use o3k_store::{DurableStore, testkit::TestStore};
 use serde_json::Value;
@@ -28,8 +29,10 @@ struct TwoTenantHarness {
     audit_sink: Arc<MemoryAuditSink>,
     token_a: String,
     token_b: String,
+    external_realm_id: uuid::Uuid,
     image_dir: std::path::PathBuf,
     net_dir: std::path::PathBuf,
+    fip_dir: std::path::PathBuf,
 }
 
 async fn build_harness() -> Result<TwoTenantHarness, Box<dyn std::error::Error>> {
@@ -73,11 +76,25 @@ async fn build_harness() -> Result<TwoTenantHarness, Box<dyn std::error::Error>>
         .await?
         .with_audit_sink(audit_sink.clone());
 
+    let fip_dir = std::env::temp_dir().join(format!("o3k-fip-test-{}", uuid::Uuid::now_v7()));
+    let prefix = Ipv4Prefix::new("198.51.100.0".parse()?, 29).ok_or("invalid pool")?;
+    let allocator = PublicAddressAllocator::open(
+        fip_dir.join("public"),
+        PublicAddressPool {
+            prefix,
+            first_usable: "198.51.100.2".parse()?,
+            last_usable: "198.51.100.6".parse()?,
+        },
+    )?;
+    let external_realm_id = uuid::Uuid::now_v7();
+
     let state = AppState::new()
         .with_identity(identity)
         .with_compute(compute)
         .with_image(image)
-        .with_network(network);
+        .with_network(network)
+        .with_public_allocator(allocator)
+        .with_network_external_realm(external_realm_id);
     state.set_ready(true);
     let app = o3k_api::router_with_state(state);
 
@@ -91,8 +108,10 @@ async fn build_harness() -> Result<TwoTenantHarness, Box<dyn std::error::Error>>
         audit_sink,
         token_a,
         token_b,
+        external_realm_id,
         image_dir,
         net_dir,
+        fip_dir,
     })
 }
 
@@ -375,6 +394,218 @@ async fn two_tenant_path_and_resource_isolation() -> Result<(), Box<dyn std::err
     // 12. Clean up temp dirs
     let _ = std::fs::remove_dir_all(&harness.image_dir);
     let _ = std::fs::remove_dir_all(&harness.net_dir);
+    let _ = std::fs::remove_dir_all(&harness.fip_dir);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn two_tenant_floating_ip_cross_scope_denial_is_concealed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let harness = build_harness().await?;
+
+    // Tenant A allocates a floating IP.
+    let fip_req = serde_json::json!({
+        "floatingip": {
+            "floating_network_id": harness.external_realm_id
+        }
+    });
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/floatingips")
+                .header("x-auth-token", &harness.token_a)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&fip_req)?))?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await?;
+    let fip_json: Value = serde_json::from_slice(&body_bytes)?;
+    let fip_id = fip_json["floatingip"]["id"]
+        .as_str()
+        .ok_or("missing floating ip id")?
+        .to_owned();
+
+    // Tenant B attempting to get Tenant A's floating IP gets 404, and the body
+    // must not disclose the foreign allocation id or owning project.
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/v2.0/floatingips/{fip_id}"))
+                .header("x-auth-token", &harness.token_b)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await?;
+    let body = String::from_utf8(body_bytes.to_vec())?;
+    assert!(!body.contains(&fip_id));
+    assert!(!body.contains(PROJECT_A));
+    assert!(!body.contains("admin"));
+
+    // Tenant B attempting to delete Tenant A's floating IP gets 404 with the
+    // same non-disclosure guarantee.
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2.0/floatingips/{fip_id}"))
+                .header("x-auth-token", &harness.token_b)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await?;
+    let body = String::from_utf8(body_bytes.to_vec())?;
+    assert!(!body.contains(&fip_id));
+    assert!(!body.contains(PROJECT_A));
+    assert!(!body.contains("admin"));
+
+    let _ = std::fs::remove_dir_all(&harness.image_dir);
+    let _ = std::fs::remove_dir_all(&harness.net_dir);
+    let _ = std::fs::remove_dir_all(&harness.fip_dir);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn two_tenant_security_group_binding_cross_scope_denial_is_concealed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let harness = build_harness().await?;
+
+    // Tenant A creates a security group.
+    let sg_req = serde_json::json!({
+        "security_group": {
+            "name": "sg-a"
+        }
+    });
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/security-groups")
+                .header("x-auth-token", &harness.token_a)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&sg_req)?))?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await?;
+    let sg_json: Value = serde_json::from_slice(&body_bytes)?;
+    let sg_id = sg_json["security_group"]["id"]
+        .as_str()
+        .ok_or("missing security group id")?
+        .to_owned();
+
+    // Tenant B creates a network and a port.
+    let net_req = serde_json::json!({
+        "network": {
+            "name": "net-b"
+        }
+    });
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/networks")
+                .header("x-auth-token", &harness.token_b)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&net_req)?))?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await?;
+    let net_json: Value = serde_json::from_slice(&body_bytes)?;
+    let net_id = net_json["network"]["id"]
+        .as_str()
+        .ok_or("missing network id")?;
+
+    let subnet_req = serde_json::json!({
+        "subnet": {
+            "network_id": net_id,
+            "name": "subnet-b",
+            "cidr": "10.0.0.0/29"
+        }
+    });
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/subnets")
+                .header("x-auth-token", &harness.token_b)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&subnet_req)?))?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let port_req = serde_json::json!({
+        "port": {
+            "network_id": net_id,
+            "name": "port-b"
+        }
+    });
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/ports")
+                .header("x-auth-token", &harness.token_b)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&port_req)?))?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await?;
+    let port_json: Value = serde_json::from_slice(&body_bytes)?;
+    let port_id = port_json["port"]["id"].as_str().ok_or("missing port id")?;
+
+    // Tenant B attempting to bind Tenant A's security group to B's port gets
+    // 404 (not 400 or 409), and the body must not disclose the foreign group.
+    let bind_req = serde_json::json!({
+        "port": {
+            "security_groups": [sg_id]
+        }
+    });
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v2.0/ports/{port_id}"))
+                .header("x-auth-token", &harness.token_b)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&bind_req)?))?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await?;
+    let body = String::from_utf8(body_bytes.to_vec())?;
+    assert!(!body.contains(&sg_id));
+    assert!(!body.contains(PROJECT_A));
+    assert!(!body.contains("admin"));
+
+    let _ = std::fs::remove_dir_all(&harness.image_dir);
+    let _ = std::fs::remove_dir_all(&harness.net_dir);
+    let _ = std::fs::remove_dir_all(&harness.fip_dir);
 
     Ok(())
 }

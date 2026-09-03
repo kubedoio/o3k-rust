@@ -2024,6 +2024,39 @@ impl SqliteStore {
             .await?
             .ok_or_else(|| StoreError::Corrupt("gateway disappeared".into()))
     }
+    async fn classify_l3_gateway_deletion_failure(
+        &self,
+        p: &str,
+        id: &Uuid,
+        expected: u64,
+        required_state: &str,
+    ) -> Result<StoreError, StoreError> {
+        let row =
+            sqlx::query("SELECT project_id,generation,state FROM canonical_l3_gateways WHERE id=?")
+                .bind(id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+        let Some(row) = row else {
+            return Ok(StoreError::OwnershipConflict);
+        };
+        let owner: String = row.try_get("project_id").map_err(StoreError::Database)?;
+        if owner != p {
+            return Ok(StoreError::OwnershipConflict);
+        }
+        let generation = checked_generation(
+            row.try_get::<i64, _>("generation")
+                .map_err(StoreError::Database)? as u64,
+        )? as u64;
+        if generation != expected {
+            return Ok(StoreError::StaleGeneration);
+        }
+        let state: String = row.try_get("state").map_err(StoreError::Database)?;
+        if state != required_state {
+            return Ok(StoreError::OwnershipConflict);
+        }
+        Ok(StoreError::NetworkInUse)
+    }
     pub async fn begin_canonical_l3_gateway_deletion(
         &self,
         p: &str,
@@ -2032,7 +2065,9 @@ impl SqliteStore {
     ) -> Result<CanonicalL3GatewayRecord, StoreError> {
         let n=sqlx::query("UPDATE canonical_l3_gateways SET state='deleting',generation=generation+1 WHERE id=? AND project_id=? AND generation=? AND state='active' AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE gateway_id=? AND state IN ('active','deleting'))").bind(id.to_string()).bind(p).bind(expected as i64).bind(id.to_string()).execute(&self.pool).await.map_err(StoreError::Database)?;
         if n.rows_affected() == 0 {
-            return Err(StoreError::OwnershipConflict);
+            return Err(self
+                .classify_l3_gateway_deletion_failure(p, id, expected, "active")
+                .await?);
         }
         self.get_canonical_l3_gateway(p, id)
             .await?
@@ -2046,7 +2081,9 @@ impl SqliteStore {
     ) -> Result<(), StoreError> {
         let n=sqlx::query("DELETE FROM canonical_l3_gateways WHERE id=? AND project_id=? AND generation=? AND state='deleting' AND NOT EXISTS (SELECT 1 FROM canonical_l3_gateway_attachments WHERE gateway_id=? AND state IN ('active','deleting'))").bind(id.to_string()).bind(p).bind(expected as i64).bind(id.to_string()).execute(&self.pool).await.map_err(StoreError::Database)?;
         if n.rows_affected() == 0 {
-            Err(StoreError::OwnershipConflict)
+            Err(self
+                .classify_l3_gateway_deletion_failure(p, id, expected, "deleting")
+                .await?)
         } else {
             Ok(())
         }

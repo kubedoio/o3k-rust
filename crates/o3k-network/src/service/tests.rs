@@ -2202,3 +2202,95 @@ async fn attachment_detach_reservation_is_gateway_scoped_and_not_finalized_impli
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn gateway_delete_with_stale_generation_is_conflict_not_concealed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = root("gateway-delete-stale-generation");
+    let _ = fs::remove_dir_all(&path);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let service = NetworkService::open(&path, store.clone()).await?;
+    let gateway = service
+        .create_l3_gateway_for_project("project-a", "edge".to_owned(), None, true)
+        .await?;
+
+    // A stale generation is a same-owner conflict and must surface as 409,
+    // never as the 404 used to conceal foreign resources.
+    let result = service
+        .delete_l3_gateway_for_project("project-a", &gateway.id, gateway.generation + 1)
+        .await;
+    assert!(
+        matches!(result, Err(NetworkError::Conflict)),
+        "stale generation must surface as Conflict, got {result:?}"
+    );
+    assert!(
+        !matches!(result, Err(NetworkError::NotFound)),
+        "stale generation must not be concealed as NotFound"
+    );
+
+    // The gateway remains active after the rejected deletion.
+    let persisted = store
+        .get_canonical_l3_gateway("project-a", &gateway.id)
+        .await?
+        .ok_or("gateway disappeared after rejected deletion")?;
+    assert_eq!(persisted.state, "active");
+    assert_eq!(persisted.generation, gateway.generation);
+    let _ = fs::remove_dir_all(&path);
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_delete_with_active_attachments_is_conflict_not_concealed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = root("gateway-delete-active-attachments");
+    let _ = fs::remove_dir_all(&path);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let service = NetworkService::open(&path, store.clone()).await?;
+    let network = service
+        .create_canonical_network_for_project("project-a", "net".to_owned())
+        .await?;
+    let realm = service
+        .create_canonical_realm_for_project(
+            "project-a",
+            network.id,
+            "192.0.2.0/24".to_owned(),
+            false,
+        )
+        .await?;
+    let gateway = service
+        .create_l3_gateway_for_project("project-a", "edge".to_owned(), None, true)
+        .await?;
+    service
+        .attach_l3_gateway_realm("project-a", &gateway.id, &realm.id)
+        .await?;
+
+    // Deleting a gateway that still has active attachments is a same-owner
+    // conflict and must surface as 409, never as the 404 used to conceal
+    // foreign resources.
+    let result = service
+        .delete_l3_gateway_for_project("project-a", &gateway.id, gateway.generation)
+        .await;
+    assert!(
+        matches!(result, Err(NetworkError::Conflict)),
+        "active attachments must surface as Conflict, got {result:?}"
+    );
+    assert!(
+        !matches!(result, Err(NetworkError::NotFound)),
+        "active attachments must not be concealed as NotFound"
+    );
+
+    // The gateway and its attachment remain active after the rejected deletion.
+    let persisted = store
+        .get_canonical_l3_gateway("project-a", &gateway.id)
+        .await?
+        .ok_or("gateway disappeared after rejected deletion")?;
+    assert_eq!(persisted.state, "active");
+    assert_eq!(persisted.generation, gateway.generation);
+    let attachments = store
+        .list_canonical_l3_gateway_attachments("project-a", &gateway.id)
+        .await?;
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].state, "active");
+    let _ = fs::remove_dir_all(&path);
+    Ok(())
+}

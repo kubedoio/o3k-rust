@@ -6,6 +6,11 @@ import pathlib
 import re
 import sys
 
+# Import the canonical baseline gate list from the manifest script so we
+# validate against the same source of truth rather than duplicating a list.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from p13_baseline_gate_manifest import BASELINE_GATES
+
 CONTRACT_PATH = "docs/compatibility/p13-6/p13-6a-security-failure-contract.json"
 
 EXPECTED_RESOURCES = [
@@ -133,8 +138,8 @@ def validate_contract(contract_path):
         "baseline.gates_passed must be a non-negative integer"
     ))
     errors.append(check(
-        gates_total == 11,
-        "baseline.gates_total must be 11 (the 11 P13.2-P13.4 gates)"
+        gates_total == len(BASELINE_GATES),
+        f"baseline.gates_total must be {len(BASELINE_GATES)} (the canonical P13.2-P13.4 gates)"
     ))
     errors.append(check(
         isinstance(gates_passed, int) and isinstance(gates_blocked, int)
@@ -148,10 +153,41 @@ def validate_contract(contract_path):
         f"baseline.gates_blocked ({gates_blocked}) must equal len(blocked_gates) "
         f"({len(blocked_gates)})"
     ))
+
+    # Status-gate consistency
+    if bl.get("status") == "verified":
+        errors.append(check(
+            gates_blocked == 0 and len(blocked_gates) == 0,
+            "baseline.status=verified requires zero blocked gates"
+        ))
+    if bl.get("status") == "blocked":
+        errors.append(check(
+            isinstance(gates_blocked, int) and gates_blocked >= 1,
+            "baseline.status=blocked requires at least one blocked gate"
+        ))
+
+    # Blocked gate uniqueness and membership in the canonical gate set
+    blocked_scripts = [g.get("script") for g in blocked_gates]
+    errors.append(check(
+        len(blocked_scripts) == len(set(blocked_scripts)),
+        f"blocked gate names must be unique; duplicates: "
+        f"{[s for s in blocked_scripts if blocked_scripts.count(s) > 1]}"
+    ))
+    canonical_set = set(BASELINE_GATES)
+    for script in blocked_scripts:
+        errors.append(check(
+            script in canonical_set,
+            f"blocked gate '{script}' is not in the canonical baseline gate set"
+        ))
+
     for gate in blocked_gates:
         errors.append(check(
             gate.get("script") and gate.get("reason"),
             "each blocked gate entry must have script and reason"
+        ))
+        errors.append(check(
+            isinstance(gate.get("exit_code"), int) and gate["exit_code"] != 0,
+            f"blocked gate '{gate.get('script')}' must have a non-zero exit_code"
         ))
 
     # Resource matrix completeness
@@ -338,8 +374,73 @@ def validate_contract(contract_path):
         sys.exit(2)
 
 
+def self_test():
+    """Prove the validator rejects malformed baseline counts and gate entries."""
+    import copy
+    import tempfile
+
+    base = load_json(CONTRACT_PATH)
+
+    cases = [
+        ("gates_passed + gates_blocked != gates_total",
+         lambda c: c["baseline"].update(gates_passed=8, gates_blocked=3)),
+        ("gates_blocked != len(blocked_gates)",
+         lambda c: c["baseline"].update(gates_blocked=3)),
+        ("duplicate blocked gate names",
+         lambda c: c["baseline"]["blocked_gates"].append(
+             copy.deepcopy(c["baseline"]["blocked_gates"][0]))),
+        ("blocked gate missing exit_code",
+         lambda c: c["baseline"]["blocked_gates"][0].pop("exit_code")),
+        ("blocked gate with zero exit_code",
+         lambda c: c["baseline"]["blocked_gates"][0].update(exit_code=0)),
+        ("blocked gate not in canonical set",
+         lambda c: c["baseline"]["blocked_gates"][0].update(
+             script="tests/nonexistent_gate.sh")),
+        ("status=verified with blocked gates",
+         lambda c: c["baseline"].update(status="verified")),
+        ("status=blocked with zero blocked gates",
+         lambda c: (c["baseline"].update(gates_blocked=0, gates_passed=11),
+                    c["baseline"].pop("blocked_gates"))),
+    ]
+
+    failures = 0
+    for name, mutate in cases:
+        fixture = copy.deepcopy(base)
+        mutate(fixture)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", prefix="o3k-p13-6a-selftest-", delete=False
+        ) as fh:
+            json.dump(fixture, fh)
+            path = fh.name
+        try:
+            # Run the validator as a subprocess so we can capture exit code
+            import subprocess
+            result = subprocess.run(
+                [sys.executable, __file__, path],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                print(f"SELF-TEST FAIL: '{name}' was not rejected", file=sys.stderr)
+                failures += 1
+            else:
+                print(f"self-test: '{name}' correctly rejected")
+        finally:
+            pathlib.Path(path).unlink(missing_ok=True)
+
+    if failures:
+        print(f"P13.6A validator self-test: FAIL ({failures} malformed inputs accepted)",
+              file=sys.stderr)
+        sys.exit(2)
+    print(f"P13.6A validator self-test: PASS ({len(cases)} malformed inputs rejected)")
+
+
 def main():
-    validate_contract(CONTRACT_PATH)
+    if "--self-test" in sys.argv:
+        self_test()
+        return
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    path = args[0] if args else CONTRACT_PATH
+    validate_contract(path)
 
 
 if __name__ == "__main__":
