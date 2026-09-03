@@ -3,7 +3,7 @@
   "schema_version": 1,
   "phase": "P13.5F",
   "scenario": "PG4-independent-replacement",
-  "tested_runtime_head_sha": "c5298c7ef1d0c845bc5162e52ea269768c1209d6",
+  "tested_runtime_head_sha": "b83e0568beb3afdc420668ac74de6de4109572b5",
   "backend": "postgresql",
   "execution_profile": "postgresql-provider-local-pinned-lvm",
   "real_provider_execution": true,
@@ -17,7 +17,12 @@
   },
   "resource": "openstack_compute_keypair_v2",
   "project_scope": "eba29e2d-53de-461d-ae91-ede7402713cb",
-  "plan_actions": [["delete", "create"]],
+  "plan_actions": [
+    [
+      "delete",
+      "create"
+    ]
+  ],
   "old_realization_absent": true,
   "replacement_count": 1,
   "provider_leaks": 0,
