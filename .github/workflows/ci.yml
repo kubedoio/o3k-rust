@@ -173,6 +173,22 @@ jobs:
         run: bash tests/compatibility-harness.sh
       - name: Test P13.1A provider harness foundation
         run: bash tests/p13_1_provider_harness.sh
+      - name: Validate P13.6A security/failure contract and harness skeleton
+        env:
+          O3K_P13_EVIDENCE_DIR: ${{ runner.temp }}/p13-6a-evidence
+        run: |
+          mkdir -p "$O3K_P13_EVIDENCE_DIR"
+          python3 scripts/validate_p13_6a_contract.py
+          python3 scripts/validate_p13_6_evidence.py --self-test
+          python3 -m json.tool docs/compatibility/p13-6/p13-6a-security-failure-contract.json >/dev/null
+          P13_6_SELF_TEST=1 bash tests/p13_6_multiproject_security.sh
+      - name: Upload P13.6A evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: p13-6a-contract-evidence
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/p13-6a-evidence
       - name: Test OpenStack CLI failure cleanup
         run: bash tests/openstack-cli-cleanup.sh
       - name: Test operational outcomes inventory

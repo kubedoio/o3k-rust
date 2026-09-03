@@ -1,0 +1,443 @@
+{
+  "schema_version": 2,
+  "artifact_type": "o3k-p13-6a-security-failure-contract",
+  "phase": "P13.6A",
+  "status": "contract_frozen",
+  "profile": "p13-iac-compatibility-v1",
+  "starting_main_sha": "4f61cd90e504a021f164df6fc9bec1cd26b43a6b",
+  "tested_runtime_head_sha": "4f61cd90e504a021f164df6fc9bec1cd26b43a6b",
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_source_tag": "v3.4.0",
+    "provider_source_commit": "4fd8eba1f85edfdc7aed2d17bae3f3c814abad41",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+    "provider_modified": false
+  },
+  "baseline": {
+    "status": "blocked",
+    "source_commit": "4f61cd90e504a021f164df6fc9bec1cd26b43a6b",
+    "gates_passed": 8,
+    "gates_blocked": 3,
+    "gates_total": 11,
+    "blocked_gates": [
+      {
+        "script": "tests/p13_2c_port_lifecycle.sh",
+        "exit_code": 22,
+        "reason": "port lifecycle required real networking provider operation that failed in this environment"
+      },
+      {
+        "script": "tests/p13_4_provider_volume_smoke.sh",
+        "exit_code": 1,
+        "reason": "LVM storage provider not available in this environment"
+      },
+      {
+        "script": "tests/p13_4_provider_volume_attachment_smoke.sh",
+        "exit_code": 1,
+        "reason": "LVM storage provider not available in this environment"
+      },
+      {
+        "script": "tests/p13_4_storage_lifecycle.sh",
+        "exit_code": 1,
+        "reason": "LVM storage provider not available in this environment"
+      }
+    ]
+  },
+  "resource_security_matrix": [
+    {
+      "resource": "openstack_compute_keypair_v2",
+      "owner_field": "ResourceRecord.project_id (resources table, kind=compute_keypair)",
+      "owner_source": "crates/o3k-store/src/domain/records.rs:535",
+      "list": {"applicable": true, "enforcement": "GET /v2.1/{project_id}/os-keypairs — project-scoped query; foreign keypairs not returned"},
+      "show": {"applicable": true, "enforcement": "GET /v2.1/{project_id}/os-keypairs/{name} — project-scoped lookup; foreign returns 404"},
+      "update": {"applicable": false, "reason": "keypair has no provider update path; replacement only"},
+      "delete": {"applicable": true, "enforcement": "DELETE /v2.1/{project_id}/os-keypairs/{name} — project-scoped; foreign returns 404"},
+      "import": {"applicable": true, "enforcement": "import = GET-by-ID, same as show; foreign returns 404, no state adoption"},
+      "relationship": {"applicable": true, "enforcement": "server->keypair reference checked via project-scoped keypair read"},
+      "replay": {"applicable": false, "reason": "keypair create is synchronous, no durable operation reservation"},
+      "restart_reconstruction": {"applicable": true, "enforcement": "KeyPair survive store reopen; project_id retained"}
+    },
+    {
+      "resource": "openstack_networking_network_v2",
+      "owner_field": "NetworkRecord.project_id / CanonicalNetworkRecord.project_id",
+      "owner_source": "crates/o3k-store/src/sqlite/network.rs (network table) / crates/o3k-api/src/network.rs",
+      "list": {"applicable": true, "enforcement": "GET /v2.0/networks — project-scoped query via service::list_networks_for_auth (auth context scope); foreign networks not returned"},
+      "show": {"applicable": true, "enforcement": "GET /v2.0/networks/{id} — project-scoped; canonical.rs resolves owner → authorizer → NotFound on mismatch"},
+      "update": {"applicable": true, "enforcement": "PUT /v2.0/networks/{id} — project-scoped; foreign returns 404"},
+      "delete": {"applicable": true, "enforcement": "DELETE /v2.0/networks/{id} — project-scoped; foreign returns 404"},
+      "import": {"applicable": true, "enforcement": "import = GET-by-ID for show path; foreign returns 404, Terraform cannot adopt"},
+      "relationship": {"applicable": true, "enforcement": "parent used by subnet->network and port->network; those scope-check through get_canonical_network_for_project"},
+      "replay": {"applicable": false, "reason": "network create is synchronous; no durable operation reservation"},
+      "restart_reconstruction": {"applicable": true, "enforcement": "NetworkRecord.project_id retained through restart; canonical network reconstructed from canonical_networks table"}
+    },
+    {
+      "resource": "openstack_networking_subnet_v2",
+      "owner_field": "SubnetRecord.project_id / CanonicalAddressRealmRecord.project_id",
+      "owner_source": "crates/o3k-store/src/sqlite/network.rs; CanonicalAddressRealmRecord.project_id",
+      "list": {"applicable": true, "enforcement": "GET /v2.0/subnets — project-scoped via service::list_subnets_for_auth"},
+      "show": {"applicable": true, "enforcement": "GET /v2.0/subnets/{id} — project-scoped; foreign returns 404"},
+      "update": {"applicable": true, "enforcement": "PUT /v2.0/subnets/{id} — project-scoped; foreign returns 404"},
+      "delete": {"applicable": true, "enforcement": "DELETE /v2.0/subnets/{id} — project-scoped; foreign returns 404"},
+      "import": {"applicable": true, "enforcement": "import = GET-by-ID; foreign returns 404"},
+      "relationship": {"applicable": true, "enforcement": "subnet->network (parent) checked via get_canonical_network_for_project; parent-scope mismatch → NotFound"},
+      "replay": {"applicable": false, "reason": "subnet create is synchronous; no durable operation reservation"},
+      "restart_reconstruction": {"applicable": true, "enforcement": "project_id retained through restart; realm reconstruction preserves owner"}
+    },
+    {
+      "resource": "openstack_networking_port_v2",
+      "owner_field": "PortRecord.project_id / CanonicalEndpointRecord.project_id",
+      "owner_source": "crates/o3k-store/src/sqlite/network.rs; CanonicalEndpointRecord.project_id",
+      "list": {"applicable": true, "enforcement": "GET /v2.0/ports — project-scoped via service::list_ports_for_auth"},
+      "show": {"applicable": true, "enforcement": "GET /v2.0/ports/{id} — project-scoped; foreign returns 404"},
+      "update": {"applicable": true, "enforcement": "PUT /v2.0/ports/{id} — project-scoped; foreign returns 404"},
+      "delete": {"applicable": true, "enforcement": "DELETE /v2.0/ports/{id} — project-scoped; foreign returns 404"},
+      "import": {"applicable": true, "enforcement": "import = GET-by-ID; foreign returns 404"},
+      "relationship": {"applicable": true, "enforcement": "port->network/subnet: get_canonical_network_for_project / realm-pool scope check; parent-scope mismatch → NotFound"},
+      "replay": {"applicable": false, "reason": "port create is synchronous, no durable operation reservation"},
+      "restart_reconstruction": {"applicable": true, "enforcement": "CanonicalEndpointRecord.project_id retained through restart"}
+    },
+    {
+      "resource": "openstack_compute_instance_v2",
+      "owner_field": "ResourceRecord.project_id (resources table, kind=compute_instance)",
+      "owner_source": "crates/o3k-store/src/domain/records.rs:535",
+      "list": {"applicable": true, "enforcement": "GET /v2.1/{project_id}/servers — project-scoped; compute::list_instance_for_project"},
+      "show": {"applicable": true, "enforcement": "GET /v2.1/{project_id}/servers/{id} — read.rs:186 project_id comparison → NotFound on mismatch"},
+      "update": {"applicable": true, "enforcement": "PUT /v2.1/{project_id}/servers/{id} — actions.rs:36 authorize → scope mismatch → NotFound"},
+      "delete": {"applicable": true, "enforcement": "DELETE /v2.1/{project_id}/servers/{id} — lifecycle.rs:25 authorize → scope mismatch → NotFound"},
+      "import": {"applicable": true, "enforcement": "import = GET-by-ID and read projection; foreign returns 404"},
+      "relationship": {"applicable": true, "enforcement": "network port attachment via server lifecycle checked against project; keypair scoped"},
+      "replay": {"applicable": true, "enforcement": "server create uses scope-bound idempotency reservation (owner_scope + action + key); same-key different-project → distinct operation"},
+      "restart_reconstruction": {"applicable": true, "enforcement": "ResourceRecord.project_id preserved; reconciler recovers owner scope from durable Operation record"}
+    },
+    {
+      "resource": "openstack_networking_secgroup_v2",
+      "owner_field": "CanonicalReusableNetworkPolicyRecord.project_id (reusable_policy_entries table)",
+      "owner_source": "crates/o3k-store/src/reusable_policy.rs",
+      "list": {"applicable": true, "enforcement": "GET /v2.0/security-groups — project-scoped; service::list_security_groups_for_auth"},
+      "show": {"applicable": true, "enforcement": "GET /v2.0/security-groups/{id} — project-scoped; foreign returns 404"},
+      "update": {"applicable": true, "enforcement": "PUT /v2.0/security-groups/{id} — project-scoped; foreign returns 404"},
+      "delete": {"applicable": true, "enforcement": "DELETE /v2.0/security-groups/{id} — project-scoped; foreign returns 404"},
+      "import": {"applicable": true, "enforcement": "import = GET-by-ID; foreign returns 404"},
+      "relationship": {"applicable": true, "enforcement": "SG→port binding: endpoint ownership check (reusable_policy.rs:759) + policy ownership check (reusable_policy.rs:782). SECURITY FIX: OwnershipConflict→400 changed to NotFound→404"},
+      "replay": {"applicable": false, "reason": "SG create is synchronous; no durable operation reservation"},
+      "restart_reconstruction": {"applicable": true, "enforcement": "CanonicalReusableNetworkPolicyRecord.project_id retained"}
+    },
+    {
+      "resource": "openstack_networking_secgroup_rule_v2",
+      "owner_field": "CanonicalNetworkPolicyRuleRecord owned through parent policy (project checked via policy scope)",
+      "owner_source": "crates/o3k-store/src/reusable_policy.rs",
+      "list": {"applicable": true, "enforcement": "GET /v2.0/security-group-rules — project-scoped; parent policy project matched"},
+      "show": {"applicable": true, "enforcement": "GET /v2.0/security-group-rules/{id} — project-scoped; foreign returns 404"},
+      "update": {"applicable": false, "reason": "secgroup rules are ForceNew; no update path in provider 3.4.0"},
+      "delete": {"applicable": true, "enforcement": "DELETE /v2.0/security-group-rules/{id} — project-scoped; foreign returns 404"},
+      "import": {"applicable": true, "enforcement": "import = GET-by-ID; foreign returns 404"},
+      "relationship": {"applicable": true, "enforcement": "rule→parent SG check via project-scoped policy lookup"},
+      "replay": {"applicable": false, "reason": "rule create is synchronous; no durable operation reservation"},
+      "restart_reconstruction": {"applicable": true, "enforcement": "policy rules owned through parent policy project_id"}
+    },
+    {
+      "resource": "openstack_networking_router_v2",
+      "owner_field": "CanonicalL3GatewayRecord.project_id (canonical_l3_gateways table)",
+      "owner_source": "crates/o3k-store/src/sqlite/network.rs; postgres/network.rs",
+      "list": {"applicable": true, "enforcement": "GET /v2.0/routers — project-scoped"},
+      "show": {"applicable": true, "enforcement": "GET /v2.0/routers/{id} — project-scoped; canonical.rs:652 authorize → owner check → foreign returns 404"},
+      "update": {"applicable": true, "enforcement": "PUT /v2.0/routers/{id} — project-scoped; foreign returns 404"},
+      "delete": {"applicable": true, "enforcement": "DELETE /v2.0/routers/{id} — project-scoped; foreign returns 404; gateway deletion also scope-checked"},
+      "import": {"applicable": true, "enforcement": "import = GET-by-ID; foreign returns 404"},
+      "relationship": {"applicable": true, "enforcement": "router interface→router parent: get_canonical_l3_gateway scoped; interface→subnet realm scoped"},
+      "replay": {"applicable": false, "reason": "router create is synchronous; no durable operation reservation"},
+      "restart_reconstruction": {"applicable": true, "enforcement": "CanonicalL3GatewayRecord.project_id retained; gateway reconstruction preserves owner"}
+    },
+    {
+      "resource": "openstack_networking_router_interface_v2",
+      "owner_field": "CanonicalL3GatewayAttachmentRecord.project_id (canonical_l3_gateway_attachments table)",
+      "owner_source": "crates/o3k-store/src/sqlite/network.rs; postgres/network.rs",
+      "list": {"applicable": false, "reason": "router interfaces are nested sub-resources shown via router show"},
+      "show": {"applicable": true, "enforcement": "interface is an endpoint (port) GET-by-ID; port scope check → foreign returns 404"},
+      "update": {"applicable": false, "reason": "router interface has no update path; replacement only"},
+      "delete": {"applicable": true, "enforcement": "router interface remove is scoped to router+subnet project; foreign parent returns 404"},
+      "import": {"applicable": true, "enforcement": "import = GET port-by-ID; foreign returns 404"},
+      "relationship": {"applicable": true, "enforcement": "parent router scope: get_canonical_l3_gateway(project_id) check. Subnet/parent realm scope also enforced"},
+      "replay": {"applicable": false, "reason": "router interface is synchronous relationship"},
+      "restart_reconstruction": {"applicable": true, "enforcement": "CanonicalL3GatewayAttachmentRecord.project_id retained"}
+    },
+    {
+      "resource": "openstack_networking_floatingip_v2",
+      "owner_field": "PublicAddressBinding.project_id (file-backed allocator); binding ownership in PublicAddressBinding struct",
+      "owner_source": "crates/o3k-network/src/public.rs:36; crates/o3k-network/src/linux_fabric/public_realization.rs",
+      "list": {"applicable": true, "enforcement": "GET /v2.0/floatingips — project-scoped; allocator lists by project_id"},
+      "show": {"applicable": true, "enforcement": "GET /v2.0/floatingips/{id} — project-scoped; foreign returns 404"},
+      "update": {"applicable": true, "enforcement": "PUT /v2.0/floatingips/{id} — project-scoped; foreign returns 404. SECURITY FIX: NotOwner was 409, changed to 404"},
+      "delete": {"applicable": true, "enforcement": "DELETE /v2.0/floatingips/{id} — project-scoped; foreign returns 404 (release returns NotFound via NotOwner→404 map)"},
+      "import": {"applicable": true, "enforcement": "import = GET-by-ID; foreign returns 404"},
+      "relationship": {"applicable": true, "enforcement": "FIP association to port resolved through get_port_for_project (project-scoped); cross-project port reference → 404"},
+      "replay": {"applicable": false, "reason": "FIP create/update/delete is synchronous"},
+      "restart_reconstruction": {"applicable": true, "enforcement": "PublicAddressBinding.store_state reloads allocation file on restart; project_id preserved in persisted JSON"}
+    },
+    {
+      "resource": "openstack_blockstorage_volume_v3",
+      "owner_field": "Volume.project_id (native storage domain)",
+      "owner_source": "crates/o3k-api/src/volume.rs; volume::show checks record.volume.project_id == project_id",
+      "list": {"applicable": true, "enforcement": "GET /v3/{project_id}/volumes — project-scoped query"},
+      "show": {"applicable": true, "enforcement": "GET /v3/{project_id}/volumes/{id} — volume.rs:300 project_auth_context → 404 on mismatch"},
+      "update": {"applicable": true, "enforcement": "PUT /v3/{project_id}/volumes/{id} — project-scoped; foreign returns 404"},
+      "delete": {"applicable": true, "enforcement": "DELETE /v3/{project_id}/volumes/{id} — project-scoped; foreign returns 404"},
+      "import": {"applicable": true, "enforcement": "import = GET-by-ID; foreign returns 404"},
+      "relationship": {"applicable": true, "enforcement": "volume→attachment: volume ownership scoped by project_id. attachment→volume check in Cinder boundary"},
+      "replay": {"applicable": false, "reason": "volume create is synchronous in bounded profile; no operation reservation"},
+      "restart_reconstruction": {"applicable": true, "enforcement": "recover_native_volumes (volume.rs:611) preserves project_id from stored volume record"}
+    },
+    {
+      "resource": "openstack_compute_volume_attach_v2",
+      "owner_field": "VolumeAttachmentRecord.owner derived through attached server project (server project determines scope)",
+      "owner_source": "crates/o3k-compute/src/attachments.rs:202-216 resolves owner via project_for_server",
+      "list": {"applicable": true, "enforcement": "GET /v2.1/{project_id}/servers/{server_id}/os-volume_attachments — project-scoped"},
+      "show": {"applicable": true, "enforcement": "GET via server+attachment path; project-scoped; foreign returns 404"},
+      "update": {"applicable": false, "reason": "volume attachment has no provider update path; detach/reattach only"},
+      "delete": {"applicable": true, "enforcement": "DELETE scoped to server project; foreign returns 404. attachment.rs:24 authorize → scope mismatch → NotFound"},
+      "import": {"applicable": true, "enforcement": "import = GET-by-ID; foreign returns 404"},
+      "relationship": {"applicable": true, "enforcement": "parent server: show_server(project_id, id) checks; parent volume: creates attachment through Cinder (scope check). Foreign server/volume reference → 404"},
+      "replay": {"applicable": true, "enforcement": "volume attachment uses scope-bound idempotency reservation (attach:{server}:{volume})"},
+      "restart_reconstruction": {"applicable": true, "enforcement": "attachment recovery recomputes owner from server project (attachments.rs:832 recover function)"}
+    }
+  ],
+  "two_project_identity_model": {
+    "project_a": {
+      "name": "admin",
+      "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "principal": "admin user (bootstrap admin)",
+      "token_scope": "project-scoped to admin project",
+      "seeding": "bootstrap O3K_BOOTSTRAP_PASSWORD seed"
+    },
+    "project_b": {
+      "name": "tenant-b",
+      "project_id": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "principal_id": "6b0f5a2e-8c4d-4a7e-9b1f-2d3e4f5a6b7c",
+      "principal": "tenant-b-user (ExtraProjectSeed)",
+      "token_scope": "project-scoped to tenant-b project",
+      "seeding": "O3K_EXTRA_TENANT_{PROJECT_ID,PROJECT_NAME,USER_ID,USER_NAME,PASSWORD} env vars"
+    },
+    "admin_bypass_check": {
+      "verified": true,
+      "evidence": "crates/o3k-api/tests/two_tenant_isolation.rs: token_a (admin) under /v2.1/{PROJECT_B}/flavors returns 404 (cross-project scope denial). Additionally bootstrap admin project-scoped token cannot list/show/update/delete Tenant B resources.",
+      "authorizer_behavior": "StaticAuthorizer::require_ownership compares resource owner_scope to auth_context.effective_scope regardless of role; no admin bypass exists.",
+      "fallback_required": false
+    },
+    "per_project_isolation": {
+      "tofu_working_directory": "separate temp dir per project",
+      "tofu_state": "separate .tfstate per project",
+      "tofu_provider_config": "separate provider.tf per project with distinct tenant_id and credentials",
+      "credentials": "never logged; separate token per project via POST /v3/auth/tokens",
+      "shared_state": false,
+      "test_process_sharing": "it is acceptable both projects run within the same test process, but O3K API requests carry independent scoped tokens"
+    }
+  },
+  "non_disclosure_contract": {
+    "general_principle": "For resources not owned by the caller, all mutations and reads return 404 with concealed body. 403/401 is only for unauthenticated requests. No error message or status code may reveal that a resource exists in another project.",
+    "per_path": {
+      "default_show": {"expected_status": 404, "expected_body": "keystone_error with 'Not Found' / 'network resource was not found' or equivalent", "enforcement": "authorizer deny maps to NotFound"},
+      "default_list": {"expected_status": 200, "expected_body": "empty collection", "enforcement": "project-scoped query or filter"},
+      "default_update": {"expected_status": 404, "expected_body": "concealed", "enforcement": "authorizer deny or store not-found"},
+      "default_delete": {"expected_status": 404, "expected_body": "concealed", "enforcement": "authorizer deny or store not-found"},
+      "default_import": {"expected_status": 404, "expected_body": "concealed", "enforcement": "import = GET-by-ID; foreign returns 404"}
+    },
+    "forbidden_response_contents": [
+      "project_id of another project",
+      "any resource detail (id, name, status) belonging to another project",
+      "error messages containing 'owned by another project', 'NotOwner', 'OwnershipConflict', or equivalent disclosure",
+      "x-auth-token / password / Authorization header values in error responses",
+      "foreign canonical or compatibility IDs in problem details"
+    ],
+    "open_findings": [
+      {
+        "id": "FIP-001",
+        "description": "PublicAddressError::NotOwner mapped to HTTP 409 (Conflict) instead of 404, leaking that a floating IP exists in another project",
+        "status": "fixed",
+        "fix_commit": "current branch p13-6a-security-failure-contract",
+        "fix_location": "crates/o3k-api/src/network.rs:2563-2566",
+        "fix_description": "Changed NotOwner from (StatusCode::CONFLICT, 'Conflict') to (StatusCode::NOT_FOUND, 'Not Found')"
+      },
+      {
+        "id": "SG-001",
+        "description": "StoreError::OwnershipConflict from reusable_policy.rs mapped to NetworkError::InvalidRequest → HTTP 400, distinguishable from foreign SG id (which returns ResourceNotFound → 404)",
+        "status": "fixed",
+        "fix_commit": "current branch p13-6a-security-failure-contract",
+        "fix_location": "crates/o3k-network/src/service/mod.rs:80",
+        "fix_description": "Changed map_store_error for OwnershipConflict from NetworkError::InvalidRequest to NetworkError::NotFound"
+      }
+    ]
+  },
+  "operation_idempotency_scope_matrix": {
+    "idempotency_reservation_coverage": {
+      "reservation_store": "idempotency_reservations table, PRIMARY KEY (owner_scope, action, idempotency_key)",
+      "migration": "crates/o3k-store/migrations/0024_idempotency_reservations.sql (SQLite) / 0007 (Postgres)",
+      "key_structure": "key includes owner_scope (project_id), action, and client-provided idempotency_key",
+      "scope_bound": true,
+      "scope_evidence": "crates/o3k-store/src/tests.rs:542 sqlite_idempotency_reservation_is_scoped_and_atomic: same key in project-b creates distinct reservation. :794 concurrent scopes are isolated.",
+      "covered_paths": [
+        "server create (ComputeService::server_id_for_create, idempotency key)",
+        "realm/l3 gateway deletion (canonical.rs realm delete, idempotency key)",
+        "native resource API mutations (bins/o3kd/src/native_adapters/resource.rs)",
+        "volume attachment (attach:{server}:{volume})",
+        "compute lifecycle operations (start/stop/reboot through reconciler)"
+      ],
+      "not_covered_paths": [
+        "Neutron-compat network create (synchronous)",
+        "Neutron-compat subnet create (synchronous)",
+        "Neutron-compat port create (synchronous)",
+        "Neutron-compat security group create (synchronous)",
+        "Neutron-compat router create (synchronous)",
+        "Native volume create (synchronous in bounded profile)"
+      ]
+    },
+    "same_key_cross_project_behavior": {
+      "expected": "For covered paths: project A + key K → operation O_A, project B + key K → independent operation O_B. O_A != O_B, resources differ, no conflict. For synchronous paths: not applicable (no durable reservation to scope).",
+      "evidence_tier": "store-level unit tests (SQLite/PostgreSQL) + integration test exercising full path for at least one covered resource"
+    },
+    "operation_show_isolation": {
+      "endpoint": "GET /o3k/v1/operations/{id}",
+      "behavior": "CanonicalOperationRecord.owner_scope compared to caller scope; mismatch returns 404 (foreign ≡ missing)",
+      "enforcement": "bins/o3kd/src/native_adapters/operation.rs:16-68: double check durable resource owner + canonical owner_scope"
+    },
+    "operation_list_isolation": {
+      "status": "no list endpoint exists; only show-by-id. Navigation through per-service list endpoints (servers, networks, etc.) is project-scoped"
+    }
+  },
+  "failure_matrix": [
+    {
+      "operation_class": "CREATE",
+      "boundary_1_before_acceptance": {"proxy_location": "before_forward", "expected": "client sees 503; O3K has no record; retry issues independent create"},
+      "boundary_2_after_acceptance_before_provider": {"proxy_location": "after_commit_before_response", "expected": "O3K Operation accepted; provider mutation may or may not have started; retry observes existing operation (idempotent paths) or creates duplicate (non-idempotent paths). post-restart: reconstructs Operation, observes provider"},
+      "boundary_3_after_provider_before_terminal": {"proxy_location": "after_commit_before_response", "expected": "provider completed; client lost response; retry or restart reconstructs terminal state"},
+      "boundary_4_after_terminal_before_client_response": {"proxy_location": "read_response_drop", "expected": "Operation succeeded; client gets 503; retry reads canonical state"},
+      "boundary_5_restart_with_pending": {"method": "SIGTERM o3kd + restart during pending", "expected": "recovery reconstructs pending Operations; no duplicate provider mutation; ownership preserved"}
+    },
+    {
+      "operation_class": "UPDATE",
+      "boundary_1_before_acceptance": {"proxy_location": "before_forward", "expected": "503; no state change"},
+      "boundary_2_after_acceptance_before_provider": {"proxy_location": "after_commit_before_response", "expected": "pending update; retry/restart completes"},
+      "boundary_3_after_provider_before_terminal": {"proxy_location": "after_commit_before_response", "expected": "provider mutation done; terminal recording lost; retry observes terminal"},
+      "boundary_4_after_terminal_before_client_response": {"proxy_location": "read_response_drop", "expected": "update done; client retries → reads final state"},
+      "boundary_5_restart_with_pending": {"expected": "recovery completes update; no duplicate side effect"}
+    },
+    {
+      "operation_class": "DELETE",
+      "boundary_1_before_acceptance": {"proxy_location": "before_forward", "expected": "503; no state change"},
+      "boundary_2_after_acceptance_before_provider": {"proxy_location": "after_commit_before_response", "expected": "pending delete; retry/restart completes"},
+      "boundary_3_after_provider_before_terminal": {"proxy_location": "after_commit_before_response", "expected": "provider deletion done; terminal recording lost; retry observes absence"},
+      "boundary_4_after_terminal_before_client_response": {"proxy_location": "read_response_drop", "expected": "delete done; client retry → 404 (gone)"},
+      "boundary_5_restart_with_pending": {"expected": "recovery completes delete; no duplicated deletion"}
+    },
+    {
+      "operation_class": "RELATIONSHIP_ADD",
+      "boundary_1_before_acceptance": {"proxy_location": "before_forward", "expected": "503; no relationship created"},
+      "boundary_2_after_acceptance_before_provider": {"proxy_location": "after_commit_before_response", "expected": "pending relationship; retry/restart completes"},
+      "boundary_3_after_provider_before_terminal": {"proxy_location": "after_commit_before_response", "expected": "relationship applied; terminal record lost; retry detects existing relationship"},
+      "boundary_4_after_terminal_before_client_response": {"proxy_location": "read_response_drop", "expected": "relationship done; retry reads terminal state"},
+      "boundary_5_restart_with_pending": {"expected": "recovery completes relationship; no duplicate"}
+    },
+    {
+      "operation_class": "RELATIONSHIP_REMOVE",
+      "same_as_delete": true,
+      "note": "router interface detach, volume detach follow same pattern as DELETE"
+    },
+    {
+      "operation_class": "REPLACEMENT",
+      "same_as_create_then_delete": true,
+      "note": "replacement = CREATE new resource (with ForceNew) + DELETE old. Both phases covered by CREATE and DELETE failure boundaries respectively. Test must prove both phases independently.",
+      "additional_requirement": "parent resource (e.g., network for subnet replacement) must survive replacement in the same project"
+    },
+    {
+      "operation_class": "OBSERVE_RETRY",
+      "boundary_3_after_provider_before_terminal": {"proxy_location": "read_response_drop", "expected": "provider-observation completed; observation record lost; retry or restart re-observes without mutating provider"},
+      "boundary_5_restart_with_unknown": {"expected": "ObserveBeforeRetry pattern: after restart with UnknownOutcome Operation, reconciler observes provider before attempting retry; no duplicate mutation"}
+    }
+  ],
+  "result_vocabulary": [
+    "passed",
+    "not_applicable",
+    "expected_ambiguous",
+    "upstream_provider_unsupported",
+    "execution_profile_unavailable",
+    "blocked",
+    "failed"
+  ],
+  "evidence_schema": {
+    "required_per_scenario_fields": [
+      "phase",
+      "tested_runtime_head_sha",
+      "backend",
+      "toolchain (block with provider_modified=false)",
+      "project_a_principal",
+      "project_a_project",
+      "project_b_principal",
+      "project_b_project",
+      "resource_type",
+      "operation",
+      "target_owner",
+      "caller_owner",
+      "expected_authorization_outcome",
+      "actual_http_status",
+      "actual_http_body_shape",
+      "foreign_state_before",
+      "foreign_state_after",
+      "own_state_before",
+      "own_state_after",
+      "operation_ids_if_applicable",
+      "provider_mutation_count",
+      "restart_fault_location_if_applicable",
+      "result"
+    ],
+    "forbidden_field_values": [
+      "actual credentials/tokens/passwords",
+      "provider_modified != false",
+      "result = 'passed' when classification is 'expected_ambiguous'"
+    ],
+    "result_derivation_rules": [
+      "passed: operation completed as expected with isolation and non-disclosure",
+      "not_applicable: scenario does not apply to this resource class (list for interface, etc.)",
+      "expected_ambiguous: known client-ambiguity case documented without false exactly-once claim",
+      "upstream_provider_unsupported: provider 3.4.0 does not implement this operation for this resource",
+      "execution_profile_unavailable: this environment lacks required real-provider or LVM capability",
+      "blocked: regression found, ownership fix required, or precondition not met",
+      "failed: isolation breach, unauthorized mutation, existence disclosure, or duplicate provider side effect"
+    ]
+  },
+  "scenario_boundary": {
+    "p13_6": [
+      "two_project_isolation",
+      "cross_project_negative_evidence",
+      "larger_controller_failure_matrix",
+      "lost_create_response_without_learned_id"
+    ],
+    "p13_7": [
+      "full_stack_real_host_acceptance",
+      "product_profile_closure"
+    ],
+    "p12_iam": "NOT STARTED. P12-IAM must not start until P13.7 is closed."
+  },
+  "architecture": {
+    "canonical_authority": "O3K canonical resources and Operations",
+    "terraform_state": "client-side bookkeeping only",
+    "provider_modified": false,
+    "provider_state_as_authority": false,
+    "resource_id_as_capability": false,
+    "non_disclosure_verified": true,
+    "security_fixes_applied": [
+      {
+        "id": "crates/o3k-api/src/network.rs:2563-2566",
+        "description": "Floating IP NotOwner→409 changed to NotOwner→404 concealed",
+        "class": "existence_oracle"
+      },
+      {
+        "id": "crates/o3k-network/src/service/mod.rs:80",
+        "description": "StoreError::OwnershipConflict→400 (InvalidRequest) changed to 404 (NotFound)",
+        "class": "existence_oracle"
+      }
+    ],
+    "production_semantic_changes": "none beyond the two non-disclosure fixes above",
+    "public_sources_reused_as_code": false
+  }
+}

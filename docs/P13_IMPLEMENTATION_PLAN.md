@@ -149,6 +149,21 @@ not proven by this result.
 
 ### P13.6 — Multi-project security and failure evidence
 
+**P13.6A contract frozen** at `origin/main` SHA `4f61cd90e504a021f164df6fc9bec1cd26b43a6b`.
+Contract artifact: `docs/compatibility/p13-6/p13-6a-security-failure-contract.json`.
+
+P13.6A delivers:
+- 12-resource security matrix with enforcement paths
+- 7-operation-class failure matrix with 5 boundaries each
+- Two-project identity model (admin + extra tenant)
+- Non-disclosure contract with 2 security fixes (FIP NotOwner→404, SG OwnershipConflict→404)
+- Operation/idempotency scope matrix (scope-bound reservations confirmed)
+- Evidence schema and result vocabulary
+- Reusable harness skeleton (`tests/p13_6_multiproject_security.sh`)
+- Validators for contract and scenario evidence
+
+B–F slices sequenced from newly protected main:
+
 - Two independent OpenTofu projects targeting separate O3K projects
 - Cross-project isolation verification
 - Restart/failure matrix: controller restart during IaC operations
