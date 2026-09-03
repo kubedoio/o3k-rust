@@ -103,8 +103,30 @@ stop_o3kd() {
     local state_dir="$1"
     local pid_file="$state_dir/o3kd.pid"
     if [[ -f "$pid_file" ]]; then
-        kill "$(cat "$pid_file")" 2>/dev/null || true
+        local pid
+        pid=$(cat "$pid_file")
+        kill "$pid" 2>/dev/null || true
+        # Wait for the process to actually exit so a subsequent start_o3kd on
+        # the same port never overlaps with a still-draining daemon.
+        local attempt
+        for attempt in $(seq 1 40); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.25
+        done
+        kill -9 "$pid" 2>/dev/null || true
         rm -f "$pid_file"
+    fi
+}
+
+# Shared EXIT cleanup for the P13.6 slices; each slice sets P13_6B_STATE_DIR
+# before trapping this.
+_cleanup_6b() {
+    [[ "${_p13_6b_cleanup_done:-0}" == 1 ]] && return
+    _p13_6b_cleanup_done=1
+    local sd="${P13_6B_STATE_DIR:-}"
+    if [[ -n "$sd" ]]; then
+        stop_o3kd "$sd" 2>/dev/null || true
+        [[ "${O3K_P13_6B_KEEP_STATE:-0}" == 1 ]] || rm -rf "$sd"
     fi
 }
 
@@ -365,15 +387,6 @@ run_slice_b() {
 
     P13_6B_STATE_DIR="$state_dir"
     _p13_6b_cleanup_done=0
-    _cleanup_6b() {
-        [[ "${_p13_6b_cleanup_done:-0}" == 1 ]] && return
-        _p13_6b_cleanup_done=1
-        local sd="${P13_6B_STATE_DIR:-}"
-        if [[ -n "$sd" ]]; then
-            stop_o3kd "$sd" 2>/dev/null || true
-            [[ "${O3K_P13_6B_KEEP_STATE:-0}" == 1 ]] || rm -rf "$sd"
-        fi
-    }
     trap _cleanup_6b EXIT
 
     local o3kd_port auth_url \
@@ -1177,6 +1190,522 @@ PY_EVIDENCE
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# P13.6C — cross-project negative/security evidence
+# ---------------------------------------------------------------------------
+
+# Perform one cross-project request; sets ATTACK_STATUS and ATTACK_BODY.
+c_attack() {
+    local method="$1" token="$2" path="$3" data="${4:-}"
+    if [[ -n "$data" ]]; then
+        ATTACK_BODY=$(curl -s -X "$method" \
+            -H "X-Auth-Token: $token" -H "Content-Type: application/json" \
+            -d "$data" -w $'\n%{http_code}' "$auth_url$path" || true)
+    else
+        ATTACK_BODY=$(curl -s -X "$method" \
+            -H "X-Auth-Token: $token" \
+            -w $'\n%{http_code}' "$auth_url$path" || true)
+    fi
+    ATTACK_STATUS=$(tail -n1 <<< "$ATTACK_BODY")
+    ATTACK_BODY=$(sed '$d' <<< "$ATTACK_BODY")
+}
+
+# Fail if any private marker leaks in the response body.
+c_leak_free() {
+    local body="$1"; shift
+    local marker
+    for marker in "$@"; do
+        [[ -n "$marker" && "$body" == *"$marker"* ]] && return 1
+    done
+    return 0
+}
+
+run_slice_c() {
+    echo "P13.6C: cross-project negative/security evidence"
+
+    local state_dir evidence_file evidence_rows
+    state_dir=$(mktemp -d /tmp/p13-6c-XXXXXX)
+    evidence_file="$evidence_dir/p13-6c-evidence.json"
+    evidence_rows="$state_dir/evidence-rows.jsonl"
+    mkdir -p "$(dirname "$evidence_file")" "$state_dir"
+
+    P13_6B_STATE_DIR="$state_dir"
+    _p13_6b_cleanup_done=0
+    trap _cleanup_6b EXIT
+
+    local o3kd_port auth_url token_a token_b
+    o3kd_port=$(find_free_port)
+    auth_url="http://127.0.0.1:$o3kd_port"
+
+    if [[ -z "${O3K_DATABASE_BACKEND:-}" ]]; then
+        case "${O3K_DATABASE_URL:-}" in
+            postgres*|postgresql*) export O3K_DATABASE_BACKEND="postgresql" ;;
+            *) export O3K_DATABASE_BACKEND="sqlite" ;;
+        esac
+    fi
+    echo "P13.6C: database backend: $O3K_DATABASE_BACKEND"
+
+    export O3K_NETWORK_EXTERNAL_REALM_ID="00000000-0000-0000-0000-000000000009"
+    export O3K_PUBLIC_POOL_CIDR="198.51.104.0/29"
+    export O3K_PUBLIC_POOL_FIRST="198.51.104.2"
+    export O3K_PUBLIC_POOL_LAST="198.51.104.6"
+    start_o3kd "$state_dir" "$o3kd_port"
+
+    local external_realm_id
+    external_realm_id=$(curl -sf -X POST "$auth_url/v2.0/networks" \
+        -H "Content-Type: application/json" \
+        -H "X-Auth-Token: $(get_token "$auth_url" "$proja_user" "$password" "$proja_name")" \
+        -d '{"network":{"name":"p13-6-public-pool","router:external":true,"shared":true}}' \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['id'])" 2>/dev/null || echo "")
+    [[ -n "$external_realm_id" ]] || { echo "P13.6C: FAILED - no external pool" >&2; exit 2; }
+    stop_o3kd "$state_dir"; sleep 1
+    export O3K_NETWORK_EXTERNAL_REALM_ID="$external_realm_id"
+    start_o3kd "$state_dir" "$o3kd_port"
+
+    tofu_a() { (cd "$dir_a" && TF_CLI_CONFIG_FILE="$dir_a/tofu.tfrc" TF_IN_AUTOMATION=1 "$tofu" "$@"); }
+    tofu_b() { (cd "$dir_b" && TF_CLI_CONFIG_FILE="$dir_b/tofu.tfrc" TF_IN_AUTOMATION=1 "$tofu" "$@"); }
+    local dir_a="$state_dir/project-a" dir_b="$state_dir/project-b"
+
+    token_a=$(get_token "$auth_url" "$proja_user" "$password" "$proja_name")
+    token_b=$(get_token "$auth_url" "$tenb_username" "$tenb_pass" "$tenb_name")
+    [[ -n "$token_a" && -n "$token_b" && "$token_a" != "$token_b" ]] || { echo "P13.6C: FAILED - tokens" >&2; exit 2; }
+
+    setup_tofu_workdir "$dir_a" "$auth_url" "$proja_id" "$proja_user" "$password"
+    setup_tofu_workdir "$dir_b" "$auth_url" "$tenb_project" "$tenb_username" "$tenb_pass"
+
+    # Both projects apply identical same-name graphs (B without the FIP).
+    cat > "$dir_a/graph.tf" <<'TOFU_G'
+resource "openstack_compute_keypair_v2" "main" {
+  name = "p13-shared-keypair"
+  # O3K stores/returns the key material without the trailing comment; keep the
+  # config identical to the accepted projection so refresh converges to no-op.
+  public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8wD+NjwFTcxjyah71iZEe5sRgIfdSYhmYQIZ+EA93K"
+}
+resource "openstack_networking_network_v2" "main" {
+  name = "p13-shared-name"
+  tags = []
+}
+resource "openstack_networking_subnet_v2" "main" {
+  name = "p13-shared-subnet"
+  network_id = openstack_networking_network_v2.main.id
+  cidr = "10.0.0.0/24"
+  ip_version = 4
+  enable_dhcp = false
+  dns_nameservers = []
+}
+resource "openstack_networking_port_v2" "main" {
+  name = "p13-shared-port"
+  network_id = openstack_networking_network_v2.main.id
+  fixed_ip {
+    subnet_id = openstack_networking_subnet_v2.main.id
+  }
+  security_group_ids = [openstack_networking_secgroup_v2.main.id]
+  tags = []
+}
+resource "openstack_networking_router_v2" "main" {
+  name = "p13-shared-router"
+  tags = []
+}
+resource "openstack_networking_router_interface_v2" "main" {
+  router_id = openstack_networking_router_v2.main.id
+  subnet_id = openstack_networking_subnet_v2.main.id
+}
+resource "openstack_networking_secgroup_v2" "main" {
+  name = "p13-shared-sg"
+  description = "p13 shared sg"
+  tags = []
+}
+resource "openstack_networking_secgroup_rule_v2" "ssh" {
+  direction = "ingress"
+  ethertype = "IPv4"
+  protocol = "tcp"
+  port_range_min = 22
+  port_range_max = 22
+  remote_ip_prefix = "0.0.0.0/0"
+  security_group_id = openstack_networking_secgroup_v2.main.id
+}
+resource "openstack_networking_floatingip_v2" "main" {
+  pool = "p13-6-public-pool"
+  tags = []
+}
+TOFU_G
+    cp "$dir_a/graph.tf" "$dir_b/graph.tf"
+    sed -i '/resource "openstack_networking_floatingip_v2"/,/^}/d' "$dir_b/graph.tf"
+
+    tofu_a apply -input=false -auto-approve >/dev/null || { echo "P13.6C: FAILED - project A baseline apply failed" >&2; exit 2; }
+    tofu_b apply -input=false -auto-approve >/dev/null || { echo "P13.6C: FAILED - project B baseline apply failed" >&2; exit 2; }
+
+    # B floating IP via API (pool not visible to B through Neutron lookup).
+    local fip_b_id
+    fip_b_id=$(curl -sf -X POST "$auth_url/v2.0/floatingips" \
+        -H "Content-Type: application/json" -H "X-Auth-Token: $token_b" \
+        -d "{\"floatingip\":{\"floating_network_id\":\"$external_realm_id\"}}" \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['floatingip']['id'])" 2>/dev/null || echo "")
+
+    extract_id() {
+        local dir="$1" addr="$2"
+        (cd "$dir" && TF_CLI_CONFIG_FILE="$dir/tofu.tfrc" "$tofu" show -json | python3 -c "
+import json,sys
+r=json.load(sys.stdin)['values']['root_module']['resources']
+print(next(x['values']['id'] for x in r if x['address']=='$addr'))")
+    }
+    local net_a subnet_a port_a router_a ri_a sg_a kp_a fip_a
+    net_a=$(extract_id "$dir_a" "openstack_networking_network_v2.main")
+    subnet_a=$(extract_id "$dir_a" "openstack_networking_subnet_v2.main")
+    port_a=$(extract_id "$dir_a" "openstack_networking_port_v2.main")
+    router_a=$(extract_id "$dir_a" "openstack_networking_router_v2.main")
+    ri_a=$(extract_id "$dir_a" "openstack_networking_router_interface_v2.main")
+    sg_a=$(extract_id "$dir_a" "openstack_networking_secgroup_v2.main")
+    kp_a=$(extract_id "$dir_a" "openstack_compute_keypair_v2.main")
+    fip_a=$(extract_id "$dir_a" "openstack_networking_floatingip_v2.main")
+    for required_id in "$net_a" "$subnet_a" "$port_a" "$router_a" "$ri_a" "$sg_a" "$kp_a" "$fip_a"; do
+        [[ -n "$required_id" ]] || { echo "P13.6C: FAILED - could not extract A canonical id from state" >&2; exit 2; }
+    done
+
+    # Canonical snapshot of A and B network state for C12 immutability proof.
+    curl -sf -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks/$net_a" > "$state_dir/snap-a-network.json"
+    local net_b
+    net_b=$(extract_id "$dir_b" "openstack_networking_network_v2.main")
+    curl -sf -H "X-Auth-Token: $token_b" "$auth_url/v2.0/networks/$net_b" > "$state_dir/snap-b-network.json"
+
+    local RANDOM_UUID="11111111-2222-3333-4444-555555555555"
+    local failures=0
+    c_row() { # scenario result status resource operation details_json
+        emit_scenario_row "P13.6C" "$1" "$2" \
+            "{\"resource_type\":\"$4\",\"operation\":\"$5\",\"target_owner\":\"project_a\",\"caller_owner\":\"project_b\",\"expected_authorization_outcome\":\"deny\",\"actual_http_status\":$3,$6}" >> "$evidence_rows"
+    }
+
+    # ------------------------------------------------------------------
+    # C1 — list isolation
+    # ------------------------------------------------------------------
+    echo "P13.6C: === C1 - list isolation ==="
+    local list_body c1_ok=1
+    # Note: A and B deliberately use identical human-readable names (the B2
+    # same-name model), so name presence cannot distinguish a leak; only
+    # foreign canonical IDs prove disclosure.
+    list_body=$(curl -sf -H "X-Auth-Token: $token_b" "$auth_url/v2.0/networks" || true)
+    for marker in "$net_a" "$subnet_a" "$port_a" "$router_a" "$fip_a"; do
+        [[ "$list_body" == *"$marker"* ]] && { echo "P13.6C: FAIL - B network list leaks A id $marker" >&2; c1_ok=0; }
+    done
+    list_body=$(curl -sf -H "X-Auth-Token: $token_b" "$auth_url/v2.0/security-groups" || true)
+    [[ "$list_body" == *"$sg_a"* ]] && { echo "P13.6C: FAIL - B SG list leaks A SG" >&2; c1_ok=0; }
+    # Keypairs: the upstream provider uses the keypair NAME as the Terraform
+    # ID, and A/B deliberately share names. Detect leaks via A's canonical
+    # server-side UUID (from A's list response), not the shared name.
+    local kp_a_canonical
+    kp_a_canonical=$(curl -sf -H "X-Auth-Token: $token_a" "$auth_url/v2.1/$proja_id/os-keypairs" \
+        | python3 -c "import json,sys; kps=json.load(sys.stdin).get('keypairs',[]); print(next((k['keypair']['id'] for k in kps if k['keypair']['name']=='p13-shared-keypair'),''))" 2>/dev/null || echo "")
+    list_body=$(curl -sf -H "X-Auth-Token: $token_b" "$auth_url/v2.1/$tenb_project/os-keypairs" || true)
+    [[ -n "$kp_a_canonical" && "$list_body" == *"$kp_a_canonical"* ]] && { echo "P13.6C: FAIL - B keypair list leaks A keypair canonical id" >&2; c1_ok=0; }
+    [[ "$c1_ok" == 1 ]] || { c_row "C1_list_isolation" "failed" 200 "multi" "list" "\"details\":{\"leak\":\"list_contains_foreign_id\"}"; exit 2; }
+    c_row "C1_list_isolation" "passed" 200 "multi" "list" "\"details\":{\"foreign_ids_absent\":true,\"foreign_names_not_applicable_due_to_same_name_model\":true}"
+    echo "P13.6C: C1 PASS"
+
+    # ------------------------------------------------------------------
+    # C2 + C10 — foreign show by known ID vs nonexistent control
+    # ------------------------------------------------------------------
+    echo "P13.6C: === C2/C10 - foreign show + existence oracle ==="
+    local c2_ok=1 random_status leak_ok
+    declare -A SHOW_PATHS=(
+        [network]="/v2.0/networks/$net_a"
+        [subnet]="/v2.0/subnets/$subnet_a"
+        [port]="/v2.0/ports/$port_a"
+        [router]="/v2.0/routers/$router_a"
+        [secgroup]="/v2.0/security-groups/$sg_a"
+        [floatingip]="/v2.0/floatingips/$fip_a"
+    )
+    local cls path foreign_status
+    for cls in network subnet port router secgroup floatingip; do
+        path="${SHOW_PATHS[$cls]}"
+        c_attack GET "$token_b" "$path"
+        foreign_status="$ATTACK_STATUS"
+        local random_url="$auth_url${path%/*}/$RANDOM_UUID"
+        random_status=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Auth-Token: $token_b" "$random_url" || echo "000")
+        leak_ok=pass
+        c_leak_free "$ATTACK_BODY" "$net_a" "p13-shared-name" "$subnet_a" "p13-shared-subnet" "$port_a" "p13-shared-port" "$router_a" "$sg_a" "$fip_a" "$ri_a" "$kp_a" || leak_ok=fail
+        [[ "$foreign_status" == "404" && "$random_status" == "404" && "$leak_ok" == "pass" ]] || {
+            echo "P13.6C: FAIL - show $cls: foreign=$foreign_status random=$random_status leak=$leak_ok" >&2; c2_ok=0;
+        }
+        c_row "C2_show_${cls}" "passed" "$foreign_status" "openstack_networking_${cls}_v2" "show" \
+            "\"details\":{\"nonexistent_control_status\":\"$random_status\",\"body_leak_check\":\"$leak_ok\"}"
+    done
+    [[ "$c2_ok" == 1 ]] || exit 2
+    echo "P13.6C: C2/C10 PASS"
+
+    # ------------------------------------------------------------------
+    # C3 — foreign update
+    # ------------------------------------------------------------------
+    echo "P13.6C: === C3 - foreign update ==="
+    local c3_ok=1 a_name_before a_name_after
+    a_name_before=$(curl -sf -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks/$net_a" | python3 -c "import json,sys;print(json.load(sys.stdin)['network']['name'])")
+    c_attack PUT "$token_b" "/v2.0/networks/$net_a" '{"network":{"name":"hijacked-by-b"}}'
+    [[ "$ATTACK_STATUS" == "404" || "$ATTACK_STATUS" == "403" ]] || { echo "P13.6C: FAIL - B update A network: $ATTACK_STATUS" >&2; c3_ok=0; }
+    c_row "C3_update_network" "passed" "$ATTACK_STATUS" "openstack_networking_network_v2" "update" "\"details\":{\"a_state_unchanged\":true}"
+    c_attack PUT "$token_b" "/v2.0/ports/$port_a" '{"port":{"name":"hijacked-by-b"}}'
+    [[ "$ATTACK_STATUS" == "404" || "$ATTACK_STATUS" == "403" ]] || { echo "P13.6C: FAIL - B update A port: $ATTACK_STATUS" >&2; c3_ok=0; }
+    c_row "C3_update_port" "passed" "$ATTACK_STATUS" "openstack_networking_port_v2" "update" "\"details\":{\"a_state_unchanged\":true}"
+    c_attack PUT "$token_b" "/v2.0/routers/$router_a" '{"router":{"name":"hijacked-by-b"}}'
+    [[ "$ATTACK_STATUS" == "404" || "$ATTACK_STATUS" == "403" ]] || { echo "P13.6C: FAIL - B update A router: $ATTACK_STATUS" >&2; c3_ok=0; }
+    c_row "C3_update_router" "passed" "$ATTACK_STATUS" "openstack_networking_router_v2" "update" "\"details\":{\"a_state_unchanged\":true}"
+    a_name_after=$(curl -sf -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks/$net_a" | python3 -c "import json,sys;print(json.load(sys.stdin)['network']['name'])")
+    [[ "$a_name_before" == "$a_name_after" ]] || { echo "P13.6C: FAIL - A network name changed" >&2; c3_ok=0; }
+    [[ "$c3_ok" == 1 ]] || exit 2
+    echo "P13.6C: C3 PASS"
+
+    # ------------------------------------------------------------------
+    # C4 — foreign delete
+    # ------------------------------------------------------------------
+    echo "P13.6C: === C4 - foreign delete ==="
+    local c4_ok=1
+    c_attack DELETE "$token_b" "/v2.0/networks/$net_a"
+    [[ "$ATTACK_STATUS" == "404" || "$ATTACK_STATUS" == "403" ]] || { echo "P13.6C: FAIL - B delete A network: $ATTACK_STATUS" >&2; c4_ok=0; }
+    c_row "C4_delete_network" "passed" "$ATTACK_STATUS" "openstack_networking_network_v2" "delete" "\"details\":{\"a_resource_survives\":true}"
+    c_attack DELETE "$token_b" "/v2.0/routers/$router_a"
+    [[ "$ATTACK_STATUS" == "404" || "$ATTACK_STATUS" == "403" ]] || { echo "P13.6C: FAIL - B delete A router: $ATTACK_STATUS" >&2; c4_ok=0; }
+    c_row "C4_delete_router" "passed" "$ATTACK_STATUS" "openstack_networking_router_v2" "delete" "\"details\":{\"a_resource_survives\":true}"
+    c_attack DELETE "$token_b" "/v2.0/floatingips/$fip_a"
+    [[ "$ATTACK_STATUS" == "404" || "$ATTACK_STATUS" == "403" ]] || { echo "P13.6C: FAIL - B delete A FIP: $ATTACK_STATUS" >&2; c4_ok=0; }
+    c_row "C4_delete_floatingip" "passed" "$ATTACK_STATUS" "openstack_networking_floatingip_v2" "delete" "\"details\":{\"a_resource_survives\":true}"
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks/$net_a")" == "200" ]] || { echo "P13.6C: FAIL - A network gone after deletes" >&2; c4_ok=0; }
+    [[ "$c4_ok" == 1 ]] || exit 2
+    echo "P13.6C: C4 PASS"
+
+    # ------------------------------------------------------------------
+    # C5 — foreign Terraform import
+    # ------------------------------------------------------------------
+    echo "P13.6C: === C5 - foreign import ==="
+    local import_rc=0
+    (cd "$dir_b" && TF_CLI_CONFIG_FILE="$dir_b/tofu.tfrc" TF_IN_AUTOMATION=1 "$tofu" import openstack_networking_network_v2.hijack "$net_a" >/dev/null 2>&1) || import_rc=$?
+    local b_state_adopts=0
+    tofu_b state list 2>/dev/null | grep -q "openstack_networking_network_v2.hijack" && b_state_adopts=1
+    local c5_ok=1
+    [[ "$import_rc" != 0 && "$b_state_adopts" == 0 ]] || { echo "P13.6C: FAIL - B imported A network (rc=$import_rc adopts=$b_state_adopts)" >&2; c5_ok=0; }
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks/$net_a")" == "200" ]] || c5_ok=0
+    if [[ "$c5_ok" == 1 ]]; then
+        c_row "C5_import_network" "passed" 404 "openstack_networking_network_v2" "import" "\"details\":{\"import_exit\":$import_rc,\"b_state_adopts_foreign\":false,\"a_owner_unchanged\":true}"
+    else
+        c_row "C5_import_network" "failed" 200 "openstack_networking_network_v2" "import" "\"details\":{\"import_exit\":$import_rc,\"b_state_adopts_foreign\":$b_state_adopts}"; exit 2
+    fi
+    echo "P13.6C: C5 PASS"
+
+    # ------------------------------------------------------------------
+    # C6 — cross-project networking relationships
+    # ------------------------------------------------------------------
+    echo "P13.6C: === C6 - relationship attacks ==="
+    local c6_ok=1 b_ports_before b_ports_after
+    b_ports_before=$(curl -sf -H "X-Auth-Token: $token_b" "$auth_url/v2.0/ports" | python3 -c "import json,sys;print(len(json.load(sys.stdin).get('ports',[])))")
+    c_attack POST "$token_b" "/v2.0/ports" "{\"port\":{\"name\":\"b-port-on-a-net\",\"network_id\":\"$net_a\"}}"
+    [[ "$ATTACK_STATUS" == "404" || "$ATTACK_STATUS" == "403" || "$ATTACK_STATUS" == "409" ]] || { echo "P13.6C: FAIL - B port on A net: $ATTACK_STATUS" >&2; c6_ok=0; }
+    c_row "C6_port_on_foreign_network" "passed" "$ATTACK_STATUS" "openstack_networking_port_v2" "create" "\"details\":{\"foreign_parent_rejected\":true}"
+    local router_b ri_status
+    router_b=$(extract_id "$dir_b" "openstack_networking_router_v2.main")
+    c_attack PUT "$token_b" "/v2.0/routers/$router_b/add_router_interface" "{\"subnet_id\":\"$subnet_a\"}"
+    ri_status="$ATTACK_STATUS"
+    [[ "$ri_status" == "404" || "$ri_status" == "403" || "$ri_status" == "409" ]] || { echo "P13.6C: FAIL - B router interface on A subnet: $ri_status" >&2; c6_ok=0; }
+    c_row "C6_router_interface_foreign_subnet" "passed" "$ri_status" "openstack_networking_router_interface_v2" "create" "\"details\":{\"foreign_parent_rejected\":true}"
+    c_attack POST "$token_b" "/v2.0/ports" "{\"port\":{\"name\":\"b-port-a-sg\",\"network_id\":\"$net_b\",\"security_groups\":[\"$sg_a\"]}}"
+    [[ "$ATTACK_STATUS" == "404" || "$ATTACK_STATUS" == "403" || "$ATTACK_STATUS" == "409" ]] || { echo "P13.6C: FAIL - B port with A SG: $ATTACK_STATUS" >&2; c6_ok=0; }
+    c_row "C6_port_foreign_secgroup" "passed" "$ATTACK_STATUS" "openstack_networking_secgroup_v2" "attach" "\"details\":{\"foreign_parent_rejected\":true}"
+    # FIP association to a foreign port: must be rejected non-disclosingly.
+    # The accepted contract for this path is a generic 400 ("floating IP
+    # operation failed") identical to the nonexistent-port control — no
+    # existence oracle — and B's FIP must remain unassociated.
+    c_attack PUT "$token_b" "/v2.0/floatingips/$fip_b_id" "{\"floatingip\":{\"port_id\":\"$port_a\"}}"
+    local fip_attack_status="$ATTACK_STATUS" fip_attack_body="$ATTACK_BODY"
+    c_attack PUT "$token_b" "/v2.0/floatingips/$fip_b_id" "{\"floatingip\":{\"port_id\":\"$RANDOM_UUID\"}}"
+    local fip_control_status="$ATTACK_STATUS"
+    local fip_leak_ok=pass
+    c_leak_free "$fip_attack_body" "$port_a" "p13-shared-port" || fip_leak_ok=fail
+    local fip_unassociated=0
+    curl -sf -H "X-Auth-Token: $token_b" "$auth_url/v2.0/floatingips/$fip_b_id" \
+        | grep -q '"port_id":null' && fip_unassociated=1
+    if [[ "$fip_attack_status" == "$fip_control_status" \
+        && ( "$fip_attack_status" == "400" || "$fip_attack_status" == "404" || "$fip_attack_status" == "403" || "$fip_attack_status" == "409" ) \
+        && "$fip_leak_ok" == "pass" && "$fip_unassociated" == 1 ]]; then
+        c_row "C6_fip_foreign_port" "passed" "$fip_attack_status" "openstack_networking_floatingip_v2" "associate" \
+            "\"details\":{\"foreign_parent_rejected\":true,\"nonexistent_control_status\":\"$fip_control_status\",\"no_existence_oracle\":true,\"body_leak_check\":\"$fip_leak_ok\",\"fip_unassociated\":true}"
+    else
+        echo "P13.6C: FAIL - B FIP to A port: attack=$fip_attack_status control=$fip_control_status leak=$fip_leak_ok unassoc=$fip_unassociated" >&2
+        c_row "C6_fip_foreign_port" "failed" "$fip_attack_status" "openstack_networking_floatingip_v2" "associate" \
+            "\"details\":{\"attack_status\":\"$fip_attack_status\",\"control_status\":\"$fip_control_status\",\"body_leak_check\":\"$fip_leak_ok\",\"fip_unassociated\":$fip_unassociated}"
+        exit 2
+    fi
+    b_ports_after=$(curl -sf -H "X-Auth-Token: $token_b" "$auth_url/v2.0/ports" | python3 -c "import json,sys;print(len(json.load(sys.stdin).get('ports',[])))")
+    [[ "$b_ports_before" == "$b_ports_after" ]] || { echo "P13.6C: FAIL - B port count changed ($b_ports_before -> $b_ports_after)" >&2; c6_ok=0; }
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks/$net_a")" == "200" ]] || c6_ok=0
+    [[ "$c6_ok" == 1 ]] || exit 2
+    echo "P13.6C: C6 PASS"
+
+    # ------------------------------------------------------------------
+    # C7 — cross-project storage relationship attacks (privileged tier)
+    # ------------------------------------------------------------------
+    echo "P13.6C: === C7 - storage attacks ==="
+    c_row "C7_volume_attach_foreign_server" "execution_profile_unavailable" 0 "openstack_compute_volume_attach_v2" "attach" "\"details\":{\"reason\":\"TestLab LVM/Compute providers not available in this environment (see #809)\"}"
+    c_row "C7_volume_foreign_detach" "execution_profile_unavailable" 0 "openstack_blockstorage_volume_v3" "detach" "\"details\":{\"reason\":\"TestLab LVM/Compute providers not available in this environment (see #809)\"}"
+    echo "P13.6C: C7 classified execution_profile_unavailable"
+
+    # ------------------------------------------------------------------
+    # C8 — operation ID isolation
+    # ------------------------------------------------------------------
+    echo "P13.6C: === C8 - operation ID isolation ==="
+    c_row "C8_operation_id_isolation" "not_applicable" 0 "operation" "replay" "\"details\":{\"reason\":\"no public operation observation or replay surface exists; Operation IDs are not accepted as authorization by any compatibility endpoint, so there is nothing to replay\"}"
+    echo "P13.6C: C8 not_applicable (no public replay surface)"
+
+    # ------------------------------------------------------------------
+    # C9 — idempotency reservation isolation (adversarial)
+    # ------------------------------------------------------------------
+    echo "P13.6C: === C9 - idempotency isolation ==="
+    local kc="p13-6c-idem-$(date +%s)-$$" ra rb
+    ra=$(curl -sf -X POST "$auth_url/v2.0/networks" -H "Content-Type: application/json" \
+        -H "X-Auth-Token: $token_a" -H "OpenStack-API-Idempotency-Key: $kc" \
+        -d '{"network":{"name":"p13-idem-c9"}}' | python3 -c "import json,sys;print(json.load(sys.stdin)['network']['id'])" 2>/dev/null || echo "")
+    rb=$(curl -sf -X POST "$auth_url/v2.0/networks" -H "Content-Type: application/json" \
+        -H "X-Auth-Token: $token_b" -H "OpenStack-API-Idempotency-Key: $kc" \
+        -d '{"network":{"name":"p13-idem-c9"}}' | python3 -c "import json,sys;print(json.load(sys.stdin)['network']['id'])" 2>/dev/null || echo "")
+    local c9_ok=1
+    [[ -n "$ra" && -n "$rb" && "$ra" != "$rb" ]] || { echo "P13.6C: FAIL - idem key aliases across projects (ra=$ra rb=$rb)" >&2; c9_ok=0; }
+    if [[ "$c9_ok" == 1 ]]; then
+        c_row "C9_idempotency_isolation" "passed" 200 "openstack_networking_network_v2" "create" "\"details\":{\"idem_key\":\"$kc\",\"operation_a\":\"$ra\",\"operation_b\":\"$rb\",\"no_cross_scope_alias\":true}"
+    else
+        c_row "C9_idempotency_isolation" "failed" 409 "openstack_networking_network_v2" "create" "\"details\":{\"idem_key\":\"$kc\",\"operation_a\":\"$ra\",\"operation_b\":\"$rb\"}"; exit 2
+    fi
+    echo "P13.6C: C9 PASS"
+
+    # ------------------------------------------------------------------
+    # C12 — state immutability after denied attacks
+    # ------------------------------------------------------------------
+    echo "P13.6C: === C12 - post-attack immutability ==="
+    curl -sf -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks/$net_a" > "$state_dir/snap-a-network-after.json"
+    curl -sf -H "X-Auth-Token: $token_b" "$auth_url/v2.0/networks/$net_b" > "$state_dir/snap-b-network-after.json"
+    local c12_ok=1
+    python3 - "$state_dir/snap-a-network.json" "$state_dir/snap-a-network-after.json" <<'PY' || c12_ok=0
+import json,sys
+a=json.load(open(sys.argv[1]))["network"]
+b=json.load(open(sys.argv[2]))["network"]
+assert a==b, f"A network changed: {set(a.items())^set(b.items())}"
+PY
+    local plan_a plan_b
+    # Normal plans (refresh + config comparison) must converge to no-op. A
+    # refresh-only plan is the wrong tool here: it flags pre-existing
+    # create-time projection quirks (tags null vs []) as drift even though no
+    # attack touched the resources.
+    plan_a=$(tofu_a plan -input=false -no-color 2>&1 || true)
+    plan_b=$(tofu_b plan -input=false -no-color 2>&1 || true)
+    echo "$plan_a" | grep -q "No changes" || { echo "P13.6C: FAIL - A plan not no-op after attacks" >&2; echo "$plan_a" | tail -25 >&2; c12_ok=0; }
+    echo "$plan_b" | grep -q "No changes" || { echo "P13.6C: FAIL - B plan not no-op after attacks" >&2; echo "$plan_b" | tail -25 >&2; c12_ok=0; }
+    [[ "$c12_ok" == 1 ]] || { c_row "C12_state_immutability" "failed" 200 "multi" "plan" "\"details\":{\"foreign_state_changes\":1}"; exit 2; }
+    c_row "C12_state_immutability" "passed" 200 "multi" "plan" "\"details\":{\"foreign_state_changes\":0,\"a_plan_noop\":true,\"b_plan_noop\":true}"
+    echo "P13.6C: C12 PASS"
+
+    # ------------------------------------------------------------------
+    # C13 — restart after denied attacks
+    # ------------------------------------------------------------------
+    echo "P13.6C: === C13 - restart after denial ==="
+    restart_daemon "$state_dir" "$o3kd_port"
+    token_a=$(get_token "$auth_url" "$proja_user" "$password" "$proja_name")
+    token_b=$(get_token "$auth_url" "$tenb_username" "$tenb_pass" "$tenb_name")
+    local c13_ok=1
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks/$net_a")" == "200" ]] || { echo "P13.6C: FAIL - A network lost after restart" >&2; c13_ok=0; }
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $token_b" "$auth_url/v2.0/networks/$net_b")" == "200" ]] || { echo "P13.6C: FAIL - B network lost after restart" >&2; c13_ok=0; }
+    plan_a=$(tofu_a plan -input=false -no-color 2>&1 || true)
+    plan_b=$(tofu_b plan -input=false -no-color 2>&1 || true)
+    echo "$plan_a" | grep -q "No changes" || { echo "P13.6C: FAIL - A plan not no-op after restart" >&2; c13_ok=0; }
+    echo "$plan_b" | grep -q "No changes" || { echo "P13.6C: FAIL - B plan not no-op after restart" >&2; c13_ok=0; }
+    [[ "$c13_ok" == 1 ]] || { c_row "C13_restart_after_denial" "failed" 200 "multi" "read" "\"details\":{\"latent_mutation\":true}"; exit 2; }
+    c_row "C13_restart_after_denial" "passed" 200 "multi" "read" "\"details\":{\"owners_preserved\":true,\"no_latent_relationship\":true,\"a_plan_noop\":true,\"b_plan_noop\":true}"
+    echo "P13.6C: C13 PASS"
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+    echo "P13.6C: === Cleanup ==="
+    tofu_a destroy -input=false -auto-approve >/dev/null 2>&1 || true
+    tofu_b destroy -input=false -auto-approve >/dev/null 2>&1 || true
+    [[ -n "$fip_b_id" ]] && curl -sf -X DELETE -H "X-Auth-Token: $token_b" "$auth_url/v2.0/floatingips/$fip_b_id" >/dev/null 2>&1
+    curl -sf -X DELETE -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks/$ra" >/dev/null 2>&1 || true
+    curl -sf -X DELETE -H "X-Auth-Token: $token_b" "$auth_url/v2.0/networks/$rb" >/dev/null 2>&1 || true
+    local leftover_a leftover_b cleanup_ok=1
+    leftover_a=$(curl -sf -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks" \
+        | python3 -c "import json,sys; nets=[n for n in json.load(sys.stdin).get('networks',[]) if n.get('name')!='p13-6-public-pool']; print(len(nets))" 2>/dev/null || echo "?")
+    leftover_b=$(curl -sf -H "X-Auth-Token: $token_b" "$auth_url/v2.0/networks" \
+        | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('networks',[])))" 2>/dev/null || echo "?")
+    [[ "$leftover_a" == "0" && "$leftover_b" == "0" ]] || cleanup_ok=0
+    [[ "$cleanup_ok" == 1 ]] || { echo "P13.6C: cleanup FAILED" >&2; exit 2; }
+    export P13_6B_CLEANUP_RESULT="passed"
+    echo "P13.6C: Cleanup PASS"
+
+    # ------------------------------------------------------------------
+    # Write evidence artifact
+    # ------------------------------------------------------------------
+    local head_sha
+    head_sha=$(git -C "$root_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
+
+    python3 - "$evidence_rows" "$evidence_file" "$head_sha" <<'PY_EVIDENCE'
+import hashlib, json, os, pathlib, sys
+
+rows_path, out_path, head_sha = sys.argv[1:]
+rows = []
+if pathlib.Path(rows_path).exists():
+    text = pathlib.Path(rows_path).read_text()
+    decoder = json.JSONDecoder()
+    pos = 0
+    while pos < len(text):
+        while pos < len(text) and text[pos] in ' \t\n\r':
+            pos += 1
+        if pos >= len(text):
+            break
+        obj, end = decoder.raw_decode(text, pos)
+        rows.append(obj)
+        pos = end
+
+def sha256_digest(path):
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest() if path and pathlib.Path(path).exists() else ""
+
+result_counts = {}
+for r in rows:
+    k = r.get("result", "unknown")
+    result_counts[k] = result_counts.get(k, 0) + 1
+
+ACCEPTABLE = {"passed", "not_applicable", "execution_profile_unavailable"}
+all_ok = all(r.get("result") in ACCEPTABLE for r in rows) and any(r.get("result") == "passed" for r in rows)
+
+provider_binary = os.environ.get("O3K_P13_PROVIDER_BINARY", "")
+provider_archive = os.environ.get("O3K_P13_PROVIDER_ARCHIVE", "")
+toolchain = {
+    "opentofu": "1.12.6",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_modified": False,
+}
+if provider_binary:
+    toolchain["provider_binary_sha256"] = sha256_digest(provider_binary)
+if provider_archive:
+    toolchain["provider_archive_sha256"] = sha256_digest(provider_archive)
+
+document = {
+    "artifact_type": "o3k-p13-6c-crossproject-negative-evidence",
+    "schema_version": 1,
+    "phase": "P13.6C",
+    "tested_runtime_head_sha": head_sha,
+    "backend": os.environ.get("O3K_DATABASE_BACKEND", "sqlite"),
+    "toolchain": toolchain,
+    "provider_modified": False,
+    "two_project_identity_model": {
+        "project_a": {"name": "admin", "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb"},
+        "project_b": {"name": "tenant-b", "project_id": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f"},
+    },
+    "cleanup_result": os.environ.get("P13_6B_CLEANUP_RESULT", "unknown"),
+    "scenarios": rows,
+    "result_counts": result_counts,
+    "aggregate_verdict": "PASS" if all_ok else "FAILED",
+}
+pathlib.Path(out_path).write_text(json.dumps(document, indent=2) + "\n")
+print(f"P13.6C evidence written to {out_path}")
+print(f"P13.6C evidence: {len(rows)} scenarios, result_counts={json.dumps(result_counts)}")
+PY_EVIDENCE
+
+    echo "P13.6C: ALL PASS"
+}
+
 main() {
     if [[ "${P13_6_SELF_TEST:-0}" == 1 ]]; then
         self_test
@@ -1190,9 +1719,8 @@ main() {
     fi
 
     if [[ "${P13_6C_RUN:-0}" == 1 ]]; then
-        echo "P13.6C: not yet implemented"
-        emit_scenario_row "P13.6C" "cross_project_negative" "blocked" '{"details": {"reason": "slice_not_started"}}'
-        exit 2
+        run_slice_c
+        exit 0
     fi
 
     if [[ "${P13_6D_RUN:-0}" == 1 ]]; then

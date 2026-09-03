@@ -609,3 +609,142 @@ async fn two_tenant_security_group_binding_cross_scope_denial_is_concealed()
 
     Ok(())
 }
+
+#[tokio::test]
+async fn foreign_security_group_port_create_is_fail_closed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let harness = build_harness().await?;
+
+    // Tenant A creates a security group.
+    let sg_req = serde_json::json!({
+        "security_group": {
+            "name": "sg-a"
+        }
+    });
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/security-groups")
+                .header("x-auth-token", &harness.token_a)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&sg_req)?))?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await?;
+    let sg_json: Value = serde_json::from_slice(&body_bytes)?;
+    let sg_id = sg_json["security_group"]["id"]
+        .as_str()
+        .ok_or("missing security group id")?
+        .to_owned();
+
+    // Tenant B creates a network and subnet.
+    let net_req = serde_json::json!({
+        "network": {
+            "name": "net-b"
+        }
+    });
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/networks")
+                .header("x-auth-token", &harness.token_b)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&net_req)?))?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await?;
+    let net_json: Value = serde_json::from_slice(&body_bytes)?;
+    let net_id = net_json["network"]["id"]
+        .as_str()
+        .ok_or("missing network id")?
+        .to_owned();
+
+    let subnet_req = serde_json::json!({
+        "subnet": {
+            "network_id": net_id,
+            "name": "subnet-b",
+            "cidr": "10.0.0.0/29"
+        }
+    });
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/subnets")
+                .header("x-auth-token", &harness.token_b)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&subnet_req)?))?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Tenant B attempts to CREATE a port on B's own network while binding
+    // Tenant A's security group in the same request. The request must be
+    // rejected non-disclosingly AND must not leave a partially created port
+    // behind (fail-closed: no provider/store side effect from a denied
+    // cross-scope relationship).
+    let port_req = serde_json::json!({
+        "port": {
+            "network_id": net_id,
+            "name": "port-b-with-foreign-sg",
+            "security_groups": [sg_id]
+        }
+    });
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/ports")
+                .header("x-auth-token", &harness.token_b)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&port_req)?))?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await?;
+    let body = String::from_utf8(body_bytes.to_vec())?;
+    assert!(!body.contains(&sg_id));
+    assert!(!body.contains(PROJECT_A));
+    assert!(!body.contains("admin"));
+
+    // No port may have been created for tenant B.
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2.0/ports")
+                .header("x-auth-token", &harness.token_b)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await?;
+    let ports_json: Value = serde_json::from_slice(&body_bytes)?;
+    let ports = ports_json["ports"]
+        .as_array()
+        .ok_or("missing ports array")?;
+    assert!(
+        ports.is_empty(),
+        "denied cross-scope port create left a partial port behind"
+    );
+
+    let _ = std::fs::remove_dir_all(&harness.image_dir);
+    let _ = std::fs::remove_dir_all(&harness.net_dir);
+    let _ = std::fs::remove_dir_all(&harness.fip_dir);
+
+    Ok(())
+}
