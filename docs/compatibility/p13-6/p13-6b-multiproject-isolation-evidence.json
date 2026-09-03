@@ -2,7 +2,7 @@
   "artifact_type": "o3k-p13-6b-multiproject-isolation-evidence",
   "schema_version": 1,
   "phase": "P13.6B",
-  "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+  "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
   "backend": "postgresql",
   "toolchain": {
     "opentofu": "1.12.6",
@@ -42,7 +42,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B1_identity_separation",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -76,7 +76,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B2_same_name_resources",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -98,7 +98,9 @@
           "p13-shared-router",
           "p13-shared-sg",
           "p13-shared-keypair"
-        ]
+        ],
+        "a_plan_exit": 0,
+        "b_plan_exit": 0
       },
       "resources_created": [
         "openstack_compute_keypair_v2",
@@ -126,7 +128,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B3_network_graph_a",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -140,13 +142,14 @@
       "expected_authorization_outcome": "allow",
       "actual_http_status": 200,
       "details": {
-        "network_id": "01a06841-05d9-79c0-85a2-2ff2d064a67d",
-        "subnet_id": "01a06841-0624-75a1-b9f1-0efe19137304",
-        "port_id": "01a06841-065b-7971-a430-33dccac9a318",
-        "router_id": "01a06841-05da-70a0-883f-b86ab508da1e",
-        "security_group_id": "01a06841-05c7-71b2-8dd9-458870d99887",
+        "network_id": "01a06867-b367-7cf1-8a7a-1f397dc1204b",
+        "subnet_id": "01a06867-b3a4-73c2-9dfe-76a519a1cd2c",
+        "port_id": "01a06867-b3d7-7021-9bc3-50fb44457010",
+        "router_id": "01a06867-b35a-7b31-a8d0-5c0aeeceb11f",
+        "router_interface_id": "01a06867-b3db-7470-9557-a4fe36da9ecd",
+        "security_group_id": "01a06867-b360-7892-b6e7-8927b59bd5d8",
         "keypair_id": "p13-shared-keypair",
-        "floating_ip_id": "01a06841-05f0-7c91-b835-20fde797e999"
+        "floating_ip_id": "01a06867-b37d-77b0-aee4-7260129ccd65"
       },
       "resources_created": [
         "openstack_compute_keypair_v2",
@@ -174,7 +177,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B4_isolation_before_b",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -207,7 +210,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B3_network_graph_b",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -221,13 +224,14 @@
       "expected_authorization_outcome": "allow",
       "actual_http_status": 200,
       "details": {
-        "network_id": "01a06841-188e-79d2-af29-352df6b68305",
-        "subnet_id": "01a06841-18be-7b61-9cab-280d9572bf45",
-        "port_id": "01a06841-18ec-71f2-b5db-fafea05216db",
-        "router_id": "01a06841-1891-7823-9fd6-217f711819d4",
-        "security_group_id": "01a06841-1889-75f2-a048-a48b6f8cfcbb",
+        "network_id": "01a06867-c664-7c22-aa38-0fe24148b362",
+        "subnet_id": "01a06867-c68d-7131-8422-016a0759fdc2",
+        "port_id": "01a06867-c6b7-7f01-983b-dd6e84b63871",
+        "router_id": "01a06867-c667-76f2-9fda-7eb1b312b1ee",
+        "router_interface_id": "01a06867-c6bb-7221-85ac-f223cfb98fde",
+        "security_group_id": "01a06867-c656-73a3-8cf5-023de92abc91",
         "keypair_id": "p13-shared-keypair",
-        "floating_ip_id": "01a06841-192e-7bb2-b6a2-7ab7af656147"
+        "floating_ip_id": "01a06867-c6f7-76b2-a538-9a599503fb53"
       },
       "resources_created": [
         "openstack_compute_keypair_v2",
@@ -255,7 +259,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B4_ids_distinct",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -270,8 +274,8 @@
       "actual_http_status": 404,
       "details": {
         "ids_distinct": true,
-        "a_network_count": 2,
-        "b_network_count": 1
+        "a_network_count": "2",
+        "b_network_count": "1"
       },
       "resources_created": [],
       "resource_types_coverage": [
@@ -289,7 +293,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B6_concurrent_operation",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -299,12 +303,14 @@
       "resource_type": "openstack_networking_network_v2",
       "operation": "create",
       "target_owner": "project_a",
-      "caller_owner": "system",
+      "caller_owner": "project_a_and_b",
       "expected_authorization_outcome": "allow",
       "actual_http_status": 200,
       "details": {
-        "concurrent_network_a": "01a06841-36af-7053-b203-409796d5f841",
-        "concurrent_network_b": "01a06841-41c7-7240-a96b-5360c10f936d"
+        "concurrent_network_a": "01a06867-e5c6-77f1-9154-464c0ade56fd",
+        "concurrent_network_b": "01a06867-f0fc-78f3-b52d-0dc94b6d841c",
+        "a_apply_exit": 0,
+        "b_apply_exit": 0
       },
       "resources_created": [
         "openstack_networking_network_v2"
@@ -324,7 +330,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B7_idempotency_key",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -338,10 +344,13 @@
       "expected_authorization_outcome": "allow",
       "actual_http_status": 200,
       "details": {
-        "idem_key": "p13-6b-idem-1788455515-2573498",
-        "net_a_id": "01a06841-7404-7222-9bef-ba1d71b1637c",
-        "net_b_id": "01a06841-7429-7c02-bc0e-657d1de66621",
-        "ids_distinct": true
+        "idem_key": "p13-6b-idem-1788458050-2690667",
+        "net_a_id": "01a06868-227e-7870-837a-02cb03ade489",
+        "replay_status_after_completion": "409",
+        "idem_resource_count_a": 1,
+        "net_b_id": "01a06868-22d8-74a3-9757-4ce1cdf136a5",
+        "ids_distinct": true,
+        "in_scope_replay_no_duplicate": true
       },
       "resources_created": [
         "openstack_networking_network_v2"
@@ -361,7 +370,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B8_restart_reconstruction",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -396,7 +405,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B9_independent_mutation",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -430,7 +439,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B9_final_convergence",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -463,7 +472,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B10_compute_server",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -495,7 +504,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B11_volume",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
@@ -527,7 +536,7 @@
     {
       "phase": "P13.6B",
       "scenario": "B12_volume_attachment",
-      "tested_runtime_head_sha": "951872a13709551f3a9fe89fa5514064b63ad05a",
+      "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
       "backend": "postgresql",
       "project_a_principal": "admin",
       "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
