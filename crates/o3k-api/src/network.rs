@@ -2560,8 +2560,8 @@ fn unix_time_millis() -> u64 {
 fn public_error(error: PublicAddressError) -> axum::response::Response {
     let (status, title) = match error {
         PublicAddressError::NotFound => (StatusCode::NOT_FOUND, "Not Found"),
-        PublicAddressError::NotOwner
-        | PublicAddressError::AssociationConflict
+        PublicAddressError::NotOwner => (StatusCode::NOT_FOUND, "Not Found"),
+        PublicAddressError::AssociationConflict
         | PublicAddressError::InUse
         | PublicAddressError::Exhausted => (StatusCode::CONFLICT, "Conflict"),
         PublicAddressError::InvalidPool

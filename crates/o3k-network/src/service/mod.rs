@@ -77,7 +77,9 @@ fn map_store_error(error: o3k_store::StoreError) -> NetworkError {
             NetworkError::NotFound
         }
         o3k_store::StoreError::NetworkInUse => NetworkError::Conflict,
-        o3k_store::StoreError::OwnershipConflict => NetworkError::InvalidRequest,
+        o3k_store::StoreError::StaleGeneration => NetworkError::Conflict,
+        o3k_store::StoreError::PolicyCompositionConflict => NetworkError::Conflict,
+        o3k_store::StoreError::OwnershipConflict => NetworkError::NotFound,
         o3k_store::StoreError::QuotaExceeded {
             key,
             limit,

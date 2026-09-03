@@ -3,7 +3,7 @@
   "schema_version": 1,
   "phase": "P13.5F",
   "scenario": "PG5-router-interface-relationship",
-  "tested_runtime_head_sha": "c5298c7ef1d0c845bc5162e52ea269768c1209d6",
+  "tested_runtime_head_sha": "b83e0568beb3afdc420668ac74de6de4109572b5",
   "backend": "postgresql",
   "execution_profile": "postgresql-provider-local-pinned-lvm",
   "real_provider_execution": true,
@@ -15,14 +15,25 @@
     "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
     "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc"
   },
-  "parent_ids_before": {"router_id": "01a06486-3bc9-7381-91d6-929d0cd3a35d", "subnet_id": "01a06486-3bea-7a22-a4c3-d50d1bc39a30"},
-  "parent_ids_after": {"router_id": "01a06486-3bc9-7381-91d6-929d0cd3a35d", "subnet_id": "01a06486-3bea-7a22-a4c3-d50d1bc39a30"},
+  "parent_ids_before": {
+    "router_id": "01a06486-3bc9-7381-91d6-929d0cd3a35d",
+    "subnet_id": "01a06486-3bea-7a22-a4c3-d50d1bc39a30"
+  },
+  "parent_ids_after": {
+    "router_id": "01a06486-3bc9-7381-91d6-929d0cd3a35d",
+    "subnet_id": "01a06486-3bea-7a22-a4c3-d50d1bc39a30"
+  },
   "parents_preserved": true,
   "old_relationship_absent": true,
   "relationship_count": 1,
   "provider_leaks": 0,
   "foreign_changes": 0,
-  "plan_actions": [["delete", "create"]],
+  "plan_actions": [
+    [
+      "delete",
+      "create"
+    ]
+  ],
   "restart_reconstruction": true,
   "final_plan_noop": true,
   "cleanup": "passed",
