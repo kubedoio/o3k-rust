@@ -1,0 +1,535 @@
+{
+  "artifact_type": "o3k-p13-6c-crossproject-negative-evidence",
+  "schema_version": 1,
+  "phase": "P13.6C",
+  "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+  "backend": "postgresql",
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_modified": false,
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b"
+  },
+  "provider_modified": false,
+  "two_project_identity_model": {
+    "project_a": {
+      "name": "admin",
+      "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb"
+    },
+    "project_b": {
+      "name": "tenant-b",
+      "project_id": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f"
+    }
+  },
+  "cleanup_result": "passed",
+  "scenarios": [
+    {
+      "phase": "P13.6C",
+      "scenario": "C1_list_isolation",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "multi",
+      "operation": "list",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 200,
+      "details": {
+        "foreign_ids_absent": true,
+        "foreign_names_not_applicable_due_to_same_name_model": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C2_show_network",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_network_v2",
+      "operation": "show",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "nonexistent_control_status": "404",
+        "body_leak_check": "pass"
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C2_show_subnet",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_subnet_v2",
+      "operation": "show",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "nonexistent_control_status": "404",
+        "body_leak_check": "pass"
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C2_show_port",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_port_v2",
+      "operation": "show",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "nonexistent_control_status": "404",
+        "body_leak_check": "pass"
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C2_show_router",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_router_v2",
+      "operation": "show",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "nonexistent_control_status": "404",
+        "body_leak_check": "pass"
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C2_show_secgroup",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_secgroup_v2",
+      "operation": "show",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "nonexistent_control_status": "404",
+        "body_leak_check": "pass"
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C2_show_floatingip",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_floatingip_v2",
+      "operation": "show",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "nonexistent_control_status": "404",
+        "body_leak_check": "pass"
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C3_update_network",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_network_v2",
+      "operation": "update",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "a_state_unchanged": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C3_update_port",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_port_v2",
+      "operation": "update",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "a_state_unchanged": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C3_update_router",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_router_v2",
+      "operation": "update",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "a_state_unchanged": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C4_delete_network",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_network_v2",
+      "operation": "delete",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "a_resource_survives": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C4_delete_router",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_router_v2",
+      "operation": "delete",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "a_resource_survives": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C4_delete_floatingip",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_floatingip_v2",
+      "operation": "delete",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "a_resource_survives": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C5_import_network",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_network_v2",
+      "operation": "import",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "import_exit": 1,
+        "b_state_adopts_foreign": false,
+        "a_owner_unchanged": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C6_port_on_foreign_network",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_port_v2",
+      "operation": "create",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "foreign_parent_rejected": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C6_router_interface_foreign_subnet",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_router_interface_v2",
+      "operation": "create",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "foreign_parent_rejected": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C6_port_foreign_secgroup",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_secgroup_v2",
+      "operation": "attach",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "foreign_parent_rejected": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C6_fip_foreign_port",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_floatingip_v2",
+      "operation": "associate",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 400,
+      "details": {
+        "foreign_parent_rejected": true,
+        "nonexistent_control_status": "400",
+        "no_existence_oracle": true,
+        "body_leak_check": "pass",
+        "fip_unassociated": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C7_volume_attach_foreign_server",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "execution_profile_unavailable",
+      "resource_type": "openstack_compute_volume_attach_v2",
+      "operation": "attach",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 0,
+      "details": {
+        "reason": "TestLab LVM/Compute providers not available in this environment (see #809)"
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C7_volume_foreign_detach",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "execution_profile_unavailable",
+      "resource_type": "openstack_blockstorage_volume_v3",
+      "operation": "detach",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 0,
+      "details": {
+        "reason": "TestLab LVM/Compute providers not available in this environment (see #809)"
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C8_operation_id_isolation",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "not_applicable",
+      "resource_type": "operation",
+      "operation": "replay",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 0,
+      "details": {
+        "reason": "no public operation observation or replay surface exists; Operation IDs are not accepted as authorization by any compatibility endpoint, so there is nothing to replay"
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C9_idempotency_isolation",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_network_v2",
+      "operation": "create",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 200,
+      "details": {
+        "idem_key": "p13-6c-idem-1788468132-3078303",
+        "operation_a": "01a06901-fb90-7372-b614-954490306b26",
+        "operation_b": "01a06901-fbb5-7da0-9ffb-250246c3feef",
+        "no_cross_scope_alias": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C12_state_immutability",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "multi",
+      "operation": "plan",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 200,
+      "details": {
+        "foreign_state_changes": 0,
+        "a_plan_noop": true,
+        "b_plan_noop": true
+      }
+    },
+    {
+      "phase": "P13.6C",
+      "scenario": "C13_restart_after_denial",
+      "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "multi",
+      "operation": "read",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 200,
+      "details": {
+        "owners_preserved": true,
+        "no_latent_relationship": true,
+        "a_plan_noop": true,
+        "b_plan_noop": true
+      }
+    }
+  ],
+  "result_counts": {
+    "passed": 21,
+    "execution_profile_unavailable": 2,
+    "not_applicable": 1
+  },
+  "aggregate_verdict": "PASS"
+}
