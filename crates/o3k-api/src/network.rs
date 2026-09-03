@@ -3314,6 +3314,17 @@ pub(crate) async fn create_port(
         .map(|value| (value.subnet_id, value.ip_address));
     let project = auth.effective_scope().id().as_str();
     let security_groups = body.port.security_groups;
+    // Validate every requested security group belongs to the caller's project
+    // BEFORE the port is created. A foreign or unknown group must not leave a
+    // partially created port behind (fail-closed, non-disclosing 404).
+    for group_id in &security_groups {
+        if let Err(error) = service
+            .get_security_group_for_project(project, *group_id)
+            .await
+        {
+            return network_error(error);
+        }
+    }
     match service
         .create_port_with_fixed_ip(
             &auth,

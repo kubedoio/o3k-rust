@@ -3,7 +3,7 @@
   "schema_version": 1,
   "phase": "P13.5F",
   "scenario": "PG3-remote-deletion-recreation",
-  "tested_runtime_head_sha": "1545fc0c800827d4741ec406d05afb328448ce1e",
+  "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
   "backend": "postgresql",
   "execution_profile": "postgresql-provider-local-pinned-lvm",
   "real_provider_execution": true,
