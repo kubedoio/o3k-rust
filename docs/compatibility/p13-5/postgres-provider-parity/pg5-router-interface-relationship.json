@@ -3,7 +3,7 @@
   "schema_version": 1,
   "phase": "P13.5F",
   "scenario": "PG5-router-interface-relationship",
-  "tested_runtime_head_sha": "fd0330c7d7dc982840eb5b2e6526ec3b1e1b0edc",
+  "tested_runtime_head_sha": "efcc52e1bc1cda9e94dcc0fafc549fddfe39ea9f",
   "backend": "postgresql",
   "execution_profile": "postgresql-provider-local-pinned-lvm",
   "real_provider_execution": true,
