@@ -1,0 +1,263 @@
+{
+  "artifact_type": "o3k-p13-6e-lost-response-evidence",
+  "schema_version": 1,
+  "phase": "P13.6E",
+  "tested_runtime_head_sha": "73db182461a6b001453c650cba703f74354ee46c",
+  "backend": "postgresql",
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_modified": false,
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b"
+  },
+  "provider_modified": false,
+  "two_project_identity_model": {
+    "project_a": {
+      "name": "admin",
+      "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb"
+    },
+    "project_b": {
+      "name": "tenant-b",
+      "project_id": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f"
+    }
+  },
+  "ambiguity_boundary": {
+    "classification": "AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS",
+    "exactly_once_client_creation_claimed": false,
+    "o3k_canonical_state_corrupted": false,
+    "authorization_isolation_intact": true,
+    "mitigations_introduced": {
+      "terraform_specific_persistence": false,
+      "custom_provider_header": false,
+      "provider_fork": false,
+      "hidden_client_request_token": false
+    }
+  },
+  "cleanup_result": "passed",
+  "scenarios": [
+    {
+      "phase": "P13.6E",
+      "scenario": "E1_lost_create_response_loss_a",
+      "tested_runtime_head_sha": "73db182461a6b001453c650cba703f74354ee46c",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "expected_ambiguous",
+      "resource_type": "openstack_networking_network_v2",
+      "operation": "create",
+      "target_owner": "project_a",
+      "caller_owner": "project_a",
+      "expected_authorization_outcome": "allow",
+      "actual_http_status": 201,
+      "classification": "AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS",
+      "details": {
+        "fault_location": "after_commit_before_response",
+        "forwarded": true,
+        "backend_completion_observed": true,
+        "recorded_status_is_backend_completion": true,
+        "client_observed_failure": true,
+        "client_status": "provider_error",
+        "provider_error_line": "Error: Error creating openstack_networking_network_v2: Expected HTTP response code [201 202] when accessing [POST http://127.0.0.1:52297/v2.0/networks], but got",
+        "orphan_network_id": "01a06b7e-1299-7c40-8a19-0fb42f3daec7",
+        "canonical_creation_committed": true,
+        "canonical_exactly_once": true,
+        "provider_state_records_resource": false,
+        "o3k_canonical_state_corrupted": false
+      }
+    },
+    {
+      "phase": "P13.6E",
+      "scenario": "E1_lost_create_response_loss_b",
+      "tested_runtime_head_sha": "73db182461a6b001453c650cba703f74354ee46c",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "expected_ambiguous",
+      "resource_type": "openstack_networking_network_v2",
+      "operation": "create",
+      "target_owner": "project_b",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "allow",
+      "actual_http_status": 201,
+      "classification": "AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS",
+      "details": {
+        "fault_location": "after_commit_before_response",
+        "forwarded": true,
+        "backend_completion_observed": true,
+        "recorded_status_is_backend_completion": true,
+        "client_observed_failure": true,
+        "client_status": "503",
+        "provider_error_line": "curl client: no resource id returned",
+        "orphan_network_id": "01a06b7e-15a2-7730-b4c4-567b2da62f44",
+        "canonical_creation_committed": true,
+        "canonical_exactly_once": true,
+        "provider_state_records_resource": null,
+        "o3k_canonical_state_corrupted": false
+      }
+    },
+    {
+      "phase": "P13.6E",
+      "scenario": "E2_post_ambiguity_plan_a",
+      "tested_runtime_head_sha": "73db182461a6b001453c650cba703f74354ee46c",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_network_v2",
+      "operation": "plan",
+      "target_owner": "project_a",
+      "caller_owner": "project_a",
+      "expected_authorization_outcome": "allow",
+      "actual_http_status": 200,
+      "details": {
+        "recreate_planned": true,
+        "plan_exit": 0,
+        "provider_state_empty": true,
+        "client_cannot_distinguish_outcome": true
+      }
+    },
+    {
+      "phase": "P13.6E",
+      "scenario": "E2_blind_retry_blocked_by_name_conflict_a",
+      "tested_runtime_head_sha": "73db182461a6b001453c650cba703f74354ee46c",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "expected_ambiguous",
+      "resource_type": "openstack_networking_network_v2",
+      "operation": "create",
+      "target_owner": "project_a",
+      "caller_owner": "project_a",
+      "expected_authorization_outcome": "allow",
+      "actual_http_status": 409,
+      "classification": "AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS",
+      "details": {
+        "blind_retry_status": 409,
+        "duplicate_created": false,
+        "name_conflict_within_project": true,
+        "name_scope_is_project_bound": true,
+        "client_still_unaware_of_orphan": true,
+        "retry_cannot_converge": true,
+        "recovery_requires_import_or_rename": true,
+        "o3k_canonical_state_corrupted": false
+      }
+    },
+    {
+      "phase": "P13.6E",
+      "scenario": "E2_recovery_via_import_a",
+      "tested_runtime_head_sha": "73db182461a6b001453c650cba703f74354ee46c",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_network_v2",
+      "operation": "import",
+      "target_owner": "project_a",
+      "caller_owner": "project_a",
+      "expected_authorization_outcome": "allow",
+      "actual_http_status": 200,
+      "details": {
+        "orphan_adopted_by_canonical_id": true,
+        "import_is_upstream_provider_standard": true,
+        "post_import_plan_noop": true,
+        "no_terraform_specific_mechanism": true,
+        "converged_after_explicit_adoption": true
+      }
+    },
+    {
+      "phase": "P13.6E",
+      "scenario": "E3_cross_project_isolation_during_ambiguity",
+      "tested_runtime_head_sha": "73db182461a6b001453c650cba703f74354ee46c",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_network_v2",
+      "operation": "show",
+      "target_owner": "project_a",
+      "caller_owner": "project_b",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 404,
+      "details": {
+        "b_apply_converged_while_a_ambiguous": true,
+        "b_state_network_id": "01a06b7e-56e8-7573-89b6-cd680b2ca99c",
+        "b_same_name_create_succeeded_despite_a_conflict": true,
+        "a_name_conflict_is_project_bound": true,
+        "list_isolation_verified": true,
+        "a_orphan_foreign_show_status": 404,
+        "foreign_response_body_non_disclosing": true,
+        "cross_project_impact": 0
+      }
+    },
+    {
+      "phase": "P13.6E",
+      "scenario": "E4_restart_after_ambiguity",
+      "tested_runtime_head_sha": "73db182461a6b001453c650cba703f74354ee46c",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "multi",
+      "operation": "plan",
+      "target_owner": "project_a",
+      "caller_owner": "project_a",
+      "expected_authorization_outcome": "allow",
+      "actual_http_status": 200,
+      "details": {
+        "a_orphan_preserved": true,
+        "b_orphan_durable_without_client_reference": true,
+        "b_state_network_preserved": true,
+        "owners_preserved_after_restart": true,
+        "a_plan_noop": true,
+        "b_plan_noop": true,
+        "no_resurrection": true,
+        "no_foreign_materialization": true
+      }
+    },
+    {
+      "phase": "P13.6E",
+      "scenario": "E5_destroy_isolation_same_name",
+      "tested_runtime_head_sha": "73db182461a6b001453c650cba703f74354ee46c",
+      "backend": "postgresql",
+      "project_a_principal": "admin",
+      "project_a_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b_principal": "tenant-b-user",
+      "project_b_project": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "result": "passed",
+      "resource_type": "openstack_networking_network_v2",
+      "operation": "delete",
+      "target_owner": "project_b",
+      "caller_owner": "project_a",
+      "expected_authorization_outcome": "deny",
+      "actual_http_status": 204,
+      "details": {
+        "a_network_absent_after_destroy": true,
+        "b_orphan_retained": true,
+        "b_state_network_retained": true,
+        "same_name_no_cross_project_destroy": true,
+        "terraform_state_is_bookkeeping_only": true,
+        "canonical_authority": "o3k"
+      }
+    }
+  ],
+  "result_counts": {
+    "expected_ambiguous": 3,
+    "passed": 5
+  },
+  "aggregate_verdict": "PASS"
+}
