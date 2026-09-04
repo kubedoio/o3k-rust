@@ -149,10 +149,24 @@ not proven by this result.
 
 ### P13.6 — Multi-project security and failure evidence
 
-**P13.6A contract frozen** at `origin/main` SHA `4f61cd90e504a021f164df6fc9bec1cd26b43a6b`.
-Contract artifact: `docs/compatibility/p13-6/p13-6a-security-failure-contract.json`.
+**P13.6 A–F are complete and protected-merged** through the P13.6F aggregate
+closure (issue #751). P13.6A contract frozen at `origin/main` SHA
+`4f61cd90e504a021f164df6fc9bec1cd26b43a6b`; contract artifact
+`docs/compatibility/p13-6/p13-6a-security-failure-contract.json` remains
+authoritative. P13.6B/C/D/E provide portable positive isolation,
+cross-project negative, restart/durable recovery, and lost-response evidence
+on PostgreSQL; the P13.6F privileged security supplement executes the
+Compute/Volume/VolumeAttachment TestLab tier and the full frozen A matrix
+(`docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json`,
+51/51 rows). The P13.6F aggregate validator re-derives and passes
+`docs/compatibility/p13-6/p13-6f-aggregate-evidence.json` (81 security/failure
+cells, aggregate PASSED). The lost-create response remains
+`expected_ambiguous`; exactly-once client creation is not claimed. The
+privileged run drove two production security fixes to protected main (#815
+project-scopes the fake compute provider idempotency ledger; #816 makes
+missing-volume delete 404, closing a foreign-vs-missing existence oracle).
 
-P13.6A delivers:
+P13.6A delivered:
 - 12-resource security matrix with enforcement paths
 - 7-operation-class failure matrix with 5 boundaries each
 - Two-project identity model (admin + extra tenant)
@@ -249,7 +263,10 @@ See ADR-0175 §1–§13 for the full authority model. Summary:
 - `tests/p13_5_state_convergence.sh` — Refresh, import, drift, retry
 
 ### P13.6
-- `tests/p13_6_multiproject_security.sh` — Multi-project isolation
+- `tests/p13_6_multiproject_security.sh` — Multi-project isolation dispatcher
+- `tests/p13_6f_privileged_security_supplement.sh` — Privileged Compute/Volume/
+  VolumeAttachment two-project isolation, cross-project attachment attacks,
+  and full P13.6A security/failure matrix completion on PostgreSQL (P13.6F)
 
 ### P13.7
 - Real-host evidence gate with complete IaC journey
