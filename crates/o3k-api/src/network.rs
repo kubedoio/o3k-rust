@@ -2323,20 +2323,23 @@ async fn dispatch_policy_network_with_gateway(
             gateway_egress.extend(egress.iter().cloned());
         }
     }
-    // Routed egress identity is the canonical AddressRealm of the external
+    // Routed egress identity is the canonical AddressRealm id of the external
     // pool network. When a Router/L3Gateway contributes egress, the flat
-    // attachment egress and the gateway egress must share one canonical realm
-    // id; if that realm cannot be resolved, fail closed rather than labeling
-    // a Network id as an external realm id (S3). A pure-flat deployment with
-    // no router keeps its flat external identity unchanged.
-    if !gateway_egress.is_empty()
-        && state.network_external_realm_id.is_some()
-        && external_realm_route_id.is_none()
-    {
+    // attachment egress and every gateway egress must share one canonical
+    // realm id; if that realm cannot be resolved, or the gateway-referenced
+    // realm differs from the resolved pool realm, fail closed rather than
+    // labeling a Network id (or a divergent realm) as external_realm_id (S3).
+    // A pure-flat deployment with no router keeps its flat external identity.
+    let flat_routed_realm_id = external_realm_route_id;
+    if !routed_egress_realm_is_coherent(
+        &gateway_egress,
+        flat_routed_realm_id,
+        state.network_external_realm_id.is_some(),
+    ) {
         return Err(keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service Unavailable",
-            "external pool network has no canonical address realm for routed egress",
+            "external pool network has no unambiguous canonical address realm for routed egress",
         ));
     }
     let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
@@ -2439,6 +2442,29 @@ fn finalize_gateway_realization(
         plan
     };
     o3k_network::add_l3_gateway_routing(plan, gateway_routes, gateway_egress)
+}
+
+/// Verifies the canonical routed-egress identity invariant (S3): when a
+/// Router/L3Gateway contributes Egress intents, the flat attachment egress
+/// and every gateway egress must share a single canonical AddressRealm id.
+/// Callers that cannot resolve such a realm must fail closed rather than
+/// labeling a Network id (or a divergent realm id) as the external realm.
+pub(crate) fn routed_egress_realm_is_coherent(
+    gateway_egress: &[o3k_domain::EgressIntent],
+    flat_routed_realm_id: Option<Uuid>,
+    external_network_configured: bool,
+) -> bool {
+    if gateway_egress.is_empty() || !external_network_configured {
+        // Pure-flat deployment: the flat external identity is the boundary's
+        // own; no Router forces a canonical realm id.
+        return true;
+    }
+    let Some(flat) = flat_routed_realm_id else {
+        return false;
+    };
+    gateway_egress
+        .iter()
+        .all(|egress| egress.external_realm_id == flat)
 }
 
 pub(crate) fn port_response(value: PortRecord, security_groups: Vec<Uuid>) -> PortResponse {
@@ -3744,5 +3770,79 @@ mod tests {
                 .with_network_gateway_realization(false)
                 .network_gateway_realization_enabled()
         );
+    }
+
+    fn realm_a() -> Uuid {
+        Uuid::from_u128(9)
+    }
+
+    fn realm_b() -> Uuid {
+        Uuid::from_u128(10)
+    }
+
+    #[test]
+    fn routed_egress_realm_is_coherent_flat_only_accepts_any_external_identity() {
+        // A pure-flat deployment (no Router egress) keeps its flat external
+        // identity even when no canonical realm resolves.
+        assert!(routed_egress_realm_is_coherent(&[], None, true));
+        assert!(routed_egress_realm_is_coherent(&[], Some(realm_a()), true));
+    }
+
+    #[test]
+    fn routed_egress_realm_is_coherent_unconfigured_external_is_accepted() {
+        let egress = gateway_egress(realm_a());
+        assert!(routed_egress_realm_is_coherent(&egress, None, false));
+    }
+
+    #[test]
+    fn routed_egress_realm_is_coherent_matching_realm_is_accepted() {
+        let egress = gateway_egress(realm_a());
+        assert!(routed_egress_realm_is_coherent(
+            &egress,
+            Some(realm_a()),
+            true
+        ));
+    }
+
+    #[test]
+    fn routed_egress_realm_is_coherent_unresolvable_realm_fails_closed() {
+        // A Router contributes egress but the external pool network has no
+        // canonical realm: must fail closed rather than labeling a Network id.
+        let egress = gateway_egress(realm_a());
+        assert!(!routed_egress_realm_is_coherent(&egress, None, true));
+    }
+
+    #[test]
+    fn routed_egress_realm_is_coherent_divergent_realm_fails_closed() {
+        // The gateway egress references a different realm than the pool's
+        // canonical realm: the single-realm routed invariant is violated.
+        let egress = gateway_egress(realm_b());
+        assert!(!routed_egress_realm_is_coherent(
+            &egress,
+            Some(realm_a()),
+            true
+        ));
+    }
+
+    #[test]
+    fn routed_egress_realm_is_coherent_multiple_gateways_require_single_realm() {
+        let mut egress = gateway_egress(realm_a());
+        egress.push(o3k_domain::EgressIntent {
+            external_realm_id: realm_b(),
+            enabled: true,
+            nat: true,
+        });
+        assert!(!routed_egress_realm_is_coherent(
+            &egress,
+            Some(realm_a()),
+            true
+        ));
+        let coherent = gateway_egress(realm_a());
+        egress.pop();
+        assert!(routed_egress_realm_is_coherent(
+            &coherent,
+            Some(realm_a()),
+            true
+        ));
     }
 }
