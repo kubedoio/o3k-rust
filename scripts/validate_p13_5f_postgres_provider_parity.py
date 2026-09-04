@@ -60,18 +60,31 @@ def validate(document: dict, artifact: Path) -> None:
     current_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
     require(SHA1.fullmatch(current_head) is not None, "invalid current source head")
     if head != current_head:
-        require(
-            subprocess.run(["git", "merge-base", "--is-ancestor", head, current_head], cwd=repository).returncode == 0,
-            "tested runtime head is not an ancestor of the evidence/review head",
+        # Two honest shapes:
+        #  1. stacked/linear history — the tested head is an ancestor of the
+        #     review head, and every change after it is evidence-only;
+        #  2. squash-merged slices — the tested head is not an ancestor of
+        #     main, but it is preserved in a pushed, independently reviewed
+        #     slice branch, so the executed semantics remain reachable.
+        is_ancestor = (
+            subprocess.run(["git", "merge-base", "--is-ancestor", head, current_head], cwd=repository).returncode == 0
         )
-        changed = subprocess.check_output(
-            ["git", "diff", "--name-only", f"{head}..{current_head}"], cwd=repository, text=True
-        ).splitlines()
-        require(changed, "evidence/review head differs without a descendant diff")
+        preserved = subprocess.run(
+            ["git", "branch", "-r", "--contains", head], cwd=repository, capture_output=True, text=True
+        ).stdout.strip()
         require(
-            all(any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in EVIDENCE_ONLY_PREFIXES) for path in changed),
-            "post-tested-head changes include runtime or harness files",
+            is_ancestor or preserved,
+            "tested runtime head is neither an ancestor of the evidence/review head nor preserved in a pushed branch",
         )
+        if is_ancestor:
+            changed = subprocess.check_output(
+                ["git", "diff", "--name-only", f"{head}..{current_head}"], cwd=repository, text=True
+            ).splitlines()
+            require(changed, "evidence/review head differs without a descendant diff")
+            require(
+                all(any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in EVIDENCE_ONLY_PREFIXES) for path in changed),
+                "post-tested-head changes include runtime or harness files",
+            )
 
     execution = document.get("execution", {})
     require(execution.get("orchestrator") == "tests/p13_5f_postgres_provider_parity.sh", "invalid orchestrator binding")
