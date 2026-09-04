@@ -634,7 +634,14 @@ impl ComputeProvider for FakeComputeProvider {
             return Err(ProviderError::Terminal);
         }
         let fingerprint = Self::create_fingerprint(&request);
-        if let Some((operation_id, original)) = state.idempotency.get(&request.idempotency_key) {
+        // Scope the fake's client-idempotency ledger by project. The default
+        // client idempotency key for a server create is the display name,
+        // which legitimately repeats across projects; without the scope prefix
+        // two projects creating a same-named server would alias on the shared
+        // fake provider ledger and surface a false cross-project Conflict
+        // (observed for Project A and B both creating "p13-shared-server").
+        let ledger_key = format!("create:{}:{}", request.project_id, request.idempotency_key);
+        if let Some((operation_id, original)) = state.idempotency.get(&ledger_key) {
             if original != &fingerprint {
                 return Err(ProviderError::Conflict);
             }
@@ -689,10 +696,9 @@ impl ComputeProvider for FakeComputeProvider {
                 .then_some(ErrorCategory::UnknownOutcome),
             Some(provider_id),
         );
-        state.idempotency.insert(
-            request.idempotency_key,
-            (operation.provider_operation_id, fingerprint),
-        );
+        state
+            .idempotency
+            .insert(ledger_key, (operation.provider_operation_id, fingerprint));
         if operation_state == OperationState::UnknownOutcome {
             return Err(ProviderError::UnknownOutcome {
                 operation_id: operation.provider_operation_id,
@@ -1166,6 +1172,39 @@ mod tests {
             })
             .await?;
         assert_eq!(deleted.state, OperationState::Succeeded);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn same_client_key_across_projects_does_not_alias() -> Result<(), ProviderError> {
+        // P13.6 scope-bound idempotency regression: a server create uses the
+        // display name as its client idempotency key by default, and the name
+        // legitimately repeats across projects. The fake provider's idempotency
+        // ledger must be project-scoped so two projects creating a same-named
+        // server converge independently instead of surfacing a false Conflict.
+        let provider = FakeComputeProvider::new();
+        let project_a = {
+            let mut request = request("p13-shared-server");
+            request.project_id = "project-a".to_owned();
+            request
+        };
+        let project_b = {
+            let mut request = request("p13-shared-server");
+            request.project_id = "project-b".to_owned();
+            request
+        };
+        let a = provider.create_instance(project_a.clone()).await?;
+        let b = provider.create_instance(project_b).await?;
+        assert_eq!(a.state, OperationState::Succeeded);
+        assert_eq!(b.state, OperationState::Succeeded);
+        assert_ne!(
+            a.provider_resource_id, b.provider_resource_id,
+            "distinct projects must get distinct provider realizations"
+        );
+        assert_eq!(provider.instance_count(), 2);
+        // Within one project an equivalent replay still converges (idempotent).
+        let replay_a = provider.create_instance(project_a).await?;
+        assert_eq!(replay_a, a);
         Ok(())
     }
 
