@@ -3,7 +3,7 @@
   "schema_version": 1,
   "phase": "P13.5F",
   "scenario": "PG6-volume-attachment-relationship",
-  "tested_runtime_head_sha": "efcc52e1bc1cda9e94dcc0fafc549fddfe39ea9f",
+  "tested_runtime_head_sha": "73db182461a6b001453c650cba703f74354ee46c",
   "backend": "postgresql",
   "execution_profile": "privileged-lvm-testlab-pinned",
   "real_provider_execution": true,

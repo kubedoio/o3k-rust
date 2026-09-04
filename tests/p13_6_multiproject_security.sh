@@ -2379,6 +2379,624 @@ PY_EVIDENCE
     echo "P13.6D: ALL PASS"
 }
 
+# ---------------------------------------------------------------------------
+# P13.6E — Lost-response and client ambiguity evidence (adversarial boundary)
+#
+# Mandated sequence: the real upstream provider sends CREATE through the
+# deterministic fault proxy; the request reaches O3K, canonical creation
+# succeeds, and the response is dropped before the provider receives the
+# resource ID. Actual provider/OpenTofu behavior is recorded honestly.
+# The valid conclusion for this scenario class is `expected_ambiguous`:
+# the OpenStack protocol has no durable client idempotency token, so the
+# client cannot distinguish "created, response lost" from "not created".
+# This slice must NOT "solve" that by adding Terraform-specific
+# persistence, custom provider headers, a provider fork, or hidden client
+# request tokens. It must prove Project A's ambiguous create cannot
+# impact Project B, that O3K canonical state is never corrupted, and that
+# exactly-once client creation is NOT claimed.
+# ---------------------------------------------------------------------------
+run_slice_e() {
+    echo "P13.6E: lost-response and client ambiguity evidence"
+
+    local state_dir evidence_file evidence_rows
+    state_dir=$(mktemp -d /tmp/p13-6e-XXXXXX)
+    evidence_file="$evidence_dir/p13-6e-evidence.json"
+    evidence_rows="$state_dir/evidence-rows.jsonl"
+    mkdir -p "$(dirname "$evidence_file")" "$state_dir"
+
+    P13_6B_STATE_DIR="$state_dir"
+    _p13_6b_cleanup_done=0
+
+    local o3kd_port proxy_port auth_url proxy_url token_a token_b
+    # Intentionally global: the EXIT trap calls stop_proxy after this
+    # function has returned, so a function-local would be unbound there.
+    proxy_pid=""
+    o3kd_port=$(find_free_port)
+    proxy_port=$(find_free_port)
+    auth_url="http://127.0.0.1:$o3kd_port"
+    proxy_url="http://127.0.0.1:$proxy_port"
+
+    if [[ -z "${O3K_DATABASE_BACKEND:-}" ]]; then
+        case "${O3K_DATABASE_URL:-}" in
+            postgres*|postgresql*) export O3K_DATABASE_BACKEND="postgresql" ;;
+            *) export O3K_DATABASE_BACKEND="sqlite" ;;
+        esac
+    fi
+    echo "P13.6E: database backend: $O3K_DATABASE_BACKEND"
+
+    # Fault proxy lifecycle. Each proxy instance carries at most one one-shot
+    # rule; scenarios restart the proxy per matrix cell (same discipline as D).
+    start_proxy() { # evidence_file [--rule 'METHOD PATH LOCATION KIND']
+        local evidence_file="$1"; shift
+        python3 "$root_dir/scripts/p13_5e_fault_proxy.py" \
+            --serve-backend "$auth_url" \
+            --listen-port "$proxy_port" \
+            --evidence "$evidence_file" "$@" \
+            >"$state_dir/proxy.log" 2>&1 &
+        proxy_pid=$!
+        local attempt
+        for attempt in $(seq 1 50); do
+            kill -0 "$proxy_pid" 2>/dev/null || return 1
+            curl -sf "$proxy_url/readyz" >/dev/null 2>&1 && return 0
+            sleep 0.1
+        done
+        echo "P13.6E: proxy failed to become ready" >&2
+        return 1
+    }
+    stop_proxy() {
+        [[ -n "$proxy_pid" ]] || return 0
+        kill -TERM "$proxy_pid" 2>/dev/null || true
+        wait "$proxy_pid" 2>/dev/null || true
+        proxy_pid=""
+    }
+    trap 'stop_proxy 2>/dev/null || true; _cleanup_6b' EXIT
+
+    # Same external-pool restart dance as slices B/C/D.
+    export O3K_NETWORK_EXTERNAL_REALM_ID="00000000-0000-0000-0000-000000000009"
+    export O3K_PUBLIC_POOL_CIDR="198.51.104.0/29"
+    export O3K_PUBLIC_POOL_FIRST="198.51.104.2"
+    export O3K_PUBLIC_POOL_LAST="198.51.104.6"
+    start_o3kd "$state_dir" "$o3kd_port"
+
+    local external_realm_id
+    external_realm_id=$(curl -sf -X POST "$auth_url/v2.0/networks" \
+        -H "Content-Type: application/json" \
+        -H "X-Auth-Token: $(get_token "$auth_url" "$proja_user" "$password" "$proja_name")" \
+        -d '{"network":{"name":"p13-6-public-pool","router:external":true,"shared":true}}' \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['network']['id'])" 2>/dev/null || echo "")
+    [[ -n "$external_realm_id" ]] || { echo "P13.6E: FAILED - no external pool" >&2; exit 2; }
+    stop_o3kd "$state_dir"; sleep 1
+    export O3K_NETWORK_EXTERNAL_REALM_ID="$external_realm_id"
+    start_o3kd "$state_dir" "$o3kd_port"
+
+    token_a=$(get_token "$auth_url" "$proja_user" "$password" "$proja_name")
+    token_b=$(get_token "$auth_url" "$tenb_username" "$tenb_pass" "$tenb_name")
+    [[ -n "$token_a" && -n "$token_b" && "$token_a" != "$token_b" ]] || { echo "P13.6E: FAILED - tokens" >&2; exit 2; }
+
+    e_token() { if [[ "$1" == b ]]; then printf '%s' "$token_b"; else printf '%s' "$token_a"; fi; }
+    e_proj_id() { if [[ "$1" == b ]]; then printf '%s' "$tenb_project"; else printf '%s' "$proja_id"; fi; }
+
+    tofu_a() { (cd "$dir_a" && TF_CLI_CONFIG_FILE="$dir_a/tofu.tfrc" TF_IN_AUTOMATION=1 "$tofu" "$@"); }
+    tofu_b() { (cd "$dir_b" && TF_CLI_CONFIG_FILE="$dir_b/tofu.tfrc" TF_IN_AUTOMATION=1 "$tofu" "$@"); }
+    local dir_a="$state_dir/project-a" dir_b="$state_dir/project-b"
+
+    # Per-project OpenTofu workdir whose provider points at the fault proxy
+    # (copied from slice D's setup to keep slices B/C untouched).
+    e_setup_workdir() { # work_dir tenant_id user_name user_password
+        local work_dir="$1" tenant_id="$2" user_name="$3" user_password="$4"
+
+        mkdir -p "$work_dir"
+        local mirror_dir="$work_dir/mirror/registry.terraform.io/terraform-provider-openstack/openstack/3.4.0/linux_amd64"
+        mkdir -p "$mirror_dir"
+        cp "$provider_binary" "$mirror_dir/terraform-provider-openstack_v3.4.0"
+
+        cat > "$work_dir/tofu.tfrc" <<TFRC
+provider_installation {
+  filesystem_mirror {
+    path = "${work_dir}/mirror"
+    include = ["registry.terraform.io/terraform-provider-openstack/openstack"]
+  }
+  direct {
+    exclude = ["registry.terraform.io/terraform-provider-openstack/openstack"]
+  }
+}
+TFRC
+
+        cat > "$work_dir/provider.tf" <<PROV
+terraform {
+  required_version = "= 1.12.6"
+  required_providers {
+    openstack = {
+      source  = "terraform-provider-openstack/openstack"
+      version = "= 3.4.0"
+    }
+  }
+}
+provider "openstack" {
+  auth_url    = "${proxy_url}"
+  user_name   = "${user_name}"
+  password    = "${user_password}"
+  tenant_id   = "${tenant_id}"
+  endpoint_overrides = { network = "${proxy_url}/v2.0/" }
+  max_retries = 0
+}
+PROV
+
+        (cd "$work_dir" && \
+            TF_CLI_CONFIG_FILE="$work_dir/tofu.tfrc" \
+            TF_IN_AUTOMATION=1 \
+            "$tofu" init -input=false -upgrade=false -no-color 2>&1 | tail -3)
+    }
+
+    e_setup_workdir "$dir_a" "$proja_id" "$proja_user" "$password"
+    e_setup_workdir "$dir_b" "$tenb_project" "$tenb_username" "$tenb_pass"
+
+    # Single-resource graph, deliberately identical human-readable names.
+    cat > "$dir_a/graph.tf" <<'TOFU_G'
+resource "openstack_networking_network_v2" "main" {
+  name = "p13-6e-net"
+  tags = []
+}
+TOFU_G
+    cp "$dir_a/graph.tf" "$dir_b/graph.tf"
+
+    # Canonical observation helper: "id name tenant_id" lines for every
+    # network visible to the given token (shared external pool excluded).
+    e_nets() { # token
+        curl -sf -H "X-Auth-Token: $1" "$auth_url/v2.0/networks" \
+            | python3 -c "
+import json,sys
+for n in json.load(sys.stdin).get('networks',[]):
+    if n.get('name')!='p13-6-public-pool':
+        print(n['id'], n.get('name',''), n.get('tenant_id',''))"
+    }
+
+    # Row helper. Unlike slice D, E has genuine cross-project rows, so caller,
+    # target and the expected authorization outcome are passed explicitly.
+    e_row() { # scenario result http_status resource operation caller target expected details_json
+        emit_scenario_row "P13.6E" "$1" "$2" \
+            "{\"resource_type\":\"$4\",\"operation\":\"$5\",\"target_owner\":\"$7\",\"caller_owner\":\"$6\",\"expected_authorization_outcome\":\"$8\",\"actual_http_status\":$3,$9}" >> "$evidence_rows"
+    }
+
+    e1_fail() { # project reason
+        e_row "E1_lost_create_response_loss_$1" failed 0 openstack_networking_network_v2 create "project_$1" "project_$1" allow \
+            "\"details\":{\"reason\":\"$2\"}"
+        echo "P13.6E: FAIL - E1 ($1): $2" >&2
+        exit 2
+    }
+
+    # ------------------------------------------------------------------
+    # E1 — lost CREATE response. A via the real upstream provider (the
+    # mandated exercise), B via a direct HTTP client to prove the boundary
+    # is scope-symmetric at the canonical layer.
+    # ------------------------------------------------------------------
+    echo "P13.6E: === E1 - lost CREATE response (both projects) ==="
+    local e1_orphan_a="" e1_orphan_b=""
+    for p in a b; do
+        local tok pid e1_rc=0 e1_client_status e1_backend e1_errjson e1_obs e1_orphan
+        tok=$(e_token "$p"); pid=$(e_proj_id "$p")
+        start_proxy "$state_dir/e1-$p.json" --rule 'POST /v2.0/networks* after_commit_before_response response_loss' \
+            || e1_fail "$p" "proxy_start_failed"
+        if [[ "$p" == a ]]; then
+            # Mandated sequence: OpenTofu CREATE reaches O3K, canonical
+            # creation succeeds, response lost before the provider sees it.
+            local e1_out e1_errline
+            e1_out=$(tofu_a apply -input=false -auto-approve -no-color 2>&1) || e1_rc=$?
+            e1_client_status="provider_error"
+            e1_errline=$(grep -m1 '^Error:' <<< "$e1_out" | tr -cd '[:print:]' | cut -c1-160)
+            [[ -n "$e1_errline" ]] || e1_errline="provider_apply_failed_without_error_line"
+            e1_errjson=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$e1_errline")
+            # The provider must hold no resource ID for the lost create.
+            local e1_state_count
+            e1_state_count=$( (cd "$dir_a" && TF_CLI_CONFIG_FILE="$dir_a/tofu.tfrc" "$tofu" show -json 2>/dev/null) \
+                | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    print('parse_error'); raise SystemExit
+res=d.get('values',{}).get('root_module',{}).get('resources',[]) or []
+print(len(res))")
+            [[ "$e1_state_count" == "0" ]] || e1_fail "$p" "provider_state_records_lost_create"
+            [[ "$e1_rc" != 0 ]] || e1_fail "$p" "provider_apply_unexpectedly_succeeded"
+        else
+            # B's orphan deliberately uses a different name so B's later
+            # managed apply of the shared graph name does not collide with
+            # B's own per-project name uniqueness.
+            e1_client_status=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$proxy_url/v2.0/networks" \
+                -H "Content-Type: application/json" -H "X-Auth-Token: $tok" \
+                -d '{"network":{"name":"p13-6e-orphan-b"}}' || true)
+            e1_errjson='"curl client: no resource id returned"'
+            [[ "$e1_client_status" == "503" ]] || e1_fail "$p" "client_status=$e1_client_status"
+        fi
+        stop_proxy
+        # Proxy evidence: exactly one fault, forwarded, backend 201 observed.
+        e1_backend=$(python3 - "$state_dir/e1-$p.json" <<'PY'
+import json, sys
+recs = json.load(open(sys.argv[1], encoding="utf-8"))["records"]
+faults = [r for r in recs if r.get("fault_location") == "after_commit_before_response"]
+assert len(faults) == 1, recs
+f = faults[0]
+assert f["method"] == "POST" and f["path"].startswith("/v2.0/networks"), f
+assert f["forwarded"] is True, f
+assert f["backend_status"] == 201, f
+print(f["backend_status"])
+PY
+) || e1_fail "$p" "proxy_evidence_mismatch"
+        # Canonical layer: exactly one committed network in this scope,
+        # carrying this project's expected orphan name.
+        local e1_name
+        e1_name=$([[ "$p" == a ]] && printf 'p13-6e-net' || printf 'p13-6e-orphan-b')
+        e1_obs=$(e_nets "$tok")
+        [[ "$(grep -c . <<< "$e1_obs")" == "1" ]] || e1_fail "$p" "canonical_count!=1: $e1_obs"
+        [[ "$e1_obs" == *" $e1_name $pid" ]] || e1_fail "$p" "orphan_name_or_owner_mismatch: $e1_obs"
+        e1_orphan=$(awk '{print $1}' <<< "$e1_obs")
+        printf -v "e1_orphan_$p" "%s" "$e1_orphan"
+        # expected_ambiguous: the client can never distinguish "created,
+        # response lost" from "not created"; O3K committed exactly once.
+        e_row "E1_lost_create_response_loss_$p" expected_ambiguous "$e1_backend" openstack_networking_network_v2 create "project_$p" "project_$p" allow \
+            "\"classification\":\"AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS\",\"details\":{\"fault_location\":\"after_commit_before_response\",\"forwarded\":true,\"backend_completion_observed\":true,\"recorded_status_is_backend_completion\":true,\"client_observed_failure\":true,\"client_status\":\"$e1_client_status\",\"provider_error_line\":$e1_errjson,\"orphan_network_id\":\"$e1_orphan\",\"canonical_creation_committed\":true,\"canonical_exactly_once\":true,\"provider_state_records_resource\":$([[ "$p" == a ]] && echo false || echo null),\"o3k_canonical_state_corrupted\":false}"
+        echo "P13.6E: E1 ($p) expected_ambiguous (orphan=$e1_orphan)"
+    done
+
+    e2_fail() { # reason
+        e_row "E2_post_ambiguity_provider_behavior_a" failed 0 openstack_networking_network_v2 create project_a project_a allow \
+            "\"details\":{\"reason\":\"$1\"}"
+        echo "P13.6E: FAIL - E2: $1" >&2
+        exit 2
+    }
+
+    # ------------------------------------------------------------------
+    # E2 — actual provider/OpenTofu behavior after the ambiguous create
+    # (project A). Honest characterization, asserted from observed
+    # behavior rather than assumed:
+    #  1. plan proposes a fresh create (provider holds no ID);
+    #  2. the blind retry is REJECTED with 409 because O3K enforces
+    #     per-project network-name uniqueness (StoreError::
+    #     ResourceAlreadyExists -> NetworkError::Conflict) — no duplicate
+    #     is created and a blind retry cannot converge;
+    #  3. the accepted recovery path is the upstream-provider-standard
+    #     import of the orphan by canonical ID (no Terraform-specific
+    #     persistence, no custom provider header, no fork, no hidden
+    #     client request token).
+    # ------------------------------------------------------------------
+    echo "P13.6E: === E2 - provider behavior after ambiguous create (project A) ==="
+    local e2_plan_out e2_plan_rc=0
+    start_proxy "$state_dir/e2-plan-a.json" || e2_fail "proxy_start_failed"
+    e2_plan_out=$(tofu_a plan -input=false -no-color 2>&1) || e2_plan_rc=$?
+    stop_proxy
+    [[ "$e2_plan_rc" == 0 ]] || e2_fail "plan_exit=$e2_plan_rc"
+    grep -q "1 to add" <<< "$e2_plan_out" || e2_fail "plan_does_not_propose_recreate"
+    # Deterministic facts are recorded as passed; the ambiguity lives in E1.
+    e_row "E2_post_ambiguity_plan_a" passed 200 openstack_networking_network_v2 plan project_a project_a allow \
+        '"details":{"recreate_planned":true,"plan_exit":0,"provider_state_empty":true,"client_cannot_distinguish_outcome":true}'
+
+    # Blind retry: must NOT create a duplicate; O3K answers 409 Conflict.
+    local e2_retry_rc=0 e2_retry_out
+    start_proxy "$state_dir/e2-retry-a.json" || e2_fail "proxy_start_failed"
+    e2_retry_out=$(tofu_a apply -input=false -auto-approve -no-color 2>&1) || e2_retry_rc=$?
+    stop_proxy
+    [[ "$e2_retry_rc" != 0 ]] || e2_fail "blind_retry_unexpectedly_succeeded"
+    grep -q "409" <<< "$e2_retry_out" || e2_fail "retry_error_not_409"
+    local e2_retry_backend
+    e2_retry_backend=$(python3 - "$state_dir/e2-retry-a.json" <<'PY'
+import json, sys
+recs = json.load(open(sys.argv[1], encoding="utf-8"))["records"]
+creates = [r for r in recs if r["method"] == "POST" and r["path"].startswith("/v2.0/networks")]
+assert len(creates) == 1, recs
+assert creates[0]["forwarded"] is True and creates[0]["backend_status"] == 409, creates[0]
+print(creates[0]["backend_status"])
+PY
+) || e2_fail "proxy_evidence_mismatch"
+    # Canonical layer: still exactly ONE network in A — no duplicate.
+    local e2_obs
+    e2_obs=$(e_nets "$token_a")
+    [[ "$(grep -c . <<< "$e2_obs")" == "1" ]] || e2_fail "duplicate_created: $e2_obs"
+    grep -q "^$e1_orphan_a p13-6e-net $proja_id" <<< "$e2_obs" || e2_fail "orphan_missing_after_retry"
+    e_row "E2_blind_retry_blocked_by_name_conflict_a" expected_ambiguous "$e2_retry_backend" openstack_networking_network_v2 create project_a project_a allow \
+        "\"classification\":\"AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS\",\"details\":{\"blind_retry_status\":409,\"duplicate_created\":false,\"name_conflict_within_project\":true,\"name_scope_is_project_bound\":true,\"client_still_unaware_of_orphan\":true,\"retry_cannot_converge\":true,\"recovery_requires_import_or_rename\":true,\"o3k_canonical_state_corrupted\":false}"
+    echo "P13.6E: E2 blind retry blocked by per-project name conflict (409, no duplicate)"
+
+    # Accepted recovery path: provider-standard import of the orphan by its
+    # canonical ID (learned out-of-band, e.g. an operator listing the
+    # project). This is the OpenStack-accepted adoption mechanism.
+    local e2_import_rc=0 e2_import_out
+    start_proxy "$state_dir/e2-import-a.json" || e2_fail "proxy_start_failed"
+    e2_import_out=$(tofu_a import openstack_networking_network_v2.main "$e1_orphan_a" -no-color 2>&1) || e2_import_rc=$?
+    stop_proxy
+    [[ "$e2_import_rc" == 0 ]] || e2_fail "import_exit=$e2_import_rc"
+    grep -q "Import successful\|Import complete" <<< "$e2_import_out" || e2_fail "import_not_successful"
+    local e2_import_backend
+    e2_import_backend=$(python3 - "$state_dir/e2-import-a.json" <<'PY'
+import json, sys
+recs = json.load(open(sys.argv[1], encoding="utf-8"))["records"]
+gets = [r for r in recs if r["method"] == "GET" and r["path"].startswith("/v2.0/networks/")]
+assert len(gets) == 1, recs
+assert gets[0]["forwarded"] is True and gets[0]["backend_status"] == 200, gets[0]
+print(gets[0]["backend_status"])
+PY
+) || e2_fail "import_proxy_evidence_mismatch"
+    local e2_post_plan
+    start_proxy "$state_dir/e2-post-import-plan.json" || e2_fail "proxy_start_failed"
+    e2_post_plan=$(tofu_a plan -input=false -no-color 2>&1 || true)
+    stop_proxy
+    grep -q "No changes" <<< "$e2_post_plan" || e2_fail "post_import_plan_not_noop"
+    e_row "E2_recovery_via_import_a" passed "$e2_import_backend" openstack_networking_network_v2 import project_a project_a allow \
+        "\"details\":{\"orphan_adopted_by_canonical_id\":true,\"import_is_upstream_provider_standard\":true,\"post_import_plan_noop\":true,\"no_terraform_specific_mechanism\":true,\"converged_after_explicit_adoption\":true}"
+    echo "P13.6E: E2 recovery via upstream import converged (plan no-op)"
+
+    e3_fail() { # reason
+        e_row "E3_cross_project_isolation_during_ambiguity" failed 0 openstack_networking_network_v2 show project_b project_a deny \
+            "\"details\":{\"reason\":\"$1\"}"
+        echo "P13.6E: FAIL - E3: $1" >&2
+        exit 2
+    }
+
+    # ------------------------------------------------------------------
+    # E3 — Project A's ambiguous create cannot impact Project B. B runs a
+    # normal provider lifecycle while A holds an unresolved orphan; B's
+    # same-name create succeeding proves A's 409 name conflict is
+    # project-bound (no global name lock leaks across projects). Foreign
+    # show of A's ambiguous ID must stay non-disclosing.
+    # ------------------------------------------------------------------
+    echo "P13.6E: === E3 - project B unaffected by A's ambiguity ==="
+    local e3_apply_rc=0 e3_apply_out
+    start_proxy "$state_dir/e3-apply-b.json" || e3_fail "proxy_start_failed"
+    e3_apply_out=$(tofu_b apply -input=false -auto-approve -no-color 2>&1) || e3_apply_rc=$?
+    stop_proxy
+    [[ "$e3_apply_rc" == 0 ]] || e3_fail "b_apply_exit=$e3_apply_rc"
+    grep -q "Apply complete" <<< "$e3_apply_out" || e3_fail "b_apply_not_complete"
+    local e3_b_state_id
+    e3_b_state_id=$( (cd "$dir_b" && TF_CLI_CONFIG_FILE="$dir_b/tofu.tfrc" "$tofu" show -json 2>/dev/null) \
+        | python3 -c "
+import json,sys
+r=json.load(sys.stdin)['values']['root_module']['resources']
+print(next(x['values']['id'] for x in r if x['address']=='openstack_networking_network_v2.main'))") \
+        || e3_fail "b_state_id_extract_failed"
+    local e3_a_obs e3_b_obs
+    e3_a_obs=$(e_nets "$token_a")
+    e3_b_obs=$(e_nets "$token_b")
+    [[ "$(grep -c . <<< "$e3_a_obs")" == "1" ]] || e3_fail "a_list_count: $e3_a_obs"
+    [[ "$(grep -c . <<< "$e3_b_obs")" == "2" ]] || e3_fail "b_list_count: $e3_b_obs"
+    grep -q "^$e1_orphan_a p13-6e-net $proja_id" <<< "$e3_a_obs" || e3_fail "a_orphan_missing"
+    grep -q "^$e1_orphan_b p13-6e-orphan-b $tenb_project" <<< "$e3_b_obs" || e3_fail "b_orphan_missing"
+    grep -q "^$e3_b_state_id p13-6e-net $tenb_project" <<< "$e3_b_obs" || e3_fail "b_state_network_missing"
+    ! grep -q "$e1_orphan_a" <<< "$e3_b_obs" || e3_fail "a_orphan_visible_to_b"
+    # Foreign show of A's ambiguous ID as B: accepted non-disclosing 404,
+    # response body must not leak A's id, name, or project.
+    local e3_probe
+    e3_probe=$(python3 - "$auth_url" "$token_b" "$e1_orphan_a" "$proja_id" <<'PY'
+import sys, urllib.error, urllib.request
+auth_url, tok, orphan, foreign_project = sys.argv[1:5]
+leaks = []
+req = urllib.request.Request(f"{auth_url}/v2.0/networks/{orphan}", headers={"X-Auth-Token": tok})
+try:
+    with urllib.request.urlopen(req) as resp:
+        status = resp.status
+        body = resp.read().decode("utf-8", "replace")
+except urllib.error.HTTPError as e:
+    status = e.code
+    body = e.read().decode("utf-8", "replace")
+if status != 404:
+    leaks.append(f"{orphan}:status={status}")
+else:
+    for forbidden in (orphan, foreign_project, "p13-6e-net"):
+        if forbidden in body:
+            leaks.append(f"{orphan}:body_leaks:{forbidden}")
+print("clean" if not leaks else ";".join(leaks))
+PY
+) || e3_fail "leak_probe_error"
+    [[ "$e3_probe" == "clean" ]] || e3_fail "foreign_show_leak: $e3_probe"
+    e_row "E3_cross_project_isolation_during_ambiguity" passed 404 openstack_networking_network_v2 show project_b project_a deny \
+        "\"details\":{\"b_apply_converged_while_a_ambiguous\":true,\"b_state_network_id\":\"$e3_b_state_id\",\"b_same_name_create_succeeded_despite_a_conflict\":true,\"a_name_conflict_is_project_bound\":true,\"list_isolation_verified\":true,\"a_orphan_foreign_show_status\":404,\"foreign_response_body_non_disclosing\":true,\"cross_project_impact\":0}"
+    echo "P13.6E: E3 PASS"
+
+    e4_fail() { # reason
+        e_row "E4_restart_after_ambiguity" failed 0 multi read project_a project_a allow \
+            "\"details\":{\"reason\":\"$1\"}"
+        echo "P13.6E: FAIL - E4: $1" >&2
+        exit 2
+    }
+
+    # ------------------------------------------------------------------
+    # E4 — clean restart with ambiguous state present: A's unresolved
+    # orphan, B's state network and B's never-adopted orphan must all
+    # reconstruct with owners unchanged. B's orphan has no client holding
+    # its ID at all — canonical durability without client bookkeeping.
+    # ------------------------------------------------------------------
+    echo "P13.6E: === E4 - restart reconstruction after ambiguity ==="
+    restart_daemon "$state_dir" "$o3kd_port"
+    token_a=$(get_token "$auth_url" "$proja_user" "$password" "$proja_name")
+    token_b=$(get_token "$auth_url" "$tenb_username" "$tenb_pass" "$tenb_name")
+    [[ -n "$token_a" && -n "$token_b" ]] || e4_fail "reauthentication_failed"
+    local e4_ok=1
+    local e4_a_obs e4_b_obs
+    e4_a_obs=$(e_nets "$token_a")
+    e4_b_obs=$(e_nets "$token_b")
+    { [[ "$(grep -c . <<< "$e4_a_obs")" == "1" ]] \
+        && grep -q "^$e1_orphan_a p13-6e-net $proja_id" <<< "$e4_a_obs"; } \
+        || { echo "P13.6E: FAIL - E4 A scope mismatch: $e4_a_obs" >&2; e4_ok=0; }
+    { [[ "$(grep -c . <<< "$e4_b_obs")" == "2" ]] \
+        && grep -q "^$e1_orphan_b p13-6e-orphan-b $tenb_project" <<< "$e4_b_obs" \
+        && grep -q "^$e3_b_state_id p13-6e-net $tenb_project" <<< "$e4_b_obs"; } \
+        || { echo "P13.6E: FAIL - E4 B scope mismatch: $e4_b_obs" >&2; e4_ok=0; }
+    start_proxy "$state_dir/e4-plan.json" || e4_fail "proxy_start_failed"
+    local e4_plan_a e4_plan_b
+    e4_plan_a=$(tofu_a plan -input=false -no-color 2>&1 || true)
+    e4_plan_b=$(tofu_b plan -input=false -no-color 2>&1 || true)
+    stop_proxy
+    grep -q "No changes" <<< "$e4_plan_a" || { echo "P13.6E: FAIL - A plan not no-op" >&2; e4_ok=0; }
+    grep -q "No changes" <<< "$e4_plan_b" || { echo "P13.6E: FAIL - B plan not no-op" >&2; e4_ok=0; }
+    [[ "$e4_ok" == 1 ]] || { e4_fail "postcondition_failed"; }
+    e_row "E4_restart_after_ambiguity" passed 200 multi plan project_a project_a allow \
+        "\"details\":{\"a_orphan_preserved\":true,\"b_orphan_durable_without_client_reference\":true,\"b_state_network_preserved\":true,\"owners_preserved_after_restart\":true,\"a_plan_noop\":true,\"b_plan_noop\":true,\"no_resurrection\":true,\"no_foreign_materialization\":true}"
+    echo "P13.6E: E4 PASS"
+
+    e5_fail() { # reason
+        e_row "E5_destroy_isolation_same_name" failed 0 openstack_networking_network_v2 delete project_a project_b deny \
+            "\"details\":{\"reason\":\"$1\"}"
+        echo "P13.6E: FAIL - E5: $1" >&2
+        exit 2
+    }
+
+    # ------------------------------------------------------------------
+    # E5 — destroy isolation under identical names: destroying A's
+    # recovered graph removes only A's network; B's same-named networks
+    # (including B's never-adopted orphan) must remain under canonical
+    # O3K authority. Terraform state never governs foreign resources.
+    # ------------------------------------------------------------------
+    echo "P13.6E: === E5 - destroy isolation under identical names ==="
+    local e5_destroy_rc=0 e5_destroy_out
+    start_proxy "$state_dir/e5-destroy-a.json" || e5_fail "proxy_start_failed"
+    e5_destroy_out=$(tofu_a destroy -input=false -auto-approve -no-color 2>&1) || e5_destroy_rc=$?
+    stop_proxy
+    [[ "$e5_destroy_rc" == 0 ]] || e5_fail "destroy_exit=$e5_destroy_rc"
+    grep -q "Destroy complete" <<< "$e5_destroy_out" || e5_fail "destroy_not_complete"
+    local e5_backend
+    e5_backend=$(python3 - "$state_dir/e5-destroy-a.json" <<'PY'
+import json, sys
+recs = json.load(open(sys.argv[1], encoding="utf-8"))["records"]
+dels = [r for r in recs if r["method"] == "DELETE" and r["path"].startswith("/v2.0/networks/")]
+assert len(dels) == 1, recs
+assert dels[0]["forwarded"] is True and dels[0]["backend_status"] in (200, 202, 204), dels[0]
+print(dels[0]["backend_status"])
+PY
+) || e5_fail "proxy_evidence_mismatch"
+    [[ "$(curl -s -o /dev/null -w "%{http_code}" -H "X-Auth-Token: $token_a" "$auth_url/v2.0/networks/$e1_orphan_a")" == "404" ]] \
+        || e5_fail "a_network_still_present"
+    local e5_b_obs
+    e5_b_obs=$(e_nets "$token_b")
+    [[ "$(grep -c . <<< "$e5_b_obs")" == "2" ]] || e5_fail "b_networks_affected: $e5_b_obs"
+    grep -q "^$e1_orphan_b p13-6e-orphan-b $tenb_project" <<< "$e5_b_obs" || e5_fail "b_orphan_lost"
+    grep -q "^$e3_b_state_id p13-6e-net $tenb_project" <<< "$e5_b_obs" || e5_fail "b_state_network_lost"
+    e_row "E5_destroy_isolation_same_name" passed "$e5_backend" openstack_networking_network_v2 delete project_a project_b deny \
+        "\"details\":{\"a_network_absent_after_destroy\":true,\"b_orphan_retained\":true,\"b_state_network_retained\":true,\"same_name_no_cross_project_destroy\":true,\"terraform_state_is_bookkeeping_only\":true,\"canonical_authority\":\"o3k\"}"
+    echo "P13.6E: E5 PASS"
+
+    # ------------------------------------------------------------------
+    # Cleanup: A's recovered network was already destroyed in E5; delete
+    # B's never-adopted orphan via direct API (canonical authority),
+    # destroy B's graph through the rule-less proxy, verify zero leftovers
+    # per project (excluding A's shared external pool network).
+    # ------------------------------------------------------------------
+    echo "P13.6E: === Cleanup ==="
+    local cleanup_ok=1
+    curl -sf -X DELETE -H "X-Auth-Token: $token_b" "$auth_url/v2.0/networks/$e1_orphan_b" >/dev/null 2>&1 \
+        || { echo "P13.6E: FAIL - could not delete B orphan" >&2; cleanup_ok=0; }
+    local e5_destroy_b_out
+    start_proxy "$state_dir/e5-destroy-b.json"
+    e5_destroy_b_out=$(tofu_b destroy -input=false -auto-approve -no-color 2>&1 || true)
+    stop_proxy
+    printf '%s' "$e5_destroy_b_out" | grep -q "Destroy complete" \
+        || { echo "P13.6E: FAIL - project B destroy did not complete" >&2; printf '%s\n' "$e5_destroy_b_out" | tail -15 >&2; cleanup_ok=0; }
+    for p in a b; do
+        local tok leftover
+        tok=$(e_token "$p")
+        leftover=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/networks" \
+            | python3 -c "import json,sys; nets=[n for n in json.load(sys.stdin).get('networks',[]) if n.get('name')!='p13-6-public-pool']; print(len(nets))" 2>/dev/null || echo "?")
+        [[ "$leftover" == "0" ]] || { echo "P13.6E: FAIL - leftover networks ($p): $leftover" >&2; cleanup_ok=0; }
+        leftover=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/subnets" \
+            | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('subnets',[])))" 2>/dev/null || echo "?")
+        [[ "$leftover" == "0" ]] || { echo "P13.6E: FAIL - leftover subnets ($p): $leftover" >&2; cleanup_ok=0; }
+        leftover=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/routers" \
+            | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('routers',[])))" 2>/dev/null || echo "?")
+        [[ "$leftover" == "0" ]] || { echo "P13.6E: FAIL - leftover routers ($p): $leftover" >&2; cleanup_ok=0; }
+        leftover=$(curl -sf -H "X-Auth-Token: $tok" "$auth_url/v2.0/ports" \
+            | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('ports',[])))" 2>/dev/null || echo "?")
+        [[ "$leftover" == "0" ]] || { echo "P13.6E: FAIL - leftover ports ($p): $leftover" >&2; cleanup_ok=0; }
+    done
+    [[ "$cleanup_ok" == 1 ]] || { echo "P13.6E: cleanup FAILED" >&2; exit 2; }
+    export P13_6B_CLEANUP_RESULT="passed"
+    echo "P13.6E: Cleanup PASS"
+
+    # ------------------------------------------------------------------
+    # Write evidence artifact
+    # ------------------------------------------------------------------
+    local head_sha
+    head_sha=$(git -C "$root_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
+
+    python3 - "$evidence_rows" "$evidence_file" "$head_sha" <<'PY_EVIDENCE'
+import hashlib, json, os, pathlib, sys
+
+rows_path, out_path, head_sha = sys.argv[1:]
+rows = []
+if pathlib.Path(rows_path).exists():
+    text = pathlib.Path(rows_path).read_text()
+    decoder = json.JSONDecoder()
+    pos = 0
+    while pos < len(text):
+        while pos < len(text) and text[pos] in ' \t\n\r':
+            pos += 1
+        if pos >= len(text):
+            break
+        obj, end = decoder.raw_decode(text, pos)
+        rows.append(obj)
+        pos = end
+
+def sha256_digest(path):
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest() if path and pathlib.Path(path).exists() else ""
+
+result_counts = {}
+for r in rows:
+    k = r.get("result", "unknown")
+    result_counts[k] = result_counts.get(k, 0) + 1
+
+# expected_ambiguous is the honest classification for the lost-response
+# scenario class; it must never be converted to "passed".
+ACCEPTABLE = {"passed", "not_applicable", "expected_ambiguous", "execution_profile_unavailable"}
+all_ok = (all(r.get("result") in ACCEPTABLE for r in rows)
+          and any(r.get("result") == "passed" for r in rows)
+          and any(r.get("result") == "expected_ambiguous" for r in rows))
+
+provider_binary = os.environ.get("O3K_P13_PROVIDER_BINARY", "")
+provider_archive = os.environ.get("O3K_P13_PROVIDER_ARCHIVE", "")
+toolchain = {
+    "opentofu": "1.12.6",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_modified": False,
+}
+if provider_binary:
+    toolchain["provider_binary_sha256"] = sha256_digest(provider_binary)
+if provider_archive:
+    toolchain["provider_archive_sha256"] = sha256_digest(provider_archive)
+
+document = {
+    "artifact_type": "o3k-p13-6e-lost-response-evidence",
+    "schema_version": 1,
+    "phase": "P13.6E",
+    "tested_runtime_head_sha": head_sha,
+    "backend": os.environ.get("O3K_DATABASE_BACKEND", "sqlite"),
+    "toolchain": toolchain,
+    "provider_modified": False,
+    "two_project_identity_model": {
+        "project_a": {"name": "admin", "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb"},
+        "project_b": {"name": "tenant-b", "project_id": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f"},
+    },
+    "ambiguity_boundary": {
+        "classification": "AMBIGUOUS_CLIENT_CREATE_RESPONSE_LOSS",
+        "exactly_once_client_creation_claimed": False,
+        "o3k_canonical_state_corrupted": False,
+        "authorization_isolation_intact": True,
+        "mitigations_introduced": {
+            "terraform_specific_persistence": False,
+            "custom_provider_header": False,
+            "provider_fork": False,
+            "hidden_client_request_token": False,
+        },
+    },
+    "cleanup_result": os.environ.get("P13_6B_CLEANUP_RESULT", "unknown"),
+    "scenarios": rows,
+    "result_counts": result_counts,
+    "aggregate_verdict": "PASS" if all_ok else "FAILED",
+}
+pathlib.Path(out_path).write_text(json.dumps(document, indent=2) + "\n")
+print(f"P13.6E evidence written to {out_path}")
+print(f"P13.6E evidence: {len(rows)} scenarios, result_counts={json.dumps(result_counts)}")
+PY_EVIDENCE
+
+    echo "P13.6E: ALL DONE (expected_ambiguous retained, not converted to PASS)"
+}
+
 main() {
     if [[ "${P13_6_SELF_TEST:-0}" == 1 ]]; then
         self_test
@@ -2402,9 +3020,8 @@ main() {
     fi
 
     if [[ "${P13_6E_RUN:-0}" == 1 ]]; then
-        echo "P13.6E: not yet implemented"
-        emit_scenario_row "P13.6E" "lost_response_boundary" "blocked" '{"details": {"reason": "slice_not_started"}}'
-        exit 2
+        run_slice_e
+        exit 0
     fi
 
     if [[ "${P13_6F_RUN:-0}" == 1 ]]; then

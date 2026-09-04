@@ -4,7 +4,7 @@
   "phase": "P13.5F",
   "backend": "postgresql",
   "execution_profile": "postgresql-provider-parity-local-and-lvm-testlab",
-  "tested_runtime_head_sha": "efcc52e1bc1cda9e94dcc0fafc549fddfe39ea9f",
+  "tested_runtime_head_sha": "73db182461a6b001453c650cba703f74354ee46c",
   "tested_o3k_head_sha": "c5298c7ef1d0c845bc5162e52ea269768c1209d6",
   "real_provider_execution": true,
   "provider_modified": false,
