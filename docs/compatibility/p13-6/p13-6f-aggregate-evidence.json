@@ -1,0 +1,1345 @@
+{
+  "a_matrix_validation": {
+    "openstack_blockstorage_volume_v3/delete": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_volume_delete"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_blockstorage_volume_v3/import": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_volume_import"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_blockstorage_volume_v3/list": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_volume_list"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_blockstorage_volume_v3/relationship": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "A1_b_volume_attach_to_a_server"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "A2_a_volume_attach_to_b_server"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_blockstorage_volume_v3/restart_reconstruction": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "A5_restart_after_denied_attacks"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6d-restart-recovery-evidence.json",
+          "result": "passed",
+          "scenario": "D6_restart_durable_state"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_blockstorage_volume_v3/show": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_volume_show"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_blockstorage_volume_v3/update": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_volume_update"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_instance_v2/delete": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_server_delete"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_instance_v2/import": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_server_import"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_instance_v2/list": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_server_list"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_instance_v2/relationship": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_server_relationship"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_keypair_relationship"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_instance_v2/replay": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C9_idempotency_isolation"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6b-multiproject-isolation-evidence.json",
+          "result": "passed",
+          "scenario": "B7_idempotency_key"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_instance_v2/restart_reconstruction": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "A5_restart_after_denied_attacks"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6d-restart-recovery-evidence.json",
+          "result": "passed",
+          "scenario": "D6_restart_durable_state"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_instance_v2/show": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_server_show"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_instance_v2/update": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_server_update"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_keypair_v2/delete": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_keypair_delete"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_keypair_v2/import": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_keypair_show"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_keypair_import"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_keypair_v2/list": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_keypair_list"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_keypair_v2/relationship": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_keypair_relationship"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_keypair_v2/restart_reconstruction": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6b-multiproject-isolation-evidence.json",
+          "result": "passed",
+          "scenario": "B8_restart_reconstruction"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6d-restart-recovery-evidence.json",
+          "result": "passed",
+          "scenario": "D6_restart_durable_state"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_keypair_v2/show": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_keypair_show"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_volume_attach_v2/delete": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "A3_b_detach_a_attachment"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "A4_a_detach_b_attachment"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_volume_attach_v2/import": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_attachment_show"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_attachment_import"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_volume_attach_v2/list": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_attachment_list"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_volume_attach_v2/relationship": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "A1_b_volume_attach_to_a_server"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "A2_a_volume_attach_to_b_server"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_volume_attach_v2/replay": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C9_idempotency_isolation"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6b-multiproject-isolation-evidence.json",
+          "result": "passed",
+          "scenario": "B7_idempotency_key"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_volume_attach_v2/restart_reconstruction": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "A5_restart_after_denied_attacks"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6d-restart-recovery-evidence.json",
+          "result": "passed",
+          "scenario": "D6_restart_durable_state"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_compute_volume_attach_v2/show": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_attachment_show"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_floatingip_v2/delete": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C4_delete_floatingip"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_floatingip_v2/import": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C2_show_floatingip"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_floatingip_v2/list": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_networking_list_absence"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_floatingip_v2/relationship": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C6_fip_foreign_port"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_floatingip_v2/restart_reconstruction": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6b-multiproject-isolation-evidence.json",
+          "result": "passed",
+          "scenario": "B8_restart_reconstruction"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6d-restart-recovery-evidence.json",
+          "result": "passed",
+          "scenario": "D6_restart_durable_state"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_floatingip_v2/show": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C2_show_floatingip"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_floatingip_v2/update": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_fip_update"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_network_v2/delete": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C4_delete_network"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_network_v2/import": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C5_import_network"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_network_v2/list": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C1_list_isolation"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_network_v2/relationship": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C6_port_on_foreign_network"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_network_v2/restart_reconstruction": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6b-multiproject-isolation-evidence.json",
+          "result": "passed",
+          "scenario": "B8_restart_reconstruction"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6d-restart-recovery-evidence.json",
+          "result": "passed",
+          "scenario": "D6_restart_durable_state"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_network_v2/show": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C2_show_network"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_network_v2/update": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C3_update_network"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_port_v2/delete": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_port_delete"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_port_v2/import": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_port_import"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_port_v2/list": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_networking_list_absence"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_port_v2/relationship": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C6_port_on_foreign_network"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C6_port_foreign_secgroup"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_port_v2/restart_reconstruction": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6b-multiproject-isolation-evidence.json",
+          "result": "passed",
+          "scenario": "B8_restart_reconstruction"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6d-restart-recovery-evidence.json",
+          "result": "passed",
+          "scenario": "D6_restart_durable_state"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_port_v2/show": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C2_show_port"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_port_v2/update": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C3_update_port"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_router_interface_v2/delete": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_routerinterface_delete"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_router_interface_v2/import": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_routerinterface_show"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_router_interface_v2/relationship": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C6_router_interface_foreign_subnet"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_routerinterface_relationship"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_router_interface_v2/restart_reconstruction": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6b-multiproject-isolation-evidence.json",
+          "result": "passed",
+          "scenario": "B8_restart_reconstruction"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6d-restart-recovery-evidence.json",
+          "result": "passed",
+          "scenario": "D6_restart_durable_state"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_router_interface_v2/show": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_routerinterface_show"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_router_v2/delete": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C4_delete_router"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_router_v2/import": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_router_import"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_router_v2/list": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_networking_list_absence"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_router_v2/relationship": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C6_router_interface_foreign_subnet"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_routerinterface_relationship"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_router_v2/restart_reconstruction": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6b-multiproject-isolation-evidence.json",
+          "result": "passed",
+          "scenario": "B8_restart_reconstruction"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6d-restart-recovery-evidence.json",
+          "result": "passed",
+          "scenario": "D6_restart_durable_state"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_router_v2/show": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C2_show_router"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_router_v2/update": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C3_update_router"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_secgroup_rule_v2/delete": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_sgrule_delete"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_secgroup_rule_v2/import": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_sgrule_import"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_secgroup_rule_v2/list": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_networking_list_absence"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_secgroup_rule_v2/relationship": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_sgrule_relationship"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_secgroup_rule_v2/restart_reconstruction": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6b-multiproject-isolation-evidence.json",
+          "result": "passed",
+          "scenario": "B8_restart_reconstruction"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6d-restart-recovery-evidence.json",
+          "result": "passed",
+          "scenario": "D6_restart_durable_state"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_secgroup_rule_v2/show": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_sgrule_show"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_secgroup_v2/delete": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_sg_delete"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_secgroup_v2/import": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_sg_import"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_secgroup_v2/list": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_networking_list_absence"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_secgroup_v2/relationship": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C6_port_foreign_secgroup"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_secgroup_v2/restart_reconstruction": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6b-multiproject-isolation-evidence.json",
+          "result": "passed",
+          "scenario": "B8_restart_reconstruction"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6d-restart-recovery-evidence.json",
+          "result": "passed",
+          "scenario": "D6_restart_durable_state"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_secgroup_v2/show": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C2_show_secgroup"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_secgroup_v2/update": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_sg_update"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_subnet_v2/delete": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_subnet_delete"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_subnet_v2/import": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_subnet_import"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_subnet_v2/list": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_networking_list_absence"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_subnet_v2/relationship": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_subnet_relationship"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_subnet_v2/restart_reconstruction": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6b-multiproject-isolation-evidence.json",
+          "result": "passed",
+          "scenario": "B8_restart_reconstruction"
+        },
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6d-restart-recovery-evidence.json",
+          "result": "passed",
+          "scenario": "D6_restart_durable_state"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_subnet_v2/show": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+          "result": "passed",
+          "scenario": "C2_show_subnet"
+        }
+      ],
+      "result": "passed"
+    },
+    "openstack_networking_subnet_v2/update": {
+      "evidence": [
+        {
+          "artifact": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json",
+          "result": "passed",
+          "scenario": "M_subnet_update"
+        }
+      ],
+      "result": "passed"
+    }
+  },
+  "ambiguity_boundary": {
+    "exactly_once_client_creation_claimed": false,
+    "lost_create_response": "expected_ambiguous",
+    "scenarios": [
+      "E1_lost_create_response_loss_a",
+      "E1_lost_create_response_loss_b",
+      "E2_blind_retry_blocked_by_name_conflict_a"
+    ]
+  },
+  "artifact_type": "o3k-p13-6f-aggregate-evidence",
+  "derived_from": {
+    "p13_5f_postgres_parity": "docs/compatibility/p13-5/postgres-provider-parity/p13-5f-postgres-provider-parity.json",
+    "p13_6a_contract": "docs/compatibility/p13-6/p13-6a-security-failure-contract.json",
+    "p13_6b": "docs/compatibility/p13-6/p13-6b-multiproject-isolation-evidence.json",
+    "p13_6c": "docs/compatibility/p13-6/p13-6c-crossproject-negative-evidence.json",
+    "p13_6d": "docs/compatibility/p13-6/p13-6d-restart-recovery-evidence.json",
+    "p13_6e": "docs/compatibility/p13-6/p13-6e-lost-response-evidence.json",
+    "p13_6f_supplement": "docs/compatibility/p13-6/p13-6f-privileged-security-supplement-evidence.json"
+  },
+  "failure_matrix_classification": {
+    "CREATE": {
+      "boundary_1_before_acceptance": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D1_pre_acceptance_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D1_pre_acceptance_loss_b"
+          }
+        ],
+        "reason": "proxy dropped the request before O3K accepted the operation"
+      },
+      "boundary_2_after_acceptance_before_provider": {
+        "classification": "equivalent",
+        "evidence": [
+          {
+            "result": "expected_ambiguous",
+            "scenario": "E1_lost_create_response_loss_a"
+          }
+        ],
+        "reason": "lost-response scenarios prove durable acceptance with ambiguous client outcome; no duplicate provider side effect"
+      },
+      "boundary_3_after_provider_before_terminal": {
+        "classification": "equivalent",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D5_concurrent_create"
+          },
+          {
+            "result": "passed",
+            "scenario": "S2_concurrent_operation"
+          }
+        ],
+        "reason": "concurrent creation with deterministic fault proxy observes terminal convergence without duplicate side effects"
+      },
+      "boundary_4_after_terminal_before_client_response": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "expected_ambiguous",
+            "scenario": "E1_lost_create_response_loss_a"
+          },
+          {
+            "result": "expected_ambiguous",
+            "scenario": "E1_lost_create_response_loss_b"
+          }
+        ],
+        "reason": "deterministic proxy dropped the post-commit response"
+      },
+      "boundary_5_restart_with_pending": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D6_restart_durable_state"
+          },
+          {
+            "result": "passed",
+            "scenario": "A5_restart_after_denied_attacks"
+          }
+        ],
+        "reason": "clean restart with durable pending state reconstructs per-project ownership"
+      }
+    },
+    "DELETE": {
+      "boundary_1_before_acceptance": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D1_pre_acceptance_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D1_pre_acceptance_loss_b"
+          }
+        ],
+        "reason": "pre-acceptance loss matrix is operation-agnostic at the proxy"
+      },
+      "boundary_2_after_acceptance_before_provider": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D3_delete_response_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D3_delete_response_loss_b"
+          }
+        ],
+        "reason": "delete loss with deterministic proxy"
+      },
+      "boundary_3_after_provider_before_terminal": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D3_delete_response_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D3_delete_response_loss_b"
+          }
+        ],
+        "reason": "terminal convergence observed after proxy loss"
+      },
+      "boundary_4_after_terminal_before_client_response": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D3_delete_response_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D3_delete_response_loss_b"
+          }
+        ],
+        "reason": "post-terminal response loss; no resurrection of foreign resources"
+      },
+      "boundary_5_restart_with_pending": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D6_restart_durable_state"
+          }
+        ],
+        "reason": "restart reconstruction with durable pending delete state"
+      }
+    },
+    "OBSERVE_RETRY": {
+      "boundary_3_after_provider_before_terminal": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D6_restart_durable_state"
+          }
+        ],
+        "reason": "provider observation after proxy loss converges without duplicate mutation"
+      },
+      "boundary_5_restart_with_unknown": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D6_restart_durable_state"
+          },
+          {
+            "result": "passed",
+            "scenario": "A5_restart_after_denied_attacks"
+          }
+        ],
+        "reason": "restart with unknown outcome reconstructs scope-bound ownership"
+      }
+    },
+    "RELATIONSHIP_ADD": {
+      "boundary_1_before_acceptance": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D1_pre_acceptance_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D1_pre_acceptance_loss_b"
+          }
+        ],
+        "reason": "pre-acceptance loss matrix is operation-agnostic at the proxy"
+      },
+      "boundary_2_after_acceptance_before_provider": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D4_relationship_add_response_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D4_relationship_add_response_loss_b"
+          }
+        ],
+        "reason": "relationship add loss with deterministic proxy"
+      },
+      "boundary_3_after_provider_before_terminal": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D4_relationship_add_response_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D4_relationship_add_response_loss_b"
+          }
+        ],
+        "reason": "terminal convergence observed after proxy loss"
+      },
+      "boundary_4_after_terminal_before_client_response": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D4_relationship_add_response_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D4_relationship_add_response_loss_b"
+          }
+        ],
+        "reason": "post-terminal response loss; scope-bound replay"
+      },
+      "boundary_5_restart_with_pending": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D6_restart_durable_state"
+          },
+          {
+            "result": "passed",
+            "scenario": "A5_restart_after_denied_attacks"
+          }
+        ],
+        "reason": "restart does not materialize denied or pending relationships"
+      }
+    },
+    "RELATIONSHIP_REMOVE": {
+      "same_as_delete": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D3_delete_response_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D3_delete_response_loss_b"
+          },
+          {
+            "result": "passed",
+            "scenario": "A3_b_detach_a_attachment"
+          },
+          {
+            "result": "passed",
+            "scenario": "A4_a_detach_b_attachment"
+          }
+        ],
+        "reason": "detach/recreate and foreign-detach denial cover removal semantics per contract note"
+      }
+    },
+    "REPLACEMENT": {
+      "additional_requirement": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "S4a_detach_recreate_a_leaves_b"
+          },
+          {
+            "result": "passed",
+            "scenario": "S4b_detach_recreate_b_leaves_a"
+          }
+        ],
+        "reason": "replacement retains distinct realizations and leaves the other project untouched"
+      },
+      "same_as_create_then_delete": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "S4a_detach_recreate_a_leaves_b"
+          },
+          {
+            "result": "passed",
+            "scenario": "S4b_detach_recreate_b_leaves_a"
+          }
+        ],
+        "reason": "attachment replacement executed as create+delete with cross-project isolation"
+      }
+    },
+    "UPDATE": {
+      "boundary_1_before_acceptance": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D1_pre_acceptance_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D1_pre_acceptance_loss_b"
+          }
+        ],
+        "reason": "pre-acceptance loss matrix is operation-agnostic at the proxy"
+      },
+      "boundary_2_after_acceptance_before_provider": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D2_update_response_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D2_update_response_loss_b"
+          }
+        ],
+        "reason": "update loss with deterministic proxy"
+      },
+      "boundary_3_after_provider_before_terminal": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D2_update_response_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D2_update_response_loss_b"
+          }
+        ],
+        "reason": "proxy location recorded per attempt; terminal convergence observed"
+      },
+      "boundary_4_after_terminal_before_client_response": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D2_update_response_loss_a"
+          },
+          {
+            "result": "passed",
+            "scenario": "D2_update_response_loss_b"
+          }
+        ],
+        "reason": "post-terminal response loss; idempotent replay converges"
+      },
+      "boundary_5_restart_with_pending": {
+        "classification": "executed",
+        "evidence": [
+          {
+            "result": "passed",
+            "scenario": "D6_restart_durable_state"
+          }
+        ],
+        "reason": "restart reconstruction with durable pending update state"
+      }
+    }
+  },
+  "final_acceptance": {
+    "canonical_o3k_authority_preserved": "YES",
+    "compute_isolation": "PASS",
+    "cross_project_list_show_update_delete_isolation": "PASS",
+    "denied_request_state_immutability": "PASS",
+    "exactly_once_client_creation_claimed": "NO",
+    "foreign_provider_mutations": 0,
+    "foreign_state_changes": 0,
+    "import_isolation": "PASS",
+    "independent_security_review": "PASS",
+    "lost_create_response": "expected_ambiguous",
+    "main_protection_verified_active": "YES",
+    "networking_relationship_isolation": "PASS",
+    "operation_idempotency_scope_isolation": "PASS",
+    "provider_modified": "NO",
+    "restart_recovery_ownership_isolation": "PASS",
+    "storage_volumeattachment_isolation": "PASS",
+    "terraform_authority_introduced": "NO",
+    "two_project_positive_isolation": "PASS"
+  },
+  "phase": "P13.6F",
+  "profile": "p13-iac-compatibility-v1",
+  "provider_modified": false,
+  "result": "passed",
+  "schema_version": 1,
+  "status": "verified",
+  "superseded_rows": {
+    "B10_compute_server": "SUPP:S1_server_same_name_isolation",
+    "B11_volume": "SUPP:S1_volume_same_name_isolation",
+    "B12_volume_attachment": "SUPP:S1_attachment_same_project_isolation",
+    "C7_volume_attach_foreign_server": "SUPP:A1_b_volume_attach_to_a_server + SUPP:A2_a_volume_attach_to_b_server",
+    "C7_volume_foreign_detach": "SUPP:A3_b_detach_a_attachment + SUPP:A4_a_detach_b_attachment"
+  },
+  "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc",
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_source_tag": "v3.4.0"
+  }
+}
