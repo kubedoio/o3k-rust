@@ -171,15 +171,35 @@ impl NetworkBindingProjector {
     /// sees one coherent external realm across the flat and gateway paths.
     /// Returns `None` when the pool network has no realm (deployments without
     /// an external subnet) — callers then fall back to the network id.
-    async fn resolve_external_realm_route_id(&self, project_id: &str) -> Option<Uuid> {
-        let network_id = self.network_external_realm_id?;
-        self.network
+    async fn resolve_external_realm_route_id(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<Uuid>, std::io::Error> {
+        let Some(network_id) = self.network_external_realm_id else {
+            return Ok(None);
+        };
+        let realms = self
+            .network
             .list_canonical_realms_for_project(project_id, network_id)
             .await
-            .ok()?
-            .into_iter()
-            .find(|realm| realm.state == "active")
-            .map(|realm| realm.id)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        select_active_external_realm(&realms)
+            .map(Some)
+            .map_err(std::io::Error::other)
+    }
+}
+
+fn select_active_external_realm(
+    realms: &[o3k_store::CanonicalAddressRealmRecord],
+) -> Result<Uuid, &'static str> {
+    let active: Vec<_> = realms
+        .iter()
+        .filter(|realm| realm.state == "active")
+        .collect();
+    match active.as_slice() {
+        [realm] => Ok(realm.id),
+        [] => Err("configured external network has no active canonical AddressRealm"),
+        _ => Err("configured external network has multiple active canonical AddressRealms"),
     }
 }
 
@@ -266,7 +286,7 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 .into_iter()
                 .filter(|policy| policy.endpoint_id == port.id)
                 .collect();
-            let external_realm_route_id = self.resolve_external_realm_route_id(project_id).await;
+            let external_realm_route_id = self.resolve_external_realm_route_id(project_id).await?;
             let deadline_unix_ms = super::unix_time_millis().saturating_add(30_000);
             let operation_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
@@ -283,7 +303,7 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 operation_id,
                 deadline_unix_ms,
                 public_address: None,
-                external_realm_id: external_realm_route_id.or(self.network_external_realm_id),
+                external_realm_id: external_realm_route_id,
                 policies,
             })
             .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -359,7 +379,7 @@ impl NetworkBindingProjector {
             .record_binding_intent(project_id, port_id, &agent.agent_id)
             .await
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        let external_realm_route_id = self.resolve_external_realm_route_id(project_id).await;
+        let external_realm_route_id = self.resolve_external_realm_route_id(project_id).await?;
         let policies = self
             .network
             .list_policies_for_project(project_id, port.network_id)
@@ -384,7 +404,7 @@ impl NetworkBindingProjector {
             operation_id,
             deadline_unix_ms,
             public_address: None,
-            external_realm_id: external_realm_route_id.or(self.network_external_realm_id),
+            external_realm_id: external_realm_route_id,
             policies,
         })
         .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -412,5 +432,49 @@ impl NetworkBindingProjector {
             .into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_active_external_realm;
+    use o3k_store::CanonicalAddressRealmRecord;
+    use uuid::Uuid;
+
+    fn realm(id: u128, state: &str) -> CanonicalAddressRealmRecord {
+        CanonicalAddressRealmRecord {
+            id: Uuid::from_u128(id),
+            network_id: Uuid::from_u128(100),
+            project_id: "project".to_owned(),
+            prefix: "198.51.100.0/24".to_owned(),
+            overlapping_prefixes: false,
+            generation: 1,
+            state: state.to_owned(),
+        }
+    }
+
+    #[test]
+    fn external_realm_selection_requires_exactly_one_active_realm() {
+        let records = [realm(1, "active"), realm(2, "retired")];
+        assert_eq!(
+            select_active_external_realm(&records),
+            Ok(Uuid::from_u128(1))
+        );
+    }
+
+    #[test]
+    fn external_realm_selection_fails_closed_without_active_realm() {
+        assert_eq!(
+            select_active_external_realm(&[realm(1, "retired")]),
+            Err("configured external network has no active canonical AddressRealm")
+        );
+    }
+
+    #[test]
+    fn external_realm_selection_fails_closed_on_ambiguity() {
+        assert_eq!(
+            select_active_external_realm(&[realm(1, "active"), realm(2, "active")]),
+            Err("configured external network has multiple active canonical AddressRealms")
+        );
     }
 }
