@@ -42,6 +42,39 @@ fn unix_time_millis() -> u64 {
         .map_or(0, |duration| duration.as_millis() as u64)
 }
 
+/// Resolve the native LVM provider configuration from the three `O3K_LVM_*`
+/// environment values. Unset and set-but-empty values both mean "provider not
+/// configured"; a partial configuration (some values set, others unset or
+/// empty) is rejected so a misconfigured host fails closed instead of
+/// silently running without storage. Values that are set but invalid are
+/// rejected by `LvmConfig::validate`.
+fn resolve_native_lvm_config(
+    volume_group: Option<String>,
+    thin_pool: Option<String>,
+    provider_namespace: Option<String>,
+) -> Result<Option<o3k_storage::LvmConfig>, Box<dyn std::error::Error>> {
+    let volume_group = volume_group.filter(|value| !value.is_empty());
+    let thin_pool = thin_pool.filter(|value| !value.is_empty());
+    let provider_namespace = provider_namespace.filter(|value| !value.is_empty());
+    match (volume_group, thin_pool, provider_namespace) {
+        (None, None, None) => Ok(None),
+        (Some(volume_group), Some(thin_pool), Some(provider_namespace)) => {
+            let config = o3k_storage::LvmConfig {
+                volume_group,
+                thin_pool,
+                provider_namespace,
+            };
+            config.validate()?;
+            Ok(Some(config))
+        }
+        _ => Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "partial O3K_LVM_* configuration: set all of O3K_LVM_VOLUME_GROUP, \
+             O3K_LVM_THIN_POOL and O3K_LVM_PROVIDER_NAMESPACE, or none",
+        ))),
+    }
+}
+
 pub struct Composition {
     pub state: o3k_api::AppState,
     controller_id: o3k_store::ControllerId,
@@ -527,20 +560,14 @@ pub async fn build_composition(
         native_manifest_registry.update_controller_health(service_id, health)?;
     }
 
-    let native_lvm_provider = match (
+    let native_lvm_config = resolve_native_lvm_config(
         std::env::var("O3K_LVM_VOLUME_GROUP").ok(),
         std::env::var("O3K_LVM_THIN_POOL").ok(),
         std::env::var("O3K_LVM_PROVIDER_NAMESPACE").ok(),
-    ) {
-        (Some(volume_group), Some(thin_pool), Some(provider_namespace)) => Some(Arc::new(
-            o3k_storage::LvmStorageProvider::new(o3k_storage::LvmConfig {
-                volume_group,
-                thin_pool,
-                provider_namespace,
-            })?,
-        )),
-        _ => None,
-    };
+    )?;
+    let native_lvm_provider = native_lvm_config
+        .map(|config| o3k_storage::LvmStorageProvider::new(config).map(Arc::new))
+        .transpose()?;
     let native_storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>> =
         match native_lvm_provider.clone() {
             Some(provider) => match provider.capabilities().await {
@@ -909,7 +936,10 @@ pub async fn shutdown_signal(state: o3k_api::AppState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DaemonCreateResolver, NetworkBindingProjector, placement_consumer_ids};
+    use super::{
+        DaemonCreateResolver, NetworkBindingProjector, placement_consumer_ids,
+        resolve_native_lvm_config,
+    };
     use crate::composition::compute::validate_inspect_probe_paths;
     use o3k_compute::PortBindingProjector;
     use std::net::Ipv4Addr;
@@ -934,6 +964,78 @@ mod tests {
                 .push(command);
             Ok(o3k_network::NetworkPlanStatus::Succeeded)
         }
+    }
+
+    #[test]
+    fn lvm_config_unset_and_empty_env_means_provider_not_configured() -> Result<(), String> {
+        assert!(
+            resolve_native_lvm_config(None, None, None)
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        assert!(
+            resolve_native_lvm_config(
+                Some(String::new()),
+                Some(String::new()),
+                Some(String::new())
+            )
+            .map_err(|error| error.to_string())?
+            .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lvm_config_all_values_set_resolves_to_config() -> Result<(), String> {
+        let config = resolve_native_lvm_config(
+            Some("vg-o3k".to_owned()),
+            Some("pool-o3k".to_owned()),
+            Some("o3k".to_owned()),
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "complete values should produce a config".to_owned())?;
+        assert_eq!(config.volume_group, "vg-o3k");
+        assert_eq!(config.thin_pool, "pool-o3k");
+        assert_eq!(config.provider_namespace, "o3k");
+        Ok(())
+    }
+
+    #[test]
+    fn lvm_config_partial_env_fails_closed() {
+        for values in [
+            (Some("vg-o3k".to_owned()), None, None),
+            (Some("vg-o3k".to_owned()), Some(String::new()), None),
+            (
+                Some("vg-o3k".to_owned()),
+                Some("pool-o3k".to_owned()),
+                Some(String::new()),
+            ),
+        ] {
+            assert!(
+                resolve_native_lvm_config(values.0, values.1, values.2).is_err(),
+                "partial LVM configuration must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn lvm_config_complete_but_invalid_values_are_rejected() {
+        assert!(
+            resolve_native_lvm_config(
+                Some("vg-o3k".to_owned()),
+                Some("vg-o3k".to_owned()),
+                Some("o3k".to_owned()),
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_native_lvm_config(
+                Some("vg o3k".to_owned()),
+                Some("pool-o3k".to_owned()),
+                Some("o3k".to_owned()),
+            )
+            .is_err()
+        );
     }
 
     #[test]
