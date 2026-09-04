@@ -169,8 +169,9 @@ impl NetworkBindingProjector {
     /// network. The canonical egress identity is the realm id, matching
     /// `compile_l3_gateway_intents`' egress identity so the routed provider
     /// sees one coherent external realm across the flat and gateway paths.
-    /// Returns `None` when the pool network has no realm (deployments without
-    /// an external subnet) — callers then fall back to the network id.
+    /// Returns `None` only when no external pool network was configured. A
+    /// configured pool must resolve to exactly one active canonical Realm;
+    /// missing or ambiguous identity is returned as an error.
     async fn resolve_external_realm_route_id(
         &self,
         project_id: &str,
