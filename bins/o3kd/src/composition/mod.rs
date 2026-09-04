@@ -828,6 +828,12 @@ pub async fn build_composition(
     if let Some(agent) = network_agent_identity {
         state = state.with_network_agent_identity(agent);
     }
+    if !config.network_gateway_realization {
+        info!(
+            "host-side L3 gateway realization disabled (O3K_NETWORK_GATEWAY_REALIZATION=disabled)"
+        );
+    }
+    state = state.with_network_gateway_realization(config.network_gateway_realization);
     // Recover canonical gateway and gateway-attachment deletion reservations
     // after the execution boundary is available.  This is intentionally
     // startup work, not a replay of an HTTP request.

@@ -102,7 +102,7 @@ pub fn router() -> Router {
 /// Composition-root state for the O3K API router: the optional service
 /// instances (identity, image, network, compute, console, agent registry)
 /// that the protocol adapters dispatch to, plus the readiness flag.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AppState {
     ready: Arc<AtomicBool>,
     identity: Option<Arc<TokenService>>,
@@ -113,6 +113,7 @@ pub struct AppState {
     network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
     network_controller: Option<o3k_network::NetworkControllerLease>,
     network_agent: Option<o3k_network::NetworkAgentIdentity>,
+    network_gateway_realization: bool,
     compute: Option<Arc<ComputeService>>,
     console: Option<Arc<ConsoleService>>,
     agent_registry: Option<NodeRegistry>,
@@ -121,6 +122,33 @@ pub struct AppState {
     storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>>,
     native_attachment_workflow: Option<Arc<dyn NativeAttachmentWorkflow>>,
     native_api: Option<NativeApiState>,
+}
+
+impl Default for AppState {
+    /// The default deployment activates host-side L3Gateway realization;
+    /// the bounded TestLab flat profile turns it off explicitly.
+    fn default() -> Self {
+        Self {
+            ready: Arc::default(),
+            identity: None,
+            image: None,
+            network: None,
+            public_allocator: None,
+            network_external_realm_id: None,
+            network_dispatcher: None,
+            network_controller: None,
+            network_agent: None,
+            network_gateway_realization: true,
+            compute: None,
+            console: None,
+            agent_registry: None,
+            volume_attachments_enabled: false,
+            storage_store: None,
+            storage_provider: None,
+            native_attachment_workflow: None,
+            native_api: None,
+        }
+    }
 }
 
 /// Durable native VolumeAttachment orchestration supplied by the composition
@@ -203,6 +231,24 @@ impl AppState {
     pub fn with_network_agent_identity(mut self, agent: o3k_network::NetworkAgentIdentity) -> Self {
         self.network_agent = Some(agent);
         self
+    }
+
+    /// Activates or deactivates host-side L3Gateway realization for this
+    /// deployment (`O3K_NETWORK_GATEWAY_REALIZATION`). When it is disabled,
+    /// the compiled canonical gateway execution snapshot is not attached to
+    /// dispatched endpoint plans and gateway snapshot dispatch is skipped;
+    /// the routed Route/Egress intents still flow.
+    #[must_use]
+    pub fn with_network_gateway_realization(mut self, enabled: bool) -> Self {
+        self.network_gateway_realization = enabled;
+        self
+    }
+
+    /// Reports whether host-side L3Gateway realization is activated for this
+    /// deployment.
+    #[must_use]
+    pub fn network_gateway_realization_enabled(&self) -> bool {
+        self.network_gateway_realization
     }
 
     /// Configures the Nova-compatible compute service.

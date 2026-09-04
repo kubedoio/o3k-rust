@@ -164,6 +164,25 @@ pub(crate) struct NetworkBindingProjector {
     pub(crate) network_agent: Option<o3k_network::NetworkAgentIdentity>,
 }
 
+impl NetworkBindingProjector {
+    /// Resolves the canonical AddressRealm id of the configured external pool
+    /// network. The canonical egress identity is the realm id, matching
+    /// `compile_l3_gateway_intents`' egress identity so the routed provider
+    /// sees one coherent external realm across the flat and gateway paths.
+    /// Returns `None` when the pool network has no realm (deployments without
+    /// an external subnet) — callers then fall back to the network id.
+    async fn resolve_external_realm_route_id(&self, project_id: &str) -> Option<Uuid> {
+        let network_id = self.network_external_realm_id?;
+        self.network
+            .list_canonical_realms_for_project(project_id, network_id)
+            .await
+            .ok()?
+            .into_iter()
+            .find(|realm| realm.state == "active")
+            .map(|realm| realm.id)
+    }
+}
+
 #[async_trait]
 impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
     async fn project_create_outcome(
@@ -247,6 +266,7 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 .into_iter()
                 .filter(|policy| policy.endpoint_id == port.id)
                 .collect();
+            let external_realm_route_id = self.resolve_external_realm_route_id(project_id).await;
             let deadline_unix_ms = super::unix_time_millis().saturating_add(30_000);
             let operation_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
@@ -263,7 +283,7 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 operation_id,
                 deadline_unix_ms,
                 public_address: None,
-                external_realm_id: self.network_external_realm_id,
+                external_realm_id: external_realm_route_id.or(self.network_external_realm_id),
                 policies,
             })
             .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -339,6 +359,7 @@ impl NetworkBindingProjector {
             .record_binding_intent(project_id, port_id, &agent.agent_id)
             .await
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let external_realm_route_id = self.resolve_external_realm_route_id(project_id).await;
         let policies = self
             .network
             .list_policies_for_project(project_id, port.network_id)
@@ -363,7 +384,7 @@ impl NetworkBindingProjector {
             operation_id,
             deadline_unix_ms,
             public_address: None,
-            external_realm_id: self.network_external_realm_id,
+            external_realm_id: external_realm_route_id.or(self.network_external_realm_id),
             policies,
         })
         .map_err(|error| std::io::Error::other(error.to_string()))?;

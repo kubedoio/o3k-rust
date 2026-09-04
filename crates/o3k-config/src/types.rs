@@ -64,6 +64,9 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub database_backend: DatabaseBackend,
     pub deployment_profile: DeploymentProfile,
+    /// Host-side L3Gateway realization activation for o3kd. Defaults to
+    /// enabled; the bounded TestLab flat profile disables it.
+    pub network_gateway_realization: bool,
     pub log_format: LogFormat,
     pub log_filter: String,
     pub provider: Provider,
@@ -93,6 +96,10 @@ impl fmt::Debug for Config {
             .field("data_dir", &self.data_dir)
             .field("database_backend", &self.database_backend)
             .field("deployment_profile", &self.deployment_profile)
+            .field(
+                "network_gateway_realization",
+                &self.network_gateway_realization,
+            )
             .field("database_url", &self.database_url)
             .field("log_format", &self.log_format)
             .field("log_filter", &self.log_filter)
