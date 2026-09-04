@@ -233,7 +233,10 @@ pub(crate) async fn create_router(
         .await;
     match result {
         Ok(gateway) => {
-            if state.network_dispatcher.is_some() && state.network_controller.is_some() {
+            if state.network_dispatcher.is_some()
+                && state.network_controller.is_some()
+                && state.network_gateway_realization_enabled()
+            {
                 let snapshot = match service
                     .compile_l3_gateway_execution_plan_for_project(project, &gateway.id)
                     .await
@@ -345,7 +348,10 @@ pub(crate) async fn update_router(
         .await
     {
         Ok(gateway) => {
-            if state.network_dispatcher.is_some() && state.network_controller.is_some() {
+            if state.network_dispatcher.is_some()
+                && state.network_controller.is_some()
+                && state.network_gateway_realization_enabled()
+            {
                 let snapshot = match service
                     .compile_l3_gateway_execution_plan_for_project(project, &gateway.id)
                     .await
@@ -399,7 +405,10 @@ pub(crate) async fn delete_router(
         Ok(value) => value,
         Err(error) => return network_error(error),
     };
-    if state.network_dispatcher.is_some() && state.network_controller.is_some() {
+    if state.network_dispatcher.is_some()
+        && state.network_controller.is_some()
+        && state.network_gateway_realization_enabled()
+    {
         let snapshot = match service
             .compile_l3_gateway_execution_plan_for_project(project, &id)
             .await
@@ -556,6 +565,7 @@ pub(crate) async fn add_router_interface(
             if !provider_dispatched
                 && state.network_dispatcher.is_some()
                 && state.network_controller.is_some()
+                && state.network_gateway_realization_enabled()
             {
                 let snapshot = match service
                     .compile_l3_gateway_execution_plan_for_project(project, &a.gateway_id)
@@ -703,6 +713,7 @@ pub(crate) async fn remove_router_interface(
             if !provider_dispatched
                 && state.network_dispatcher.is_some()
                 && state.network_controller.is_some()
+                && state.network_gateway_realization_enabled()
             {
                 let snapshot = match service
                     .compile_l3_gateway_execution_plan_for_project(project, &a.gateway_id)
@@ -727,8 +738,12 @@ pub(crate) async fn remove_router_interface(
             // With no execution boundary there is no external realization to
             // observe. Finalize the canonical relationship immediately; an
             // available boundary still requires a successful observation.
-            let no_execution_boundary =
-                state.network_dispatcher.is_none() || state.network_controller.is_none();
+            // A deployment that deactivates host-side gateway realization has
+            // no gateway snapshot to dispatch either, so canonical detachment
+            // finalizes the same way.
+            let no_execution_boundary = state.network_dispatcher.is_none()
+                || state.network_controller.is_none()
+                || !state.network_gateway_realization_enabled();
             if (provider_dispatched || no_execution_boundary)
                 && let Err(error) = service
                     .finalize_l3_gateway_realm_detachment_for_project(
@@ -2234,11 +2249,22 @@ async fn dispatch_policy_network_with_gateway(
         .filter(|realm| realm.network_id == network_id)
         .cloned()
         .collect::<Vec<_>>();
+    let external_realm_route_id = state.network_external_realm_id.and_then(|network_id| {
+        all_realms
+            .iter()
+            .find(|realm| realm.network_id == network_id)
+            .map(|realm| realm.id)
+    });
     let realm = realms
         .iter()
         .find(|realm| realm.prefix == subnet.cidr)
         .or_else(|| realms.first())
         .ok_or_else(|| network_error(NetworkError::NotFound))?;
+    // Host-side gateway realization is a deployment switch. When it is not
+    // activated, the canonical L3Gateway execution snapshot is not compiled
+    // for the plan and only the Route/Egress intents derived from the
+    // canonical gateway graph flow to the routed provider path.
+    let gateway_realization_enabled = state.network_gateway_realization_enabled();
     let mut gateway_routes = Vec::new();
     let mut gateway_egress = Vec::new();
     let mut gateway_execution = None;
@@ -2265,10 +2291,11 @@ async fn dispatch_policy_network_with_gateway(
             .list_l3_gateway_attachments(project_id, &gateway.id)
             .await
             .map_err(network_error)?;
-        if attachments
-            .iter()
-            .any(|attachment| attachment.realm_id == realm.id && attachment.state == "active")
-            || gateway_id == Some(gateway.id)
+        if gateway_realization_enabled
+            && (attachments
+                .iter()
+                .any(|attachment| attachment.realm_id == realm.id && attachment.state == "active")
+                || gateway_id == Some(gateway.id))
         {
             let compiled =
                 o3k_network::compile_l3_gateway_execution_plan(&gateway, &attachments, &realm_map)
@@ -2296,6 +2323,25 @@ async fn dispatch_policy_network_with_gateway(
             gateway_egress.extend(egress.iter().cloned());
         }
     }
+    // Routed egress identity is the canonical AddressRealm id of the external
+    // pool network. When a Router/L3Gateway contributes egress, the flat
+    // attachment egress and every gateway egress must share one canonical
+    // realm id; if that realm cannot be resolved, or the gateway-referenced
+    // realm differs from the resolved pool realm, fail closed rather than
+    // labeling a Network id (or a divergent realm) as external_realm_id (S3).
+    // A pure-flat deployment with no router keeps its flat external identity.
+    let flat_routed_realm_id = external_realm_route_id;
+    if !routed_egress_realm_is_coherent(
+        &gateway_egress,
+        flat_routed_realm_id,
+        state.network_external_realm_id.is_some(),
+    ) {
+        return Err(keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "external pool network has no unambiguous canonical address realm for routed egress",
+        ));
+    }
     let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
     let operation_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
@@ -2321,22 +2367,27 @@ async fn dispatch_policy_network_with_gateway(
             operation_id,
             deadline_unix_ms,
             public_address: None,
-            external_realm_id: state.network_external_realm_id,
+            // The canonical egress identity is the AddressRealm id of the
+            // external pool's realm, matching the gateway-intent egress
+            // identity (`compile_l3_gateway_intents` uses the canonical realm
+            // id). When no Router contributes egress and the pool network
+            // carries no realm, keep the configured flat external identity
+            // unchanged (pure-flat deployments). Routed plans fail closed
+            // above rather than conflating Network and Realm identities.
+            external_realm_id: external_realm_route_id.or(state.network_external_realm_id),
             policies,
         },
         policy_defaults,
     )
     .map_err(|error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()))?;
-    let plan = if let Some(gateway) = gateway_execution {
-        plan.with_gateway(gateway).map_err(|error| {
-            keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string())
-        })?
-    } else {
-        plan
-    };
-    let plan = o3k_network::add_l3_gateway_routing(plan, gateway_routes, gateway_egress).map_err(
-        |error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()),
-    )?;
+    let plan = finalize_gateway_realization(
+        plan,
+        gateway_execution,
+        gateway_routes,
+        gateway_egress,
+        gateway_realization_enabled,
+    )
+    .map_err(|error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()))?;
     let status = dispatcher
         .dispatch(o3k_network::NetworkPlanCommand {
             command_id: Uuid::new_v5(
@@ -2371,6 +2422,49 @@ async fn dispatch_policy_network_with_gateway(
         .await
         .map_err(network_error)?;
     Ok(true)
+}
+
+/// Applies the canonical L3Gateway decision to a complete endpoint plan: the
+/// compiled gateway execution snapshot is attached only when host-side
+/// gateway realization is activated, and the routed Route/Egress intents
+/// derived from the canonical gateway graph are always kept so the routed
+/// provider path preserves tenant egress/routing semantics.
+fn finalize_gateway_realization(
+    plan: o3k_network::NodeNetworkPlan,
+    gateway_execution: Option<o3k_domain::L3GatewayExecutionPlan>,
+    gateway_routes: Vec<o3k_domain::GatewayIntent>,
+    gateway_egress: Vec<o3k_domain::EgressIntent>,
+    gateway_realization_enabled: bool,
+) -> Result<o3k_network::NodeNetworkPlan, o3k_network::NetworkPlanError> {
+    let plan = if gateway_realization_enabled && let Some(gateway) = gateway_execution {
+        plan.with_gateway(gateway)?
+    } else {
+        plan
+    };
+    o3k_network::add_l3_gateway_routing(plan, gateway_routes, gateway_egress)
+}
+
+/// Verifies the canonical routed-egress identity invariant (S3): when a
+/// Router/L3Gateway contributes Egress intents, the flat attachment egress
+/// and every gateway egress must share a single canonical AddressRealm id.
+/// Callers that cannot resolve such a realm must fail closed rather than
+/// labeling a Network id (or a divergent realm id) as the external realm.
+pub(crate) fn routed_egress_realm_is_coherent(
+    gateway_egress: &[o3k_domain::EgressIntent],
+    flat_routed_realm_id: Option<Uuid>,
+    external_network_configured: bool,
+) -> bool {
+    if gateway_egress.is_empty() || !external_network_configured {
+        // Pure-flat deployment: the flat external identity is the boundary's
+        // own; no Router forces a canonical realm id.
+        return true;
+    }
+    let Some(flat) = flat_routed_realm_id else {
+        return false;
+    };
+    gateway_egress
+        .iter()
+        .all(|egress| egress.external_realm_id == flat)
 }
 
 pub(crate) fn port_response(value: PortRecord, security_groups: Vec<Uuid>) -> PortResponse {
@@ -3527,5 +3621,228 @@ pub(crate) async fn delete_port(
     match service.delete_port(&auth, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => network_error(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AppState;
+    use o3k_domain::{
+        EgressIntent, GatewayIntent, Ipv4Prefix, L3GatewayExecutionAttachment,
+        L3GatewayExecutionPlan, NetworkPlanIntent,
+    };
+    use o3k_network::{AttachmentPlanInput, compile_attachment_plan};
+    use std::net::Ipv4Addr;
+
+    const TEST_PROJECT: &str = "project-a";
+    const TEST_NODE: &str = "compute-1";
+    const TEST_REALM_PREFIX: &str = "10.0.0.0/24";
+
+    fn endpoint_plan(realm_id: Uuid) -> Result<o3k_network::NodeNetworkPlan, String> {
+        compile_attachment_plan(AttachmentPlanInput {
+            endpoint_id: Uuid::now_v7(),
+            realm_id,
+            project_id: TEST_PROJECT,
+            mac: "02:00:00:00:00:01",
+            fixed_ip: Ipv4Addr::new(10, 0, 0, 10),
+            subnet_cidr: TEST_REALM_PREFIX,
+            node_id: TEST_NODE,
+            operation_id: Uuid::now_v7(),
+            deadline_unix_ms: 1,
+            public_address: None,
+            external_realm_id: None,
+            policies: Vec::new(),
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    fn realm_prefix() -> Result<Ipv4Prefix, String> {
+        Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)
+            .ok_or_else(|| "invalid realm prefix".to_owned())
+    }
+
+    fn gateway_execution_plan(realm_id: Uuid) -> Result<L3GatewayExecutionPlan, String> {
+        Ok(L3GatewayExecutionPlan {
+            gateway_id: Uuid::now_v7(),
+            project_id: TEST_PROJECT.to_owned(),
+            gateway_generation: 1,
+            attachments: vec![L3GatewayExecutionAttachment {
+                attachment_id: Uuid::now_v7(),
+                attachment_generation: 1,
+                realm_id,
+                realm_generation: 1,
+                realm_prefix: realm_prefix()?,
+                gateway_address: Ipv4Addr::new(10, 0, 0, 1),
+            }],
+            external_realm_id: Some(Uuid::now_v7()),
+            external_realm_prefix: Some(
+                Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)
+                    .ok_or_else(|| "invalid external prefix".to_owned())?,
+            ),
+            external_realm_generation: Some(1),
+            enable_snat: true,
+        })
+    }
+
+    fn gateway_routes() -> Result<Vec<GatewayIntent>, String> {
+        Ok(vec![GatewayIntent {
+            destination: Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24)
+                .ok_or_else(|| "invalid route destination prefix".to_owned())?,
+            gateway: Ipv4Addr::new(10, 0, 0, 1),
+            external: true,
+        }])
+    }
+
+    fn gateway_egress(external_realm_id: Uuid) -> Vec<EgressIntent> {
+        vec![EgressIntent {
+            external_realm_id,
+            enabled: true,
+            nat: true,
+        }]
+    }
+
+    fn has_routed_intents(plan: &o3k_network::NodeNetworkPlan) -> bool {
+        plan.intents
+            .iter()
+            .any(|intent| matches!(intent, NetworkPlanIntent::Gateway(_)))
+            && plan
+                .intents
+                .iter()
+                .any(|intent| matches!(intent, NetworkPlanIntent::Egress(_)))
+    }
+
+    #[test]
+    fn gateway_realization_enabled_attaches_snapshot_and_keeps_routed_intents()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let realm_id = Uuid::now_v7();
+        let gateway = gateway_execution_plan(realm_id)?;
+        let external_realm_id = gateway
+            .external_realm_id
+            .ok_or_else(|| "missing external realm".to_owned())?;
+        let realized = finalize_gateway_realization(
+            endpoint_plan(realm_id)?,
+            Some(gateway.clone()),
+            gateway_routes()?,
+            gateway_egress(external_realm_id),
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(realized.gateway.as_ref(), Some(&gateway));
+        assert!(has_routed_intents(&realized));
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_realization_disabled_keeps_routed_intents_without_gateway_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let realm_id = Uuid::now_v7();
+        let gateway = gateway_execution_plan(realm_id)?;
+        let external_realm_id = gateway
+            .external_realm_id
+            .ok_or_else(|| "missing external realm".to_owned())?;
+        let plan = endpoint_plan(realm_id)?;
+        let routed_only = o3k_network::add_l3_gateway_routing(
+            plan.clone(),
+            gateway_routes()?,
+            gateway_egress(external_realm_id),
+        )
+        .map_err(|error| error.to_string())?;
+        let realized = finalize_gateway_realization(
+            plan,
+            Some(gateway),
+            gateway_routes()?,
+            gateway_egress(external_realm_id),
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(realized.gateway.is_none());
+        assert!(has_routed_intents(&realized));
+        assert_eq!(realized, routed_only);
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_realization_defaults_to_enabled_on_app_state() {
+        assert!(AppState::new().network_gateway_realization_enabled());
+        assert!(
+            !AppState::new()
+                .with_network_gateway_realization(false)
+                .network_gateway_realization_enabled()
+        );
+    }
+
+    fn realm_a() -> Uuid {
+        Uuid::from_u128(9)
+    }
+
+    fn realm_b() -> Uuid {
+        Uuid::from_u128(10)
+    }
+
+    #[test]
+    fn routed_egress_realm_is_coherent_flat_only_accepts_any_external_identity() {
+        // A pure-flat deployment (no Router egress) keeps its flat external
+        // identity even when no canonical realm resolves.
+        assert!(routed_egress_realm_is_coherent(&[], None, true));
+        assert!(routed_egress_realm_is_coherent(&[], Some(realm_a()), true));
+    }
+
+    #[test]
+    fn routed_egress_realm_is_coherent_unconfigured_external_is_accepted() {
+        let egress = gateway_egress(realm_a());
+        assert!(routed_egress_realm_is_coherent(&egress, None, false));
+    }
+
+    #[test]
+    fn routed_egress_realm_is_coherent_matching_realm_is_accepted() {
+        let egress = gateway_egress(realm_a());
+        assert!(routed_egress_realm_is_coherent(
+            &egress,
+            Some(realm_a()),
+            true
+        ));
+    }
+
+    #[test]
+    fn routed_egress_realm_is_coherent_unresolvable_realm_fails_closed() {
+        // A Router contributes egress but the external pool network has no
+        // canonical realm: must fail closed rather than labeling a Network id.
+        let egress = gateway_egress(realm_a());
+        assert!(!routed_egress_realm_is_coherent(&egress, None, true));
+    }
+
+    #[test]
+    fn routed_egress_realm_is_coherent_divergent_realm_fails_closed() {
+        // The gateway egress references a different realm than the pool's
+        // canonical realm: the single-realm routed invariant is violated.
+        let egress = gateway_egress(realm_b());
+        assert!(!routed_egress_realm_is_coherent(
+            &egress,
+            Some(realm_a()),
+            true
+        ));
+    }
+
+    #[test]
+    fn routed_egress_realm_is_coherent_multiple_gateways_require_single_realm() {
+        let mut egress = gateway_egress(realm_a());
+        egress.push(o3k_domain::EgressIntent {
+            external_realm_id: realm_b(),
+            enabled: true,
+            nat: true,
+        });
+        assert!(!routed_egress_realm_is_coherent(
+            &egress,
+            Some(realm_a()),
+            true
+        ));
+        let coherent = gateway_egress(realm_a());
+        egress.pop();
+        assert!(routed_egress_realm_is_coherent(
+            &coherent,
+            Some(realm_a()),
+            true
+        ));
     }
 }

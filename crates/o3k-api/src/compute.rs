@@ -149,7 +149,11 @@ pub(crate) struct IdResponse {
 /// separate projections owned by `o3k-domain` and `o3k-store`.
 pub(crate) fn nova_status(state: ServerState) -> &'static str {
     match state {
-        ServerState::Requested => "REQUESTED",
+        // The canonical `Requested` state is an internal pre-execution
+        // intent. Nova has no such status, and upstream clients must observe
+        // an in-progress status while realization is in flight, so it is
+        // exposed through Nova's build status.
+        ServerState::Requested => "BUILD",
         ServerState::Building => "BUILD",
         ServerState::Active => "ACTIVE",
         ServerState::Stopping => "STOPPING",
@@ -1562,7 +1566,7 @@ mod tests {
     #[test]
     fn canonical_server_states_project_to_the_nova_response_shape() {
         let expected = [
-            (ServerState::Requested, "REQUESTED"),
+            (ServerState::Requested, "BUILD"),
             (ServerState::Building, "BUILD"),
             (ServerState::Active, "ACTIVE"),
             (ServerState::Stopping, "STOPPING"),

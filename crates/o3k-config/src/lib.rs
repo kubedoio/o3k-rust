@@ -114,6 +114,8 @@ pub enum ConfigError {
     MissingDatabaseUrl,
     #[error("deployment profile must be `standalone` or `kubernetes`")]
     InvalidDeploymentProfile,
+    #[error("network gateway realization must be `enabled` or `disabled`")]
+    InvalidNetworkGatewayRealization,
     #[error(
         "PostgreSQL database backend is strictly required for the Kubernetes deployment profile; SQLite is rejected"
     )]
@@ -128,6 +130,7 @@ struct PartialConfig {
     database_backend: Option<String>,
     database_url: Option<String>,
     deployment_profile: Option<String>,
+    network_gateway_realization: Option<String>,
     log_format: Option<String>,
     log_filter: Option<String>,
     provider: Option<String>,
@@ -224,6 +227,9 @@ impl PartialConfig {
         if other.deployment_profile.is_some() {
             self.deployment_profile = other.deployment_profile;
         }
+        if other.network_gateway_realization.is_some() {
+            self.network_gateway_realization = other.network_gateway_realization;
+        }
         if other.log_format.is_some() {
             self.log_format = other.log_format;
         }
@@ -285,6 +291,10 @@ impl PartialConfig {
             database_url: value_from_env(environment, "O3K_DATABASE_URL"),
             deployment_profile: value_from_env(environment, "O3K_DEPLOYMENT_PROFILE")
                 .or_else(|| value_from_env(environment, "O3K_DEPLOYMENT_MODE")),
+            network_gateway_realization: value_from_env(
+                environment,
+                "O3K_NETWORK_GATEWAY_REALIZATION",
+            ),
             log_format: value_from_env(environment, "O3K_LOG_FORMAT"),
             log_filter: value_from_env(environment, "O3K_LOG_FILTER"),
             provider: value_from_env(environment, "O3K_PROVIDER"),
@@ -530,6 +540,18 @@ impl PartialConfig {
             _ => return Err(ConfigError::InvalidDeploymentProfile),
         };
 
+        let network_gateway_realization = match self
+            .network_gateway_realization
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "enabled" => true,
+            "disabled" => false,
+            _ => return Err(ConfigError::InvalidNetworkGatewayRealization),
+        };
+
         let database_backend = match self
             .database_backend
             .as_deref()
@@ -562,6 +584,7 @@ impl PartialConfig {
             data_dir,
             database_backend,
             deployment_profile,
+            network_gateway_realization,
             database_url: self.database_url.map(Secret),
             log_format,
             log_filter,
@@ -804,5 +827,58 @@ mod tests {
         assert_eq!(config.deployment_profile, DeploymentProfile::Kubernetes);
         assert_eq!(config.database_backend, DatabaseBackend::Postgres);
         Ok(())
+    }
+
+    #[test]
+    fn unset_network_gateway_realization_defaults_to_enabled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config::from_sources(["o3kd".to_owned()], Vec::new())?;
+        assert!(config.network_gateway_realization);
+        Ok(())
+    }
+
+    #[test]
+    fn network_gateway_realization_enabled_value_activates_realization()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config::from_sources(
+            ["o3kd".to_owned()],
+            env(&[("O3K_NETWORK_GATEWAY_REALIZATION", "enabled")]),
+        )?;
+        assert!(config.network_gateway_realization);
+        Ok(())
+    }
+
+    #[test]
+    fn network_gateway_realization_empty_value_means_enabled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config::from_sources(
+            ["o3kd".to_owned()],
+            env(&[("O3K_NETWORK_GATEWAY_REALIZATION", "")]),
+        )?;
+        assert!(config.network_gateway_realization);
+        Ok(())
+    }
+
+    #[test]
+    fn network_gateway_realization_disabled_value_deactivates_realization()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config::from_sources(
+            ["o3kd".to_owned()],
+            env(&[("O3K_NETWORK_GATEWAY_REALIZATION", "disabled")]),
+        )?;
+        assert!(!config.network_gateway_realization);
+        Ok(())
+    }
+
+    #[test]
+    fn network_gateway_realization_rejects_unknown_values() {
+        let result = Config::from_sources(
+            ["o3kd".to_owned()],
+            env(&[("O3K_NETWORK_GATEWAY_REALIZATION", "yes")]),
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidNetworkGatewayRealization)
+        ));
     }
 }
