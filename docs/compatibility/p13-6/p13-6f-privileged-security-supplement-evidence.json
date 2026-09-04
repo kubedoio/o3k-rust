@@ -1,0 +1,1346 @@
+{
+  "artifact_type": "o3k-p13-6f-privileged-security-supplement",
+  "backend": "postgresql",
+  "execution_tier": "privileged-testlab-disposable-lvm",
+  "lvm_profile": {
+    "disposable": true,
+    "volume_group": "o3k-lvm-p136supp2"
+  },
+  "phase": "P13.6F",
+  "profile": "p13-iac-compatibility-v1",
+  "result": "passed",
+  "scenarios": [
+    {
+      "a_matrix_cells": [
+        "openstack_compute_instance_v2/positive_isolation"
+      ],
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_a_and_b",
+      "details": {
+        "a_list_contains_b": false,
+        "b_list_contains_a": false,
+        "ids_distinct": true,
+        "server_a": "d0aa1fdc-e863-5d0d-8539-8cae0421bb0c",
+        "server_b": "43cb10a9-71b7-5774-a9e2-5f1d3cd19c06"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "allow",
+      "operation": "create",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_instance_v2",
+      "result": "passed",
+      "same_name": "p13-shared-server",
+      "scenario": "S1_server_same_name_isolation",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_blockstorage_volume_v3/positive_isolation"
+      ],
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_a_and_b",
+      "details": {
+        "b_list_contains_a": false,
+        "ids_distinct": true,
+        "lvm_realizations_distinct": true,
+        "volume_a": "414250f3-3af3-42d5-9fd0-5ac042acdefe",
+        "volume_b": "e4599ab6-62d7-46ef-96e5-53833c97ce56"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "allow",
+      "operation": "create",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_blockstorage_volume_v3",
+      "result": "passed",
+      "same_name": "p13-shared-volume",
+      "scenario": "S1_volume_same_name_isolation",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_volume_attach_v2/positive_isolation"
+      ],
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_a",
+      "details": {
+        "attachment_a": "d0aa1fdc-e863-5d0d-8539-8cae0421bb0c/78d76f61-c221-4780-98b6-e70ae53cbbbf",
+        "attachment_b": "43cb10a9-71b7-5774-a9e2-5f1d3cd19c06/2525a53e-3fac-4af6-8c9c-92cf4f2e18b6",
+        "ids_distinct": true,
+        "same_project_only": true
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "allow",
+      "operation": "create",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_volume_attach_v2",
+      "result": "passed",
+      "scenario": "S1_attachment_same_project_isolation",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "positive_isolation/concurrent"
+      ],
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_a_and_b",
+      "details": {
+        "conc_server_a": "e058edcc-7c32-53b7-8434-5c393b5a37d0",
+        "conc_server_b": "290ab415-ad71-5f7e-bdf2-c78ee2c01f4e",
+        "cross_project_conflict": false,
+        "ids_distinct": true,
+        "note": "concurrent network+server create across two projects; volume attachment is serialized through the single-controller storage fence"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "allow",
+      "operation": "create",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_instance_v2",
+      "result": "passed",
+      "scenario": "S2_concurrent_operation",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_volume_attach_v2/relationship",
+        "openstack_compute_volume_attach_v2/delete"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "attachment_list_unchanged": false,
+        "caller_volume": "e4599ab6-62d7-46ef-96e5-53833c97ce56",
+        "foreign_server": "d0aa1fdc-e863-5d0d-8539-8cae0421bb0c"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "attach",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_volume_attach_v2",
+      "result": "passed",
+      "scenario": "A1_b_volume_attach_to_a_server",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_volume_attach_v2/relationship"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_a",
+      "details": {
+        "attachment_list_unchanged": false,
+        "caller_volume": "414250f3-3af3-42d5-9fd0-5ac042acdefe",
+        "foreign_server": "43cb10a9-71b7-5774-a9e2-5f1d3cd19c06"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "attach",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_volume_attach_v2",
+      "result": "passed",
+      "scenario": "A2_a_volume_attach_to_b_server",
+      "target_owner": "project_b",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_volume_attach_v2/delete"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "attachment_still_present": true,
+        "foreign_attachment": "78d76f61-c221-4780-98b6-e70ae53cbbbf"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "detach",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_volume_attach_v2",
+      "result": "passed",
+      "scenario": "A3_b_detach_a_attachment",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_volume_attach_v2/delete"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_a",
+      "details": {
+        "attachment_still_present": true,
+        "foreign_attachment": "2525a53e-3fac-4af6-8c9c-92cf4f2e18b6"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "detach",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_volume_attach_v2",
+      "result": "passed",
+      "scenario": "A4_a_detach_b_attachment",
+      "target_owner": "project_b",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_volume_attach_v2/restart_reconstruction",
+        "openstack_compute_instance_v2/restart_reconstruction",
+        "openstack_blockstorage_volume_v3/restart_reconstruction"
+      ],
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_a_and_b",
+      "details": {
+        "a_attachment_present": true,
+        "a_plan_noop": true,
+        "b_attachment_present": true,
+        "b_plan_noop": true
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "allow",
+      "operation": "read",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_volume_attach_v2",
+      "result": "passed",
+      "scenario": "A5_restart_after_denied_attacks",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_subnet_v2/list",
+        "openstack_networking_port_v2/list",
+        "openstack_networking_secgroup_v2/list",
+        "openstack_networking_secgroup_rule_v2/list",
+        "openstack_networking_floatingip_v2/list",
+        "openstack_networking_router_v2/list",
+        "openstack_networking_router_interface_v2/list"
+      ],
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_ids_absent": true,
+        "resources": [
+          "subnet",
+          "port",
+          "secgroup",
+          "secgroup_rule",
+          "floatingip",
+          "router",
+          "router_interface"
+        ]
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "list",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "multi",
+      "result": "passed",
+      "scenario": "M_networking_list_absence",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_volume_attach_v2/list"
+      ],
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_attachment_absent": true
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "list",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_volume_attach_v2",
+      "result": "passed",
+      "scenario": "M_attachment_list",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_keypair_v2/list"
+      ],
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "a_only_keypair_absent": true
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "list",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_keypair_v2",
+      "result": "passed",
+      "scenario": "M_keypair_list",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_keypair_v2/show",
+        "openstack_compute_keypair_v2/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.1/9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f/os-keypairs/a-only-keypair-1685d388"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "GET",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_keypair_show",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_keypair_v2/delete"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.1/9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f/os-keypairs/a-only-keypair-1685d388"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "DELETE",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_keypair_delete",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_keypair_v2/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_state_adoption": false,
+        "tofu_import_exit": 1
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "import",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_keypair_v2",
+      "result": "passed",
+      "scenario": "M_keypair_import",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_instance_v2/list"
+      ],
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_server_absent": true
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "list",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_instance_v2",
+      "result": "passed",
+      "scenario": "M_server_list",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_instance_v2/show",
+        "openstack_compute_instance_v2/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.1/9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f/servers/d0aa1fdc-e863-5d0d-8539-8cae0421bb0c"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "GET",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_server_show",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_instance_v2/update"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.1/9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f/servers/d0aa1fdc-e863-5d0d-8539-8cae0421bb0c"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "PUT",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_server_update",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_instance_v2/delete"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.1/9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f/servers/d0aa1fdc-e863-5d0d-8539-8cae0421bb0c"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "DELETE",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_server_delete",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_instance_v2/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_state_adoption": false,
+        "note": "O3K returns 404 on the foreign read; tofu reports an empty import (exit 0) without materializing A's server in B's state",
+        "tofu_import_exit": 0
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "import",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_instance_v2",
+      "result": "passed",
+      "scenario": "M_server_import",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_instance_v2/relationship"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_port": "01a06c8a-9dec-7a02-a8fc-c8cc02d935f1"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "create",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_instance_v2",
+      "result": "passed",
+      "scenario": "M_server_relationship",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_keypair_v2/relationship"
+      ],
+      "actual_http_status": 202,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_keypair_name": "p13-shared-keypair",
+        "no_foreign_binding": true
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "create",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_keypair_v2",
+      "result": "passed",
+      "scenario": "M_keypair_relationship",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_blockstorage_volume_v3/list"
+      ],
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_volume_absent": true
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "list",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_blockstorage_volume_v3",
+      "result": "passed",
+      "scenario": "M_volume_list",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_blockstorage_volume_v3/show",
+        "openstack_blockstorage_volume_v3/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v3/9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f/volumes/414250f3-3af3-42d5-9fd0-5ac042acdefe"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "GET",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_volume_show",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_blockstorage_volume_v3/update"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v3/9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f/volumes/414250f3-3af3-42d5-9fd0-5ac042acdefe"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "PUT",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_volume_update",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_blockstorage_volume_v3/delete"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v3/9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f/volumes/414250f3-3af3-42d5-9fd0-5ac042acdefe"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "DELETE",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_volume_delete",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_blockstorage_volume_v3/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_state_adoption": false,
+        "tofu_import_exit": 1
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "import",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_blockstorage_volume_v3",
+      "result": "passed",
+      "scenario": "M_volume_import",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_volume_attach_v2/show",
+        "openstack_compute_volume_attach_v2/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.1/9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f/servers/d0aa1fdc-e863-5d0d-8539-8cae0421bb0c/os-volume_attachments/78d76f61-c221-4780-98b6-e70ae53cbbbf"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "GET",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_attachment_show",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_volume_attach_v2/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_state_adoption": false,
+        "tofu_import_exit": 1
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "import",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_volume_attach_v2",
+      "result": "passed",
+      "scenario": "M_attachment_import",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_subnet_v2/update"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.0/subnets/01a06c89-f10f-7291-aba7-7cadd8bf025c"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "PUT",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_subnet_update",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_subnet_v2/delete"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.0/subnets/01a06c89-f10f-7291-aba7-7cadd8bf025c"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "DELETE",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_subnet_delete",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_subnet_v2/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_state_adoption": false,
+        "tofu_import_exit": 1
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "import",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_networking_subnet_v2",
+      "result": "passed",
+      "scenario": "M_subnet_import",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_subnet_v2/relationship"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_network": "01a06c89-f0dd-7800-a6c0-eec661ddb880"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "create",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_networking_subnet_v2",
+      "result": "passed",
+      "scenario": "M_subnet_relationship",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_port_v2/delete"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.0/ports/01a06c8a-9dec-7a02-a8fc-c8cc02d935f1"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "DELETE",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_port_delete",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_port_v2/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_state_adoption": false,
+        "tofu_import_exit": 1
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "import",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_networking_port_v2",
+      "result": "passed",
+      "scenario": "M_port_import",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_secgroup_v2/update"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.0/security-groups/01a06c8a-9e4c-7e02-a4a2-123df619fa07"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "PUT",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_sg_update",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_secgroup_v2/delete"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.0/security-groups/01a06c8a-9e4c-7e02-a4a2-123df619fa07"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "DELETE",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_sg_delete",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_secgroup_v2/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_state_adoption": false,
+        "tofu_import_exit": 1
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "import",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_networking_secgroup_v2",
+      "result": "passed",
+      "scenario": "M_sg_import",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_secgroup_rule_v2/show",
+        "openstack_networking_secgroup_rule_v2/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.0/security-group-rules/01a06c8a-9ea3-7000-9baa-8cd46bb03071"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "GET",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_sgrule_show",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_secgroup_rule_v2/delete"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.0/security-group-rules/01a06c8a-9ea3-7000-9baa-8cd46bb03071"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "DELETE",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_sgrule_delete",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_secgroup_rule_v2/relationship"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_secgroup": "01a06c8a-9e4c-7e02-a4a2-123df619fa07"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "create",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_networking_secgroup_rule_v2",
+      "result": "passed",
+      "scenario": "M_sgrule_relationship",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_secgroup_rule_v2/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_state_adoption": false,
+        "tofu_import_exit": 1
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "import",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_networking_secgroup_rule_v2",
+      "result": "passed",
+      "scenario": "M_sgrule_import",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_router_v2/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_state_adoption": false,
+        "tofu_import_exit": 1
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "operation": "import",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_networking_router_v2",
+      "result": "passed",
+      "scenario": "M_router_import",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_router_interface_v2/show",
+        "openstack_networking_router_interface_v2/import"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.0/ports/01a06c8a-9f60-7412-ad10-e191dc339813"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "GET",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_routerinterface_show",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_router_interface_v2/delete"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.0/routers/01a06c8a-9f01-7313-9125-44cf8a2d0938/remove_router_interface"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "PUT",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_routerinterface_delete",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_router_interface_v2/relationship"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "foreign_router": "01a06c8a-9f01-7313-9125-44cf8a2d0938"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "create",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_networking_router_interface_v2",
+      "result": "passed",
+      "scenario": "M_routerinterface_relationship",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_networking_floatingip_v2/update"
+      ],
+      "actual_http_status": 404,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "control_http_status": 404,
+      "details": {
+        "path": "/v2.0/floatingips/01a06c8a-9fbd-72d3-acae-d4805df03833"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "existence_oracle_free": true,
+      "expected_authorization_outcome": "deny",
+      "non_disclosure_ok": true,
+      "operation": "PUT",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "matrix_completion",
+      "result": "passed",
+      "scenario": "M_fip_update",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_a",
+      "details": {
+        "foreign_state_changes": 0,
+        "snapshot_after": "d02e82473964da97ab17a13ec43f6130124b735830059cf54fc9b79c8400d8b5",
+        "snapshot_before": "d02e82473964da97ab17a13ec43f6130124b735830059cf54fc9b79c8400d8b5"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "allow",
+      "operation": "plan",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "multi",
+      "result": "passed",
+      "scenario": "M_a_state_immutability",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "a_matrix_cells": [
+        "openstack_compute_volume_attach_v2/restart_reconstruction"
+      ],
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_a",
+      "details": {
+        "attachment_a_after": "d0aa1fdc-e863-5d0d-8539-8cae0421bb0c/00cf0789-b15f-4263-a61f-7a4df7cdcc38",
+        "attachment_a_before": "d0aa1fdc-e863-5d0d-8539-8cae0421bb0c/78d76f61-c221-4780-98b6-e70ae53cbbbf",
+        "b_attachment_unchanged": true,
+        "lv_a_after": "o3k-v-414250f33af342d59fd05ac042acdefe",
+        "lv_a_before": "o3k-v-414250f33af342d59fd05ac042acdefe",
+        "lv_b_unchanged": true
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "allow",
+      "operation": "create",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_volume_attach_v2",
+      "result": "passed",
+      "scenario": "S4a_detach_recreate_a_leaves_b",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_b",
+      "details": {
+        "a_attachment_unchanged": true,
+        "attachment_b_after": "43cb10a9-71b7-5774-a9e2-5f1d3cd19c06/4d60d924-f8e6-4c07-b279-85947a2ec947",
+        "attachment_b_before": "43cb10a9-71b7-5774-a9e2-5f1d3cd19c06/2525a53e-3fac-4af6-8c9c-92cf4f2e18b6",
+        "lv_a_unchanged": true,
+        "lv_b_after": "o3k-v-e4599ab662d746ef96e553833c97ce56",
+        "lv_b_before": "o3k-v-e4599ab662d746ef96e553833c97ce56"
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "allow",
+      "operation": "create",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "openstack_compute_volume_attach_v2",
+      "result": "passed",
+      "scenario": "S4b_detach_recreate_b_leaves_a",
+      "target_owner": "project_b",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    },
+    {
+      "actual_http_status": 200,
+      "backend": "postgresql",
+      "caller_owner": "project_a_and_b",
+      "details": {
+        "a_plan_noop": true,
+        "b_plan_noop": true,
+        "cleanup_ok": true,
+        "lvm_realization_leaks": ""
+      },
+      "execution_tier": "privileged-testlab-disposable-lvm",
+      "expected_authorization_outcome": "allow",
+      "operation": "plan",
+      "phase": "P13.6F",
+      "project_a": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "project_b": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f",
+      "provider_modified": false,
+      "resource_type": "multi",
+      "result": "passed",
+      "scenario": "S5_final_convergence_and_cleanup",
+      "target_owner": "project_a",
+      "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc"
+    }
+  ],
+  "schema_version": 1,
+  "status": "verified",
+  "supersedes": {
+    "cross_project_attachment_attacks": "P13.6C C7_volume_attach_foreign_server / C7_volume_foreign_detach",
+    "openstack_blockstorage_volume_v3_positive_isolation": "P13.6B B11_volume",
+    "openstack_compute_instance_v2_positive_isolation": "P13.6B B10_compute_server",
+    "openstack_compute_volume_attach_v2_positive_isolation": "P13.6B B12_volume_attachment"
+  },
+  "tested_runtime_head_sha": "b315fb949c89198a9fe51ecf9f361e29bc769bbc",
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+    "provider_modified": false
+  },
+  "two_project_identity_model": {
+    "project_a": {
+      "principal": "admin",
+      "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb"
+    },
+    "project_b": {
+      "principal": "tenant-b-user",
+      "project_id": "9f3c2b6e-5f2d-4b3a-9c8e-1a2b3c4d5e6f"
+    }
+  }
+}

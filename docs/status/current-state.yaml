@@ -269,8 +269,22 @@ profiles:
       ADR-0176 and SPEC-0033 were accepted on 2026-08-24 against reviewed
       proposal baseline 9b5a74d9e470278c77907a5c3ca22a56af4fe64a. P13.1
       provider discovery and canonical Network/AddressRealm runtime closure
-      are complete through P13.1F3. P13.6A contract frozen via #751 update;
-      P13.6B–F implementation and P13.7 remain unproven.
+      are complete through P13.1F3. P13.6 multi-project security and failure
+      evidence (issue #751) is complete through P13.6F on the bounded
+      p13-iac-compatibility-v1 profile: two independent OpenTofu 1.12.6
+      projects against the unmodified upstream OpenStack provider 3.4.0 on
+      PostgreSQL converge independently with identical human-readable names,
+      list/show/update/delete/import/relationship isolation holds, denied
+      cross-project state is immutable across restart, and the privileged
+      Compute/Volume/VolumeAttachment TestLab tier plus the full frozen
+      P13.6A security/failure matrix are executed and passed (aggregate:
+      docs/compatibility/p13-6/p13-6f-aggregate-evidence.json). Lost-create
+      response remains characterized as expected_ambiguous; exactly-once
+      client creation is not claimed. The P13.6 privileged run drove two
+      production security fixes to protected main: project-scoping the fake
+      compute provider idempotency ledger (#815) and closing the volume-delete
+      foreign-vs-missing existence oracle (#816). P13.7 full-stack real-host
+      IaC acceptance remains unproven.
     source_commit: c5298c7ef1d0c845bc5162e52ea269768c1209d6
     portable_evidence:
       - name: adr-0175-accepted
@@ -319,8 +333,16 @@ profiles:
           docs/compatibility/p13-5/p13-5f-backend-parity-aggregate-evidence.json
           records the passed SQLite and PostgreSQL provider matrices and
           committed PG1-PG7 parity evidence. The lost-create-response case
-          remains explicitly ambiguous; P13.6A contract frozen, P13.6B–F
-          implementation and P13.7 remain unproven.
+          remains explicitly ambiguous.
+      - name: p13-6-multiproject-security-failure
+        state: passed
+        note: >-
+          docs/compatibility/p13-6/p13-6a-security-failure-contract.json plus
+          the P13.6B-C-D-E evidence and the P13.6F privileged security
+          supplement and aggregate prove bounded two-project IaC isolation,
+          cross-project non-disclosure, restart/durable recovery ownership,
+          and the frozen security/failure matrix on PostgreSQL. Aggregate:
+          docs/compatibility/p13-6/p13-6f-aggregate-evidence.json.
     full_profile_evidence:
       - name: iac-full-lifecycle-gate
         state: not-proven
@@ -328,10 +350,10 @@ profiles:
       Non-blocking for the first native alpha (v0.2.0-alpha.1). This profile
       extends native-rust-testlab but does not alter its release gate.
     blockers:
-      - P13.6A contract frozen; P13.6B–F multi-project adversarial and controller failure evidence remains unproven
       - P13.7 full-stack real-host acceptance remains unproven
     next_evidence_action: >-
-      P13.6A contract frozen; proceed with P13.6B positive isolation evidence.
+      P13.6 A–F evidence is merged and passed on PostgreSQL (issue #751);
+      proceed with P13.7 full-stack real-host IaC acceptance.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)
