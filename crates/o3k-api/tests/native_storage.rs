@@ -398,3 +398,43 @@ async fn native_volume_recovery_rejects_foreign_provider_observation()
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn delete_missing_volume_is_404_not_an_existence_oracle()
+-> Result<(), Box<dyn std::error::Error>> {
+    // P13.6 non-disclosure regression: deleting a volume that does not exist
+    // must return 404 (matching a foreign volume delete and upstream Cinder)
+    // rather than an idempotent 204, otherwise an attacker can distinguish "no
+    // such volume" from "a volume that exists in another project" and turn the
+    // delete endpoint into an existence oracle.
+    let store = store().await?;
+    let identity = TokenService::load(
+        store.clone(),
+        Secret::new("a-secure-signing-key-with-at-least-32-bytes".into()),
+        Duration::from_secs(3600),
+    )
+    .await?;
+    let compute = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()));
+    let storage_provider = Arc::new(RecoveryProvider::default());
+    let state = AppState::new()
+        .with_identity(identity)
+        .with_compute(compute)
+        .with_storage_store(store.clone())
+        .with_storage_provider(storage_provider);
+    state.set_ready(true);
+    let app = o3k_api::router_with_state(state);
+    let auth = token(&app).await?;
+    let missing = VolumeId::new();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v3/{PROJECT}/volumes/{missing}"))
+                .header("x-auth-token", &auth)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}

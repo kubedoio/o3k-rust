@@ -512,8 +512,15 @@ pub(crate) async fn delete(
     let Some(id) = volume_id(&id) else {
         return volume_not_found();
     };
-    let Ok(Some(record)) = store.get_volume(id).await else {
-        return StatusCode::NO_CONTENT.into_response();
+    let Ok(maybe_record) = store.get_volume(id).await else {
+        return volume_not_found();
+    };
+    let Some(record) = maybe_record else {
+        // A missing volume delete must be indistinguishable from a foreign
+        // volume delete (both 404) so the endpoint does not act as an
+        // existence oracle. Upstream Cinder also returns 404 when deleting a
+        // volume that does not exist.
+        return volume_not_found();
     };
     if record.volume.project_id != project_id {
         return keystone_error(StatusCode::NOT_FOUND, "Not Found", "volume not found")
