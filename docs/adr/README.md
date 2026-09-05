@@ -188,6 +188,7 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0176](ADR-0176-canonical-network-and-addressrealm-lifecycle-separation.md) (accepted)
 - [ADR-0177](ADR-0177-canonical-networkpolicy-and-reusable-policy-set.md) (accepted)
 - [ADR-0178](ADR-0178-canonical-l3-gateway-and-realm-connectivity.md) (accepted)
+- [ADR-0179](ADR-0179-o3k-federated-identity-ingress.md) (accepted)
 
 ## Required audit
 
