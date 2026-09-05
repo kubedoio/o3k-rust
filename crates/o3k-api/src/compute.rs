@@ -187,11 +187,13 @@ pub(crate) async fn server_response(
                 .await
                 .map(|network| network.name)
                 .unwrap_or_else(|_| port.network_id.to_string());
-            let address_key = if port.name.starts_with("o3k-server:") {
-                network_name
-            } else {
-                port.network_id.to_string()
-            };
+            // Nova's addresses object is keyed by the network name.  The
+            // OpenStack provider uses that key to correlate the refreshed
+            // address with the configured port and preserve its port ID.
+            // Keep this projection independent of the port's origin: using
+            // the network UUID for user-created ports makes an unchanged
+            // instance appear to lose its network and forces replacement.
+            let address_key = network_name;
             let address_list = addresses
                 .entry(address_key)
                 .or_insert_with(|| serde_json::Value::Array(Vec::new()));
