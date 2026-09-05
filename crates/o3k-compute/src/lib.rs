@@ -131,6 +131,7 @@ pub trait PortBindingProjector: Send + Sync {
         &self,
         project_id: &str,
         port_id: &str,
+        operation_id: uuid::Uuid,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
@@ -513,6 +514,7 @@ mod tests {
             &self,
             project_id: &str,
             port_id: &str,
+            _operation_id: uuid::Uuid,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             self.calls
                 .lock()
