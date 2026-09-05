@@ -268,6 +268,7 @@ pub async fn build_composition(
     let scheduler = o3k_scheduler::Scheduler::new(placement.clone());
     let network_dispatcher = network_dispatcher_from_env()?;
     let public_allocator = public_allocator_from_env(&config.data_dir)?;
+    let public_allocator_for_binding = public_allocator_from_env(&config.data_dir)?;
     let network_controller = o3k_network::NetworkControllerLease {
         controller_id: controller_id.to_string(),
         controller_epoch: controller_epoch.to_string(),
@@ -305,6 +306,7 @@ pub async fn build_composition(
         network_controller: network_controller.clone(),
         network_external_realm_id,
         network_agent: network_agent_identity.clone(),
+        public_allocator: public_allocator_for_binding.map(Arc::new),
     });
 
     // Build compute service based on configured provider.
@@ -1424,6 +1426,19 @@ mod tests {
         let port = network
             .create_port_for_project("project-a", net.id, "endpoint".to_owned())
             .await?;
+        let public_root = root.join("public-addresses");
+        let public_address: std::net::Ipv4Addr = "198.51.100.10".parse()?;
+        let public_allocator = o3k_network::PublicAddressAllocator::open(
+            &public_root,
+            o3k_network::PublicAddressPool {
+                prefix: o3k_domain::Ipv4Prefix::new("198.51.100.0".parse()?, 24)
+                    .ok_or("invalid test prefix")?,
+                first_usable: public_address,
+                last_usable: public_address,
+            },
+        )?;
+        let allocation = public_allocator.allocate("project-a", "test-operation")?;
+        public_allocator.associate("project-a", allocation.allocation_id, port.id)?;
         let dispatcher = RecordingNetworkDispatcher::default();
         let commands = dispatcher.commands.clone();
         let projector = NetworkBindingProjector {
@@ -1440,6 +1455,7 @@ mod tests {
                 agent_id: "network-agent".to_owned(),
                 agent_epoch: "agent-epoch".to_owned(),
             }),
+            public_allocator: Some(Arc::new(public_allocator)),
         };
         projector
             .project_create_outcome("project-a", &port.id.to_string(), true)
@@ -1450,7 +1466,13 @@ mod tests {
         let bound = network.get_port_for_project("project-a", port.id).await?;
         assert_eq!(bound.binding_host.as_deref(), Some("network-agent"));
         assert_eq!(bound.binding_state.as_deref(), Some("bound"));
-        assert_eq!(commands.lock().map_err(|_| "commands poisoned")?.len(), 1);
+        let commands = commands.lock().map_err(|_| "commands poisoned")?;
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].plan.intents.iter().any(|intent| matches!(
+            intent,
+            o3k_domain::NetworkPlanIntent::PublicAddressBinding(binding)
+                if binding.public_address == public_address
+        )));
         std::fs::remove_dir_all(&root)?;
         let _ = std::fs::remove_file(&sqlite_path);
         let _ = std::fs::remove_file(format!("{}-wal", sqlite_path.display()));
@@ -1479,6 +1501,7 @@ mod tests {
             },
             network_agent: None,
             network_external_realm_id: None,
+            public_allocator: None,
         };
         let net = network
             .create_network_for_project("project-a", "flat".to_owned())
