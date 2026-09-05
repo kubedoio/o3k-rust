@@ -47,6 +47,7 @@ async-trait = "0.1"
 base64 = "0.22"
 md-5 = "0.10"
 hmac = "0.12"
+jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
 http = "1"
 hyper = { version = "1", features = ["http1", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
@@ -58,11 +59,12 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "macros", "migrate", "chrono", "uuid"] }
 thiserror = "2"
 toml = "0.8"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 prost = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustix = { version = "0.38", default-features = false, features = ["process", "std"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tokio-rustls = "0.26"
 tonic = { version = "0.13", features = ["transport", "tls-native-roots", "tls-ring"] }
 tonic-build = "0.13"

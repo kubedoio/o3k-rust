@@ -14,6 +14,8 @@ use sha2::Sha256;
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod oidc;
+
 use o3k_kernel::{
     AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, ServicePrincipal, UserPrincipal,
 };

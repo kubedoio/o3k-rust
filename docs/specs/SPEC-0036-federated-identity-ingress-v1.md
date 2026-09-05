@@ -41,6 +41,8 @@ The federation adapter MUST:
    credential;
 2. validate an access token's compact representation, signature, algorithm,
    exact issuer, required audience, subject, `exp`, and `nbf` when present;
+   The initial JWT access-token profile requires the RFC 9068 `typ` header
+   value `at+jwt`; an ID-token-shaped JWT is not accepted as an API credential.
 3. use a maintained standards-based JOSE/OIDC implementation;
 4. bound input, metadata, JWKS, network timeout and refresh work;
 5. refresh at most once for an unknown key ID when the configured policy allows
