@@ -66,6 +66,7 @@ impl DaemonCreateResolver {
         ),
         ProviderError,
     > {
+        let external_realm_id = self.resolve_external_realm_id(&request.project_id).await?;
         let mut attachments = Vec::with_capacity(request.network_ids.len());
         let mut network_data = BTreeMap::new();
         for network_id in &request.network_ids {
@@ -117,7 +118,7 @@ impl DaemonCreateResolver {
                     operation_id: request.operation_id,
                     deadline_unix_ms,
                     public_address: None,
-                    external_realm_id: self.network_external_realm_id,
+                    external_realm_id,
                     policies: self
                         .network
                         .list_policies_for_project(&request.project_id, port.network_id)
@@ -185,6 +186,23 @@ impl DaemonCreateResolver {
         Ok((attachments, network_data))
     }
 
+    async fn resolve_external_realm_id(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<Uuid>, ProviderError> {
+        let Some(external_network_id) = self.network_external_realm_id else {
+            return Ok(None);
+        };
+        let realms = self
+            .network
+            .list_canonical_realms_for_project(project_id, external_network_id)
+            .await
+            .map_err(|_| ProviderError::InvalidRequest)?;
+        select_active_external_realm(&realms)
+            .map(Some)
+            .map_err(|_| ProviderError::InvalidRequest)
+    }
+
     fn config_drive_input(
         request: &CreateInstanceRequest,
         config: &ConfigDriveRequest,
@@ -232,6 +250,20 @@ impl DaemonCreateResolver {
             .read_verified_iso(&iso)
             .map_err(|_| ProviderError::InvalidRequest)?;
         Ok((iso, bytes))
+    }
+}
+
+fn select_active_external_realm(
+    realms: &[o3k_store::CanonicalAddressRealmRecord],
+) -> Result<Uuid, &'static str> {
+    let active: Vec<_> = realms
+        .iter()
+        .filter(|realm| realm.state == "active")
+        .collect();
+    match active.as_slice() {
+        [realm] => Ok(realm.id),
+        [] => Err("configured external network has no active canonical AddressRealm"),
+        _ => Err("configured external network has multiple active canonical AddressRealms"),
     }
 }
 
@@ -508,4 +540,53 @@ pub(crate) async fn run_agent_inspect_probe(
         "agent inspect probe timed out waiting for a durable server record and observation"
             .to_owned(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_active_external_realm;
+    use uuid::Uuid;
+
+    fn realm(id: Uuid, state: &str) -> o3k_store::CanonicalAddressRealmRecord {
+        o3k_store::CanonicalAddressRealmRecord {
+            id,
+            network_id: Uuid::from_u128(11),
+            project_id: "project".to_owned(),
+            prefix: "198.51.100.0/24".to_owned(),
+            overlapping_prefixes: false,
+            generation: 1,
+            state: state.to_owned(),
+        }
+    }
+
+    #[test]
+    fn external_realm_selection_ignores_retired_realms() {
+        let active = Uuid::from_u128(2);
+        assert_eq!(
+            select_active_external_realm(&[
+                realm(Uuid::from_u128(1), "retired"),
+                realm(active, "active"),
+            ]),
+            Ok(active)
+        );
+    }
+
+    #[test]
+    fn external_realm_selection_fails_closed_without_active_realm() {
+        assert_eq!(
+            select_active_external_realm(&[realm(Uuid::from_u128(1), "retired")]),
+            Err("configured external network has no active canonical AddressRealm")
+        );
+    }
+
+    #[test]
+    fn external_realm_selection_fails_closed_on_ambiguity() {
+        assert_eq!(
+            select_active_external_realm(&[
+                realm(Uuid::from_u128(1), "active"),
+                realm(Uuid::from_u128(2), "active"),
+            ]),
+            Err("configured external network has multiple active canonical AddressRealms")
+        );
+    }
 }
