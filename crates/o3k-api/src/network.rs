@@ -2249,12 +2249,15 @@ async fn dispatch_policy_network_with_gateway(
         .filter(|realm| realm.network_id == network_id)
         .cloned()
         .collect::<Vec<_>>();
-    let external_realm_route_id = state.network_external_realm_id.and_then(|network_id| {
-        all_realms
-            .iter()
-            .find(|realm| realm.network_id == network_id)
-            .map(|realm| realm.id)
-    });
+    let external_realm_route_id =
+        select_active_external_realm_for_network(&all_realms, state.network_external_realm_id)
+            .map_err(|error| {
+                keystone_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Service Unavailable",
+                    error,
+                )
+            })?;
     let realm = realms
         .iter()
         .find(|realm| realm.prefix == subnet.cidr)
@@ -2465,6 +2468,28 @@ pub(crate) fn routed_egress_realm_is_coherent(
     gateway_egress
         .iter()
         .all(|egress| egress.external_realm_id == flat)
+}
+
+/// Resolves the configured external Network to its one active canonical
+/// AddressRealm. A configured Network with no active Realm, or with multiple
+/// active Realms, is ambiguous and must fail closed; the Network UUID is not a
+/// substitute for the routed Realm identity.
+pub(crate) fn select_active_external_realm_for_network(
+    realms: &[o3k_store::CanonicalAddressRealmRecord],
+    external_network_id: Option<Uuid>,
+) -> Result<Option<Uuid>, &'static str> {
+    let Some(external_network_id) = external_network_id else {
+        return Ok(None);
+    };
+    let active: Vec<_> = realms
+        .iter()
+        .filter(|realm| realm.network_id == external_network_id && realm.state == "active")
+        .collect();
+    match active.as_slice() {
+        [realm] => Ok(Some(realm.id)),
+        [] => Err("configured external network has no active canonical AddressRealm"),
+        _ => Err("configured external network has multiple active canonical AddressRealms"),
+    }
 }
 
 pub(crate) fn port_response(value: PortRecord, security_groups: Vec<Uuid>) -> PortResponse {
@@ -3778,6 +3803,62 @@ mod tests {
 
     fn realm_b() -> Uuid {
         Uuid::from_u128(10)
+    }
+
+    fn address_realm(
+        id: Uuid,
+        network_id: Uuid,
+        state: &str,
+    ) -> o3k_store::CanonicalAddressRealmRecord {
+        o3k_store::CanonicalAddressRealmRecord {
+            id,
+            network_id,
+            project_id: "project".to_owned(),
+            prefix: "198.51.100.0/24".to_owned(),
+            overlapping_prefixes: false,
+            generation: 1,
+            state: state.to_owned(),
+        }
+    }
+
+    #[test]
+    fn active_external_realm_selection_ignores_retired_realms() {
+        let network_id = Uuid::from_u128(11);
+        let selected = select_active_external_realm_for_network(
+            &[
+                address_realm(realm_a(), network_id, "retired"),
+                address_realm(realm_b(), network_id, "active"),
+            ],
+            Some(network_id),
+        );
+        assert_eq!(selected, Ok(Some(realm_b())));
+    }
+
+    #[test]
+    fn active_external_realm_selection_fails_closed_without_active_realm() {
+        let network_id = Uuid::from_u128(11);
+        assert_eq!(
+            select_active_external_realm_for_network(
+                &[address_realm(realm_a(), network_id, "retired")],
+                Some(network_id),
+            ),
+            Err("configured external network has no active canonical AddressRealm")
+        );
+    }
+
+    #[test]
+    fn active_external_realm_selection_fails_closed_on_ambiguity() {
+        let network_id = Uuid::from_u128(11);
+        assert_eq!(
+            select_active_external_realm_for_network(
+                &[
+                    address_realm(realm_a(), network_id, "active"),
+                    address_realm(realm_b(), network_id, "active"),
+                ],
+                Some(network_id),
+            ),
+            Err("configured external network has multiple active canonical AddressRealms")
+        );
     }
 
     #[test]
