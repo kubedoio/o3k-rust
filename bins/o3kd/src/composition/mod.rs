@@ -1252,6 +1252,20 @@ mod tests {
         let port = network
             .create_port_for_project("project-a", net.id, "one".to_owned())
             .await?;
+        let security_group = network
+            .create_security_group_for_project(
+                "project-a",
+                "default-deny".to_owned(),
+                String::new(),
+            )
+            .await?;
+        network
+            .replace_security_group_bindings_for_project(
+                "project-a",
+                port.id,
+                vec![security_group.id],
+            )
+            .await?;
         let allocation = resolver
             .public_allocator
             .as_ref()
@@ -1295,6 +1309,13 @@ mod tests {
                 intent,
                 o3k_domain::NetworkPlanIntent::PublicAddressBinding(binding)
                     if binding.public_address == public_address
+            )));
+            assert!(commands[0].plan.intents.iter().any(|intent| matches!(
+                intent,
+                o3k_domain::NetworkPlanIntent::PolicyDefault(default)
+                    if default.endpoint_id == port.id
+                        && default.policy_id == security_group.id
+                        && default.unmatched_action == o3k_domain::PolicyAction::Deny
             )));
         }
 

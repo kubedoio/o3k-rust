@@ -390,6 +390,11 @@ impl NetworkBindingProjector {
             .into_iter()
             .filter(|policy| policy.endpoint_id == port.id)
             .collect();
+        let policy_defaults = self
+            .network
+            .policy_defaults_for_endpoint(project_id, port.id)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         let public_address = self
             .public_allocator
             .as_ref()
@@ -410,20 +415,23 @@ impl NetworkBindingProjector {
             format!("o3k:network:terminal-binding:{project_id}:{port_id}").as_bytes(),
         );
         let deadline_unix_ms = super::unix_time_millis().saturating_add(30_000);
-        let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
-            endpoint_id: port.id,
-            realm_id: port.network_id,
-            project_id,
-            mac: &port.mac_address,
-            fixed_ip: port.fixed_ip,
-            subnet_cidr: &subnet.cidr,
-            node_id: &agent.agent_id,
-            operation_id,
-            deadline_unix_ms,
-            public_address,
-            external_realm_id: external_realm_route_id,
-            policies,
-        })
+        let plan = o3k_network::compile_attachment_plan_with_defaults(
+            o3k_network::AttachmentPlanInput {
+                endpoint_id: port.id,
+                realm_id: port.network_id,
+                project_id,
+                mac: &port.mac_address,
+                fixed_ip: port.fixed_ip,
+                subnet_cidr: &subnet.cidr,
+                node_id: &agent.agent_id,
+                operation_id,
+                deadline_unix_ms,
+                public_address,
+                external_realm_id: external_realm_route_id,
+                policies,
+            },
+            policy_defaults,
+        )
         .map_err(|error| std::io::Error::other(error.to_string()))?;
         let command_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,

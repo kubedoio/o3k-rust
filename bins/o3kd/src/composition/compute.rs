@@ -109,6 +109,24 @@ impl DaemonCreateResolver {
                         .find(|binding| binding.endpoint_id == Some(port.id))
                         .map(|binding| binding.public_address)
                 });
+            let (policies, policy_defaults) = if self.network_dispatcher.is_some() {
+                let policies = self
+                    .network
+                    .list_policies_for_project(&request.project_id, port.network_id)
+                    .await
+                    .map_err(|_| ProviderError::InvalidRequest)?
+                    .into_iter()
+                    .filter(|policy| policy.endpoint_id == port.id)
+                    .collect();
+                let policy_defaults = self
+                    .network
+                    .policy_defaults_for_endpoint(&request.project_id, port.id)
+                    .await
+                    .map_err(|_| ProviderError::InvalidRequest)?;
+                (policies, policy_defaults)
+            } else {
+                (Vec::new(), Vec::new())
+            };
             self.network
                 .record_binding_intent(&request.project_id, port_id, network_agent_id)
                 .await
@@ -118,32 +136,28 @@ impl DaemonCreateResolver {
                 })?;
             if let Some(dispatcher) = &self.network_dispatcher {
                 let deadline_unix_ms = super::unix_time_millis().saturating_add(30_000);
-                let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
-                    endpoint_id: port.id,
-                    realm_id: port.subnet_id.ok_or(ProviderError::InvalidRequest)?,
-                    project_id: &request.project_id,
-                    mac: &port.mac_address,
-                    fixed_ip: port.fixed_ip,
-                    subnet_cidr: &subnet.cidr,
-                    // The network plan is owned by the network execution
-                    // agent, not by the selected compute host.  Keeping the
-                    // plan node bound to the network agent lets the executor
-                    // reject cross-agent replay without conflating compute
-                    // placement with network mutation authority.
-                    node_id: network_agent_id,
-                    operation_id: request.operation_id,
-                    deadline_unix_ms,
-                    public_address,
-                    external_realm_id,
-                    policies: self
-                        .network
-                        .list_policies_for_project(&request.project_id, port.network_id)
-                        .await
-                        .map_err(|_| ProviderError::InvalidRequest)?
-                        .into_iter()
-                        .filter(|policy| policy.endpoint_id == port.id)
-                        .collect(),
-                })
+                let plan = o3k_network::compile_attachment_plan_with_defaults(
+                    o3k_network::AttachmentPlanInput {
+                        endpoint_id: port.id,
+                        realm_id: port.subnet_id.ok_or(ProviderError::InvalidRequest)?,
+                        project_id: &request.project_id,
+                        mac: &port.mac_address,
+                        fixed_ip: port.fixed_ip,
+                        subnet_cidr: &subnet.cidr,
+                        // The network plan is owned by the network execution
+                        // agent, not by the selected compute host.  Keeping the
+                        // plan node bound to the network agent lets the executor
+                        // reject cross-agent replay without conflating compute
+                        // placement with network mutation authority.
+                        node_id: network_agent_id,
+                        operation_id: request.operation_id,
+                        deadline_unix_ms,
+                        public_address,
+                        external_realm_id,
+                        policies,
+                    },
+                    policy_defaults,
+                )
                 .map_err(|_| ProviderError::InvalidRequest)?;
                 let command_id = Uuid::new_v5(
                     &Uuid::NAMESPACE_URL,

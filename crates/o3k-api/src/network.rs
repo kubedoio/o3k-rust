@@ -2767,6 +2767,10 @@ async fn dispatch_public_binding(
         .into_iter()
         .filter(|policy| policy.endpoint_id == port.id)
         .collect();
+    let policy_defaults = network
+        .policy_defaults_for_endpoint(&binding.project_id, port.id)
+        .await
+        .map_err(network_error)?;
     let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
     let operation_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
@@ -2776,20 +2780,23 @@ async fn dispatch_public_binding(
         )
         .as_bytes(),
     );
-    let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
-        endpoint_id,
-        realm_id: port.network_id,
-        project_id: &binding.project_id,
-        mac: &port.mac_address,
-        fixed_ip: port.fixed_ip,
-        subnet_cidr: &subnet.cidr,
-        node_id: host,
-        operation_id,
-        deadline_unix_ms,
-        public_address: Some(binding.public_address),
-        external_realm_id: state.network_external_realm_id,
-        policies,
-    })
+    let plan = o3k_network::compile_attachment_plan_with_defaults(
+        o3k_network::AttachmentPlanInput {
+            endpoint_id,
+            realm_id: port.network_id,
+            project_id: &binding.project_id,
+            mac: &port.mac_address,
+            fixed_ip: port.fixed_ip,
+            subnet_cidr: &subnet.cidr,
+            node_id: host,
+            operation_id,
+            deadline_unix_ms,
+            public_address: Some(binding.public_address),
+            external_realm_id: state.network_external_realm_id,
+            policies,
+        },
+        policy_defaults,
+    )
     .map_err(|error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()))?;
     let command_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
