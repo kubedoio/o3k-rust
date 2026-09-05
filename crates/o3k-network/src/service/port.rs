@@ -421,6 +421,47 @@ impl NetworkService {
     }
 
     pub async fn delete_port(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
+        self.authorize_delete_port(auth, id).await?;
+        match self
+            .delete_port_for_project(auth.effective_scope().id().as_str(), id)
+            .await
+        {
+            Ok(()) => {
+                let ns = ServiceNamespace::new("network")
+                    .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+                let act = ActionId::new("network", "DeletePort").unwrap_or_else(|_| {
+                    ActionId::new_unchecked("network".to_owned(), "DeletePort".to_owned())
+                });
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("network", "port").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("network".to_owned(), "port".to_owned())
+                        }),
+                        ResourceId::new(id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(())
+            }
+            Err(error) => {
+                let ns = ServiceNamespace::new("network")
+                    .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+                let act = ActionId::new("network", "DeletePort").unwrap_or_else(|_| {
+                    ActionId::new_unchecked("network".to_owned(), "DeletePort".to_owned())
+                });
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn authorize_delete_port(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+    ) -> Result<PortRecord, NetworkError> {
         let ns = ServiceNamespace::new("network")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
         let act = ActionId::new("network", "DeletePort").unwrap_or_else(|_| {
@@ -443,29 +484,8 @@ impl NetworkService {
             self.audit_sink.record(&event);
             return Err(NetworkError::NotFound);
         }
-        match self
-            .delete_port_for_project(auth.effective_scope().id().as_str(), id)
+        self.get_port_for_project(auth.effective_scope().id().as_str(), id)
             .await
-        {
-            Ok(()) => {
-                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
-                    .with_resource(
-                        ResourceType::new("network", "port").unwrap_or_else(|_| {
-                            ResourceType::new_unchecked("network".to_owned(), "port".to_owned())
-                        }),
-                        ResourceId::new(id.to_string()).ok(),
-                        Some(auth.effective_scope().clone()),
-                    );
-                self.audit_sink.record(&event);
-                Ok(())
-            }
-            Err(error) => {
-                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
-                    .with_reason(error.to_string());
-                self.audit_sink.record(&event);
-                Err(error)
-            }
-        }
     }
 
     pub async fn delete_port_for_project(
