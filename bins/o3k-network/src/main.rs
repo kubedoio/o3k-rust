@@ -20,6 +20,38 @@ fn required(name: &str) -> Result<String, Box<dyn std::error::Error>> {
     env::var(name).map_err(|_| format!("missing required environment variable {name}").into())
 }
 
+#[cfg(test)]
+mod public_removal_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn routed_plan() -> NodeNetworkPlan {
+        NodeNetworkPlan {
+            schema_version: 1,
+            plan_id: Uuid::from_u128(1),
+            node_id: "test-node".to_owned(),
+            operation_id: Uuid::from_u128(2),
+            deadline_unix_ms: 1,
+            resource_generations: BTreeMap::new(),
+            intents: vec![NetworkPlanIntent::Egress(o3k_domain::EgressIntent {
+                external_realm_id: Uuid::from_u128(3),
+                enabled: true,
+                nat: true,
+            })],
+            fabric: None,
+            gateway: None,
+            fingerprint_sha256: "test".to_owned(),
+        }
+    }
+
+    #[test]
+    fn only_remove_reconciles_routed_snapshot_without_public_binding() {
+        let plan = routed_plan();
+        assert!(should_reconcile_public_on_remove(&plan, true));
+        assert!(!should_reconcile_public_on_remove(&plan, false));
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The workspace intentionally contains dependencies that expose both
@@ -273,13 +305,7 @@ impl NetworkPlanRealizer for CompositeRealizer {
                 provider.apply_endpoint_snapshot(endpoint_id, &endpoint_intents, &endpoints)?;
             }
         }
-        // A routed plan is also the reconciliation boundary for public
-        // address state.  A later full snapshot can legitimately omit the
-        // PublicAddressBinding after the FIP was deleted; still invoke the
-        // public realizer so it can remove any durable binding left by an
-        // earlier snapshot.  Without this, the empty-request cleanup path is
-        // unreachable in the composite runtime.
-        if should_reconcile_public(plan, self.public.is_some()) {
+        if plan.intents.iter().any(is_public_intent) {
             self.public
                 .as_mut()
                 .ok_or(CompositeRealizerError::PublicNotConfigured)?
@@ -325,11 +351,20 @@ impl NetworkPlanRealizer for CompositeRealizer {
                 .map_err(|error| CompositeRealizerError::Fabric(error.to_string()))?;
             return Ok(());
         }
-        if plan.intents.iter().any(is_public_intent) {
-            self.public
+        if should_reconcile_public_on_remove(plan, self.public.is_some()) {
+            let public = self
+                .public
                 .as_mut()
-                .ok_or(CompositeRealizerError::PublicNotConfigured)?
-                .remove_for_plan(&plan.intents)?;
+                .ok_or(CompositeRealizerError::PublicNotConfigured)?;
+            if plan.intents.iter().any(is_public_intent) {
+                public.remove_for_plan(&plan.intents)?;
+            } else {
+                // A delete snapshot for a routed endpoint may no longer
+                // contain the public binding.  Reconcile the addressed realm
+                // only on Remove; Apply snapshots can be partial and must not
+                // tear down a still-live Floating IP association.
+                public.apply(&plan.intents)?;
+            }
         }
         if plan.intents.iter().any(is_policy_intent) {
             let endpoints = policy_endpoints(plan);
@@ -483,7 +518,7 @@ fn is_public_intent(intent: &NetworkPlanIntent) -> bool {
     matches!(intent, NetworkPlanIntent::PublicAddressBinding(_))
 }
 
-fn should_reconcile_public(plan: &NodeNetworkPlan, public_configured: bool) -> bool {
+fn should_reconcile_public_on_remove(plan: &NodeNetworkPlan, public_configured: bool) -> bool {
     plan.intents.iter().any(is_public_intent)
         || (public_configured && plan.intents.iter().any(is_routed_intent))
 }
@@ -624,37 +659,5 @@ mod transport_tests {
         let _ = server_task.await;
         let _ = fs::remove_dir_all(root);
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod public_reconciliation_tests {
-    use super::*;
-    use std::collections::BTreeMap;
-
-    fn plan(intents: Vec<NetworkPlanIntent>) -> NodeNetworkPlan {
-        NodeNetworkPlan {
-            schema_version: 1,
-            plan_id: Uuid::from_u128(1),
-            node_id: "test-node".to_owned(),
-            operation_id: Uuid::from_u128(2),
-            deadline_unix_ms: 1,
-            resource_generations: BTreeMap::new(),
-            intents,
-            fabric: None,
-            gateway: None,
-            fingerprint_sha256: "test".to_owned(),
-        }
-    }
-
-    #[test]
-    fn routed_snapshot_reconciles_public_state_when_binding_is_absent() {
-        let routed = NetworkPlanIntent::Egress(o3k_domain::EgressIntent {
-            external_realm_id: Uuid::from_u128(3),
-            enabled: true,
-            nat: true,
-        });
-        assert!(should_reconcile_public(&plan(vec![routed.clone()]), true));
-        assert!(!should_reconcile_public(&plan(vec![routed]), false));
     }
 }
