@@ -9,7 +9,7 @@ product_identity:
   canonical_internal_platform: o3k-cloud-kernel
 profiles:
   - id: p13-iac-compatibility-v1
-    maturity: specified
+    maturity: verified
     parent_profile: native-rust-testlab
     user_outcome: >
       Existing OpenStack Terraform/OpenTofu configurations that use the
@@ -42,7 +42,7 @@ profiles:
       production_target: postgres
     release_blocking_for_first_alpha: false
     footprint_claim: unmeasured
-    evidence_state: bounded-p13-5-verified
+    evidence_state: bounded-p13-7-verified
     normative_adr: docs/adr/ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md
     normative_spec: docs/specs/SPEC-0032-openstack-terraform-opentofu-compatibility-profile-v1.md
     contract: contracts/iac-openstack-profile-v1.yaml

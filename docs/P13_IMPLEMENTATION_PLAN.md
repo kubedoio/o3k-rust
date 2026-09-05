@@ -190,11 +190,13 @@ B–F slices sequenced from newly protected main:
 
 ### P13.7 — Full-stack real-host acceptance
 
-- Real-host evidence with complete IaC journey
+- Real-host evidence with complete IaC journey — verified in
+  `docs/compatibility/p13-7/p13-7-real-host-iac-evidence.json` against the
+  protected runtime recorded there
 - Full profile test: auth → data sources → managed resources → state
   convergence → cleanup
 - Product profile and compatibility manifest updated
-- Evidence documented in `docs/evidence/` or equivalent
+- Evidence documented in `docs/compatibility/p13-7/`
 
 ## Tool baseline
 

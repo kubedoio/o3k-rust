@@ -284,8 +284,10 @@ profiles:
       production security fixes to protected main: project-scoping the fake
       compute provider idempotency ledger (#815) and closing the volume-delete
       foreign-vs-missing existence oracle (#816). P13.7 full-stack real-host
-      IaC acceptance remains unproven.
-    source_commit: c5298c7ef1d0c845bc5162e52ea269768c1209d6
+      IaC acceptance is passed on protected runtime
+      3d5ecf610a13bfdafb0d8026292dbeca83d68102; the bounded profile evidence
+      is committed at docs/compatibility/p13-7/p13-7-real-host-iac-evidence.json.
+    source_commit: 3d5ecf610a13bfdafb0d8026292dbeca83d68102
     portable_evidence:
       - name: adr-0175-accepted
         state: passed
@@ -322,11 +324,11 @@ profiles:
           the bounded Security Group, Port security-group attachment,
           Floating IP, and Router provider lifecycle paths.
       - name: p13-3-native-policy-real-traffic
-        state: not-proven
+        state: passed
         note: >-
-          Historical real-QEMU evidence exists, but current gateway/provider
-          lifecycle changes require the protected policy traffic and recovery
-          gate to be rerun before this claim can be restored.
+          P13.7 R4 proves the real Floating IP packet decision transition
+          DENY -> security-group rule apply -> ALLOW with O3K-owned nftables
+          counters and a real guest connection.
       - name: p13-5-state-convergence-backend-parity
         state: passed
         note: >-
@@ -345,15 +347,20 @@ profiles:
           docs/compatibility/p13-6/p13-6f-aggregate-evidence.json.
     full_profile_evidence:
       - name: iac-full-lifecycle-gate
-        state: not-proven
+        state: passed
+        note: >-
+          R1-R10 passed on the real host with PostgreSQL 16, OpenTofu 1.12.6,
+          the unmodified upstream provider 3.4.0, real libvirt, real packet
+          policy, disposable LVM, guest I/O, restart, lifecycle, destroy, and
+          independent zero-leak verification. Evidence:
+          docs/compatibility/p13-7/p13-7-real-host-iac-evidence.json.
     release_relevance: >-
       Non-blocking for the first native alpha (v0.2.0-alpha.1). This profile
       extends native-rust-testlab but does not alter its release gate.
-    blockers:
-      - P13.7 full-stack real-host acceptance remains unproven
+    blockers: []
     next_evidence_action: >-
-      P13.6 A–F evidence is merged and passed on PostgreSQL (issue #751);
-      proceed with P13.7 full-stack real-host IaC acceptance.
+      Perform the read-only P13 aggregate closure audit; no new P13.7
+      acceptance run is required for this protected runtime.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)

@@ -7,7 +7,7 @@ profile:
   id: p13-iac-compatibility-v1
   product: O3K Cloud OS
   parent_profile: native-rust-testlab
-  maturity: specified
+  maturity: verified
   user_outcome: >
     Existing OpenStack Terraform/OpenTofu configurations that use the resources
     listed by this profile and the attribute subsets frozen by the applicable

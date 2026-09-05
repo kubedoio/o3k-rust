@@ -1,0 +1,176 @@
+{
+  "artifact_type": "o3k-p13-7-real-host-iac-evidence",
+  "backend": "postgresql",
+  "execution_host": "o3k-rust",
+  "execution_tier": "real-host-kvm-libvirt-disposable-lvm",
+  "fake_provider": false,
+  "gates": [
+    {
+      "catalog_services": [
+        "compute",
+        "identity",
+        "image",
+        "network",
+        "placement",
+        "volumev3"
+      ],
+      "flavor_data_source_resolved": true,
+      "gate": "R1",
+      "image_data_source_resolved": true,
+      "phase": "P13.7",
+      "result": "passed",
+      "token_acquired": true
+    },
+    {
+      "bridge_name": "o3kp137p13717",
+      "bridge_present": true,
+      "dnsmasq_inventory_seen": true,
+      "external_network_id": "01a0739f-3d31-7763-8733-6adfa84e5308",
+      "external_realm_id": "01a0739f-3d62-7990-a810-63c82bc5d161",
+      "external_realm_matches_plan": true,
+      "gate": "R2",
+      "network_id": "01a0739f-887a-7170-8207-e18d659d673e",
+      "owner_project": "eba29e2d-53de-461d-ae91-ede7402713cb",
+      "phase": "P13.7",
+      "port_id": "01a0739f-88e7-7470-b265-af892ee2fc21",
+      "result": "passed",
+      "router_id": "01a0739f-88e2-7b93-bcd2-43beb0735321",
+      "subnet_id": "01a0739f-88ac-7491-a3ad-853ea4afc1d8"
+    },
+    {
+      "allowed_observed": true,
+      "denied_observed": true,
+      "gate": "R4",
+      "nft_counter_packets_after": 1,
+      "nft_counter_packets_before": 0,
+      "nft_drop_counter_packets_after": 0,
+      "nft_drop_counter_packets_before": 0,
+      "nft_drop_counter_seen": true,
+      "phase": "P13.7",
+      "result": "passed",
+      "security_group_id": "01a0739f-886e-77e3-b642-2d68b951e746",
+      "toggle_via": "openstack_networking_secgroup_rule_v2"
+    },
+    {
+      "boot_marker": "login as 'cirros' user",
+      "boot_marker_seen": true,
+      "dhcp_lease_matches_port": true,
+      "domain_running": true,
+      "fixed_ip": "192.0.2.2",
+      "gate": "R3",
+      "libvirt_domain": "o3k-039502b1e0c5f242eb77",
+      "phase": "P13.7",
+      "result": "passed",
+      "ssh_ok": true,
+      "ssh_path": "floating_ip"
+    },
+    {
+      "checksum_match": true,
+      "gate": "R5",
+      "guest_device": "/dev/vdb",
+      "lv_name": "o3k-v-9cbae23a177c469ba542525c9503ceae",
+      "marker_sha256": "a730604a4653f9b3f1781a557dc9cb665683def1b26eb81e5b399c80a85d2b2e",
+      "phase": "P13.7",
+      "post_reattach_sha256": "a730604a4653f9b3f1781a557dc9cb665683def1b26eb81e5b399c80a85d2b2e",
+      "reattach_mechanism": "tofu taint openstack_compute_volume_attach_v2",
+      "result": "passed"
+    },
+    {
+      "drift_attribute": "name",
+      "drift_detected": true,
+      "drift_exactly_one_change": true,
+      "drift_resource": "openstack_networking_network_v2.network",
+      "final_plan_noop": true,
+      "gate": "R6",
+      "initial_plan_noop": true,
+      "phase": "P13.7",
+      "restored_by_apply": true,
+      "result": "passed"
+    },
+    {
+      "gate": "R7",
+      "identities": {
+        "floating_ip": "198.51.100.10",
+        "port_id": "01a0739f-88e7-7470-b265-af892ee2fc21",
+        "server_id": "5f07fc29-d823-5c82-8a9b-78ae754e8228",
+        "volume_id": "9cbae23a-177c-469b-a542-525c9503ceae"
+      },
+      "identities_equal": true,
+      "phase": "P13.7",
+      "post_restart_plan_noop": true,
+      "restart_clean_sigterm": true,
+      "result": "passed",
+      "ssh_after_restart": true,
+      "volume_marker_intact": true
+    },
+    {
+      "gate": "R8",
+      "mechanism": "openstack_compute_instance_v2.power_state + os-reboot action API",
+      "phase": "P13.7",
+      "post_recovery_plan_noop": true,
+      "reboot_observed": true,
+      "result": "passed",
+      "ssh_after_recovery": true,
+      "start_observed": true,
+      "stop_observed": true,
+      "virsh_transitions": [
+        "running",
+        "shut off",
+        "running",
+        "running"
+      ],
+      "volume_marker_intact": true
+    },
+    {
+      "attachment_count": 0,
+      "gate": "R9",
+      "phase": "P13.7",
+      "result": "passed",
+      "zero_attachments": true,
+      "zero_bridges": true,
+      "zero_dnsmasq": true,
+      "zero_floating_ips": true,
+      "zero_keypairs": true,
+      "zero_libvirt_domains": true,
+      "zero_lvs": true,
+      "zero_networks": true,
+      "zero_nft_tables": true,
+      "zero_non_terminal_operations": true,
+      "zero_ports": true,
+      "zero_router_interfaces": true,
+      "zero_routers": true,
+      "zero_security_group_rules": true,
+      "zero_security_groups": true,
+      "zero_servers": true,
+      "zero_subnets": true,
+      "zero_volumes": true
+    },
+    {
+      "foreign_baseline_entries": 85,
+      "foreign_state_changes": 0,
+      "gate": "R10",
+      "owned_leaks": 0,
+      "phase": "P13.7",
+      "result": "passed"
+    }
+  ],
+  "image": {
+    "name": "cirros-0.6.3-x86_64-disk.img",
+    "sha256": "7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b",
+    "source_url": "https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img"
+  },
+  "phase": "P13.7",
+  "postgresql_server_version": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+  "profile": "p13-iac-compatibility-v1",
+  "result": "passed",
+  "schema_version": 1,
+  "tested_runtime_head_sha": "3d5ecf610a13bfdafb0d8026292dbeca83d68102",
+  "toolchain": {
+    "opentofu": "1.12.6",
+    "opentofu_archive_sha256": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
+    "provider": "terraform-provider-openstack/openstack 3.4.0",
+    "provider_archive_sha256": "11b3c88e24197a29b13cf5ab41771944bd16707b561645323e8cbb4f1da00b7b",
+    "provider_binary_sha256": "2840ef5e25598f85591cf984825a8a19b9de498782cfe253e6d3e78740fbd5dc",
+    "provider_modified": false
+  }
+}

@@ -429,7 +429,8 @@ discovery; runtime compatibility claims remain gated by SPEC-0032 evidence.
 
 ### P13.7 — Full-stack real-host acceptance
 
-- Complete IaC journey on real host, product profile closure
+- Complete bounded IaC journey on the real host and product-profile closure
+  are verified by `docs/compatibility/p13-7/p13-7-real-host-iac-evidence.json`.
 
 ### P13 non-goals
 
