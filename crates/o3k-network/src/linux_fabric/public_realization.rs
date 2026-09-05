@@ -88,7 +88,17 @@ impl PublicAddressRealizer {
             })
             .collect();
         if requested.is_empty() {
-            return Ok(());
+            if self.owned_bindings.is_empty() {
+                return Ok(());
+            }
+            let realm_id = plan_realm_id(intents)?;
+            let retained: Vec<OwnedBinding> = self
+                .owned_bindings
+                .iter()
+                .filter(|binding| binding.realm_id != realm_id)
+                .cloned()
+                .collect();
+            return self.realize_bindings(&retained);
         }
         let realm_id = plan_realm_id(intents)?;
         let mut bindings = self.owned_bindings.clone();
@@ -836,14 +846,28 @@ mod tests {
         ];
         provider.apply(&second_intents).expect("second binding");
         assert_eq!(provider.owned_bindings.len(), 2);
+        let second_without_public = [
+            NetworkPlanIntent::AddressRealm {
+                realm_id: Uuid::from_u128(2),
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect("realm prefix"),
+                gateway: Ipv4Addr::new(10, 0, 0, 1),
+            },
+            NetworkPlanIntent::AddressAssignment {
+                endpoint_id: second,
+                address: Ipv4Addr::new(10, 0, 0, 3),
+                generation: 1,
+            },
+        ];
+        provider
+            .apply(&second_without_public)
+            .expect("remove absent public intent");
+        assert_eq!(provider.owned_bindings.len(), 1);
+        assert_eq!(provider.owned_bindings[0].endpoint_id, first);
         provider
             .remove_for_plan(&first_intents)
             .expect("remove first");
-        assert_eq!(provider.owned_bindings.len(), 1);
-        assert_eq!(provider.owned_bindings[0].endpoint_id, second);
-        let stored = fs::read_to_string(root.join(OWNED_BINDING_FILE)).expect("stored bindings");
-        assert!(stored.contains(&second.to_string()));
-        assert!(!stored.contains(&first.to_string()));
+        assert!(provider.owned_bindings.is_empty());
+        assert!(!root.join(OWNED_BINDING_FILE).exists());
     }
 
     #[test]
