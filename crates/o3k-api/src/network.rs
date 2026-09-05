@@ -2403,18 +2403,40 @@ async fn dispatch_policy_network_with_gateway(
     }
     let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
     let operation_id = match action {
-        o3k_network::NetworkPlanAction::Apply => Uuid::new_v5(
-            &Uuid::NAMESPACE_URL,
-            &serde_json::to_string(&(&policies, &policy_defaults))
-                .map_err(|_| {
-                    keystone_error(
-                        StatusCode::BAD_REQUEST,
-                        "Bad Request",
-                        "policy identity serialization failed",
-                    )
-                })?
-                .into_bytes(),
-        ),
+        o3k_network::NetworkPlanAction::Apply => {
+            // The same endpoint plan id is intentionally reusable, but its
+            // operation identity must change whenever any semantic input to
+            // the plan changes. In particular, detaching a RouterInterface
+            // changes gateway Route/Egress intents while the endpoint policy
+            // rows remain unchanged. Reusing the old policy-only identity
+            // would make the executor classify the new plan as a conflicting
+            // replay and strand provider cleanup.
+            let identity = serde_json::to_vec(&(
+                project_id,
+                network_id,
+                endpoint_id,
+                realm.id,
+                &port.mac_address,
+                port.fixed_ip,
+                &subnet.cidr,
+                &host,
+                external_realm_route_id.or(state.network_external_realm_id),
+                &policies,
+                &policy_defaults,
+                &gateway_execution,
+                &gateway_routes,
+                &gateway_egress,
+                gateway_realization_enabled,
+            ))
+            .map_err(|_| {
+                keystone_error(
+                    StatusCode::BAD_REQUEST,
+                    "Bad Request",
+                    "policy identity serialization failed",
+                )
+            })?;
+            Uuid::new_v5(&Uuid::NAMESPACE_URL, &identity)
+        }
         o3k_network::NetworkPlanAction::Remove => Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!("o3k:network:policy-remove:{project_id}:{network_id}:{endpoint_id}").as_bytes(),
