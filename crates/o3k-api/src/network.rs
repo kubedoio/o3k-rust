@@ -580,6 +580,7 @@ pub(crate) async fn add_router_interface(
                     realm.network_id,
                     port.id,
                     Some(a.gateway_id),
+                    o3k_network::NetworkPlanAction::Apply,
                 )
                 .await
                 {
@@ -728,6 +729,7 @@ pub(crate) async fn remove_router_interface(
                     realm.network_id,
                     port.id,
                     Some(a.gateway_id),
+                    o3k_network::NetworkPlanAction::Apply,
                 )
                 .await
                 {
@@ -1024,6 +1026,7 @@ pub async fn recover_l3_gateway_operations(state: &AppState) {
             network_id,
             attachment.endpoint_id,
             None,
+            o3k_network::NetworkPlanAction::Apply,
         )
         .await
         {
@@ -1085,6 +1088,7 @@ pub async fn recover_l3_gateway_operations(state: &AppState) {
                 network_id,
                 endpoint_id,
                 None,
+                o3k_network::NetworkPlanAction::Apply,
             )
             .await
             {
@@ -2180,9 +2184,34 @@ async fn dispatch_policy_network(
     network_id: Uuid,
     endpoint_id: Uuid,
 ) -> Result<(), axum::response::Response> {
-    dispatch_policy_network_with_gateway(state, project_id, network_id, endpoint_id, None)
-        .await
-        .map(|_| ())
+    dispatch_policy_network_with_gateway(
+        state,
+        project_id,
+        network_id,
+        endpoint_id,
+        None,
+        o3k_network::NetworkPlanAction::Apply,
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn remove_policy_network(
+    state: &AppState,
+    project_id: &str,
+    network_id: Uuid,
+    endpoint_id: Uuid,
+) -> Result<(), axum::response::Response> {
+    dispatch_policy_network_with_gateway(
+        state,
+        project_id,
+        network_id,
+        endpoint_id,
+        None,
+        o3k_network::NetworkPlanAction::Remove,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Dispatches a complete endpoint plan and, when requested, the complete
@@ -2195,6 +2224,7 @@ async fn dispatch_policy_network_with_gateway(
     network_id: Uuid,
     endpoint_id: Uuid,
     gateway_id: Option<Uuid>,
+    action: o3k_network::NetworkPlanAction,
 ) -> Result<bool, axum::response::Response> {
     let Some(dispatcher) = state.network_dispatcher.as_ref() else {
         return Ok(false);
@@ -2372,18 +2402,24 @@ async fn dispatch_policy_network_with_gateway(
         ));
     }
     let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
-    let operation_id = Uuid::new_v5(
-        &Uuid::NAMESPACE_URL,
-        &serde_json::to_string(&(&policies, &policy_defaults))
-            .map_err(|_| {
-                keystone_error(
-                    StatusCode::BAD_REQUEST,
-                    "Bad Request",
-                    "policy identity serialization failed",
-                )
-            })?
-            .into_bytes(),
-    );
+    let operation_id = match action {
+        o3k_network::NetworkPlanAction::Apply => Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            &serde_json::to_string(&(&policies, &policy_defaults))
+                .map_err(|_| {
+                    keystone_error(
+                        StatusCode::BAD_REQUEST,
+                        "Bad Request",
+                        "policy identity serialization failed",
+                    )
+                })?
+                .into_bytes(),
+        ),
+        o3k_network::NetworkPlanAction::Remove => Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:network:policy-remove:{project_id}:{network_id}:{endpoint_id}").as_bytes(),
+        ),
+    };
     let plan = o3k_network::compile_attachment_plan_with_defaults(
         o3k_network::AttachmentPlanInput {
             endpoint_id: port.id,
@@ -2421,11 +2457,13 @@ async fn dispatch_policy_network_with_gateway(
         .dispatch(o3k_network::NetworkPlanCommand {
             command_id: Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
-                format!("policy:{operation_id}").as_bytes(),
+                format!("policy:{action:?}:{operation_id}").as_bytes(),
             ),
             operation_id,
-            idempotency_key: format!("o3k:network:policy:{project_id}:{network_id}:{operation_id}"),
-            action: o3k_network::NetworkPlanAction::Apply,
+            idempotency_key: format!(
+                "o3k:network:policy:{project_id}:{network_id}:{action:?}:{operation_id}"
+            ),
+            action,
             target: agent,
             controller: controller.clone(),
             deadline_unix_ms,
@@ -2446,10 +2484,12 @@ async fn dispatch_policy_network_with_gateway(
             "policy realization requires observation",
         ));
     }
-    network
-        .mark_network_intent_active_for_project(project_id, network_id)
-        .await
-        .map_err(network_error)?;
+    if matches!(action, o3k_network::NetworkPlanAction::Apply) {
+        network
+            .mark_network_intent_active_for_project(project_id, network_id)
+            .await
+            .map_err(network_error)?;
+    }
     Ok(true)
 }
 
@@ -3682,6 +3722,14 @@ pub(crate) async fn delete_port(
         Ok(value) => value,
         Err(response) => return response,
     };
+    let project = auth.effective_scope().id().as_str();
+    let port = match service.authorize_delete_port(&auth, id).await {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    if let Err(response) = remove_policy_network(&state, project, port.network_id, port.id).await {
+        return response;
+    }
     match service.delete_port(&auth, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => network_error(error),
