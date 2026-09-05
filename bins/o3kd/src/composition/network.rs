@@ -163,6 +163,11 @@ pub(crate) struct NetworkBindingProjector {
     pub(crate) network_external_realm_id: Option<Uuid>,
     pub(crate) network_agent: Option<o3k_network::NetworkAgentIdentity>,
     pub(crate) public_allocator: Option<Arc<o3k_network::PublicAddressAllocator>>,
+    /// Terminal compute observations can be delivered more than once. Keep
+    /// the read/dispatch/unbind sequence single-flight so a concurrent
+    /// observation cannot construct a different remove plan while policy
+    /// resources are being destroyed.
+    pub(crate) unbind_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl NetworkBindingProjector {
@@ -219,6 +224,11 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 format!("invalid port id {port_id:?}: {error}"),
             )
         })?;
+        // Every terminal outcome and terminal unbind share the same durable
+        // binding. Keep the dispatch/projection sequence in the same
+        // single-flight boundary as unbind so they cannot cross between the
+        // binding read and intent update.
+        let _guard = self.unbind_lock.lock().await;
         let state = if succeeded {
             o3k_network::PortBindingState::Bound
         } else {
@@ -246,6 +256,7 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 format!("invalid port id {port_id:?}: {error}"),
             )
         })?;
+        let _guard = self.unbind_lock.lock().await;
         let port = self
             .network
             .get_port_for_project(project_id, port_id)

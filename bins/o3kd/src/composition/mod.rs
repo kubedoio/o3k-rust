@@ -307,6 +307,7 @@ pub async fn build_composition(
         network_external_realm_id,
         network_agent: network_agent_identity.clone(),
         public_allocator: public_allocator_for_binding.clone(),
+        unbind_lock: Arc::new(tokio::sync::Mutex::new(())),
     });
 
     // Build compute service based on configured provider.
@@ -1511,6 +1512,7 @@ mod tests {
                 agent_epoch: "agent-epoch".to_owned(),
             }),
             public_allocator: Some(Arc::new(public_allocator)),
+            unbind_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         projector
             .project_create_outcome("project-a", &port.id.to_string(), true)
@@ -1521,8 +1523,25 @@ mod tests {
         let bound = network.get_port_for_project("project-a", port.id).await?;
         assert_eq!(bound.binding_host.as_deref(), Some("network-agent"));
         assert_eq!(bound.binding_state.as_deref(), Some("bound"));
+        let first = projector.clone();
+        let second = projector.clone();
+        let first_port_id = port.id.to_string();
+        let second_port_id = first_port_id.clone();
+        let first_unbind =
+            tokio::spawn(async move { first.unbind_port("project-a", &first_port_id).await });
+        let second_unbind =
+            tokio::spawn(async move { second.unbind_port("project-a", &second_port_id).await });
+        first_unbind.await??;
+        second_unbind.await??;
         let commands = commands.lock().map_err(|_| "commands poisoned")?;
-        assert_eq!(commands.len(), 1);
+        assert_eq!(commands.len(), 2);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.action == o3k_network::NetworkPlanAction::Remove)
+                .count(),
+            1
+        );
         assert!(commands[0].plan.intents.iter().any(|intent| matches!(
             intent,
             o3k_domain::NetworkPlanIntent::PublicAddressBinding(binding)
@@ -1557,6 +1576,7 @@ mod tests {
             network_agent: None,
             network_external_realm_id: None,
             public_allocator: None,
+            unbind_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         let net = network
             .create_network_for_project("project-a", "flat".to_owned())
