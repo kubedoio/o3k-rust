@@ -273,7 +273,13 @@ impl NetworkPlanRealizer for CompositeRealizer {
                 provider.apply_endpoint_snapshot(endpoint_id, &endpoint_intents, &endpoints)?;
             }
         }
-        if plan.intents.iter().any(is_public_intent) {
+        // A routed plan is also the reconciliation boundary for public
+        // address state.  A later full snapshot can legitimately omit the
+        // PublicAddressBinding after the FIP was deleted; still invoke the
+        // public realizer so it can remove any durable binding left by an
+        // earlier snapshot.  Without this, the empty-request cleanup path is
+        // unreachable in the composite runtime.
+        if should_reconcile_public(plan, self.public.is_some()) {
             self.public
                 .as_mut()
                 .ok_or(CompositeRealizerError::PublicNotConfigured)?
@@ -477,6 +483,11 @@ fn is_public_intent(intent: &NetworkPlanIntent) -> bool {
     matches!(intent, NetworkPlanIntent::PublicAddressBinding(_))
 }
 
+fn should_reconcile_public(plan: &NodeNetworkPlan, public_configured: bool) -> bool {
+    plan.intents.iter().any(is_public_intent)
+        || (public_configured && plan.intents.iter().any(is_routed_intent))
+}
+
 fn policy_endpoints(plan: &NodeNetworkPlan) -> Vec<PolicyEndpoint> {
     plan.intents
         .iter()
@@ -613,5 +624,37 @@ mod transport_tests {
         let _ = server_task.await;
         let _ = fs::remove_dir_all(root);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod public_reconciliation_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn plan(intents: Vec<NetworkPlanIntent>) -> NodeNetworkPlan {
+        NodeNetworkPlan {
+            schema_version: 1,
+            plan_id: Uuid::from_u128(1),
+            node_id: "test-node".to_owned(),
+            operation_id: Uuid::from_u128(2),
+            deadline_unix_ms: 1,
+            resource_generations: BTreeMap::new(),
+            intents,
+            fabric: None,
+            gateway: None,
+            fingerprint_sha256: "test".to_owned(),
+        }
+    }
+
+    #[test]
+    fn routed_snapshot_reconciles_public_state_when_binding_is_absent() {
+        let routed = NetworkPlanIntent::Egress(o3k_domain::EgressIntent {
+            external_realm_id: Uuid::from_u128(3),
+            enabled: true,
+            nat: true,
+        });
+        assert!(should_reconcile_public(&plan(vec![routed.clone()]), true));
+        assert!(!should_reconcile_public(&plan(vec![routed]), false));
     }
 }
