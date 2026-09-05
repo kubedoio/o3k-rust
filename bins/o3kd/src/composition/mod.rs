@@ -313,6 +313,7 @@ pub async fn build_composition(
     // Build compute service based on configured provider.
     let mut compute_service = if config.provider == o3k_config::Provider::Agent {
         let resolver = Arc::new(DaemonCreateResolver {
+            store: store.clone(),
             image: image_service.clone(),
             network: network_service.clone(),
             config_drive: config_drive_store.clone(),
@@ -1223,6 +1224,7 @@ mod tests {
         let dispatcher = RecordingNetworkDispatcher::default();
         let commands = dispatcher.commands.clone();
         let resolver = DaemonCreateResolver {
+            store: store.clone(),
             image,
             network: network.clone(),
             config_drive,
@@ -1388,6 +1390,7 @@ mod tests {
         let network =
             o3k_network::NetworkService::open(root.join("network"), network_repository).await?;
         let resolver = DaemonCreateResolver {
+            store: store.clone(),
             image,
             network: network.clone(),
             config_drive,
