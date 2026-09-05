@@ -1087,12 +1087,19 @@ fn backend_attach_disk(
     })?;
     let disk_xml = build_attach_disk_xml(volume_id, attachment_id, host_path, device, slot)?;
     domain
-        .attach_device_flags(
-            &disk_xml,
-            VIR_DOMAIN_DEVICE_MODIFY_LIVE | VIR_DOMAIN_DEVICE_MODIFY_CONFIG,
-        )
+        .attach_device_flags(&disk_xml, VIR_DOMAIN_DEVICE_MODIFY_LIVE)
         .map_err(|_| {
             LibvirtError::new(ErrorCategory::OperationFailed, "block-device attach failed")
+        })?;
+    wait_for_disk_presence(&domain, volume_id, true)?;
+    wait_for_block_device_ready(&domain, device)?;
+    domain
+        .attach_device_flags(&disk_xml, VIR_DOMAIN_DEVICE_MODIFY_CONFIG)
+        .map_err(|_| {
+            LibvirtError::new(
+                ErrorCategory::OperationFailed,
+                "block-device persistent configuration update failed",
+            )
         })?;
     Ok(())
 }
@@ -1123,15 +1130,92 @@ fn backend_detach_disk(uri: &str, name: &str, volume_id: &str) -> Result<bool, L
             "attached disk metadata is malformed",
         )
     })?;
-    domain
-        .detach_device_flags(
-            &disk_xml,
-            VIR_DOMAIN_DEVICE_MODIFY_LIVE | VIR_DOMAIN_DEVICE_MODIFY_CONFIG,
+    let device = disk_target_from_xml(&disk_xml).ok_or_else(|| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "attached disk target is missing",
         )
+    })?;
+    domain
+        .detach_device_flags(&disk_xml, VIR_DOMAIN_DEVICE_MODIFY_LIVE)
         .map_err(|_| {
             LibvirtError::new(ErrorCategory::OperationFailed, "block-device detach failed")
         })?;
+    wait_for_disk_presence(&domain, volume_id, false)?;
+    wait_for_block_device_absence(&domain, &device)?;
+    domain
+        .detach_device_flags(&disk_xml, VIR_DOMAIN_DEVICE_MODIFY_CONFIG)
+        .map_err(|_| {
+            LibvirtError::new(
+                ErrorCategory::OperationFailed,
+                "block-device persistent configuration update failed",
+            )
+        })?;
     Ok(true)
+}
+
+#[cfg(feature = "libvirt")]
+fn wait_for_disk_presence(
+    domain: &Domain,
+    volume_id: &str,
+    expected: bool,
+) -> Result<(), LibvirtError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let xml = domain.get_xml_desc(0).map_err(|_| {
+            LibvirtError::new(
+                ErrorCategory::OperationFailed,
+                "domain XML inspection failed while waiting for block-device hotplug",
+            )
+        })?;
+        let present = owned_disk_volume_ids(&xml)
+            .iter()
+            .any(|value| value == volume_id);
+        if present == expected {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(LibvirtError::new(
+                ErrorCategory::OperationFailed,
+                "block-device hotplug did not reach the requested state",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(feature = "libvirt")]
+fn wait_for_block_device_ready(domain: &Domain, device: &str) -> Result<(), LibvirtError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if domain.get_block_stats(device).is_ok() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(LibvirtError::new(
+                ErrorCategory::OperationFailed,
+                "block-device backend did not become ready",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(feature = "libvirt")]
+fn wait_for_block_device_absence(domain: &Domain, device: &str) -> Result<(), LibvirtError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if domain.get_block_stats(device).is_err() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(LibvirtError::new(
+                ErrorCategory::OperationFailed,
+                "block-device backend remained present after detach",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 #[cfg(feature = "libvirt")]
@@ -1199,6 +1283,13 @@ fn owned_disk_xml_for_volume(xml: &str, volume_id: &str) -> Option<String> {
         search_from = end;
     }
     None
+}
+
+#[cfg(feature = "libvirt")]
+fn disk_target_from_xml(xml: &str) -> Option<String> {
+    let target = xml.split_once("<target")?.1;
+    let target = target.split_once('>')?.0;
+    xml_fragment_attribute(target, "dev")
 }
 
 #[cfg(feature = "libvirt")]
@@ -2455,5 +2546,18 @@ mod block_device_tests {
         assert!(element.ends_with("</disk>"));
         assert!(owned_disk_xml_for_volume(&xml, "00000000-0000-0000-0000-00000000ffff").is_none());
         Ok(())
+    }
+
+    #[test]
+    fn disk_target_from_xml_ignores_source_device_attribute() {
+        let xml = r#"<disk type="block" device="disk">
+  <source dev="/dev/vg/volume"/>
+  <target dev="vdb" bus="virtio"/>
+</disk>"#;
+        assert_eq!(disk_target_from_xml(xml).as_deref(), Some("vdb"));
+        assert_eq!(
+            disk_target_from_xml("<disk><source dev=\"/dev/vg/volume\"/></disk>"),
+            None
+        );
     }
 }
