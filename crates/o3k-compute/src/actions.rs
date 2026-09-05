@@ -222,7 +222,11 @@ impl ComputeService {
             self.release_placement_allocation(id.as_uuid(), &intent)
                 .await?;
             self.store.detach_server_keypair(id.as_uuid()).await?;
-            self.unbind_ports_from_intent(&intent).await;
+            self.unbind_ports_from_intent(
+                &intent,
+                accepted_operation_id.unwrap_or(intent.operation_id),
+            )
+            .await;
             self.cleanup_config_drive_best_effort(&id.as_uuid().to_string());
             let _ = self
                 .store

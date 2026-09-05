@@ -230,7 +230,9 @@ impl ComputeService {
                         .await
                 }
                 "lifecycle:delete" if state == o3k_store::OperationState::Succeeded => {
-                    projector.unbind_port(&request.project_id, port_id).await
+                    projector
+                        .unbind_port(&request.project_id, port_id, operation_id)
+                        .await
                 }
                 _ => continue,
             };
@@ -250,12 +252,19 @@ impl ComputeService {
     /// intent. Used when a delete reached terminal success, including the
     /// already-deleted shortcut, where the delete completed in a previous
     /// run. Best-effort and idempotent like `project_terminal_binding_outcome`.
-    pub(super) async fn unbind_ports_from_intent(&self, request: &CreateInstanceRequest) {
+    pub(super) async fn unbind_ports_from_intent(
+        &self,
+        request: &CreateInstanceRequest,
+        operation_id: uuid::Uuid,
+    ) {
         let Some(projector) = self.binding_projector.as_ref() else {
             return;
         };
         for port_id in &request.network_ids {
-            if let Err(error) = projector.unbind_port(&request.project_id, port_id).await {
+            if let Err(error) = projector
+                .unbind_port(&request.project_id, port_id, operation_id)
+                .await
+            {
                 tracing::warn!(
                     resource_id = %request.o3k_server_id,
                     port_id = %port_id,

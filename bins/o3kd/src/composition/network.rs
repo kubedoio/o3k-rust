@@ -249,6 +249,7 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
         &self,
         project_id: &str,
         port_id: &str,
+        operation_id: uuid::Uuid,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let port_id = port_id.parse::<Uuid>().map_err(|error| {
             std::io::Error::new(
@@ -293,10 +294,6 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             let external_realm_route_id = self.resolve_external_realm_route_id(project_id).await?;
             let deadline_unix_ms = super::unix_time_millis().saturating_add(30_000);
-            let operation_id = Uuid::new_v5(
-                &Uuid::NAMESPACE_URL,
-                format!("o3k:network:remove:{project_id}:{port_id}").as_bytes(),
-            );
             let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
                 endpoint_id: port.id,
                 realm_id: port.network_id,
@@ -319,13 +316,15 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
             .map_err(|error| std::io::Error::other(error.to_string()))?;
             let command_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
-                format!("o3k:network:remove-command:{operation_id}").as_bytes(),
+                format!("o3k:network:remove-command:{operation_id}:{port_id}").as_bytes(),
             );
             let status = dispatcher
                 .dispatch(o3k_network::NetworkPlanCommand {
                     command_id,
                     operation_id,
-                    idempotency_key: format!("o3k:network:remove:{project_id}:{port_id}"),
+                    idempotency_key: format!(
+                        "o3k:network:remove:{project_id}:{port_id}:{operation_id}"
+                    ),
                     action: o3k_network::NetworkPlanAction::Remove,
                     target: agent,
                     controller: self.network_controller.clone(),

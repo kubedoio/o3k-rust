@@ -1530,10 +1530,16 @@ mod tests {
         let second = projector.clone();
         let first_port_id = port.id.to_string();
         let second_port_id = first_port_id.clone();
-        let first_unbind =
-            tokio::spawn(async move { first.unbind_port("project-a", &first_port_id).await });
-        let second_unbind =
-            tokio::spawn(async move { second.unbind_port("project-a", &second_port_id).await });
+        let first_unbind = tokio::spawn(async move {
+            first
+                .unbind_port("project-a", &first_port_id, uuid::Uuid::now_v7())
+                .await
+        });
+        let second_unbind = tokio::spawn(async move {
+            second
+                .unbind_port("project-a", &second_port_id, uuid::Uuid::now_v7())
+                .await
+        });
         first_unbind.await??;
         second_unbind.await??;
         // A late successful create outcome must not recreate a binding after
@@ -1623,7 +1629,7 @@ mod tests {
         assert_eq!(bound.binding_host.as_deref(), Some("compute-1"));
         assert_eq!(bound.binding_state.as_deref(), Some("bound"));
         projector
-            .unbind_port("project-a", &port.id.to_string())
+            .unbind_port("project-a", &port.id.to_string(), uuid::Uuid::now_v7())
             .await?;
         let unbound = network.get_port_for_project("project-a", port.id).await?;
         assert_eq!(unbound.binding_host, None);
