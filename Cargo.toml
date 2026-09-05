@@ -58,7 +58,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "macros", "migrate", "chrono", "uuid"] }
 thiserror = "2"
 toml = "0.8"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 prost = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

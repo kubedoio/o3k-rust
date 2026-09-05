@@ -887,6 +887,7 @@ pub(crate) async fn create_server(
     match result {
         Ok(server) => {
             if let Some(network_service) = state.network.as_ref() {
+                let _mutation_guard = state.network_mutation_lock.lock().await;
                 let mut cleanup_failed = false;
                 for port_id in &owned_network_ids {
                     if !server.network_ids.iter().any(|id| id == port_id)
@@ -921,6 +922,7 @@ pub(crate) async fn create_server(
         }
         Err(error) => {
             if let Some(network_service) = state.network.as_ref() {
+                let _mutation_guard = state.network_mutation_lock.lock().await;
                 let durable_network_ids = match service
                     .server_network_ids_for_auth(&auth, ServerId::from_uuid(server_id))
                     .await
@@ -1099,6 +1101,7 @@ pub(crate) async fn delete_server(
         Ok(value) => value,
         Err(response) => return response,
     };
+    let _mutation_guard = state.network_mutation_lock.lock().await;
     let owned_ports = match service
         .server_network_ids_for_auth(&auth, ServerId::from_uuid(id))
         .await

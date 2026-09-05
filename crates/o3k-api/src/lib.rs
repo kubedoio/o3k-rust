@@ -113,6 +113,11 @@ pub struct AppState {
     network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
     network_controller: Option<o3k_network::NetworkControllerLease>,
     network_agent: Option<o3k_network::NetworkAgentIdentity>,
+    /// Serializes canonical network mutations with their provider-plan
+    /// dispatch.  A RouterInterface removal can otherwise snapshot a port
+    /// while a concurrent port delete is already removing that endpoint,
+    /// allowing a stale Apply to arrive after the Remove.
+    network_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     network_gateway_realization: bool,
     compute: Option<Arc<ComputeService>>,
     console: Option<Arc<ConsoleService>>,
@@ -138,6 +143,7 @@ impl Default for AppState {
             network_dispatcher: None,
             network_controller: None,
             network_agent: None,
+            network_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             network_gateway_realization: true,
             compute: None,
             console: None,

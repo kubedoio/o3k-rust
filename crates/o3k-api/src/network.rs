@@ -649,6 +649,10 @@ pub(crate) async fn remove_router_interface(
         Ok(v) => v,
         Err(r) => return r,
     };
+    // Keep the canonical detach and every derived provider Apply in one
+    // mutation epoch.  Port deletion takes the same lock, so it cannot
+    // remove the endpoint between the detach snapshot and its dispatch.
+    let _mutation_guard = state.network_mutation_lock.lock().await;
     let project = auth.effective_scope().id().as_str();
     let attachments = match service.list_l3_gateway_attachments(project, &id).await {
         Ok(v) => v,
@@ -3744,6 +3748,9 @@ pub(crate) async fn delete_port(
         Ok(value) => value,
         Err(response) => return response,
     };
+    // Serialize endpoint removal with RouterInterface-derived policy plans;
+    // otherwise a stale concurrent Apply can follow this endpoint's Remove.
+    let _mutation_guard = state.network_mutation_lock.lock().await;
     let project = auth.effective_scope().id().as_str();
     let port = match service.authorize_delete_port(&auth, id).await {
         Ok(value) => value,
