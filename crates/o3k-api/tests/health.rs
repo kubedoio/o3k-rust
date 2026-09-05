@@ -2200,6 +2200,9 @@ async fn router_detach_dispatches_only_the_requested_gateway_and_finalizes_after
     let gateway_c = network
         .create_l3_gateway_for_project(project_id, "gateway-c".to_owned(), None, true)
         .await?;
+    let gateway_d = network
+        .create_l3_gateway_for_project(project_id, "gateway-d".to_owned(), None, true)
+        .await?;
     network
         .attach_l3_gateway_realm(project_id, &gateway_a.id, &realm.id)
         .await?;
@@ -2273,6 +2276,36 @@ async fn router_detach_dispatches_only_the_requested_gateway_and_finalizes_after
             .await?
             .into_iter()
             .all(|gateway| gateway.id != gateway_c.id)
+    );
+
+    // A successful interface DELETE may leave a durable deletion reservation
+    // until the next request observes the disabled realization boundary. A
+    // following router DELETE must finish that reservation rather than
+    // exposing a transient "router in use" conflict to the IaC provider.
+    let attachment_d = network
+        .attach_l3_gateway_realm(project_id, &gateway_d.id, &realm.id)
+        .await?;
+    let deleting_attachment = network
+        .detach_l3_gateway_realm(project_id, &attachment_d.id, attachment_d.generation)
+        .await?;
+    assert_eq!(deleting_attachment.state, "deleting");
+    let disabled_state = state.clone().with_network_gateway_realization(false);
+    let response = o3k_api::router_with_state(disabled_state)
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2.0/routers/{}", gateway_d.id))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(
+        network
+            .list_l3_gateways_for_project(project_id)
+            .await?
+            .into_iter()
+            .all(|gateway| gateway.id != gateway_d.id)
     );
 
     let response = o3k_api::router_with_state(state)
