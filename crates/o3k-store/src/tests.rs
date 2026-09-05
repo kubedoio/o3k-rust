@@ -1514,6 +1514,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_federated_binding_survives_restart() -> Result<(), Box<dyn Error>> {
+        let path =
+            std::env::temp_dir().join(format!("o3k-federated-binding-{}.sqlite", Uuid::now_v7()));
+        let store = SqliteStore::connect_file(&path).await?;
+        let domain = KeystoneDomainRecord {
+            id: "restart-domain".to_owned(),
+            name: "Restart".to_owned(),
+            description: None,
+            enabled: true,
+            created_at: "2026-08-07T00:00:00Z".to_owned(),
+        };
+        let user = KeystoneUserRecord {
+            id: "restart-user".to_owned(),
+            domain_id: domain.id.clone(),
+            name: "restart-user".to_owned(),
+            password_hash: "not-used".to_owned(),
+            email: Some("same@example.test".to_owned()),
+            enabled: true,
+            created_at: domain.created_at.clone(),
+        };
+        let binding = FederatedBindingRecord {
+            id: "restart-binding".to_owned(),
+            trusted_issuer_id: "restart-issuer".to_owned(),
+            issuer: "https://idp.example.test".to_owned(),
+            subject: "restart-subject".to_owned(),
+            principal_id: user.id.clone(),
+            principal_type: "user".to_owned(),
+            enabled: true,
+            created_at: domain.created_at.clone(),
+            updated_at: domain.created_at.clone(),
+        };
+        store.insert_keystone_domain(&domain).await?;
+        store.insert_keystone_user(&user).await?;
+        store.insert_federated_binding(&binding).await?;
+        drop(store);
+
+        let reopened = SqliteStore::connect_file(&path).await?;
+        assert_eq!(
+            reopened
+                .find_federated_binding("restart-issuer", "restart-subject")
+                .await?,
+            Some(binding)
+        );
+        drop(reopened);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn image_metadata_survives_store_reopen() -> Result<(), Box<dyn Error>> {
         let path = PathBuf::from(format!("/tmp/o3k-store-image-{}.sqlite", Uuid::now_v7()));
         let image = ImageMetadataRecord {

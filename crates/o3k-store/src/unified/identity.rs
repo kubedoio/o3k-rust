@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::{
-    IdentityRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
-    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    FederatedBindingRecord, IdentityRepository, KeypairRecord, KeypairRepository,
+    KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
     StoreError,
 };
@@ -57,6 +57,38 @@ impl IdentityRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.list_keystone_users().await,
             Self::Postgres(s) => s.list_keystone_users().await,
+        }
+    }
+
+    async fn insert_federated_binding(
+        &self,
+        binding: &FederatedBindingRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_federated_binding(binding).await,
+            Self::Postgres(s) => s.insert_federated_binding(binding).await,
+        }
+    }
+
+    async fn find_federated_binding(
+        &self,
+        trusted_issuer_id: &str,
+        subject: &str,
+    ) -> Result<Option<FederatedBindingRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.find_federated_binding(trusted_issuer_id, subject).await,
+            Self::Postgres(s) => s.find_federated_binding(trusted_issuer_id, subject).await,
+        }
+    }
+
+    async fn set_federated_binding_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.set_federated_binding_enabled(id, enabled).await,
+            Self::Postgres(s) => s.set_federated_binding_enabled(id, enabled).await,
         }
     }
 

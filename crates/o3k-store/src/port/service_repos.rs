@@ -5,13 +5,14 @@ use crate::domain::error::StoreError;
 use crate::domain::records::{
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
     CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord,
-    CanonicalNetworkRecord, CanonicalRealmBindingRecord, ImageMetadataRecord, KeypairRecord,
-    KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
-    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, PlacementAllocationRecord,
-    PlacementIntentRecord, PlacementInventoryRecord, PlacementProviderRecord,
-    PlacementReconcileRecord, PortRecord, ResourceRecord, SecurityGroupBindingRecord,
-    SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord, VolumeAttachmentRecord,
+    CanonicalNetworkRecord, CanonicalRealmBindingRecord, FederatedBindingRecord,
+    ImageMetadataRecord, KeypairRecord, KeystoneDomainRecord, KeystoneEndpointRecord,
+    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
+    KeystoneServiceRecord, KeystoneUserRecord, NetworkAddressAllocationRecord, NetworkIntentRecord,
+    NetworkRecord, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    PlacementProviderRecord, PlacementReconcileRecord, PortRecord, ResourceRecord,
+    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord,
+    VolumeAttachmentRecord,
 };
 use crate::port::durable::DurableStore;
 use crate::quota::QuotaRepository;
@@ -35,6 +36,20 @@ pub trait IdentityRepository: Send + Sync {
     async fn list_keystone_projects(&self) -> Result<Vec<KeystoneProjectRecord>, StoreError>;
     async fn insert_keystone_user(&self, user: &KeystoneUserRecord) -> Result<(), StoreError>;
     async fn list_keystone_users(&self) -> Result<Vec<KeystoneUserRecord>, StoreError>;
+    async fn insert_federated_binding(
+        &self,
+        binding: &FederatedBindingRecord,
+    ) -> Result<(), StoreError>;
+    async fn find_federated_binding(
+        &self,
+        trusted_issuer_id: &str,
+        subject: &str,
+    ) -> Result<Option<FederatedBindingRecord>, StoreError>;
+    async fn set_federated_binding_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<(), StoreError>;
     async fn insert_keystone_role(&self, role: &KeystoneRoleRecord) -> Result<(), StoreError>;
     async fn list_keystone_roles(&self) -> Result<Vec<KeystoneRoleRecord>, StoreError>;
     async fn insert_keystone_role_assignment(

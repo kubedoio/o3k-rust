@@ -54,16 +54,16 @@ pub use domain::records::{
     CanonicalNetworkPolicyRecord, CanonicalNetworkPolicyRuleRecord, CanonicalNetworkRecord,
     CanonicalOperationLifecycleUpdate, CanonicalOperationRecord, CanonicalPolicyAttachmentRecord,
     CanonicalPolicyRealizationRecord, CanonicalRealmBindingRecord,
-    CanonicalReusableNetworkPolicyRecord, DatabaseHealth, IdempotencyReservationRequest,
-    ImageMetadataRecord, ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayUpdate,
-    KeypairRecord, KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord,
-    KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord,
-    KeystoneUserRecord, NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord,
-    ObservationUpdate, OperationRecord, PlacementAllocationRecord, PlacementIntentRecord,
-    PlacementInventoryRecord, PlacementProviderRecord, PlacementReconcileRecord,
-    PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord,
-    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord,
-    VolumeAttachmentRecord,
+    CanonicalReusableNetworkPolicyRecord, DatabaseHealth, FederatedBindingRecord,
+    IdempotencyReservationRequest, ImageMetadataRecord, ImageOverlayIdentity,
+    ImageOverlayOwnershipRecord, ImageOverlayUpdate, KeypairRecord, KeystoneDomainRecord,
+    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
+    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, ObservationUpdate,
+    OperationRecord, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    PlacementProviderRecord, PlacementReconcileRecord, PlacementResourceRecord, PortRecord,
+    ProviderReference, ResourceRecord, SecurityGroupBindingRecord, SecurityGroupRecord,
+    SecurityGroupRuleRecord, SubnetRecord, VolumeAttachmentRecord,
 };
 pub(crate) use domain::records::{legacy_policy_records, validate_canonical_lifecycle_update};
 pub use domain::state::{
@@ -465,6 +465,113 @@ pub async fn run_identity_repository_conformance<S: IdentityRepository>(
     store.insert_keystone_user(&user).await?;
     store.insert_keystone_user(&user).await?;
     assert_eq!(store.list_keystone_users().await?, vec![user.clone()]);
+
+    let binding = FederatedBindingRecord {
+        id: "binding-a".to_owned(),
+        trusted_issuer_id: "issuer-a".to_owned(),
+        issuer: "https://idp.example.test".to_owned(),
+        subject: "subject-a".to_owned(),
+        principal_id: user.id.clone(),
+        principal_type: "user".to_owned(),
+        enabled: true,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    store.insert_federated_binding(&binding).await?;
+    assert_eq!(
+        store
+            .find_federated_binding("issuer-a", "subject-a")
+            .await?,
+        Some(binding.clone())
+    );
+    assert!(store.insert_federated_binding(&binding).await.is_err());
+    assert!(
+        store
+            .find_federated_binding("issuer-b", "subject-a")
+            .await?
+            .is_none()
+    );
+    store
+        .set_federated_binding_enabled(&binding.id, false)
+        .await?;
+    assert!(
+        store
+            .find_federated_binding("issuer-a", "subject-a")
+            .await?
+            .is_none()
+    );
+    store
+        .set_federated_binding_enabled(&binding.id, true)
+        .await?;
+    let Some(reenabled) = store
+        .find_federated_binding("issuer-a", "subject-a")
+        .await?
+    else {
+        return Err(StoreError::Corrupt(
+            "reenabled federated binding did not resolve".to_owned(),
+        ));
+    };
+    assert_eq!(reenabled.id, binding.id);
+    assert_eq!(reenabled.principal_id, binding.principal_id);
+    assert!(reenabled.updated_at >= binding.updated_at);
+
+    let disabled_user = KeystoneUserRecord {
+        id: "user-disabled".to_owned(),
+        domain_id: domain.id.clone(),
+        name: "disabled".to_owned(),
+        password_hash: "pbkdf2_sha256$1$test".to_owned(),
+        email: user.email.clone(),
+        enabled: false,
+        created_at: now.clone(),
+    };
+    store.insert_keystone_user(&disabled_user).await?;
+    let disabled_binding = FederatedBindingRecord {
+        id: "binding-disabled-principal".to_owned(),
+        trusted_issuer_id: "issuer-a".to_owned(),
+        issuer: "https://idp.example.test".to_owned(),
+        subject: "subject-disabled".to_owned(),
+        principal_id: disabled_user.id.clone(),
+        principal_type: "user".to_owned(),
+        enabled: true,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    store.insert_federated_binding(&disabled_binding).await?;
+    assert!(
+        store
+            .find_federated_binding("issuer-a", "subject-disabled")
+            .await?
+            .is_none()
+    );
+
+    let missing_principal = FederatedBindingRecord {
+        id: "binding-missing-principal".to_owned(),
+        principal_id: "missing-user".to_owned(),
+        subject: "subject-missing".to_owned(),
+        ..disabled_binding.clone()
+    };
+    assert!(
+        store
+            .insert_federated_binding(&missing_principal)
+            .await
+            .is_err()
+    );
+
+    let concurrent_a = FederatedBindingRecord {
+        id: "binding-concurrent-a".to_owned(),
+        trusted_issuer_id: "issuer-concurrent".to_owned(),
+        subject: "same-subject".to_owned(),
+        ..binding.clone()
+    };
+    let concurrent_b = FederatedBindingRecord {
+        id: "binding-concurrent-b".to_owned(),
+        ..concurrent_a.clone()
+    };
+    let (left, right) = tokio::join!(
+        store.insert_federated_binding(&concurrent_a),
+        store.insert_federated_binding(&concurrent_b)
+    );
+    assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
 
     let role = KeystoneRoleRecord {
         id: "role-a".to_owned(),
