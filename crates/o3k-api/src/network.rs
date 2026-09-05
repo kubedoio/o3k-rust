@@ -3050,6 +3050,12 @@ pub(crate) async fn delete_floating_ip(
     {
         return response;
     }
+    // Neutron-compatible clients delete an associated floating IP directly.
+    // Remove host realization first, then clear canonical association before
+    // releasing the allocation.
+    if let Err(error) = allocator.disassociate(project_id, id) {
+        return public_error(error);
+    }
     match allocator.release(project_id, id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => public_error(error),

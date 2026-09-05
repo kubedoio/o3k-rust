@@ -390,28 +390,8 @@ async fn floating_ip_lifecycle_is_project_scoped_and_idempotent()
         serde_json::from_slice(&axum::body::to_bytes(listed.into_body(), 4096).await?)?;
     assert_eq!(listed["floatingips"].as_array().map(Vec::len), Some(1));
 
-    let still_associated = o3k_api::router_with_state(state.clone())
-        .oneshot(
-            Request::builder()
-                .method(Method::DELETE)
-                .uri(format!("/v2.0/floatingips/{id}"))
-                .header("x-auth-token", &token)
-                .body(Body::empty())?,
-        )
-        .await?;
-    assert_eq!(still_associated.status(), StatusCode::CONFLICT);
-
-    let disassociated = o3k_api::router_with_state(state.clone())
-        .oneshot(
-            Request::builder()
-                .method(Method::PUT)
-                .uri(format!("/v2.0/floatingips/{id}"))
-                .header("x-auth-token", &token)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"floatingip":{}}"#))?,
-        )
-        .await?;
-    assert_eq!(disassociated.status(), StatusCode::OK);
+    // Deleting an associated floating IP must remove its realization and
+    // canonical association as part of the same compatibility operation.
     let deleted = o3k_api::router_with_state(state)
         .oneshot(
             Request::builder()
