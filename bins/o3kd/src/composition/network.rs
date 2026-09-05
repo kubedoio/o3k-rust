@@ -374,7 +374,10 @@ impl NetworkBindingProjector {
             .get_port_for_project(project_id, port_id)
             .await
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        if port.binding_host.is_some() {
+        // `down` is a durable explicit-unbind tombstone.  Do not recreate a
+        // host-side binding from a late compute-create callback after the
+        // server has already been deleted.
+        if port.binding_host.is_some() || port.binding_state.as_deref() == Some("down") {
             return Ok(());
         }
         let subnet_id = port
