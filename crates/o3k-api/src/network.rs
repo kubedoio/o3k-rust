@@ -2962,6 +2962,11 @@ pub(crate) async fn create_floating_ip(
         Ok(value) => value,
         Err(response) => return response,
     };
+    // Serialize Floating IP allocation/realization with endpoint and router
+    // mutations.  The provider snapshot includes the endpoint identity; an
+    // unlocked concurrent port delete can otherwise let a stale public Apply
+    // recreate nftables after the Floating IP has been removed.
+    let _mutation_guard = state.network_mutation_lock.lock().await;
     let allocator = match public_allocator(&state) {
         Ok(value) => value,
         Err(response) => return response,
@@ -3059,6 +3064,9 @@ pub(crate) async fn update_floating_ip(
         Ok(value) => value,
         Err(response) => return response,
     };
+    // Keep the canonical association change and its derived provider plan in
+    // the same mutation epoch as endpoint deletion.
+    let _mutation_guard = state.network_mutation_lock.lock().await;
     let allocator = match public_allocator(&state) {
         Ok(value) => value,
         Err(response) => return response,
@@ -3128,6 +3136,10 @@ pub(crate) async fn delete_floating_ip(
         Ok(value) => value,
         Err(response) => return response,
     };
+    // Hold the fence through provider removal and canonical release so a
+    // concurrent endpoint mutation cannot recreate the public binding after
+    // this delete has completed.
+    let _mutation_guard = state.network_mutation_lock.lock().await;
     let allocator = match public_allocator(&state) {
         Ok(value) => value,
         Err(response) => return response,
