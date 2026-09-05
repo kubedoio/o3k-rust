@@ -3,6 +3,8 @@ matrix_version: 0.2.0-alpha.1
 source_accessed: 2026-07-30
 # P13.5 bounded IaC state-convergence parity is verified separately by
 # docs/compatibility/p13-5/p13-5f-backend-parity-aggregate-evidence.json.
+# The bounded P13.7 real-host full-profile gate is verified separately by
+# docs/compatibility/p13-7/p13-7-real-host-iac-evidence.json.
 # This matrix continues to advertise only its operation-level entries.
 profile: testlab-alpha
 target_manifest: ../../compatibility/openstack-targets.yaml
