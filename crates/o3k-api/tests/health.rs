@@ -1746,7 +1746,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     // server metadata object unconditionally; Nova always carries one.
     assert_eq!(server_json["server"]["metadata"], serde_json::json!({}));
     assert_eq!(
-        server_json["server"]["addresses"][network.id.to_string()][0]["addr"],
+        server_json["server"]["addresses"][network.name][0]["addr"],
         expected_fixed_ip
     );
     let server_id = server_json["server"]["id"]
