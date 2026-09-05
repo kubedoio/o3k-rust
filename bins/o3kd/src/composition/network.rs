@@ -162,6 +162,7 @@ pub(crate) struct NetworkBindingProjector {
     pub(crate) network_controller: o3k_network::NetworkControllerLease,
     pub(crate) network_external_realm_id: Option<Uuid>,
     pub(crate) network_agent: Option<o3k_network::NetworkAgentIdentity>,
+    pub(crate) public_allocator: Option<Arc<o3k_network::PublicAddressAllocator>>,
 }
 
 impl NetworkBindingProjector {
@@ -389,6 +390,21 @@ impl NetworkBindingProjector {
             .into_iter()
             .filter(|policy| policy.endpoint_id == port.id)
             .collect();
+        let public_address = self
+            .public_allocator
+            .as_ref()
+            .map(|allocator| {
+                allocator
+                    .list(project_id)
+                    .map_err(|error| std::io::Error::other(error.to_string()))
+            })
+            .transpose()?
+            .and_then(|bindings| {
+                bindings
+                    .into_iter()
+                    .find(|binding| binding.endpoint_id == Some(port.id))
+                    .map(|binding| binding.public_address)
+            });
         let operation_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!("o3k:network:terminal-binding:{project_id}:{port_id}").as_bytes(),
@@ -404,7 +420,7 @@ impl NetworkBindingProjector {
             node_id: &agent.agent_id,
             operation_id,
             deadline_unix_ms,
-            public_address: None,
+            public_address,
             external_realm_id: external_realm_route_id,
             policies,
         })
