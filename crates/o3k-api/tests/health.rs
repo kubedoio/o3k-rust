@@ -440,9 +440,10 @@ async fn floating_ip_api_dispatches_a_public_binding_plan_to_the_selected_agent(
 
     let dispatcher = RecordingNetworkDispatcher::default();
     let commands = dispatcher.commands.clone();
-    let external_realm_id = uuid::Uuid::now_v7();
+    let external_realm_id = network_record.id;
+    let public_root = root.join("public");
     let allocator = PublicAddressAllocator::open(
-        root.join("public"),
+        &public_root,
         PublicAddressPool {
             prefix: Ipv4Prefix::new("198.51.100.0".parse()?, 29).ok_or("invalid pool")?,
             first_usable: "198.51.100.2".parse()?,
@@ -488,34 +489,81 @@ async fn floating_ip_api_dispatches_a_public_binding_plan_to_the_selected_agent(
             "port_id": port.id
         }
     });
-    let response = o3k_api::router_with_state(state)
+    let response = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri("/v2.0/floatingips")
-                .header("x-auth-token", token)
+                .header("x-auth-token", &token)
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("x-openstack-request-id", "floating-dispatch-1")
                 .body(Body::from(request_body.to_string()))?,
         )
         .await?;
     assert_eq!(response.status(), StatusCode::CREATED);
+    drop(response);
 
-    let commands = commands
-        .lock()
-        .map_err(|_| std::io::Error::other("recording dispatcher lock poisoned"))?;
-    assert_eq!(commands.len(), 1);
-    let command = &commands[0];
-    assert_eq!(command.action, NetworkPlanAction::Apply);
-    assert_eq!(command.target.agent_id, "agent-network");
-    assert_eq!(command.target.agent_epoch, "epoch-1");
-    assert!(command.plan.intents.iter().any(|intent| {
-        matches!(
-            intent,
-            o3k_domain::NetworkPlanIntent::PublicAddressBinding(binding)
-                if binding.endpoint_id == port.id
+    {
+        let recorded = commands
+            .lock()
+            .map_err(|_| std::io::Error::other("recording dispatcher lock poisoned"))?;
+        assert_eq!(recorded.len(), 1);
+        let command = &recorded[0];
+        assert_eq!(command.action, NetworkPlanAction::Apply);
+        assert_eq!(command.target.agent_id, "agent-network");
+        assert_eq!(command.target.agent_epoch, "epoch-1");
+        assert!(command.plan.intents.iter().any(|intent| {
+            matches!(
+                intent,
+                o3k_domain::NetworkPlanIntent::PublicAddressBinding(binding)
+                    if binding.endpoint_id == port.id
+            )
+        }));
+    }
+
+    // Endpoint deletion must clean the public realization before removing the
+    // endpoint snapshot, covering IaC destroy order where the port precedes
+    // the Floating IP.
+    let deleted_port = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2.0/ports/{}", port.id))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
         )
-    }));
+        .await?;
+    assert_eq!(deleted_port.status(), StatusCode::NO_CONTENT);
+    let allocator = PublicAddressAllocator::open(
+        &public_root,
+        PublicAddressPool {
+            prefix: Ipv4Prefix::new("198.51.100.0".parse()?, 29).ok_or("invalid pool")?,
+            first_usable: "198.51.100.2".parse()?,
+            last_usable: "198.51.100.6".parse()?,
+        },
+    )?;
+    assert!(
+        allocator
+            .list(project_id)?
+            .into_iter()
+            .all(|binding| binding.endpoint_id != Some(port.id))
+    );
+    assert!(
+        commands
+            .lock()
+            .map_err(|_| std::io::Error::other("recording dispatcher lock poisoned"))?
+            .iter()
+            .any(|command| {
+                command.action == NetworkPlanAction::Remove
+                    && command.plan.intents.iter().any(|intent| {
+                        matches!(
+                            intent,
+                            o3k_domain::NetworkPlanIntent::PublicAddressBinding(binding)
+                                if binding.endpoint_id == port.id
+                        )
+                    })
+            })
+    );
     Ok(())
 }
 
