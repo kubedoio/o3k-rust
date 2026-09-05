@@ -394,6 +394,32 @@ pub(crate) async fn delete_router(
         Err(r) => return r,
     };
     let project = auth.effective_scope().id().as_str();
+    // In the bounded profile, host-side gateway realization is disabled, so
+    // an accepted attachment deletion has no provider observation left to
+    // await. Finish that durable deletion reservation before retrying the
+    // router delete; otherwise the canonical gateway fence can transiently
+    // report the router as still in use after interface DELETE succeeded.
+    if !state.network_gateway_realization_enabled() {
+        let attachments = match service.list_l3_gateway_attachments(project, &id).await {
+            Ok(value) => value,
+            Err(error) => return network_error(error),
+        };
+        for attachment in attachments
+            .into_iter()
+            .filter(|attachment| attachment.state == "deleting")
+        {
+            if let Err(error) = service
+                .finalize_l3_gateway_realm_detachment_for_project(
+                    project,
+                    &attachment.id,
+                    attachment.generation,
+                )
+                .await
+            {
+                return network_error(error);
+            }
+        }
+    }
     let current = match service.get_l3_gateway_for_project(project, &id).await {
         Ok(value) => value,
         Err(error) => return network_error(error),
