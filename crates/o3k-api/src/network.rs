@@ -3768,6 +3768,31 @@ pub(crate) async fn delete_port(
         Ok(value) => value,
         Err(error) => return network_error(error),
     };
+    // Terraform may destroy an associated port before issuing the Floating IP
+    // delete.  Remove the derived public realization while the endpoint
+    // snapshot is still available; otherwise the provider cannot compile a
+    // removal plan after the port has disappeared.
+    if let Some(allocator) = state.public_allocator.as_ref() {
+        let project = auth.effective_scope().id().as_str();
+        let bindings = match allocator.list(project) {
+            Ok(values) => values
+                .into_iter()
+                .filter(|binding| binding.endpoint_id == Some(id))
+                .collect::<Vec<_>>(),
+            Err(error) => return public_error(error),
+        };
+        for binding in bindings {
+            if let Err(response) =
+                dispatch_public_binding(&state, &binding, o3k_network::NetworkPlanAction::Remove)
+                    .await
+            {
+                return response;
+            }
+            if let Err(error) = allocator.disassociate(project, binding.allocation_id) {
+                return public_error(error);
+            }
+        }
+    }
     if let Err(response) = remove_policy_network(&state, project, port.network_id, port.id).await {
         return response;
     }
