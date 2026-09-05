@@ -25,6 +25,7 @@ pub(crate) struct DaemonCreateResolver {
     pub(crate) network_controller: o3k_network::NetworkControllerLease,
     pub(crate) network_external_realm_id: Option<Uuid>,
     pub(crate) network_agent: Option<o3k_network::NetworkAgentIdentity>,
+    pub(crate) public_allocator: Option<Arc<o3k_network::PublicAddressAllocator>>,
 }
 
 impl DaemonCreateResolver {
@@ -93,6 +94,21 @@ impl DaemonCreateResolver {
                 .network_agent
                 .as_ref()
                 .map_or(agent_id, |agent| agent.agent_id.as_str());
+            let public_address = self
+                .public_allocator
+                .as_ref()
+                .map(|allocator| {
+                    allocator
+                        .list(&request.project_id)
+                        .map_err(|_| ProviderError::InvalidRequest)
+                })
+                .transpose()?
+                .and_then(|bindings| {
+                    bindings
+                        .into_iter()
+                        .find(|binding| binding.endpoint_id == Some(port.id))
+                        .map(|binding| binding.public_address)
+                });
             self.network
                 .record_binding_intent(&request.project_id, port_id, network_agent_id)
                 .await
@@ -117,7 +133,7 @@ impl DaemonCreateResolver {
                     node_id: network_agent_id,
                     operation_id: request.operation_id,
                     deadline_unix_ms,
-                    public_address: None,
+                    public_address,
                     external_realm_id,
                     policies: self
                         .network
