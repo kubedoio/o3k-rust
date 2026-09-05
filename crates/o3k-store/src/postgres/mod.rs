@@ -91,7 +91,7 @@ impl PostgresStore {
                 provider_refs, observation_watermarks,
                 keypairs, server_keypairs, agent_commands, artifact_transfers,
                 image_overlay_ownership, volume_attachments,
-                keystone_domains, keystone_projects, keystone_users, keystone_roles,
+                federated_bindings, keystone_domains, keystone_projects, keystone_users, keystone_roles,
                 keystone_role_assignments, keystone_services, keystone_endpoints, keystone_regions,
                 image_metadata, network_intents, network_networks, network_subnets, network_ports,
                 canonical_realm_encapsulation_bindings, canonical_endpoints, canonical_address_pools, canonical_address_realms, canonical_networks,

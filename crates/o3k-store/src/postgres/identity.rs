@@ -3,8 +3,8 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
-    IdentityRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
-    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    FederatedBindingRecord, IdentityRepository, KeypairRecord, KeypairRepository,
+    KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
     StoreError,
 };
@@ -138,6 +138,55 @@ impl IdentityRepository for PostgresStore {
                 }
             })
             .collect())
+    }
+
+    async fn insert_federated_binding(
+        &self,
+        binding: &FederatedBindingRecord,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO federated_bindings (id, trusted_issuer_id, issuer, subject, principal_id, principal_type, enabled, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(&binding.id).bind(&binding.trusted_issuer_id).bind(&binding.issuer)
+        .bind(&binding.subject).bind(&binding.principal_id).bind(&binding.principal_type)
+        .bind(binding.enabled).bind(&binding.created_at).bind(&binding.updated_at)
+        .execute(&self.pool).await.map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    async fn find_federated_binding(
+        &self,
+        trusted_issuer_id: &str,
+        subject: &str,
+    ) -> Result<Option<FederatedBindingRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT b.id, b.trusted_issuer_id, b.issuer, b.subject, b.principal_id, b.principal_type, b.enabled, b.created_at, b.updated_at
+             FROM federated_bindings b JOIN keystone_users u ON u.id = b.principal_id
+             WHERE b.trusted_issuer_id = $1 AND b.subject = $2 AND b.enabled = TRUE AND u.enabled = TRUE",
+        ).bind(trusted_issuer_id).bind(subject).fetch_optional(&self.pool).await
+        .map_err(StoreError::Database)?;
+        Ok(row.map(|r| FederatedBindingRecord {
+            id: r.get("id"),
+            trusted_issuer_id: r.get("trusted_issuer_id"),
+            issuer: r.get("issuer"),
+            subject: r.get("subject"),
+            principal_id: r.get("principal_id"),
+            principal_type: r.get("principal_type"),
+            enabled: r.get("enabled"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        }))
+    }
+
+    async fn set_federated_binding_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE federated_bindings SET enabled = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2")
+            .bind(enabled).bind(id).execute(&self.pool).await.map_err(StoreError::Database)?;
+        Ok(())
     }
 
     async fn insert_keystone_role(&self, role: &KeystoneRoleRecord) -> Result<(), StoreError> {

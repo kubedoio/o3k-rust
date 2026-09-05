@@ -481,6 +481,22 @@ pub struct KeystoneUserRecord {
     pub created_at: String,
 }
 
+/// An explicitly provisioned mapping from a validated external identity to a
+/// canonical O3K identity. The external subject is the only federated user
+/// identity key; display attributes and raw tokens are intentionally absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FederatedBindingRecord {
+    pub id: String,
+    pub trusted_issuer_id: String,
+    pub issuer: String,
+    pub subject: String,
+    pub principal_id: String,
+    pub principal_type: String,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeystoneRoleRecord {
     pub id: String,
