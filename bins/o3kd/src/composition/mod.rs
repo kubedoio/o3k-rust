@@ -1533,6 +1533,14 @@ mod tests {
             tokio::spawn(async move { second.unbind_port("project-a", &second_port_id).await });
         first_unbind.await??;
         second_unbind.await??;
+        // A late successful create outcome must not recreate a binding after
+        // terminal unbind has persisted the `down` tombstone.
+        assert!(
+            projector
+                .project_create_outcome("project-a", &port.id.to_string(), true)
+                .await
+                .is_err()
+        );
         let commands = commands.lock().map_err(|_| "commands poisoned")?;
         assert_eq!(commands.len(), 2);
         assert_eq!(
@@ -1616,7 +1624,7 @@ mod tests {
             .await?;
         let unbound = network.get_port_for_project("project-a", port.id).await?;
         assert_eq!(unbound.binding_host, None);
-        assert_eq!(unbound.binding_state, None);
+        assert_eq!(unbound.binding_state.as_deref(), Some("down"));
         drop(projector);
         drop(network);
         std::fs::remove_dir_all(&root)?;

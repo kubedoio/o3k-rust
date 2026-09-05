@@ -8,7 +8,8 @@ use thiserror::Error;
 /// The durable store persists the string projections (persistence
 /// projection); this service is the only authority that transitions between
 /// states. `None` in the store means no host was ever selected and no
-/// observation exists.
+/// observation exists; `down` additionally records an explicit terminal
+/// unbind so late callbacks cannot recreate execution state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortBindingState {
     /// A create dispatch selected a host but realization is not yet observed.

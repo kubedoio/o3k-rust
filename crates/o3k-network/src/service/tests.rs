@@ -1567,7 +1567,7 @@ async fn create_outcome_projection_and_unbind_are_durable_and_idempotent()
     // Unbind clears the binding idempotently and is durable.
     let unbound = service.unbind_port("project-a", port.id).await?;
     assert_eq!(unbound.binding_host, None);
-    assert_eq!(unbound.binding_state, None);
+    assert_eq!(unbound.binding_state.as_deref(), Some("down"));
     let again = service.unbind_port("project-a", port.id).await?;
     assert_eq!(again.binding_host, None);
     assert!(matches!(
@@ -1580,7 +1580,7 @@ async fn create_outcome_projection_and_unbind_are_durable_and_idempotent()
     let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
     let restored = reopened.get_port(&auth("project-a"), port.id).await?;
     assert_eq!(restored.binding_host, None);
-    assert_eq!(restored.binding_state, None);
+    assert_eq!(restored.binding_state.as_deref(), Some("down"));
     drop(reopened);
     drop(reopened_store);
     fs::remove_dir_all(path)?;

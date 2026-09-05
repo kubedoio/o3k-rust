@@ -604,6 +604,10 @@ impl NetworkService {
     }
 
     /// Clears the binding of a port whose server reached terminal deletion.
+    /// The durable `down` state is a tombstone for an explicit unbind, so a
+    /// late create callback cannot mistake the port for one that was never
+    /// bound and recreate execution state.  A future binding intent changes
+    /// it back to `binding`.
     /// Idempotent: unbinding a port with no intent is a successful no-op.
     pub async fn unbind_port(
         &self,
@@ -619,7 +623,7 @@ impl NetworkService {
             .ok_or(NetworkError::NotFound)?;
         self.inner
             .repository
-            .update_port_binding(project_id, &port_id, None, None)
+            .update_port_binding(project_id, &port_id, None, Some("down"))
             .await
             .map_err(map_store_error)
     }
