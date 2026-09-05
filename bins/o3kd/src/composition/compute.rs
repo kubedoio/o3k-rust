@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub(crate) struct DaemonCreateResolver {
+    pub(crate) store: Arc<dyn o3k_store::ComputeRepository>,
     pub(crate) image: o3k_image::ImageService,
     pub(crate) network: o3k_network::NetworkService,
     pub(crate) config_drive: o3k_config_drive::ConfigDriveStore,
@@ -29,6 +30,21 @@ pub(crate) struct DaemonCreateResolver {
 }
 
 impl DaemonCreateResolver {
+    async fn ensure_create_operation_active(
+        &self,
+        request: &CreateInstanceRequest,
+    ) -> Result<(), ProviderError> {
+        let operation = self
+            .store
+            .get_operation(request.operation_id)
+            .await
+            .map_err(|_| ProviderError::InvalidRequest)?;
+        if !operation_allows_create(&operation, request.o3k_server_id) {
+            return Err(ProviderError::Conflict);
+        }
+        Ok(())
+    }
+
     pub(crate) fn config_drive_iso_path(
         generated_directory: &std::path::Path,
         server_id: Uuid,
@@ -283,6 +299,62 @@ impl DaemonCreateResolver {
     }
 }
 
+fn operation_allows_create(operation: &o3k_store::OperationRecord, server_id: Uuid) -> bool {
+    matches!(operation.kind.as_str(), "create" | "lifecycle:create")
+        && operation.resource_id == server_id
+        && matches!(
+            operation.state,
+            o3k_store::OperationState::Pending
+                | o3k_store::OperationState::Running
+                | o3k_store::OperationState::Retryable
+                | o3k_store::OperationState::UnknownOutcome
+        )
+}
+
+#[cfg(test)]
+mod operation_tests {
+    use super::operation_allows_create;
+    use o3k_store::{OperationRecord, OperationState};
+    use uuid::Uuid;
+
+    fn operation(kind: &str, state: OperationState, resource_id: Uuid) -> OperationRecord {
+        OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id,
+            kind: kind.to_owned(),
+            state,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        }
+    }
+
+    #[test]
+    fn stale_or_mismatched_create_operations_are_rejected() {
+        let server_id = Uuid::now_v7();
+        assert!(operation_allows_create(
+            &operation("create", OperationState::Running, server_id),
+            server_id
+        ));
+        assert!(operation_allows_create(
+            &operation("lifecycle:create", OperationState::Retryable, server_id),
+            server_id
+        ));
+        assert!(!operation_allows_create(
+            &operation("lifecycle:delete", OperationState::Running, server_id),
+            server_id
+        ));
+        assert!(!operation_allows_create(
+            &operation("create", OperationState::Succeeded, server_id),
+            server_id
+        ));
+        assert!(!operation_allows_create(
+            &operation("create", OperationState::Running, Uuid::now_v7()),
+            server_id
+        ));
+    }
+}
+
 fn select_active_external_realm(
     realms: &[o3k_store::CanonicalAddressRealmRecord],
 ) -> Result<Uuid, &'static str> {
@@ -304,6 +376,7 @@ impl ResolvedCreateResolver for DaemonCreateResolver {
         request: &CreateInstanceRequest,
         agent: &AgentNodeSnapshot,
     ) -> Result<ResolvedCreateInputs, ProviderError> {
+        self.ensure_create_operation_active(request).await?;
         let image = self.resolve_image(request).await?;
         let (network_attachments, network_data) = self
             .resolve_network(request, &agent.agent_id, &agent.agent_epoch)
@@ -345,6 +418,7 @@ impl CreateArtifactResolver for DaemonCreateResolver {
         agent: &AgentNodeSnapshot,
         inputs: &ResolvedCreateInputs,
     ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError> {
+        self.ensure_create_operation_active(request).await?;
         let image = self.resolve_image(request).await?;
         if image.checksum != inputs.image_sha256 || image.format != inputs.image_format {
             return Err(ProviderError::Conflict);
