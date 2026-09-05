@@ -291,14 +291,6 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 .get_subnet_for_project(project_id, subnet_id)
                 .await
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-            let policies = self
-                .network
-                .list_policies_for_project(project_id, port.network_id)
-                .await
-                .map_err(|error| std::io::Error::other(error.to_string()))?
-                .into_iter()
-                .filter(|policy| policy.endpoint_id == port.id)
-                .collect();
             let external_realm_route_id = self.resolve_external_realm_route_id(project_id).await?;
             let deadline_unix_ms = super::unix_time_millis().saturating_add(30_000);
             let operation_id = Uuid::new_v5(
@@ -317,7 +309,12 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 deadline_unix_ms,
                 public_address: None,
                 external_realm_id: external_realm_route_id,
-                policies,
+                // Removal must remain stable while Terraform/OpenStack
+                // destroys policy resources concurrently.  The agent removes
+                // the endpoint-scoped realization; including a mutable policy
+                // snapshot here would reuse the deterministic remove command
+                // with a different fingerprint and be rejected as a replay.
+                policies: Vec::new(),
             })
             .map_err(|error| std::io::Error::other(error.to_string()))?;
             let command_id = Uuid::new_v5(
