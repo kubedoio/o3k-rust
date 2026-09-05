@@ -3,10 +3,13 @@
 //! This module deliberately stops at authentication evidence. It does not
 //! provision principals, discover scopes, or issue O3K tokens.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode_header};
-use reqwest::Url;
+use reqwest::{Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -23,6 +26,7 @@ pub struct TrustedIssuer {
     pub discovery_url: Url,
     pub allow_insecure_local: bool,
     pub timeout: Duration,
+    pub cache_ttl: Duration,
     pub max_token_bytes: usize,
     pub max_document_bytes: usize,
     pub clock_skew: Duration,
@@ -34,12 +38,24 @@ impl TrustedIssuer {
             || self.audience.trim().is_empty()
             || self.algorithms.is_empty()
             || self.timeout.is_zero()
+            || self.cache_ttl.is_zero()
             || self.max_token_bytes == 0
             || self.max_document_bytes == 0
         {
             return Err(OidcError::InvalidConfiguration);
         }
         if self.issuer.path() != "/" && self.issuer.path().ends_with('/') {
+            return Err(OidcError::InvalidConfiguration);
+        }
+        if self.issuer.query().is_some()
+            || self.issuer.fragment().is_some()
+            || self.discovery_url.query().is_some()
+            || self.discovery_url.fragment().is_some()
+            || !self.issuer.username().is_empty()
+            || self.issuer.password().is_some()
+            || !self.discovery_url.username().is_empty()
+            || self.discovery_url.password().is_some()
+        {
             return Err(OidcError::InvalidConfiguration);
         }
         if !self.allow_insecure_local
@@ -65,6 +81,7 @@ impl TrustedIssuer {
             discovery_url,
             allow_insecure_local: true,
             timeout: Duration::from_secs(2),
+            cache_ttl: Duration::from_secs(300),
             max_token_bytes: DEFAULT_MAX_TOKEN_BYTES,
             max_document_bytes: DEFAULT_MAX_DOCUMENT_BYTES,
             clock_skew: Duration::from_secs(30),
@@ -106,10 +123,16 @@ struct Claims {
 }
 
 #[derive(Clone)]
+struct CachedKeys {
+    fetched_at: Instant,
+    keys: jsonwebtoken::jwk::JwkSet,
+}
+
+#[derive(Clone)]
 pub struct OidcValidator {
     client: reqwest::Client,
     issuer: TrustedIssuer,
-    keys: Arc<RwLock<Option<jsonwebtoken::jwk::JwkSet>>>,
+    keys: Arc<RwLock<Option<CachedKeys>>>,
 }
 
 impl OidcValidator {
@@ -118,6 +141,7 @@ impl OidcValidator {
         let client = reqwest::Client::builder()
             .connect_timeout(issuer.timeout)
             .timeout(issuer.timeout)
+            .redirect(Policy::none())
             .build()
             .map_err(|_| OidcError::InvalidConfiguration)?;
         Ok(Self {
@@ -147,7 +171,7 @@ impl OidcValidator {
         self.validate_with_jwks(token, &keys)
     }
 
-    pub fn validate_with_jwks(
+    fn validate_with_jwks(
         &self,
         token: &str,
         keys: &jsonwebtoken::jwk::JwkSet,
@@ -163,16 +187,20 @@ impl OidcValidator {
     }
 
     async fn get_keys(&self, kid: &str) -> Result<jsonwebtoken::jwk::JwkSet, OidcError> {
-        if let Some(keys) = self.keys.read().await.clone()
-            && keys.find(kid).is_some()
+        if let Some(cached) = self.keys.read().await.clone()
+            && cached.fetched_at.elapsed() < self.issuer.cache_ttl
+            && cached.keys.find(kid).is_some()
         {
-            return Ok(keys);
+            return Ok(cached.keys);
         }
         let fresh = self.fetch_jwks().await?;
         if fresh.find(kid).is_none() {
             return Err(OidcError::AuthenticationFailed);
         }
-        *self.keys.write().await = Some(fresh.clone());
+        *self.keys.write().await = Some(CachedKeys {
+            fetched_at: Instant::now(),
+            keys: fresh.clone(),
+        });
         Ok(fresh)
     }
 
@@ -190,6 +218,10 @@ impl OidcValidator {
             return Err(OidcError::AuthenticationFailed);
         }
         let key = DecodingKey::from_jwk(jwk).map_err(|_| OidcError::AuthenticationFailed)?;
+        let header = decode_header(token).map_err(|_| OidcError::AuthenticationFailed)?;
+        if header.typ.as_deref() != Some("at+jwt") {
+            return Err(OidcError::AuthenticationFailed);
+        }
         let mut validation = Validation::new(algorithm);
         validation.leeway = self.issuer.clock_skew.as_secs();
         validation.validate_nbf = true;
@@ -217,6 +249,9 @@ impl OidcValidator {
             .send()
             .await
             .map_err(|_| OidcError::ProviderUnavailable)?;
+        if !discovery.status().is_success() {
+            return Err(OidcError::ProviderUnavailable);
+        }
         let body = bounded_body(discovery, self.issuer.max_document_bytes).await?;
         let document: DiscoveryDocument =
             serde_json::from_slice(&body).map_err(|_| OidcError::ProviderUnavailable)?;
@@ -239,26 +274,33 @@ impl OidcValidator {
             .send()
             .await
             .map_err(|_| OidcError::ProviderUnavailable)?;
+        if !response.status().is_success() {
+            return Err(OidcError::ProviderUnavailable);
+        }
         let body = bounded_body(response, self.issuer.max_document_bytes).await?;
         serde_json::from_slice(&body).map_err(|_| OidcError::ProviderUnavailable)
     }
 }
 
-async fn bounded_body(response: reqwest::Response, max: usize) -> Result<Vec<u8>, OidcError> {
+async fn bounded_body(mut response: reqwest::Response, max: usize) -> Result<Vec<u8>, OidcError> {
     if response
         .content_length()
         .is_some_and(|length| length > max as u64)
     {
         return Err(OidcError::DocumentTooLarge);
     }
-    let body = response
-        .bytes()
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|_| OidcError::ProviderUnavailable)?;
-    if body.len() > max {
-        return Err(OidcError::DocumentTooLarge);
+        .map_err(|_| OidcError::ProviderUnavailable)?
+    {
+        if chunk.len() > max.saturating_sub(body.len()) {
+            return Err(OidcError::DocumentTooLarge);
+        }
+        body.extend_from_slice(&chunk);
     }
-    Ok(body.to_vec())
+    Ok(body)
 }
 
 fn is_local_url(url: &Url) -> bool {
@@ -271,9 +313,39 @@ fn is_local_url(url: &Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Json, Router, extract::State, routing::get};
     use jsonwebtoken::{EncodingKey, Header, encode};
     use serde_json::json;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    use tokio::net::TcpListener;
+
+    struct TestProviderState {
+        issuer: String,
+        jwks_uri: String,
+        first_key: serde_json::Value,
+        rotated_key: serde_json::Value,
+        jwks_requests: AtomicUsize,
+    }
+
+    async fn discovery(State(state): State<Arc<TestProviderState>>) -> Json<serde_json::Value> {
+        Json(json!({"issuer": state.issuer, "jwks_uri": state.jwks_uri}))
+    }
+
+    async fn jwks(State(state): State<Arc<TestProviderState>>) -> Json<serde_json::Value> {
+        let request = state.jwks_requests.fetch_add(1, Ordering::SeqCst);
+        let key = if request == 0 {
+            &state.first_key
+        } else {
+            &state.rotated_key
+        };
+        Json(json!({"keys": [key]}))
+    }
 
     #[test]
     fn production_configuration_rejects_http() -> Result<(), OidcError> {
@@ -292,6 +364,7 @@ mod tests {
             max_token_bytes: DEFAULT_MAX_TOKEN_BYTES,
             max_document_bytes: DEFAULT_MAX_DOCUMENT_BYTES,
             clock_skew: Duration::from_secs(30),
+            cache_ttl: Duration::from_secs(30),
         };
         assert_eq!(issuer.validate(), Err(OidcError::InsecureIssuer));
         Ok(())
@@ -325,6 +398,7 @@ mod tests {
         let validator = OidcValidator::new(trusted)?;
         let secret = b"a-test-secret-that-is-long-enough";
         let mut header = Header::new(Algorithm::HS256);
+        header.typ = Some("at+jwt".to_owned());
         header.kid = Some("key-1".to_owned());
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -348,11 +422,133 @@ mod tests {
         )
         .map_err(|_| OidcError::AuthenticationFailed)?;
         jwk.common.key_id = Some("key-1".to_owned());
-        let identity_result =
-            validator.validate_with_jwks(&token, &jsonwebtoken::jwk::JwkSet { keys: vec![jwk] });
+        let keys = jsonwebtoken::jwk::JwkSet { keys: vec![jwk] };
+        let identity_result = validator.validate_with_jwks(&token, &keys);
         let identity = identity_result?;
         assert_eq!(identity.trusted_issuer_id, "local");
         assert_eq!(identity.subject, "external-subject");
+
+        let mut id_token_header = Header::new(Algorithm::HS256);
+        id_token_header.kid = Some("key-1".to_owned());
+        let id_token = encode(
+            &id_token_header,
+            &json!({
+                "iss": "http://127.0.0.1:9000/",
+                "sub": "external-subject",
+                "aud": "o3k",
+                "exp": now + 300,
+            }),
+            &EncodingKey::from_secret(secret),
+        )
+        .map_err(|_| OidcError::AuthenticationFailed)?;
+        assert_eq!(
+            validator.validate_with_jwks(&id_token, &keys),
+            Err(OidcError::AuthenticationFailed)
+        );
+
+        let wrong_audience = encode(
+            &header,
+            &json!({
+                "iss": "http://127.0.0.1:9000/",
+                "sub": "external-subject",
+                "aud": "another-service",
+                "exp": now + 300,
+            }),
+            &EncodingKey::from_secret(secret),
+        )
+        .map_err(|_| OidcError::AuthenticationFailed)?;
+        assert_eq!(
+            validator.validate_with_jwks(&wrong_audience, &keys),
+            Err(OidcError::AuthenticationFailed)
+        );
+        assert_eq!(
+            validator.validate_with_jwks(&"x".repeat(DEFAULT_MAX_TOKEN_BYTES + 1), &keys),
+            Err(OidcError::AuthenticationFailed)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fetches_discovery_and_refreshes_on_key_rotation() -> Result<(), OidcError> {
+        let secret_one = b"first-test-secret-that-is-long-enough";
+        let secret_two = b"rotated-test-secret-that-is-long-enough";
+        let mut header_one = Header::new(Algorithm::HS256);
+        header_one.typ = Some("at+jwt".to_owned());
+        header_one.kid = Some("key-1".to_owned());
+        let mut header_two = header_one.clone();
+        header_two.kid = Some("key-2".to_owned());
+        let mut jwk_one = jsonwebtoken::jwk::Jwk::from_decoding_key(
+            &DecodingKey::from_secret(secret_one),
+            Some(Algorithm::HS256),
+        )
+        .map_err(|_| OidcError::AuthenticationFailed)?;
+        jwk_one.common.key_id = Some("key-1".to_owned());
+        let mut jwk_two = jsonwebtoken::jwk::Jwk::from_decoding_key(
+            &DecodingKey::from_secret(secret_two),
+            Some(Algorithm::HS256),
+        )
+        .map_err(|_| OidcError::AuthenticationFailed)?;
+        jwk_two.common.key_id = Some("key-2".to_owned());
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|_| OidcError::ProviderUnavailable)?;
+        let address = listener
+            .local_addr()
+            .map_err(|_| OidcError::ProviderUnavailable)?;
+        let base = format!("http://{address}");
+        let state = Arc::new(TestProviderState {
+            issuer: format!("{base}/"),
+            jwks_uri: format!("{base}/jwks"),
+            first_key: serde_json::to_value(&jwk_one)
+                .map_err(|_| OidcError::ProviderUnavailable)?,
+            rotated_key: serde_json::to_value(&jwk_two)
+                .map_err(|_| OidcError::ProviderUnavailable)?,
+            jwks_requests: AtomicUsize::new(0),
+        });
+        let app = Router::new()
+            .route("/.well-known/openid-configuration", get(discovery))
+            .route("/jwks", get(jwks))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let issuer = TrustedIssuer::test_local(
+            "rotation-test",
+            Url::parse(&format!("{base}/")).map_err(|_| OidcError::InvalidConfiguration)?,
+            "o3k",
+            Url::parse(&format!("{base}/.well-known/openid-configuration"))
+                .map_err(|_| OidcError::InvalidConfiguration)?,
+        );
+        let validator = OidcValidator::new(TrustedIssuer {
+            algorithms: vec![Algorithm::HS256],
+            cache_ttl: Duration::from_secs(300),
+            ..issuer
+        })?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| OidcError::InvalidConfiguration)?
+            .as_secs();
+        let token_one = encode(
+            &header_one,
+            &json!({"iss": format!("{base}/"), "sub": "subject", "aud": "o3k", "exp": now + 300}),
+            &EncodingKey::from_secret(secret_one),
+        )
+        .map_err(|_| OidcError::AuthenticationFailed)?;
+        validator.validate(&token_one).await?;
+        validator.validate(&token_one).await?;
+        assert_eq!(state.jwks_requests.load(Ordering::SeqCst), 1);
+
+        let token_two = encode(
+            &header_two,
+            &json!({"iss": format!("{base}/"), "sub": "subject", "aud": "o3k", "exp": now + 300}),
+            &EncodingKey::from_secret(secret_two),
+        )
+        .map_err(|_| OidcError::AuthenticationFailed)?;
+        validator.validate(&token_two).await?;
+        assert_eq!(state.jwks_requests.load(Ordering::SeqCst), 2);
+        server.abort();
         Ok(())
     }
 }
