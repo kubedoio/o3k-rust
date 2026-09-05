@@ -268,7 +268,7 @@ pub async fn build_composition(
     let scheduler = o3k_scheduler::Scheduler::new(placement.clone());
     let network_dispatcher = network_dispatcher_from_env()?;
     let public_allocator = public_allocator_from_env(&config.data_dir)?;
-    let public_allocator_for_binding = public_allocator_from_env(&config.data_dir)?;
+    let public_allocator_for_binding = public_allocator_from_env(&config.data_dir)?.map(Arc::new);
     let network_controller = o3k_network::NetworkControllerLease {
         controller_id: controller_id.to_string(),
         controller_epoch: controller_epoch.to_string(),
@@ -306,7 +306,7 @@ pub async fn build_composition(
         network_controller: network_controller.clone(),
         network_external_realm_id,
         network_agent: network_agent_identity.clone(),
-        public_allocator: public_allocator_for_binding.map(Arc::new),
+        public_allocator: public_allocator_for_binding.clone(),
     });
 
     // Build compute service based on configured provider.
@@ -319,6 +319,7 @@ pub async fn build_composition(
             network_controller: network_controller.clone(),
             network_external_realm_id,
             network_agent: network_agent_identity.clone(),
+            public_allocator: public_allocator_for_binding.clone(),
         });
         o3k_compute::ComputeService::new(
             store.clone(),
@@ -1208,11 +1209,23 @@ mod tests {
         let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
         let network =
             o3k_network::NetworkService::open(root.join("network"), network_repository).await?;
+        let public_address: std::net::Ipv4Addr = "198.51.100.10".parse()?;
+        let public_allocator = o3k_network::PublicAddressAllocator::open(
+            root.join("public-addresses"),
+            o3k_network::PublicAddressPool {
+                prefix: o3k_domain::Ipv4Prefix::new("198.51.100.0".parse()?, 24)
+                    .ok_or("invalid test prefix")?,
+                first_usable: public_address,
+                last_usable: public_address,
+            },
+        )?;
+        let dispatcher = RecordingNetworkDispatcher::default();
+        let commands = dispatcher.commands.clone();
         let resolver = DaemonCreateResolver {
             image,
             network: network.clone(),
             config_drive,
-            network_dispatcher: None,
+            network_dispatcher: Some(Arc::new(dispatcher)),
             network_controller: o3k_network::NetworkControllerLease {
                 controller_id: "test-controller".to_owned(),
                 controller_epoch: "test-epoch".to_owned(),
@@ -1220,6 +1233,7 @@ mod tests {
             },
             network_agent: None,
             network_external_realm_id: None,
+            public_allocator: Some(Arc::new(public_allocator)),
         };
         let net = network
             .create_network_for_project("project-a", "flat".to_owned())
@@ -1238,6 +1252,16 @@ mod tests {
         let port = network
             .create_port_for_project("project-a", net.id, "one".to_owned())
             .await?;
+        let allocation = resolver
+            .public_allocator
+            .as_ref()
+            .ok_or("missing public allocator")?
+            .allocate("project-a", "test-public-operation")?;
+        resolver
+            .public_allocator
+            .as_ref()
+            .ok_or("missing public allocator")?
+            .associate("project-a", allocation.allocation_id, port.id)?;
         let request = o3k_provider::CreateInstanceRequest {
             operation_id: Uuid::now_v7(),
             o3k_server_id: Uuid::now_v7(),
@@ -1264,6 +1288,15 @@ mod tests {
         let bound = network.get_port_for_project("project-a", port.id).await?;
         assert_eq!(bound.binding_host.as_deref(), Some("compute-1"));
         assert_eq!(bound.binding_state.as_deref(), Some("binding"));
+        {
+            let commands = commands.lock().map_err(|_| "commands poisoned")?;
+            assert_eq!(commands.len(), 1);
+            assert!(commands[0].plan.intents.iter().any(|intent| matches!(
+                intent,
+                o3k_domain::NetworkPlanIntent::PublicAddressBinding(binding)
+                    if binding.public_address == public_address
+            )));
+        }
 
         let unresolved_port = o3k_store::PortRecord {
             id: Uuid::now_v7(),
@@ -1347,6 +1380,7 @@ mod tests {
                 agent_epoch: "network-epoch-1".to_owned(),
             }),
             network_external_realm_id: None,
+            public_allocator: None,
         };
         let net = network
             .create_network_for_project("project-a", "flat".to_owned())
