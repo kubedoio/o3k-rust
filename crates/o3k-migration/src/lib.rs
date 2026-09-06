@@ -19,6 +19,7 @@ use thiserror::Error;
 use url::Url;
 pub mod manifest;
 pub mod transfer;
+pub mod translation;
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RESOURCES: usize = 50_000;
