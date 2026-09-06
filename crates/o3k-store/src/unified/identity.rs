@@ -81,6 +81,13 @@ impl IdentityRepository for O3kStore {
         }
     }
 
+    async fn list_federated_bindings(&self) -> Result<Vec<FederatedBindingRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_federated_bindings().await,
+            Self::Postgres(s) => s.list_federated_bindings().await,
+        }
+    }
+
     async fn set_federated_binding_enabled(
         &self,
         id: &str,

@@ -45,6 +45,7 @@ pub trait IdentityRepository: Send + Sync {
         trusted_issuer_id: &str,
         subject: &str,
     ) -> Result<Option<FederatedBindingRecord>, StoreError>;
+    async fn list_federated_bindings(&self) -> Result<Vec<FederatedBindingRecord>, StoreError>;
     async fn set_federated_binding_enabled(
         &self,
         id: &str,

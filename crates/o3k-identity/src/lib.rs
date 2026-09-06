@@ -17,9 +17,10 @@ use uuid::Uuid;
 pub mod oidc;
 
 use o3k_kernel::{
-    AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, ServicePrincipal, UserPrincipal,
+    AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, ScopeKind, ServicePrincipal,
+    UserPrincipal,
 };
-use o3k_store::{IdentityRepository, StoreError};
+use o3k_store::{FederatedBindingRecord, IdentityRepository, StoreError};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -205,6 +206,34 @@ pub struct SnapshotAssignment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotFederatedBinding {
+    pub trusted_issuer_id: String,
+    pub issuer: String,
+    pub subject: String,
+    pub principal_id: String,
+    pub enabled: bool,
+}
+
+/// Public-safe projection of an effective O3K assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiscoverableScope {
+    pub id: String,
+    pub kind: ScopeKind,
+    pub name: Option<String>,
+    pub domain_id: Option<String>,
+    pub can_request_token: bool,
+}
+
+/// Authorization result consumed by the federated token-exchange slice.
+/// It contains no external or native credential material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FederatedScopeAuthorization {
+    pub principal_id: String,
+    pub scope: OwnershipScope,
+    pub roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotService {
     pub id: String,
     pub name: String,
@@ -239,6 +268,7 @@ pub struct IdentitySnapshot {
     pub users: Vec<SnapshotUser>,
     pub roles: Vec<SnapshotRole>,
     pub assignments: Vec<SnapshotAssignment>,
+    pub federated_bindings: Vec<SnapshotFederatedBinding>,
     pub services: Vec<SnapshotService>,
     pub endpoints: Vec<SnapshotEndpoint>,
     pub regions: Vec<SnapshotRegion>,
@@ -290,6 +320,18 @@ impl IdentitySnapshot {
         roles.sort();
         roles.dedup();
         roles
+    }
+
+    fn federated_binding_for(
+        &self,
+        identity: &oidc::ValidatedExternalIdentity,
+    ) -> Option<&SnapshotFederatedBinding> {
+        self.federated_bindings.iter().find(|binding| {
+            binding.enabled
+                && binding.trusted_issuer_id == identity.trusted_issuer_id
+                && binding.issuer == identity.issuer
+                && binding.subject == identity.subject
+        })
     }
 }
 
@@ -823,6 +865,97 @@ impl TokenService {
     #[must_use]
     pub fn snapshot(&self) -> &IdentitySnapshot {
         &self.snapshot
+    }
+
+    /// Returns only enabled project scopes currently assigned to the
+    /// canonical principal bound to `identity`. Domain and system scopes are
+    /// intentionally absent until their authorization semantics are proven.
+    pub fn discover_federated_scopes(
+        &self,
+        identity: &oidc::ValidatedExternalIdentity,
+    ) -> Result<Vec<DiscoverableScope>, AuthError> {
+        let binding = self
+            .snapshot
+            .federated_binding_for(identity)
+            .ok_or(AuthError::Unauthorized)?;
+        let user = self
+            .snapshot
+            .user_by_id(&binding.principal_id)
+            .filter(|user| user.enabled)
+            .ok_or(AuthError::Unauthorized)?;
+
+        let mut scopes: Vec<DiscoverableScope> = self
+            .snapshot
+            .projects
+            .iter()
+            .filter(|project| {
+                project.enabled
+                    && self
+                        .snapshot
+                        .domain_by_id(&project.domain_id)
+                        .is_some_and(|domain| domain.enabled)
+                    && !self
+                        .snapshot
+                        .role_names_for(&user.id, &project.id)
+                        .is_empty()
+            })
+            .map(|project| DiscoverableScope {
+                id: project.id.clone(),
+                kind: ScopeKind::Project,
+                name: Some(project.name.clone()),
+                domain_id: Some(project.domain_id.clone()),
+                can_request_token: true,
+            })
+            .collect();
+        scopes.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(scopes)
+    }
+
+    /// Re-evaluates a requested project scope against the current snapshot.
+    /// The previous token/AuthContext is never used as authorization input.
+    pub fn authorize_federated_scope(
+        &self,
+        identity: &oidc::ValidatedExternalIdentity,
+        requested_scope_id: &str,
+    ) -> Result<FederatedScopeAuthorization, AuthError> {
+        let binding = self
+            .snapshot
+            .federated_binding_for(identity)
+            .ok_or(AuthError::Unauthorized)?;
+        let user = self
+            .snapshot
+            .user_by_id(&binding.principal_id)
+            .filter(|user| user.enabled)
+            .ok_or(AuthError::Unauthorized)?;
+        let project = self
+            .snapshot
+            .project_by_id(requested_scope_id)
+            .filter(|project| project.enabled)
+            .ok_or(AuthError::Unauthorized)?;
+        let domain = self
+            .snapshot
+            .domain_by_id(&project.domain_id)
+            .filter(|domain| domain.enabled)
+            .ok_or(AuthError::Unauthorized)?;
+        let roles: Vec<String> = self
+            .snapshot
+            .role_names_for(&user.id, &project.id)
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        if roles.is_empty() {
+            return Err(AuthError::Unauthorized);
+        }
+        let scope_id = ScopeId::new(&project.id).map_err(|_| AuthError::Unauthorized)?;
+        Ok(FederatedScopeAuthorization {
+            principal_id: user.id.clone(),
+            scope: OwnershipScope::project(
+                scope_id,
+                Some(project.name.clone()),
+                Some(domain.id.clone()),
+            ),
+            roles,
+        })
     }
 
     pub fn issue(
@@ -1375,6 +1508,19 @@ async fn load_snapshot(store: &dyn IdentityRepository) -> Result<IdentitySnapsho
             role_id: record.role_id,
         })
         .collect();
+    let federated_bindings = store
+        .list_federated_bindings()
+        .await
+        .map_err(map_error)?
+        .into_iter()
+        .map(|record: FederatedBindingRecord| SnapshotFederatedBinding {
+            trusted_issuer_id: record.trusted_issuer_id,
+            issuer: record.issuer,
+            subject: record.subject,
+            principal_id: record.principal_id,
+            enabled: record.enabled,
+        })
+        .collect();
     let services = store
         .list_keystone_services()
         .await
@@ -1417,6 +1563,7 @@ async fn load_snapshot(store: &dyn IdentityRepository) -> Result<IdentitySnapsho
         users,
         roles,
         assignments,
+        federated_bindings,
         services,
         endpoints,
         regions,
@@ -1654,6 +1801,13 @@ mod tests {
                     role_id: "service".to_owned(),
                 },
             ],
+            federated_bindings: vec![SnapshotFederatedBinding {
+                trusted_issuer_id: "issuer-a".to_owned(),
+                issuer: "https://idp.example.test".to_owned(),
+                subject: "alice".to_owned(),
+                principal_id: "bootstrap-user".to_owned(),
+                enabled: true,
+            }],
             services: vec![
                 SnapshotService {
                     id: "identity".to_owned(),
@@ -1703,6 +1857,132 @@ mod tests {
 
     fn admin_request() -> TokenRequest {
         testkit::admin_request("password")
+    }
+
+    fn alice_identity() -> oidc::ValidatedExternalIdentity {
+        oidc::ValidatedExternalIdentity {
+            trusted_issuer_id: "issuer-a".to_owned(),
+            issuer: "https://idp.example.test".to_owned(),
+            subject: "alice".to_owned(),
+        }
+    }
+
+    #[test]
+    fn federated_scope_discovery_is_principal_specific_and_id_based() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let alice_scopes = service.discover_federated_scopes(&alice_identity())?;
+        assert_eq!(alice_scopes.len(), 1);
+        assert_eq!(alice_scopes[0].id, "eba29e2d-53de-461d-ae91-ede7402713cb");
+        assert_eq!(alice_scopes[0].kind, ScopeKind::Project);
+        assert!(alice_scopes[0].can_request_token);
+
+        let mut bob = service.snapshot.clone();
+        bob.projects.push(SnapshotProject {
+            id: "project-b".to_owned(),
+            domain_id: "default".to_owned(),
+            name: "admin".to_owned(),
+            enabled: true,
+        });
+        bob.users.push(SnapshotUser {
+            id: "bob".to_owned(),
+            domain_id: "default".to_owned(),
+            name: "Bob".to_owned(),
+            password_hash: PasswordHash::derive_with_iterations_for_testing("unused", 1_000)?,
+            enabled: true,
+        });
+        bob.assignments.push(SnapshotAssignment {
+            user_id: "bob".to_owned(),
+            project_id: "project-b".to_owned(),
+            role_id: "member".to_owned(),
+        });
+        bob.federated_bindings.push(SnapshotFederatedBinding {
+            trusted_issuer_id: "issuer-a".to_owned(),
+            issuer: "https://idp.example.test".to_owned(),
+            subject: "bob".to_owned(),
+            principal_id: "bob".to_owned(),
+            enabled: true,
+        });
+        let bob_service = TokenService::from_snapshot(
+            bob,
+            Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+            Duration::from_secs(3600),
+        )?;
+        let bob_scopes =
+            bob_service.discover_federated_scopes(&oidc::ValidatedExternalIdentity {
+                trusted_issuer_id: "issuer-a".to_owned(),
+                issuer: "https://idp.example.test".to_owned(),
+                subject: "bob".to_owned(),
+            })?;
+        assert_eq!(
+            bob_scopes
+                .iter()
+                .map(|scope| scope.id.as_str())
+                .collect::<Vec<_>>(),
+            ["project-b"]
+        );
+        assert_eq!(bob_scopes[0].name.as_deref(), Some("admin"));
+        assert!(
+            bob_service
+                .authorize_federated_scope(&alice_identity(), "project-b")
+                .is_err()
+        );
+        assert!(
+            bob_service
+                .authorize_federated_scope(&alice_identity(), "missing-project")
+                .is_err()
+        );
+        assert!(
+            alice_scopes
+                .iter()
+                .all(|scope| scope.kind != ScopeKind::Domain && scope.kind != ScopeKind::System)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn federated_rescoping_rechecks_disabled_and_removed_assignments() -> Result<(), AuthError> {
+        let mut snapshot = service_with_snapshot()?.snapshot;
+        let project_id = "eba29e2d-53de-461d-ae91-ede7402713cb";
+        let identity = alice_identity();
+        let Some(project) = snapshot
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+        else {
+            return Err(AuthError::InvalidRequest);
+        };
+        project.enabled = false;
+        let disabled = TokenService::from_snapshot(
+            snapshot.clone(),
+            Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+            Duration::from_secs(3600),
+        )?;
+        assert!(disabled.discover_federated_scopes(&identity)?.is_empty());
+        assert!(matches!(
+            disabled.authorize_federated_scope(&identity, project_id),
+            Err(AuthError::Unauthorized)
+        ));
+
+        snapshot
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+            .ok_or(AuthError::InvalidRequest)?
+            .enabled = true;
+        snapshot
+            .assignments
+            .retain(|assignment| assignment.project_id != project_id);
+        let stale = TokenService::from_snapshot(
+            snapshot,
+            Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+            Duration::from_secs(3600),
+        )?;
+        assert!(stale.discover_federated_scopes(&identity)?.is_empty());
+        assert!(matches!(
+            stale.authorize_federated_scope(&identity, project_id),
+            Err(AuthError::Unauthorized)
+        ));
+        Ok(())
     }
 
     fn admin_scoped_request(project_name: &str) -> TokenRequest {
@@ -2093,12 +2373,35 @@ mod tests {
         .await
         .map_err(|_| AuthError::IdentityUnavailable)?;
 
+        store
+            .insert_federated_binding(&FederatedBindingRecord {
+                id: "restart-binding".to_owned(),
+                trusted_issuer_id: "issuer-a".to_owned(),
+                issuer: "https://idp.example.test".to_owned(),
+                subject: "alice".to_owned(),
+                principal_id: "bootstrap-user".to_owned(),
+                principal_type: "user".to_owned(),
+                enabled: true,
+                created_at: "2026-09-06T00:00:00Z".to_owned(),
+                updated_at: "2026-09-06T00:00:00Z".to_owned(),
+            })
+            .await
+            .map_err(|_| AuthError::IdentityUnavailable)?;
+
         let first = TokenService::load(
             store.clone(),
             Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
             Duration::from_secs(3600),
         )
         .await?;
+        assert_eq!(
+            first
+                .discover_federated_scopes(&alice_identity())?
+                .iter()
+                .map(|scope| scope.id.as_str())
+                .collect::<Vec<_>>(),
+            ["eba29e2d-53de-461d-ae91-ede7402713cb"]
+        );
         let now = UNIX_EPOCH + Duration::from_secs(1_000);
         let (token, _) = first.issue(&testkit::admin_request("password"), now)?;
 
@@ -2118,6 +2421,14 @@ mod tests {
         // A token issued before restart validates after reload.
         let verified = reloaded.verify(&token, now)?;
         assert_eq!(verified.user_id, "bootstrap-user");
+        assert_eq!(
+            reloaded
+                .discover_federated_scopes(&alice_identity())?
+                .iter()
+                .map(|scope| scope.id.as_str())
+                .collect::<Vec<_>>(),
+            ["eba29e2d-53de-461d-ae91-ede7402713cb"]
+        );
         Ok(())
     }
 
