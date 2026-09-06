@@ -70,6 +70,49 @@ paths:
                 $ref: '#/components/schemas/CurrentContext'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /identity/scopes:
+    post:
+      operationId: discoverFederatedScopes
+      summary: Discover project scopes for a federated identity
+      description: >-
+        Returns only currently enabled project assignments for the validated
+        external identity. The external access token is used for this request
+        only and is never returned or persisted by O3K.
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [federated]
+              properties:
+                federated:
+                  type: object
+                  additionalProperties: false
+                  required: [access_token]
+                  properties:
+                    access_token: {type: string, minLength: 1, maxLength: 8192, writeOnly: true}
+      responses:
+        '200':
+          description: Public-safe discoverable project scopes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [scopes]
+                properties:
+                  scopes:
+                    type: array
+                    items: {$ref: '#/components/schemas/DiscoverableScope'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
   /operator/profile:
     get:
       operationId: getOperatorProfile
@@ -210,6 +253,16 @@ components:
         scope: {const: system}
         principal_id: {type: string, minLength: 1}
         audit_id: {type: string, minLength: 1}
+    DiscoverableScope:
+      type: object
+      additionalProperties: false
+      required: [id, kind, can_request_token]
+      properties:
+        id: {type: string, minLength: 1}
+        kind: {type: string, enum: [project]}
+        name: {type: [string, 'null']}
+        domain_id: {type: [string, 'null']}
+        can_request_token: {type: boolean}
     PrincipalProjection:
       type: object
       additionalProperties: false

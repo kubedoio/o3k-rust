@@ -123,6 +123,10 @@ pub fn router(state: NativeApiState) -> Router {
         .route("/services", get(discover_services))
         .route("/resource-types", get(discover_resource_types))
         .route("/identity/tokens", post(identity::issue_token))
+        .route(
+            "/identity/scopes",
+            post(identity::discover_federated_scopes),
+        )
         .route("/identity/me", get(identity::current_context))
         .route("/operator/profile", get(identity::operator_profile))
         .route("/compute/servers", get(compute::list_servers))
@@ -485,6 +489,33 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn federated_scope_discovery_rejects_empty_external_credentials() {
+        let state = NativeApiState::new(
+            Some(test_manifest_registry()),
+            pagination::CursorConfig::default(),
+            Some(Arc::new(TestIssuer(test_operator_context(false)))),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let response = tower::ServiceExt::oneshot(
+            router(state),
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/identity/scopes")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    r#"{"federated":{"access_token":""}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
