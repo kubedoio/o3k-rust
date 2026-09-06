@@ -55,6 +55,27 @@ impl SqliteStore {
         }))
     }
 
+    pub async fn list_federated_bindings(&self) -> Result<Vec<FederatedBindingRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, trusted_issuer_id, issuer, subject, principal_id, principal_type, enabled, created_at, updated_at FROM federated_bindings ORDER BY id ASC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| FederatedBindingRecord {
+                id: r.get("id"),
+                trusted_issuer_id: r.get("trusted_issuer_id"),
+                issuer: r.get("issuer"),
+                subject: r.get("subject"),
+                principal_id: r.get("principal_id"),
+                principal_type: r.get("principal_type"),
+                enabled: r.get::<i32, _>("enabled") != 0,
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect())
+    }
+
     pub async fn set_federated_binding_enabled(
         &self,
         id: &str,
@@ -663,6 +684,10 @@ impl IdentityRepository for SqliteStore {
     ) -> Result<Option<FederatedBindingRecord>, StoreError> {
         self.find_federated_binding(trusted_issuer_id, subject)
             .await
+    }
+
+    async fn list_federated_bindings(&self) -> Result<Vec<FederatedBindingRecord>, StoreError> {
+        self.list_federated_bindings().await
     }
 
     async fn set_federated_binding_enabled(
