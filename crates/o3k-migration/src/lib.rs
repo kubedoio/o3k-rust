@@ -19,6 +19,7 @@ use thiserror::Error;
 use url::Url;
 pub mod cutover;
 pub mod manifest;
+pub mod recovery;
 pub mod transfer;
 pub mod translation;
 pub mod volume;
