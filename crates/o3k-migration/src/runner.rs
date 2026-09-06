@@ -17,9 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::process::Stdio;
 use thiserror::Error;
-use tokio::process::Command;
+
+pub use crate::tofu::run_opentofu_noop;
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
@@ -611,54 +611,6 @@ impl CanonicalDestination for HttpNativeDestination {
         }
         Ok(())
     }
-}
-
-/// Exact process boundary for the pinned OpenTofu handoff. This intentionally
-/// does not offer an in-memory shortcut.
-pub async fn run_opentofu_noop(
-    executable: &str,
-    working_directory: &std::path::Path,
-    environment: &[(String, String)],
-) -> Result<String, RunnerError> {
-    let mut command = Command::new(executable);
-    command
-        .current_dir(working_directory)
-        .arg("plan")
-        .arg("-detailed-exitcode")
-        .arg("-input=false")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (key, value) in environment {
-        command.env(key, value);
-    }
-    let output = command
-        .output()
-        .await
-        .map_err(|error| RunnerError::OpenTofu(error.to_string()))?;
-    if output.status.code() != Some(0) {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(RunnerError::OpenTofu(format!(
-            "plan was not NO-OP (exit {:?}): {}",
-            output.status.code(),
-            redact_process_output(&stderr)
-        )));
-    }
-    Ok(redact_process_output(&String::from_utf8_lossy(
-        &output.stdout,
-    )))
-}
-
-fn redact_process_output(value: &str) -> String {
-    value
-        .lines()
-        .filter(|line| {
-            !line.to_ascii_lowercase().contains("token")
-                && !line.to_ascii_lowercase().contains("password")
-                && !line.to_ascii_lowercase().contains("secret")
-        })
-        .take(20)
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn redact_json(value: &Value) -> Value {
