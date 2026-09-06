@@ -142,8 +142,8 @@ def validate_document(document):
         fail(document, "x-o3k-baseline.path must link the normative TestLab baseline")
     if baseline.get("status") not in {"partial", "complete"}:
         fail(document, "x-o3k-baseline.status must be partial or complete")
-    if baseline.get("coverage") != "bootstrap":
-        fail(document, "bootstrap contract must declare bootstrap baseline coverage")
+    if baseline.get("coverage") not in {"bootstrap", "native-iam"}:
+        fail(document, "contract must declare bootstrap or native-iam baseline coverage")
 
     paths = data.get("paths")
     if not isinstance(paths, dict) or not paths:
