@@ -372,7 +372,22 @@ create/delete; generic dispatch exists before the external controller boundary;
 the external controller boundary exists before real Database composition; and
 everything exists before the security evidence gate.
 
-## P13 — Ecosystem Compatibility & Infrastructure as Code — implementation active
+## P12-IAM — Production identity federation — implementation complete
+
+P12-IAM production federation is complete for the bounded O3K/Araf identity
+profile. O3K remains authoritative for trusted issuer validation, canonical
+principals, ownership scopes, authorization, native scoped tokens, and
+`AuthContext`; Araf owns the browser OIDC redirect/callback, cookies, and
+session boundary.
+
+The aggregate closure evidence is recorded by P12-IAM #794 and its completed
+implementation slices. The real Keycloak federation gate and the protected
+Araf process journey passed, and the protected O3K CI run passed. This records
+the completed evidence profile only; it does not claim broad OIDC-provider
+certification, generic OpenStack compatibility, HA/SLA, or production
+readiness for the broader O3K product.
+
+## P13 — Ecosystem Compatibility & Infrastructure as Code — implementation complete (bounded profile)
 
 P13 targets configurations using the resources listed by
 `p13-iac-compatibility-v1` and the attribute subsets frozen by its staged
@@ -381,11 +396,12 @@ provider-contract discovery gates. They use the standard, unmodified
 remain canonical O3K resources and all OpenStack concepts remain compatibility
 projections.
 
-The P13 architecture is defined by ADR-0175 and SPEC-0032. Those sources are
-Accepted as of 2026-08-24. Acceptance authorizes P13.1 provider-contract
-discovery; runtime compatibility claims remain gated by SPEC-0032 evidence.
+The P13 architecture is defined by ADR-0175 and SPEC-0032. Those sources were
+accepted on 2026-08-24. The bounded P13.1–P13.7 implementation and evidence
+profile is complete; runtime compatibility claims remain limited to the
+operation/resource subsets and evidence recorded by SPEC-0032.
 
-### P13.0 — Architecture, compatibility contracts, IaC profile (this phase)
+### P13.0 — Architecture, compatibility contracts, IaC profile — completed
 
 - ADR-0175: OpenStack Ecosystem and Infrastructure-as-Code Compatibility Boundary
 - SPEC-0032: OpenStack Terraform/OpenTofu Compatibility Profile v1
@@ -431,6 +447,10 @@ discovery; runtime compatibility claims remain gated by SPEC-0032 evidence.
 
 - Complete bounded IaC journey on the real host and product-profile closure
   are verified by `docs/compatibility/p13-7/p13-7-real-host-iac-evidence.json`.
+
+P13 closure is frozen at the bounded `p13-iac-compatibility-v1` profile. No
+generic OpenStack compatibility, HA/SLA, multi-region, or broader product
+support claim follows from this milestone.
 
 ### P13 non-goals
 
