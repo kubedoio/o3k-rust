@@ -7,6 +7,7 @@ use crate::{
     auth_context::AuthContext,
     principal::PrincipalKind,
     resource::{ResourceTarget, ResourceType},
+    scope::ScopeKind,
 };
 
 /// Authorization request presented to the Cloud Kernel authorizer.
@@ -271,6 +272,22 @@ impl StaticAuthorizer {
         reg("network", "CreateEndpoint", "network", "endpoint", true);
         reg("network", "ReadEndpoint", "network", "endpoint", true);
         reg("network", "DeleteEndpoint", "network", "endpoint", true);
+
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("operator", "ReadProfile"),
+            ResourceType::new("operator", "profile"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: false,
+                    required_roles: vec!["operator".to_owned()],
+                },
+            );
+        }
     }
 }
 
@@ -295,6 +312,14 @@ impl Authorizer for StaticAuthorizer {
         if !policy.accepted_principals.contains(&principal_kind) {
             return AuthorizationDecision::Deny {
                 reason: DecisionReason::UnsupportedPrincipal,
+            };
+        }
+
+        if request.action == ActionId::new_unchecked("operator", "ReadProfile")
+            && request.auth_context.effective_scope().kind() != ScopeKind::System
+        {
+            return AuthorizationDecision::Deny {
+                reason: DecisionReason::ScopeMismatch,
             };
         }
 

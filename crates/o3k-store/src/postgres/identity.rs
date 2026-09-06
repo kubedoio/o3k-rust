@@ -6,7 +6,7 @@ use crate::{
     FederatedBindingRecord, IdentityRepository, KeypairRecord, KeypairRepository,
     KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    StoreError,
+    OperatorAssignmentRecord, StoreError,
 };
 
 use super::{PostgresStore, helpers::parse_uuid};
@@ -209,6 +209,42 @@ impl IdentityRepository for PostgresStore {
         enabled: bool,
     ) -> Result<(), StoreError> {
         sqlx::query("UPDATE federated_bindings SET enabled = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2")
+            .bind(enabled).bind(id).execute(&self.pool).await.map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    async fn insert_operator_assignment(
+        &self,
+        assignment: &OperatorAssignmentRecord,
+    ) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO operator_assignments (id, user_id, profile, enabled, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT(user_id, profile) DO UPDATE SET enabled=EXCLUDED.enabled, updated_at=EXCLUDED.updated_at")
+            .bind(&assignment.id).bind(&assignment.user_id).bind(&assignment.profile).bind(assignment.enabled)
+            .bind(&assignment.created_at).bind(&assignment.updated_at).execute(&self.pool).await.map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    async fn list_operator_assignments(&self) -> Result<Vec<OperatorAssignmentRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, user_id, profile, enabled, created_at, updated_at FROM operator_assignments ORDER BY id ASC")
+            .fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| OperatorAssignmentRecord {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                profile: r.get("profile"),
+                enabled: r.get("enabled"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect())
+    }
+
+    async fn set_operator_assignment_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE operator_assignments SET enabled = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2")
             .bind(enabled).bind(id).execute(&self.pool).await.map_err(StoreError::Database)?;
         Ok(())
     }

@@ -1548,6 +1548,15 @@ mod tests {
         store.insert_keystone_domain(&domain).await?;
         store.insert_keystone_user(&user).await?;
         store.insert_federated_binding(&binding).await?;
+        let assignment = OperatorAssignmentRecord {
+            id: "restart-operator-assignment".to_owned(),
+            user_id: user.id.clone(),
+            profile: "operator-console".to_owned(),
+            enabled: true,
+            created_at: domain.created_at.clone(),
+            updated_at: domain.created_at.clone(),
+        };
+        store.insert_operator_assignment(&assignment).await?;
         drop(store);
 
         let reopened = SqliteStore::connect_file(&path).await?;
@@ -1556,6 +1565,10 @@ mod tests {
                 .find_federated_binding("restart-issuer", "restart-subject")
                 .await?,
             Some(binding)
+        );
+        assert_eq!(
+            reopened.list_operator_assignments().await?,
+            vec![assignment]
         );
         drop(reopened);
         std::fs::remove_file(path)?;

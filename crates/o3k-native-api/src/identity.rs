@@ -14,6 +14,9 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use o3k_kernel::{
+    ActionId, AuthorizationDecision, AuthorizationRequest, ResourceTarget, ResourceType, ScopeId,
+};
 use serde::Serialize;
 
 use crate::{
@@ -91,4 +94,43 @@ pub async fn current_context(auth: BearerAuth, _request_id: RequestId) -> Json<C
         effective_scope_id: ctx.effective_scope().id().to_string(),
         effective_scope_kind: ctx.effective_scope().kind().as_str().to_owned(),
     })
+}
+
+/// Bounded operator-console probe. The route is intentionally server-
+/// authorized and does not expose shell, host, or data-plane controls.
+pub async fn operator_profile(
+    State(state): State<NativeApiState>,
+    auth: BearerAuth,
+    request_id: RequestId,
+) -> Response {
+    let Some(authorizer) = state.authorizer.as_ref() else {
+        return ProblemDetails::with_detail(
+            ErrorCode::Forbidden,
+            "operator authorization is not configured",
+        )
+        .with_request_id(request_id.0)
+        .into_response();
+    };
+    let target = ResourceTarget::collection(
+        ResourceType::new_unchecked("operator", "profile"),
+        Some(ScopeId::new_unchecked("system")),
+    );
+    match authorizer.authorize(&AuthorizationRequest {
+        auth_context: &auth.0,
+        action: ActionId::new_unchecked("operator", "ReadProfile"),
+        resource_target: target,
+    }) {
+        AuthorizationDecision::Allow => Json(serde_json::json!({
+            "profile": "operator-console",
+            "scope": "system",
+            "principal_id": auth.0.principal().id().to_string(),
+            "audit_id": auth.0.audit_id(),
+        }))
+        .into_response(),
+        AuthorizationDecision::Deny { .. } => {
+            ProblemDetails::with_detail(ErrorCode::Forbidden, "operator authorization denied")
+                .with_request_id(request_id.0)
+                .into_response()
+        }
+    }
 }

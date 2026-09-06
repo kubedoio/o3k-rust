@@ -9,10 +9,10 @@ use crate::domain::records::{
     ImageMetadataRecord, KeypairRecord, KeystoneDomainRecord, KeystoneEndpointRecord,
     KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
     KeystoneServiceRecord, KeystoneUserRecord, NetworkAddressAllocationRecord, NetworkIntentRecord,
-    NetworkRecord, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
-    PlacementProviderRecord, PlacementReconcileRecord, PortRecord, ResourceRecord,
-    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord,
-    VolumeAttachmentRecord,
+    NetworkRecord, OperatorAssignmentRecord, PlacementAllocationRecord, PlacementIntentRecord,
+    PlacementInventoryRecord, PlacementProviderRecord, PlacementReconcileRecord, PortRecord,
+    ResourceRecord, SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord,
+    SubnetRecord, VolumeAttachmentRecord,
 };
 use crate::port::durable::DurableStore;
 use crate::quota::QuotaRepository;
@@ -47,6 +47,16 @@ pub trait IdentityRepository: Send + Sync {
     ) -> Result<Option<FederatedBindingRecord>, StoreError>;
     async fn list_federated_bindings(&self) -> Result<Vec<FederatedBindingRecord>, StoreError>;
     async fn set_federated_binding_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<(), StoreError>;
+    async fn insert_operator_assignment(
+        &self,
+        assignment: &OperatorAssignmentRecord,
+    ) -> Result<(), StoreError>;
+    async fn list_operator_assignments(&self) -> Result<Vec<OperatorAssignmentRecord>, StoreError>;
+    async fn set_operator_assignment_enabled(
         &self,
         id: &str,
         enabled: bool,
