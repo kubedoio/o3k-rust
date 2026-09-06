@@ -196,7 +196,10 @@ where
                             node.key
                         )));
                     }
-                    if expected_destination_id.as_deref() != Some(value.destination_id.as_str()) {
+                    if expected_destination_id
+                        .as_deref()
+                        .is_some_and(|expected| expected != value.destination_id)
+                    {
                         return Err(RunnerError::Fenced(format!(
                             "create returned a conflicting destination mapping for {}",
                             node.key
@@ -611,7 +614,8 @@ impl CanonicalDestination for HttpNativeDestination {
         let observed = self.observe(migration_id, node).await?.ok_or_else(|| {
             RunnerError::Destination(format!("{} disappeared after create", node.key))
         })?;
-        if !observed.owned_by_migration
+        if observed.destination_id != node.destination_id.as_deref().unwrap_or_default()
+            || !observed.owned_by_migration
             || !observed.complete
             || observed.owner_scope_id != node.owner_scope_id
         {
