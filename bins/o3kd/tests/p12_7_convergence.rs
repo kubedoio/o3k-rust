@@ -199,6 +199,7 @@ async fn build_http_runtime(
         });
     let token_issuer: Arc<dyn TokenIssuer> = Arc::new(o3kd::native_adapters::TokenIssuerAdapter {
         service: Arc::new(identity.clone()),
+        oidc_validator: None,
     });
     let native = o3k_native_api::NativeApiState::new(
         Some(manifests),
@@ -309,6 +310,7 @@ async fn run_native_openstack_http_conformance(
         });
     let token_issuer: Arc<dyn TokenIssuer> = Arc::new(o3kd::native_adapters::TokenIssuerAdapter {
         service: Arc::new(identity.clone()),
+        oidc_validator: None,
     });
     let native = o3k_native_api::NativeApiState::new(
         Some(manifests),

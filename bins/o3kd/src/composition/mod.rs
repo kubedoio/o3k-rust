@@ -12,6 +12,39 @@ use std::{sync::Arc, time::Duration};
 use tracing::info;
 use uuid::Uuid;
 
+fn federated_oidc_validator_from_env()
+-> Result<Option<Arc<o3k_identity::oidc::OidcValidator>>, Box<dyn std::error::Error>> {
+    let values = [
+        std::env::var("O3K_OIDC_TRUST_ID").ok(),
+        std::env::var("O3K_OIDC_ISSUER").ok(),
+        std::env::var("O3K_OIDC_AUDIENCE").ok(),
+        std::env::var("O3K_OIDC_DISCOVERY_URL").ok(),
+    ]
+    .map(|value| value.filter(|value| !value.is_empty()));
+    match values {
+        [None, None, None, None] => Ok(None),
+        [Some(id), Some(issuer), Some(audience), Some(discovery_url)] => {
+            let trusted = o3k_identity::oidc::TrustedIssuer {
+                id,
+                issuer: url::Url::parse(&issuer)?,
+                audience,
+                algorithms: vec![jsonwebtoken::Algorithm::RS256],
+                discovery_url: url::Url::parse(&discovery_url)?,
+                allow_insecure_local: false,
+                timeout: Duration::from_secs(5),
+                cache_ttl: Duration::from_secs(300),
+                max_token_bytes: 16 * 1024,
+                max_document_bytes: 512 * 1024,
+                clock_skew: Duration::from_secs(30),
+            };
+            Ok(Some(Arc::new(o3k_identity::oidc::OidcValidator::new(
+                trusted,
+            )?)))
+        }
+        _ => Err("partial O3K_OIDC_* configuration: set trust ID, issuer, audience, and discovery URL, or none".into()),
+    }
+}
+
 use self::compute::{
     DaemonCreateResolver, agent_inspect_probe_from_env, parse_extra_project_seeds,
 };
@@ -477,6 +510,7 @@ pub async fn build_composition(
             None
         }
     };
+    let oidc_validator = federated_oidc_validator_from_env()?;
 
     let authorized_agents = config
         .compute_authorized_agents
@@ -523,6 +557,7 @@ pub async fn build_composition(
         identity.as_ref().map(|id_service| {
             std::sync::Arc::new(crate::native_adapters::TokenIssuerAdapter {
                 service: std::sync::Arc::new(id_service.clone()),
+                oidc_validator: oidc_validator.clone(),
             }) as std::sync::Arc<dyn o3k_native_api::auth::TokenIssuer>
         });
     let external_controllers = external_controllers_from_config().await?;
