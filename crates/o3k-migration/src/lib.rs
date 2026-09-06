@@ -21,6 +21,8 @@ pub mod cutover;
 pub mod handoff;
 pub mod manifest;
 pub mod recovery;
+pub mod runner;
+pub mod tofu;
 pub mod transfer;
 pub mod translation;
 pub mod volume;

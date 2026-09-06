@@ -1,11 +1,11 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: cde27affc11d3501291fa11a173e5ebedd8a2de1
+source_commit: 44146c99a5cee3f274e0275c904f3958d682e655
 updated_at: 2026-09-06T00:00:00Z
 milestones:
   p14:
     status: architecture-defined
-    source_commit: cde27affc11d3501291fa11a173e5ebedd8a2de1
+    source_commit: 44146c99a5cee3f274e0275c904f3958d682e655
     evidence: >-
       P14.0 architecture/contracts are defined by ADR-0180 and SPEC-0037;
       runtime migration is not implemented and no cross-cloud support claim is
@@ -78,7 +78,7 @@ profiles:
       Architecture-defined only. ADR-0180, SPEC-0037, and the ordered P14
       prompt/review set are present. Runtime implementation and real two-cloud
       evidence are intentionally not started by P14.0.
-    source_commit: cde27affc11d3501291fa11a173e5ebedd8a2de1
+    source_commit: 44146c99a5cee3f274e0275c904f3958d682e655
     portable_evidence:
       - name: p14-architecture-contracts
         state: passed

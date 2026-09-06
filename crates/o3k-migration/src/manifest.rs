@@ -341,6 +341,13 @@ pub fn validate(manifest: &MigrationManifest) -> Result<(), ManifestError> {
     Ok(())
 }
 
+/// Recomputes the integrity field after a durable workflow projection changes
+/// phase, ownership, verification, or cutover state.
+pub fn refresh_integrity(manifest: &mut MigrationManifest) -> Result<(), ManifestError> {
+    manifest.integrity.manifest_digest = digest_without_integrity(manifest)?;
+    Ok(())
+}
+
 pub fn ensure_snapshot_unchanged(
     manifest: &MigrationManifest,
     snapshot: &SourceSnapshot,

@@ -253,6 +253,7 @@ APPROVED_HOST_EXECUTION_PATHS = {
     "crates/o3k-network/src/linux_fabric",
     "crates/o3k-storage/src/ceph.rs",
     "crates/o3k-storage/src/lib.rs",
+    "crates/o3k-migration/src/tofu.rs",
     # These crates are themselves explicit provider/host-execution adapters.
     "crates/o3k-cellhv/src",
     "crates/o3k-libvirt/src",
