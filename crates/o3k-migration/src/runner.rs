@@ -450,9 +450,18 @@ impl CanonicalDestination for HttpNativeDestination {
         migration_id: &str,
         node: &ManifestNode,
     ) -> Result<Option<DestinationObservation>, RunnerError> {
+        let url = if node.destination_id.is_some() {
+            self.resource_url(node)?
+        } else {
+            let mut url = self.collection_url(node)?;
+            url.query_pairs_mut()
+                .append_pair("migration_id", migration_id)
+                .append_pair("source_key", &node.key);
+            url
+        };
         let response = self
             .client
-            .get(self.resource_url(node)?)
+            .get(url)
             .bearer_auth(&self.bearer)
             .header(
                 "Idempotency-Key",
@@ -474,21 +483,41 @@ impl CanonicalDestination for HttpNativeDestination {
             .json()
             .await
             .map_err(|error| RunnerError::Destination(error.to_string()))?;
-        let id = body
+        let resource = if node.destination_id.is_none() {
+            body.get("resources")
+                .and_then(Value::as_array)
+                .and_then(|resources| {
+                    resources.iter().find(|resource| {
+                        resource
+                            .pointer("/metadata/migration_id")
+                            .and_then(Value::as_str)
+                            == Some(migration_id)
+                            && resource
+                                .pointer("/metadata/source_key")
+                                .and_then(Value::as_str)
+                                == Some(node.key.as_str())
+                    })
+                })
+                .or_else(|| body.get("resource"))
+                .unwrap_or(&body)
+        } else {
+            &body
+        };
+        let id = resource
             .pointer("/metadata/id")
             .and_then(Value::as_str)
-            .or_else(|| body.get("id").and_then(Value::as_str))
+            .or_else(|| resource.get("id").and_then(Value::as_str))
             .ok_or_else(|| RunnerError::Destination("observe omitted canonical id".into()))?;
         Ok(Some(DestinationObservation {
             destination_id: id.into(),
             migration_id: migration_id.into(),
-            owner_scope_id: body
+            owner_scope_id: resource
                 .pointer("/metadata/owner_scope")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .into(),
             source_key: node.key.clone(),
-            owned_by_migration: body
+            owned_by_migration: resource
                 .pointer("/metadata/migration_id")
                 .and_then(Value::as_str)
                 == Some(migration_id),
