@@ -2018,6 +2018,7 @@ dependencies = [
  "axum",
  "chrono",
  "ed25519-dalek",
+ "jsonwebtoken",
  "o3k-api",
  "o3k-cellhv",
  "o3k-cinder",
@@ -2051,6 +2052,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

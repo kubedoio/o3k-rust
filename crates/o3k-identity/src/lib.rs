@@ -230,7 +230,7 @@ pub struct DiscoverableScope {
 pub struct FederatedScopeAuthorization {
     pub principal_id: String,
     pub scope: OwnershipScope,
-    pub roles: Vec<String>,
+    pub roles: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -937,12 +937,7 @@ impl TokenService {
             .domain_by_id(&project.domain_id)
             .filter(|domain| domain.enabled)
             .ok_or(AuthError::Unauthorized)?;
-        let roles: Vec<String> = self
-            .snapshot
-            .role_names_for(&user.id, &project.id)
-            .into_iter()
-            .map(|(_, name)| name)
-            .collect();
+        let roles = self.snapshot.role_names_for(&user.id, &project.id);
         if roles.is_empty() {
             return Err(AuthError::Unauthorized);
         }
@@ -1031,20 +1026,61 @@ impl TokenService {
             return Err(AuthError::Unauthorized);
         }
 
+        self.issue_scoped(&user_id, &project.id, &roles, "password", None, now)
+    }
+
+    /// Exchanges a validated external identity for the existing native scoped
+    /// token model. Raw external credentials are handled by the OIDC adapter;
+    /// IAM receives only safe identity claims and the validated expiry.
+    pub fn issue_federated(
+        &self,
+        identity: &oidc::ValidatedExternalIdentity,
+        requested_scope_id: &str,
+        now: SystemTime,
+    ) -> Result<(String, TokenResponse), AuthError> {
+        let authorized = self.authorize_federated_scope(identity, requested_scope_id)?;
+        self.issue_scoped(
+            &authorized.principal_id,
+            requested_scope_id,
+            &authorized.roles,
+            "federated",
+            Some(identity.expires_at),
+            now,
+        )
+    }
+
+    fn issue_scoped(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        roles: &[(String, String)],
+        method: &str,
+        external_expires_at: Option<u64>,
+        now: SystemTime,
+    ) -> Result<(String, TokenResponse), AuthError> {
         let issued = now
             .duration_since(UNIX_EPOCH)
             .map_err(|_| AuthError::InvalidRequest)?
             .as_secs();
-        let expires = issued.saturating_add(self.token_ttl.as_secs());
+        if external_expires_at.is_some_and(|expires| expires <= issued) {
+            return Err(AuthError::Unauthorized);
+        }
+        let expires = issued
+            .saturating_add(self.token_ttl.as_secs())
+            .min(external_expires_at.unwrap_or(u64::MAX));
+        if expires <= issued {
+            return Err(AuthError::Unauthorized);
+        }
         let token_id = Uuid::now_v7().to_string();
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
         let payload = URL_SAFE_NO_PAD.encode(
             serde_json::to_vec(&Claims {
-                sub: user_id.clone(),
-                project: project.id.clone(),
+                sub: user_id.to_owned(),
+                project: project_id.to_owned(),
                 issued,
                 expires,
                 token_id,
+                method: method.to_owned(),
             })
             .map_err(|_| AuthError::InvalidRequest)?,
         );
@@ -1056,7 +1092,7 @@ impl TokenService {
         Ok((
             token,
             TokenResponse {
-                token: self.details(&user_id, &project.id, &roles, issued_at, expires_at)?,
+                token: self.details(user_id, project_id, roles, method, issued_at, expires_at)?,
             },
         ))
     }
@@ -1118,6 +1154,7 @@ impl TokenService {
             project_id: claims.project,
             issued: claims.issued,
             expires: claims.expires,
+            method: claims.method,
         })
     }
 
@@ -1133,6 +1170,7 @@ impl TokenService {
                 &verified.user_id,
                 &verified.project_id,
                 &roles,
+                &verified.method,
                 issued_at,
                 expires_at,
             )?,
@@ -1282,6 +1320,7 @@ impl TokenService {
         user_id: &str,
         project_id: &str,
         roles: &[(String, String)],
+        method: &str,
         issued_at: String,
         expires_at: String,
     ) -> Result<TokenDetails, AuthError> {
@@ -1314,7 +1353,7 @@ impl TokenService {
         Ok(TokenDetails {
             expires_at,
             issued_at,
-            methods: vec!["password".to_owned()],
+            methods: vec![method.to_owned()],
             project: ProjectDetails {
                 id: project.id.clone(),
                 name: project.name.clone(),
@@ -1390,6 +1429,7 @@ pub struct VerifiedToken {
     pub project_id: String,
     pub issued: u64,
     pub expires: u64,
+    pub method: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1399,6 +1439,12 @@ struct Claims {
     issued: u64,
     expires: u64,
     token_id: String,
+    #[serde(default = "default_token_method")]
+    method: String,
+}
+
+fn default_token_method() -> String {
+    "password".to_owned()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1864,6 +1910,7 @@ mod tests {
             trusted_issuer_id: "issuer-a".to_owned(),
             issuer: "https://idp.example.test".to_owned(),
             subject: "alice".to_owned(),
+            expires_at: u64::MAX,
         }
     }
 
@@ -1912,6 +1959,7 @@ mod tests {
                 trusted_issuer_id: "issuer-a".to_owned(),
                 issuer: "https://idp.example.test".to_owned(),
                 subject: "bob".to_owned(),
+                expires_at: u64::MAX,
             })?;
         assert_eq!(
             bob_scopes
@@ -1980,6 +2028,37 @@ mod tests {
         assert!(stale.discover_federated_scopes(&identity)?.is_empty());
         assert!(matches!(
             stale.authorize_federated_scope(&identity, project_id),
+            Err(AuthError::Unauthorized)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn federated_exchange_issues_native_context_with_external_lifetime() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let mut identity = alice_identity();
+        identity.expires_at = 1_200;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let project_id = "eba29e2d-53de-461d-ae91-ede7402713cb";
+        let (token, response) = service.issue_federated(&identity, project_id, now)?;
+        let verified = service.verify(&token, now)?;
+        assert_eq!(verified.user_id, "bootstrap-user");
+        assert_eq!(verified.project_id, project_id);
+        assert_eq!(verified.expires, 1_200);
+        assert_eq!(verified.method, "federated");
+        assert_eq!(response.token.methods, ["federated"]);
+        let context = service.auth_context(&token, now)?;
+        assert_eq!(context.principal().id().as_str(), "bootstrap-user");
+        assert_eq!(context.effective_scope().id().as_str(), project_id);
+        assert_eq!(context.expires_at(), 1_200);
+
+        identity.expires_at = 1_000;
+        assert!(matches!(
+            service.issue_federated(&identity, project_id, now),
+            Err(AuthError::Unauthorized)
+        ));
+        assert!(matches!(
+            service.issue_federated(&alice_identity(), "missing-project", now),
             Err(AuthError::Unauthorized)
         ));
         Ok(())

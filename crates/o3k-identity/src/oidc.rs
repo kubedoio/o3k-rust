@@ -94,6 +94,7 @@ pub struct ValidatedExternalIdentity {
     pub trusted_issuer_id: String,
     pub issuer: String,
     pub subject: String,
+    pub expires_at: u64,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -120,6 +121,7 @@ struct DiscoveryDocument {
 struct Claims {
     iss: String,
     sub: String,
+    exp: u64,
 }
 
 #[derive(Clone)]
@@ -239,6 +241,7 @@ impl OidcValidator {
             trusted_issuer_id: self.issuer.id.clone(),
             issuer: claims.iss,
             subject: claims.sub,
+            expires_at: claims.exp,
         })
     }
 

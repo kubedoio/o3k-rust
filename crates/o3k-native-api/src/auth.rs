@@ -22,12 +22,12 @@ use crate::{NativeApiState, error::ProblemDetails};
 ///
 /// This is the canonical native IAM request, separate from the
 /// Keystone-compatible `TokenRequest`. Both map to the same O3K IAM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NativeTokenRequestV1 {
     pub auth: NativeAuth,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NativeAuth {
     pub method: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,14 +36,82 @@ pub struct NativeAuth {
     pub token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub federated: Option<NativeFederatedCredentials>,
 }
 
 /// Validated native credential.  The wire DTO remains deliberately separate
 /// from Keystone's request shape; callers must pass through this validator.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum NativeCredentialV1 {
-    Password { user_id: String, password: String },
-    Token { token: String },
+    Password {
+        user_id: String,
+        password: String,
+    },
+    Token {
+        token: String,
+    },
+    Federated {
+        access_token: String,
+        project_id: String,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NativeFederatedCredentials {
+    pub access_token: String,
+}
+
+impl std::fmt::Debug for NativeTokenRequestV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeTokenRequestV1")
+            .field("auth", &self.auth)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for NativeAuth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeAuth")
+            .field("method", &self.method)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("project_id", &self.project_id)
+            .field("federated", &self.federated)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for NativeFederatedCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeFederatedCredentials")
+            .field("access_token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for NativeCredentialV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Password { user_id, .. } => formatter
+                .debug_struct("Password")
+                .field("user_id", user_id)
+                .field("password", &"<redacted>")
+                .finish(),
+            Self::Token { .. } => formatter
+                .debug_struct("Token")
+                .field("token", &"<redacted>")
+                .finish(),
+            Self::Federated { project_id, .. } => formatter
+                .debug_struct("Federated")
+                .field("project_id", project_id)
+                .field("access_token", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 impl NativeAuth {
@@ -64,16 +132,44 @@ impl NativeAuth {
             ("token", None, Some(token)) if !token.is_empty() => Ok(NativeCredentialV1::Token {
                 token: token.clone(),
             }),
+            ("federated", None, None) if self.federated.is_some() => {
+                let project_id = self
+                    .project_id
+                    .as_deref()
+                    .filter(|project_id| !project_id.is_empty())
+                    .ok_or("federated credential requires project_id")?;
+                let access_token = self
+                    .federated
+                    .as_ref()
+                    .map(|credentials| credentials.access_token.as_str())
+                    .filter(|token| !token.is_empty())
+                    .ok_or("federated credential requires access_token")?;
+                Ok(NativeCredentialV1::Federated {
+                    access_token: access_token.to_owned(),
+                    project_id: project_id.to_owned(),
+                })
+            }
             ("password" | "token", _, _) => Err("credential does not match method"),
+            ("federated", _, _) => Err("credential does not match method"),
             _ => Err("unknown native credential method"),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NativePasswordCredentials {
     pub user_id: String,
     pub password: String,
+}
+
+impl std::fmt::Debug for NativePasswordCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativePasswordCredentials")
+            .field("user_id", &self.user_id)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Bounded request correlation identity accepted by the native API.
@@ -129,6 +225,7 @@ mod tests {
             password,
             token: token.map(str::to_owned),
             project_id: None,
+            federated: None,
         }
     }
 
@@ -164,6 +261,22 @@ mod tests {
             .is_err()
         );
         assert!(auth("other", None, None).credential().is_err());
+    }
+
+    #[test]
+    fn federated_credentials_require_explicit_scope_and_method() {
+        let mut request = auth("federated", None, None);
+        request.project_id = Some("project-a".into());
+        request.federated = Some(NativeFederatedCredentials {
+            access_token: "external-access-token".into(),
+        });
+        assert!(matches!(
+            request.credential(),
+            Ok(NativeCredentialV1::Federated { project_id, .. }) if project_id == "project-a"
+        ));
+
+        request.project_id = None;
+        assert!(request.credential().is_err());
     }
 
     #[test]

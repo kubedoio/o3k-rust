@@ -9,6 +9,18 @@ use o3k_native_api::{
 /// Adapter for issuing native API tokens through the identity service.
 pub struct TokenIssuerAdapter {
     pub service: Arc<o3k_identity::TokenService>,
+    pub oidc_validator: Option<Arc<o3k_identity::oidc::OidcValidator>>,
+}
+
+impl TokenIssuerAdapter {
+    #[must_use]
+    pub fn with_oidc_validator(
+        mut self,
+        validator: Arc<o3k_identity::oidc::OidcValidator>,
+    ) -> Self {
+        self.oidc_validator = Some(validator);
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -21,6 +33,31 @@ impl TokenIssuer for TokenIssuerAdapter {
             .auth
             .credential()
             .map_err(ProblemDetails::bad_request)?;
+        if let NativeCredentialV1::Federated {
+            ref access_token,
+            ref project_id,
+        } = credential
+        {
+            let validator = self.oidc_validator.as_ref().ok_or_else(|| {
+                ProblemDetails::with_detail(
+                    o3k_native_api::error::ErrorCode::NotAvailable,
+                    "federated identity is not configured",
+                )
+            })?;
+            let identity = validator
+                .validate(access_token)
+                .await
+                .map_err(|_| ProblemDetails::unauthorized())?;
+            return match self
+                .service
+                .issue_federated(&identity, project_id, SystemTime::now())
+            {
+                Ok((token, response)) => serde_json::to_value(response)
+                    .map(|value| (token, value))
+                    .map_err(|_| ProblemDetails::internal()),
+                Err(_) => Err(ProblemDetails::unauthorized()),
+            };
+        }
         let (methods, password, token) = match credential {
             NativeCredentialV1::Password { user_id, password } => (
                 vec!["password".to_owned()],
@@ -39,6 +76,9 @@ impl TokenIssuer for TokenIssuerAdapter {
                 None,
                 Some(o3k_identity::TokenIdentity { id: token }),
             ),
+            NativeCredentialV1::Federated { .. } => {
+                return Err(ProblemDetails::bad_request("invalid federated credential"));
+            }
         };
         // Build a Keystone-compatible TokenRequest from native request
         let token_req = o3k_identity::TokenRequest {
