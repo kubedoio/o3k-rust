@@ -112,6 +112,25 @@ mod tests {
         )
     }
 
+    fn test_system_operator_context() -> AuthContext {
+        let principal = UserPrincipal::new(PrincipalId::new_unchecked("usr-1"), "test-user", None);
+        AuthContext::new(
+            Principal::User(principal),
+            OwnershipScope::new(
+                ScopeId::new_unchecked("system"),
+                ScopeKind::System,
+                Some("System".to_owned()),
+                None,
+            ),
+            vec!["operator".to_owned()],
+            1700000000,
+            1700003600,
+            "audit-system",
+            "req-system",
+            None,
+        )
+    }
+
     #[test]
     fn authorizer_standard_allow_owner() -> Result<(), KernelError> {
         let auth = StaticAuthorizer::standard();
@@ -129,6 +148,45 @@ mod tests {
         let decision = auth.authorize(&req);
         assert!(decision.is_allowed());
         assert_eq!(decision.reason(), &DecisionReason::Allowed);
+        Ok(())
+    }
+
+    #[test]
+    fn operator_action_requires_system_user_scope_and_operator_role() -> Result<(), KernelError> {
+        let auth = StaticAuthorizer::standard();
+        let target = ResourceTarget::collection(
+            ResourceType::new("operator", "profile")?,
+            Some(ScopeId::new("system")?),
+        );
+        let system = test_system_operator_context();
+        let request = AuthorizationRequest {
+            auth_context: &system,
+            action: ActionId::new("operator", "ReadProfile")?,
+            resource_target: target.clone(),
+        };
+        assert!(auth.authorize(&request).is_allowed());
+
+        let project = test_user_context("usr-1", "proj-1");
+        let request = AuthorizationRequest {
+            auth_context: &project,
+            action: ActionId::new("operator", "ReadProfile")?,
+            resource_target: target.clone(),
+        };
+        assert_eq!(
+            auth.authorize(&request).reason(),
+            &DecisionReason::ScopeMismatch
+        );
+
+        let service = test_service_context("svc-1", "system");
+        let request = AuthorizationRequest {
+            auth_context: &service,
+            action: ActionId::new("operator", "ReadProfile")?,
+            resource_target: target,
+        };
+        assert_eq!(
+            auth.authorize(&request).reason(),
+            &DecisionReason::UnsupportedPrincipal
+        );
         Ok(())
     }
 

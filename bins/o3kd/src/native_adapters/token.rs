@@ -36,6 +36,7 @@ impl TokenIssuer for TokenIssuerAdapter {
         if let NativeCredentialV1::Federated {
             ref access_token,
             ref project_id,
+            system,
         } = credential
         {
             let validator = self.oidc_validator.as_ref().ok_or_else(|| {
@@ -48,10 +49,14 @@ impl TokenIssuer for TokenIssuerAdapter {
                 .validate(access_token)
                 .await
                 .map_err(|_| ProblemDetails::unauthorized())?;
-            return match self
-                .service
-                .issue_federated(&identity, project_id, SystemTime::now())
-            {
+            let issued = if system {
+                self.service
+                    .issue_federated_system(&identity, SystemTime::now())
+            } else {
+                self.service
+                    .issue_federated(&identity, project_id, SystemTime::now())
+            };
+            return match issued {
                 Ok((token, response)) => serde_json::to_value(response)
                     .map(|value| (token, value))
                     .map_err(|_| ProblemDetails::internal()),

@@ -497,6 +497,18 @@ pub struct FederatedBindingRecord {
     pub updated_at: String,
 }
 
+/// Explicit durable authorization for a human operator profile. This is
+/// intentionally separate from project role assignments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorAssignmentRecord {
+    pub id: String,
+    pub user_id: String,
+    pub profile: String,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeystoneRoleRecord {
     pub id: String,

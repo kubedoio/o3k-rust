@@ -20,7 +20,7 @@ use o3k_kernel::{
     AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, ScopeKind, ServicePrincipal,
     UserPrincipal,
 };
-use o3k_store::{FederatedBindingRecord, IdentityRepository, StoreError};
+use o3k_store::{FederatedBindingRecord, IdentityRepository, OperatorAssignmentRecord, StoreError};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -211,6 +211,14 @@ pub struct SnapshotFederatedBinding {
     pub issuer: String,
     pub subject: String,
     pub principal_id: String,
+    pub principal_type: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotOperatorAssignment {
+    pub user_id: String,
+    pub profile: String,
     pub enabled: bool,
 }
 
@@ -231,6 +239,12 @@ pub struct FederatedScopeAuthorization {
     pub principal_id: String,
     pub scope: OwnershipScope,
     pub roles: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FederatedSystemAuthorization {
+    pub principal_id: String,
+    pub profile: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +283,7 @@ pub struct IdentitySnapshot {
     pub roles: Vec<SnapshotRole>,
     pub assignments: Vec<SnapshotAssignment>,
     pub federated_bindings: Vec<SnapshotFederatedBinding>,
+    pub operator_assignments: Vec<SnapshotOperatorAssignment>,
     pub services: Vec<SnapshotService>,
     pub endpoints: Vec<SnapshotEndpoint>,
     pub regions: Vec<SnapshotRegion>,
@@ -328,9 +343,20 @@ impl IdentitySnapshot {
     ) -> Option<&SnapshotFederatedBinding> {
         self.federated_bindings.iter().find(|binding| {
             binding.enabled
+                && binding.principal_type == "user"
                 && binding.trusted_issuer_id == identity.trusted_issuer_id
                 && binding.issuer == identity.issuer
                 && binding.subject == identity.subject
+        })
+    }
+
+    fn operator_assignment_for(
+        &self,
+        user_id: &str,
+        profile: &str,
+    ) -> Option<&SnapshotOperatorAssignment> {
+        self.operator_assignments.iter().find(|assignment| {
+            assignment.enabled && assignment.user_id == user_id && assignment.profile == profile
         })
     }
 }
@@ -1049,6 +1075,47 @@ impl TokenService {
         )
     }
 
+    /// Issues the bounded system-scoped operator profile. The profile is
+    /// selected by server policy; callers cannot choose an arbitrary role or
+    /// convert a project assignment into system access.
+    pub fn issue_federated_system(
+        &self,
+        identity: &oidc::ValidatedExternalIdentity,
+        now: SystemTime,
+    ) -> Result<(String, TokenResponse), AuthError> {
+        let authorized = self.authorize_federated_system(identity)?;
+        self.issue_scoped(
+            &authorized.principal_id,
+            "system",
+            &[("operator-console".to_owned(), "operator".to_owned())],
+            "federated",
+            Some(identity.expires_at),
+            now,
+        )
+    }
+
+    pub fn authorize_federated_system(
+        &self,
+        identity: &oidc::ValidatedExternalIdentity,
+    ) -> Result<FederatedSystemAuthorization, AuthError> {
+        let binding = self
+            .snapshot
+            .federated_binding_for(identity)
+            .ok_or(AuthError::Unauthorized)?;
+        let user = self
+            .snapshot
+            .user_by_id(&binding.principal_id)
+            .filter(|user| user.enabled)
+            .ok_or(AuthError::Unauthorized)?;
+        self.snapshot
+            .operator_assignment_for(&user.id, "operator-console")
+            .ok_or(AuthError::Unauthorized)?;
+        Ok(FederatedSystemAuthorization {
+            principal_id: user.id.clone(),
+            profile: "operator-console".to_owned(),
+        })
+    }
+
     fn issue_scoped(
         &self,
         user_id: &str,
@@ -1145,6 +1212,13 @@ impl TokenService {
         let project = self.snapshot.project_by_id(&claims.project);
         match (user, project) {
             (Some(user), Some(project)) if user.enabled && project.enabled => {}
+            (Some(user), None)
+                if claims.project == "system"
+                    && user.enabled
+                    && self
+                        .snapshot
+                        .operator_assignment_for(&user.id, "operator-console")
+                        .is_some() => {}
             _ => return Err(AuthError::InvalidToken),
         }
 
@@ -1160,9 +1234,12 @@ impl TokenService {
 
     pub fn verify_details(&self, token: &str, now: SystemTime) -> Result<TokenResponse, AuthError> {
         let verified = self.verify(token, now)?;
-        let roles = self
-            .snapshot
-            .role_names_for(&verified.user_id, &verified.project_id);
+        let roles = if verified.project_id == "system" {
+            vec![("operator-console".to_owned(), "operator".to_owned())]
+        } else {
+            self.snapshot
+                .role_names_for(&verified.user_id, &verified.project_id)
+        };
         let issued_at = format_time(verified.issued)?;
         let expires_at = format_time(verified.expires)?;
         Ok(TokenResponse {
@@ -1183,6 +1260,24 @@ impl TokenService {
             .snapshot
             .user_by_id(&verified.user_id)
             .ok_or(AuthError::InvalidToken)?;
+        if verified.project_id == "system" {
+            let principal_id = PrincipalId::new(&user.id).map_err(|_| AuthError::InvalidToken)?;
+            return Ok(AuthContext::new(
+                Principal::User(UserPrincipal::new(principal_id, &user.name, None)),
+                OwnershipScope::new(
+                    ScopeId::new_unchecked("system"),
+                    ScopeKind::System,
+                    Some("System".to_owned()),
+                    None,
+                ),
+                vec!["operator".to_owned()],
+                verified.issued,
+                verified.expires,
+                Uuid::now_v7().to_string(),
+                Uuid::now_v7().to_string(),
+                None,
+            ));
+        }
         let project = self
             .snapshot
             .project_by_id(&verified.project_id)
@@ -1328,6 +1423,39 @@ impl TokenService {
             .snapshot
             .user_by_id(user_id)
             .ok_or(AuthError::InvalidToken)?;
+        if project_id == "system" {
+            let role_details = roles
+                .iter()
+                .map(|(id, name)| RoleDetails {
+                    id: id.clone(),
+                    name: name.clone(),
+                })
+                .collect();
+            return Ok(TokenDetails {
+                expires_at,
+                issued_at,
+                methods: vec![method.to_owned()],
+                project: ProjectDetails {
+                    id: "system".to_owned(),
+                    name: "System".to_owned(),
+                    domain: DomainDetails {
+                        id: "system".to_owned(),
+                        name: "System".to_owned(),
+                    },
+                },
+                user: UserDetails {
+                    id: user.id.clone(),
+                    name: user.name.clone(),
+                    domain: DomainDetails {
+                        id: user.domain_id.clone(),
+                        name: "System".to_owned(),
+                    },
+                    password_expires_at: None,
+                },
+                roles: role_details,
+                catalog: Vec::new(),
+            });
+        }
         let project = self
             .snapshot
             .project_by_id(project_id)
@@ -1564,8 +1692,22 @@ async fn load_snapshot(store: &dyn IdentityRepository) -> Result<IdentitySnapsho
             issuer: record.issuer,
             subject: record.subject,
             principal_id: record.principal_id,
+            principal_type: record.principal_type,
             enabled: record.enabled,
         })
+        .collect();
+    let operator_assignments = store
+        .list_operator_assignments()
+        .await
+        .map_err(map_error)?
+        .into_iter()
+        .map(
+            |record: OperatorAssignmentRecord| SnapshotOperatorAssignment {
+                user_id: record.user_id,
+                profile: record.profile,
+                enabled: record.enabled,
+            },
+        )
         .collect();
     let services = store
         .list_keystone_services()
@@ -1610,6 +1752,7 @@ async fn load_snapshot(store: &dyn IdentityRepository) -> Result<IdentitySnapsho
         roles,
         assignments,
         federated_bindings,
+        operator_assignments,
         services,
         endpoints,
         regions,
@@ -1852,6 +1995,12 @@ mod tests {
                 issuer: "https://idp.example.test".to_owned(),
                 subject: "alice".to_owned(),
                 principal_id: "bootstrap-user".to_owned(),
+                principal_type: "user".to_owned(),
+                enabled: true,
+            }],
+            operator_assignments: vec![SnapshotOperatorAssignment {
+                user_id: "bootstrap-user".to_owned(),
+                profile: "operator-console".to_owned(),
                 enabled: true,
             }],
             services: vec![
@@ -1947,6 +2096,7 @@ mod tests {
             issuer: "https://idp.example.test".to_owned(),
             subject: "bob".to_owned(),
             principal_id: "bob".to_owned(),
+            principal_type: "user".to_owned(),
             enabled: true,
         });
         let bob_service = TokenService::from_snapshot(
@@ -2059,6 +2209,60 @@ mod tests {
         ));
         assert!(matches!(
             service.issue_federated(&alice_identity(), "missing-project", now),
+            Err(AuthError::Unauthorized)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn federated_system_exchange_requires_explicit_operator_assignment() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let mut identity = alice_identity();
+        identity.expires_at = 1_200;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (token, response) = service.issue_federated_system(&identity, now)?;
+        let verified = service.verify(&token, now)?;
+        assert_eq!(verified.user_id, "bootstrap-user");
+        assert_eq!(verified.project_id, "system");
+        assert_eq!(verified.expires, 1_200);
+        assert_eq!(response.token.project.id, "system");
+
+        let context = service.auth_context(&token, now)?;
+        assert_eq!(context.principal().id().as_str(), "bootstrap-user");
+        assert_eq!(context.principal().kind(), PrincipalKind::User);
+        assert_eq!(context.effective_scope().kind(), ScopeKind::System);
+        assert_eq!(context.effective_scope().id().as_str(), "system");
+        assert_eq!(context.roles(), &["operator"]);
+
+        let mut no_operator = service.snapshot.clone();
+        no_operator.operator_assignments.clear();
+        let no_operator = TokenService::from_snapshot(
+            no_operator,
+            Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+            Duration::from_secs(3600),
+        )?;
+        assert!(matches!(
+            no_operator.issue_federated_system(&identity, now),
+            Err(AuthError::Unauthorized)
+        ));
+
+        let mut service_binding = service.snapshot.clone();
+        service_binding.federated_bindings[0].principal_id = "cinder".to_owned();
+        service_binding.federated_bindings[0].principal_type = "service".to_owned();
+        service_binding
+            .operator_assignments
+            .push(SnapshotOperatorAssignment {
+                user_id: "cinder".to_owned(),
+                profile: "operator-console".to_owned(),
+                enabled: true,
+            });
+        let service_binding = TokenService::from_snapshot(
+            service_binding,
+            Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+            Duration::from_secs(3600),
+        )?;
+        assert!(matches!(
+            service_binding.issue_federated_system(&identity, now),
             Err(AuthError::Unauthorized)
         ));
         Ok(())

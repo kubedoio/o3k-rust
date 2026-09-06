@@ -54,12 +54,27 @@ pub enum NativeCredentialV1 {
     Federated {
         access_token: String,
         project_id: String,
+        system: bool,
     },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NativeFederatedCredentials {
     pub access_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<NativeFederatedScope>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum NativeFederatedScope {
+    System,
+}
+
+impl std::fmt::Debug for NativeFederatedScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("System")
+    }
 }
 
 impl std::fmt::Debug for NativeTokenRequestV1 {
@@ -89,6 +104,7 @@ impl std::fmt::Debug for NativeFederatedCredentials {
         formatter
             .debug_struct("NativeFederatedCredentials")
             .field("access_token", &"<redacted>")
+            .field("scope", &self.scope)
             .finish()
     }
 }
@@ -105,9 +121,12 @@ impl std::fmt::Debug for NativeCredentialV1 {
                 .debug_struct("Token")
                 .field("token", &"<redacted>")
                 .finish(),
-            Self::Federated { project_id, .. } => formatter
+            Self::Federated {
+                project_id, system, ..
+            } => formatter
                 .debug_struct("Federated")
                 .field("project_id", project_id)
+                .field("system", system)
                 .field("access_token", &"<redacted>")
                 .finish(),
         }
@@ -132,7 +151,16 @@ impl NativeAuth {
             ("token", None, Some(token)) if !token.is_empty() => Ok(NativeCredentialV1::Token {
                 token: token.clone(),
             }),
-            ("federated", None, None) if self.federated.is_some() => {
+            ("federated", None, None)
+                if self
+                    .project_id
+                    .as_ref()
+                    .is_some_and(|project_id| !project_id.is_empty())
+                    && self
+                        .federated
+                        .as_ref()
+                        .is_some_and(|credentials| credentials.scope.is_none()) =>
+            {
                 let project_id = self
                     .project_id
                     .as_deref()
@@ -147,6 +175,24 @@ impl NativeAuth {
                 Ok(NativeCredentialV1::Federated {
                     access_token: access_token.to_owned(),
                     project_id: project_id.to_owned(),
+                    system: false,
+                })
+            }
+            ("federated", None, None)
+                if self.federated.as_ref().is_some_and(|credentials| {
+                    matches!(credentials.scope, Some(NativeFederatedScope::System))
+                }) && self.project_id.is_none() =>
+            {
+                let access_token = self
+                    .federated
+                    .as_ref()
+                    .map(|credentials| credentials.access_token.as_str())
+                    .filter(|token| !token.is_empty())
+                    .ok_or("federated credential requires access_token")?;
+                Ok(NativeCredentialV1::Federated {
+                    access_token: access_token.to_owned(),
+                    project_id: String::new(),
+                    system: true,
                 })
             }
             ("password" | "token", _, _) => Err("credential does not match method"),
@@ -269,6 +315,7 @@ mod tests {
         request.project_id = Some("project-a".into());
         request.federated = Some(NativeFederatedCredentials {
             access_token: "external-access-token".into(),
+            scope: None,
         });
         assert!(matches!(
             request.credential(),
@@ -276,6 +323,19 @@ mod tests {
         ));
 
         request.project_id = None;
+        assert!(request.credential().is_err());
+
+        request.federated = Some(NativeFederatedCredentials {
+            access_token: "external-access-token".into(),
+            scope: Some(NativeFederatedScope::System),
+        });
+        assert!(matches!(
+            request.credential(),
+            Ok(NativeCredentialV1::Federated { system: true, project_id, .. })
+                if project_id.is_empty()
+        ));
+
+        request.project_id = Some("project-a".into());
         assert!(request.credential().is_err());
     }
 

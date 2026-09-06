@@ -5,7 +5,7 @@ use crate::{
     FederatedBindingRecord, IdentityRepository, KeypairRecord, KeypairRepository,
     KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    StoreError,
+    OperatorAssignmentRecord, StoreError,
 };
 
 use super::O3kStore;
@@ -96,6 +96,32 @@ impl IdentityRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.set_federated_binding_enabled(id, enabled).await,
             Self::Postgres(s) => s.set_federated_binding_enabled(id, enabled).await,
+        }
+    }
+
+    async fn insert_operator_assignment(
+        &self,
+        assignment: &OperatorAssignmentRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_operator_assignment(assignment).await,
+            Self::Postgres(s) => s.insert_operator_assignment(assignment).await,
+        }
+    }
+    async fn list_operator_assignments(&self) -> Result<Vec<OperatorAssignmentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_operator_assignments().await,
+            Self::Postgres(s) => s.list_operator_assignments().await,
+        }
+    }
+    async fn set_operator_assignment_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.set_operator_assignment_enabled(id, enabled).await,
+            Self::Postgres(s) => s.set_operator_assignment_enabled(id, enabled).await,
         }
     }
 

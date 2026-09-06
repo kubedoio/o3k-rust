@@ -124,6 +124,7 @@ pub fn router(state: NativeApiState) -> Router {
         .route("/resource-types", get(discover_resource_types))
         .route("/identity/tokens", post(identity::issue_token))
         .route("/identity/me", get(identity::current_context))
+        .route("/operator/profile", get(identity::operator_profile))
         .route("/compute/servers", get(compute::list_servers))
         .route("/compute/servers/{id}", get(compute::show_server))
         .route("/volume/volumes", get(volume::list_volumes))
@@ -176,6 +177,7 @@ pub async fn api_root() -> Json<ApiRootResponse> {
             "/o3k/v1/resource-types",
             "/o3k/v1/identity/tokens",
             "/o3k/v1/identity/me",
+            "/o3k/v1/operator/profile",
             "/o3k/v1/compute/servers",
             "/o3k/v1/volume/volumes",
             "/o3k/v1/network/address-realms",
@@ -313,9 +315,55 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use o3k_kernel::ServiceManifest;
     use o3k_kernel::manifest::{ManifestController, RegisteredResourceType, ResourceScope};
     use o3k_kernel::resource::ResourceType;
+    use o3k_kernel::{
+        AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, ScopeKind, ServiceManifest,
+        UserPrincipal,
+    };
+
+    #[derive(Clone)]
+    struct TestIssuer(AuthContext);
+
+    #[async_trait::async_trait]
+    impl auth::TokenIssuer for TestIssuer {
+        async fn issue_native(
+            &self,
+            _request: &auth::NativeTokenRequestV1,
+        ) -> Result<(String, serde_json::Value), error::ProblemDetails> {
+            Err(error::ProblemDetails::unauthorized())
+        }
+
+        async fn auth_context(&self, _token: &str) -> Result<AuthContext, error::ProblemDetails> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn test_operator_context(system: bool) -> AuthContext {
+        AuthContext::new(
+            Principal::User(UserPrincipal::new(
+                PrincipalId::new_unchecked("operator-1"),
+                "operator",
+                None,
+            )),
+            OwnershipScope::new(
+                ScopeId::new_unchecked(if system { "system" } else { "project-a" }),
+                if system {
+                    ScopeKind::System
+                } else {
+                    ScopeKind::Project
+                },
+                None,
+                None,
+            ),
+            vec!["operator".to_owned()],
+            1,
+            2,
+            "audit-test",
+            "request-test",
+            None,
+        )
+    }
 
     fn test_manifest_registry() -> ManifestRegistry {
         let mut reg = ManifestRegistry::new();
@@ -390,6 +438,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body["api_version"], "o3k.io/v1");
+    }
+
+    #[tokio::test]
+    async fn operator_profile_route_is_server_authorized_and_system_scoped() {
+        let state = NativeApiState::new(
+            Some(test_manifest_registry()),
+            pagination::CursorConfig::default(),
+            Some(Arc::new(TestIssuer(test_operator_context(true)))),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
+        let response = tower::ServiceExt::oneshot(
+            router(state),
+            axum::http::Request::builder()
+                .uri("/operator/profile")
+                .header("authorization", "Bearer test-token")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let state = NativeApiState::new(
+            Some(test_manifest_registry()),
+            pagination::CursorConfig::default(),
+            Some(Arc::new(TestIssuer(test_operator_context(false)))),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
+        let response = tower::ServiceExt::oneshot(
+            router(state),
+            axum::http::Request::builder()
+                .uri("/operator/profile")
+                .header("authorization", "Bearer test-token")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
