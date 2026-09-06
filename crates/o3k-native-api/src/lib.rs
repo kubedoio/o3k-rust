@@ -180,6 +180,7 @@ pub async fn api_root() -> Json<ApiRootResponse> {
             "/o3k/v1/services",
             "/o3k/v1/resource-types",
             "/o3k/v1/identity/tokens",
+            "/o3k/v1/identity/scopes",
             "/o3k/v1/identity/me",
             "/o3k/v1/operator/profile",
             "/o3k/v1/compute/servers",
@@ -442,6 +443,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body["api_version"], "o3k.io/v1");
+        assert!(
+            body["endpoints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|endpoint| endpoint == "/o3k/v1/identity/scopes")
+        );
     }
 
     #[tokio::test]

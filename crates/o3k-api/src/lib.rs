@@ -508,6 +508,10 @@ pub fn router_with_state(state: AppState) -> Router {
                 get(o3k_native_api::identity::current_context),
             )
             .route(
+                "/o3k/v1/operator/profile",
+                get(o3k_native_api::identity::operator_profile),
+            )
+            .route(
                 "/o3k/v1/compute/servers",
                 get(o3k_native_api::compute::list_servers)
                     .post(o3k_native_api::resource::create_compute),
