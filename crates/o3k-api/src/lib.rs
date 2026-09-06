@@ -500,6 +500,10 @@ pub fn router_with_state(state: AppState) -> Router {
                 post(o3k_native_api::identity::issue_token),
             )
             .route(
+                "/o3k/v1/identity/scopes",
+                post(o3k_native_api::identity::discover_federated_scopes),
+            )
+            .route(
                 "/o3k/v1/identity/me",
                 get(o3k_native_api::identity::current_context),
             )

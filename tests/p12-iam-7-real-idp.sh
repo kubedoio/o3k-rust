@@ -148,8 +148,18 @@ export O3K_P12_7_ALICE_SUBJECT="${alice_subject}"
 export O3K_P12_7_BOB_SUBJECT="${bob_subject}"
 export O3K_P12_7_OPERATOR_SUBJECT="${operator_subject}"
 export O3K_P12_7_BOOTSTRAP_SECRET="${o3k_seed_password}"
+export O3K_P12_7_KEYCLOAK_PORT="${port}"
+export O3K_P12_7_KEYCLOAK_ADMIN_PASSWORD="${admin_password}"
+export O3K_P12_7_WORKDIR="${workdir}"
+export P12_8_ALICE_PASSWORD="${alice_password}"
+export P12_8_BOB_PASSWORD="${bob_password}"
+export P12_8_OPERATOR_PASSWORD="${operator_password}"
 
 cargo test --locked -p o3kd --test p12_iam_7_real_oidc --all-features -- \
   --ignored --nocapture
+
+if [[ -n "${O3K_P12_7_AFTER_HOOK:-}" ]]; then
+  "${O3K_P12_7_AFTER_HOOK}"
+fi
 
 echo "P12-IAM.7 real federation evidence: PASS"
