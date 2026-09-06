@@ -24,13 +24,16 @@ fn federated_oidc_validator_from_env()
     match values {
         [None, None, None, None] => Ok(None),
         [Some(id), Some(issuer), Some(audience), Some(discovery_url)] => {
+            let allow_insecure_local = std::env::var("O3K_OIDC_ALLOW_INSECURE_LOCAL")
+                .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+                .unwrap_or(false);
             let trusted = o3k_identity::oidc::TrustedIssuer {
                 id,
                 issuer: url::Url::parse(&issuer)?,
                 audience,
                 algorithms: vec![jsonwebtoken::Algorithm::RS256],
                 discovery_url: url::Url::parse(&discovery_url)?,
-                allow_insecure_local: false,
+                allow_insecure_local,
                 timeout: Duration::from_secs(5),
                 cache_ttl: Duration::from_secs(300),
                 max_token_bytes: 16 * 1024,

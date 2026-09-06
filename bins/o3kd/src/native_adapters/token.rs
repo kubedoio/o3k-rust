@@ -45,10 +45,10 @@ impl TokenIssuer for TokenIssuerAdapter {
                     "federated identity is not configured",
                 )
             })?;
-            let identity = validator
-                .validate(access_token)
-                .await
-                .map_err(|_| ProblemDetails::unauthorized())?;
+            let identity = validator.validate(access_token).await.map_err(|error| {
+                tracing::debug!(error = %error, "federated OIDC validation failed");
+                ProblemDetails::unauthorized()
+            })?;
             let issued = if system {
                 self.service
                     .issue_federated_system(&identity, SystemTime::now())
@@ -132,10 +132,10 @@ impl TokenIssuer for TokenIssuerAdapter {
                 "federated identity is not configured",
             )
         })?;
-        let identity = validator
-            .validate(access_token)
-            .await
-            .map_err(|_| ProblemDetails::unauthorized())?;
+        let identity = validator.validate(access_token).await.map_err(|error| {
+            tracing::debug!(error = %error, "federated OIDC validation failed");
+            ProblemDetails::unauthorized()
+        })?;
         self.service
             .discover_federated_scopes(&identity)
             .map(|scopes| {
@@ -150,7 +150,10 @@ impl TokenIssuer for TokenIssuerAdapter {
                     })
                     .collect()
             })
-            .map_err(|_| ProblemDetails::unauthorized())
+            .map_err(|error| {
+                tracing::debug!(error = %error, "federated scope discovery failed");
+                ProblemDetails::unauthorized()
+            })
     }
 }
 
