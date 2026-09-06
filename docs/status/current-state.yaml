@@ -1,7 +1,34 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: 20e623941ce6ddf3317c68078978f0976d2c2b30
-updated_at: 2026-08-27T00:00:00Z
+source_commit: e47a81861f1f2c5dac125d017366a959dca39d1b
+updated_at: 2026-09-06T00:00:00Z
+milestones:
+  p12-iam:
+    status: completed
+    source_commit: e47a81861f1f2c5dac125d017366a959dca39d1b
+    evidence: >-
+      P12-IAM aggregate PASS; umbrella closure authorized; Araf production
+      identity unblocked. Real federation and protected Araf process evidence
+      passed, with closure recorded in O3K issue #794 and Araf's protected
+      closure-evidence document.
+    claim_scope: >-
+      Bounded O3K/Araf OIDC federation profile only. O3K owns trusted issuer
+      validation, principals, scopes, authorization, native tokens, and
+      AuthContext; Araf owns browser redirect/callback, cookies, and sessions.
+      This is not a broad provider-certification, HA/SLA, or general product
+      readiness claim.
+  p13:
+    status: completed
+    source_commit: 3d5ecf610a13bfdafb0d8026292dbeca83d68102
+    evidence: >-
+      Bounded p13-iac-compatibility-v1 P13.1-P13.7 evidence passed, including
+      the full-stack real-host artifact at
+      docs/compatibility/p13-7/p13-7-real-host-iac-evidence.json.
+    claim_scope: >-
+      Operation/resource-level Terraform/OpenTofu compatibility through the
+      unmodified upstream OpenStack provider and the declared profile only;
+      no generic OpenStack parity, HA/SLA, multi-region, or broader product
+      support claim.
 release_context: >-
   The first native alpha candidate v0.2.0-alpha.1 at
   952dcf9c4a1ae958996e4ae9444763e5524eddc5 is rejected and permanently
@@ -258,8 +285,9 @@ profiles:
       - generic cross-cloud connectivity
   p13-iac-compatibility-v1:
     implementation_state: >-
-      Specified and bounded P13.5 evidence is complete through P13.5F. This profile extends
-      native-rust-testlab for Terraform/OpenTofu IaC compatibility. ADR-0175
+      Bounded P13.1-P13.7 implementation and evidence is complete through the
+      real-host acceptance gate. This profile extends native-rust-testlab for
+      Terraform/OpenTofu IaC compatibility. ADR-0175
       and SPEC-0032 are accepted. The bounded P13.2-P13.4 provider lifecycle
       gates are verified with OpenTofu 1.12.6 and the unmodified upstream
       OpenStack provider 3.4.0 across the tested SQLite and PostgreSQL
@@ -359,8 +387,9 @@ profiles:
       extends native-rust-testlab but does not alter its release gate.
     blockers: []
     next_evidence_action: >-
-      Perform the read-only P13 aggregate closure audit; no new P13.7
-      acceptance run is required for this protected runtime.
+      None for the completed bounded P13 profile. Treat this profile as a
+      frozen regression baseline; any broader compatibility or product claim
+      requires a separately accepted milestone and evidence gate.
     explicitly_unproven_claims:
       - production SLA
       - broad OpenStack parity (operation-level only)
