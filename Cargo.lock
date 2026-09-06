@@ -1821,10 +1821,12 @@ name = "o3k-migration"
 version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
+ "chrono",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "thiserror",
  "tokio",
  "url",
