@@ -22,6 +22,7 @@ assert data["x-o3k-baseline"]["coverage"] == "native-iam"
 
 expected = {
     ("/identity/tokens", "post", "issueNativeToken"),
+    ("/identity/scopes", "post", "discoverFederatedScopes"),
     ("/identity/me", "get", "getNativeIdentityContext"),
     ("/operator/profile", "get", "getOperatorProfile"),
 }
@@ -36,7 +37,7 @@ assert actual == expected, f"native IAM operation drift: expected {expected}, go
 for path, method, operation_id in expected:
     operation = data["paths"][path][method]
     assert operation["responses"], f"{operation_id} has no responses"
-    if path != "/identity/tokens":
+    if path not in {"/identity/tokens", "/identity/scopes"}:
         assert operation["security"] == [{"bearerAuth": []}], f"{operation_id} security drift"
 
 assert "application/problem+json" in json.dumps(data["components"]["responses"])
@@ -66,6 +67,7 @@ generated=$(mktemp)
 trap 'rm -f "${generated}"' EXIT
 npx --yes openapi-typescript@7.8.0 "${CONTRACT}" -o "${generated}" >/dev/null
 grep -q 'issueNativeToken' "${generated}"
+grep -q 'discoverFederatedScopes' "${generated}"
 grep -q 'getNativeIdentityContext' "${generated}"
 grep -q 'getOperatorProfile' "${generated}"
 echo "native IAM generated-client smoke passed"

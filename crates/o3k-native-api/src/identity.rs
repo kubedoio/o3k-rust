@@ -25,6 +25,16 @@ use crate::{
     error::{ErrorCode, ProblemDetails},
 };
 
+#[derive(serde::Deserialize)]
+pub struct FederatedScopeDiscoveryRequest {
+    pub federated: FederatedScopeCredentials,
+}
+
+#[derive(serde::Deserialize)]
+pub struct FederatedScopeCredentials {
+    pub access_token: String,
+}
+
 // ── POST /o3k/v1/identity/tokens ──────────────────────────────────────────
 
 /// Native token issuance endpoint.
@@ -65,6 +75,34 @@ pub async fn issue_token(
             (StatusCode::CREATED, Json(native_response)).into_response()
         }
         Err(pd) => pd.with_request_id(request_id.0).into_response(),
+    }
+}
+
+/// Discovers current project scopes for one validated external identity.
+pub async fn discover_federated_scopes(
+    State(state): State<NativeApiState>,
+    request_id: RequestId,
+    body: Result<Json<FederatedScopeDiscoveryRequest>, JsonRejection>,
+) -> Response {
+    let Json(body) = match body {
+        Ok(body) if !body.federated.access_token.is_empty() => body,
+        _ => {
+            return ProblemDetails::bad_request("invalid federated scope request")
+                .with_request_id(request_id.0)
+                .into_response();
+        }
+    };
+    let Some(ref issuer) = state.token_issuer else {
+        return ProblemDetails::with_detail(ErrorCode::NotAvailable, "IAM is not configured")
+            .with_request_id(request_id.0)
+            .into_response();
+    };
+    match issuer
+        .discover_federated_scopes(&body.federated.access_token)
+        .await
+    {
+        Ok(scopes) => Json(serde_json::json!({ "scopes": scopes })).into_response(),
+        Err(error) => error.with_request_id(request_id.0).into_response(),
     }
 }
 

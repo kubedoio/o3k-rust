@@ -65,6 +65,15 @@ pub struct NativeFederatedCredentials {
     pub scope: Option<NativeFederatedScope>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct FederatedScopeDescriptor {
+    pub id: String,
+    pub kind: String,
+    pub name: Option<String>,
+    pub domain_id: Option<String>,
+    pub can_request_token: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum NativeFederatedScope {
@@ -379,6 +388,17 @@ pub trait TokenIssuer: Send + Sync {
 
     /// Validates a bearer token and returns the canonical AuthContext.
     async fn auth_context(&self, token: &str) -> Result<AuthContext, ProblemDetails>;
+
+    /// Discovers public project scopes for a validated external identity.
+    async fn discover_federated_scopes(
+        &self,
+        _access_token: &str,
+    ) -> Result<Vec<FederatedScopeDescriptor>, ProblemDetails> {
+        Err(ProblemDetails::with_detail(
+            crate::error::ErrorCode::NotAvailable,
+            "federated scope discovery is not configured",
+        ))
+    }
 }
 
 // ── Bearer auth extractor ──────────────────────────────────────────────────

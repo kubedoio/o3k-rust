@@ -121,6 +121,37 @@ impl TokenIssuer for TokenIssuerAdapter {
             .auth_context(token, SystemTime::now())
             .map_err(|_| ProblemDetails::unauthorized())
     }
+
+    async fn discover_federated_scopes(
+        &self,
+        access_token: &str,
+    ) -> Result<Vec<o3k_native_api::auth::FederatedScopeDescriptor>, ProblemDetails> {
+        let validator = self.oidc_validator.as_ref().ok_or_else(|| {
+            ProblemDetails::with_detail(
+                o3k_native_api::error::ErrorCode::NotAvailable,
+                "federated identity is not configured",
+            )
+        })?;
+        let identity = validator
+            .validate(access_token)
+            .await
+            .map_err(|_| ProblemDetails::unauthorized())?;
+        self.service
+            .discover_federated_scopes(&identity)
+            .map(|scopes| {
+                scopes
+                    .into_iter()
+                    .map(|scope| o3k_native_api::auth::FederatedScopeDescriptor {
+                        id: scope.id,
+                        kind: scope.kind.as_str().to_owned(),
+                        name: scope.name,
+                        domain_id: scope.domain_id,
+                        can_request_token: scope.can_request_token,
+                    })
+                    .collect()
+            })
+            .map_err(|_| ProblemDetails::unauthorized())
+    }
 }
 
 // ── ServerReader ──────────────────────────────────────────────────────────
