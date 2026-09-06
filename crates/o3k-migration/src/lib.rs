@@ -17,6 +17,7 @@ use std::{
 };
 use thiserror::Error;
 use url::Url;
+pub mod manifest;
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RESOURCES: usize = 50_000;
