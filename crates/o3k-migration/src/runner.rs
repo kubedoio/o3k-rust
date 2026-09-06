@@ -4,7 +4,9 @@
 //! and destination adapters remain explicit ports: this module never writes a
 //! database and never treats provider state as canonical ownership evidence.
 
-use crate::cutover::{CutoverAuthorization, commit_cutover, prepare_server_cutover};
+use crate::cutover::{
+    CutoverAuthorization, commit_cutover, prepare_server_cutover, validate_cutover_authorization,
+};
 use crate::manifest::{
     FileManifestStore, ManifestError, ManifestNode, ManifestPhase, MigrationManifest,
     RollbackState, VerificationState, ensure_snapshot_unchanged, validate,
@@ -283,6 +285,8 @@ where
         if manifest.phase != ManifestPhase::Validated {
             return Err(RunnerError::Fenced("migration is not validated".into()));
         }
+        validate_cutover_authorization(&manifest, authorization)
+            .map_err(|error| RunnerError::Fenced(error.to_string()))?;
         self.source.quiesce(server_source_id).await?;
         manifest.cutover.source_quiesced = true;
         manifest.phase = ManifestPhase::CutoverPending;
@@ -647,7 +651,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    struct Source;
+    #[derive(Clone, Default)]
+    struct Source {
+        quiesces: Arc<Mutex<usize>>,
+        final_syncs: Arc<Mutex<usize>>,
+    }
 
     #[async_trait]
     impl OpenStackSource for Source {
@@ -675,10 +683,18 @@ mod tests {
     #[async_trait]
     impl SourceControl for Source {
         async fn quiesce(&self, _server_source_id: &str) -> Result<(), RunnerError> {
+            *self
+                .quiesces
+                .lock()
+                .map_err(|_| RunnerError::Source("poisoned test lock".into()))? += 1;
             Ok(())
         }
 
         async fn final_sync(&self, _snapshot: &SourceSnapshot) -> Result<(), RunnerError> {
+            *self
+                .final_syncs
+                .lock()
+                .map_err(|_| RunnerError::Source("poisoned test lock".into()))? += 1;
             Ok(())
         }
     }
@@ -837,7 +853,7 @@ mod tests {
         let (snapshot, manifest) = fixture()?;
         let destination = Destination::default();
         let path = std::env::temp_dir().join(format!("o3k-p14-9a-{}.json", uuid::Uuid::new_v4()));
-        let runner = MigrationRunner::new(Source, destination.clone(), &path);
+        let runner = MigrationRunner::new(Source::default(), destination.clone(), &path);
         let first = runner.execute(manifest, &snapshot).await?;
         let reopened = runner.load()?;
         let second = runner.execute(reopened, &snapshot).await?;
@@ -872,7 +888,7 @@ mod tests {
             .lock()
             .map_err(|_| RunnerError::Destination("poisoned test lock".into()))? =
             Some("foreign-id".into());
-        let runner = MigrationRunner::new(Source, destination, &path);
+        let runner = MigrationRunner::new(Source::default(), destination, &path);
         let error = match runner.execute(conflicting, &snapshot).await {
             Err(error) => error,
             Ok(_) => return Err(RunnerError::Invalid("conflict was not fenced".into())),
@@ -889,7 +905,7 @@ mod tests {
         crate::manifest::refresh_integrity(&mut manifest)?;
         let destination = Destination::default();
         let path = std::env::temp_dir().join(format!("o3k-p14-9a-{}.json", uuid::Uuid::new_v4()));
-        let runner = MigrationRunner::new(Source, destination, &path);
+        let runner = MigrationRunner::new(Source::default(), destination, &path);
         assert!(matches!(
             runner.execute(manifest.clone(), &snapshot).await,
             Err(RunnerError::Fenced(_))
@@ -911,7 +927,7 @@ mod tests {
         crate::manifest::refresh_integrity(&mut manifest)?;
         let destination = Destination::default();
         let path = std::env::temp_dir().join(format!("o3k-p14-9a-{}.json", uuid::Uuid::new_v4()));
-        let runner = MigrationRunner::new(Source, destination.clone(), &path);
+        let runner = MigrationRunner::new(Source::default(), destination.clone(), &path);
         runner.rollback(manifest).await?;
         assert_eq!(
             *destination
@@ -929,8 +945,9 @@ mod tests {
     -> Result<(), RunnerError> {
         let (snapshot, manifest) = server_fixture()?;
         let destination = Destination::default();
+        let source = Source::default();
         let path = std::env::temp_dir().join(format!("o3k-p14-9a-{}.json", uuid::Uuid::new_v4()));
-        let runner = MigrationRunner::new(Source, destination, &path);
+        let runner = MigrationRunner::new(source.clone(), destination, &path);
         runner.execute(manifest, &snapshot).await?;
         let validated = runner.load()?;
         let unauthorized = CutoverAuthorization {
@@ -950,8 +967,21 @@ mod tests {
             }
         };
         assert!(matches!(error, RunnerError::Fenced(_)));
-        assert_eq!(runner.load()?.phase, ManifestPhase::CutoverPending);
-        assert!(runner.load()?.cutover.source_quiesced);
+        assert_eq!(runner.load()?.phase, ManifestPhase::Validated);
+        assert_eq!(
+            *source
+                .quiesces
+                .lock()
+                .map_err(|_| RunnerError::Source("poisoned test lock".into()))?,
+            0
+        );
+        assert_eq!(
+            *source
+                .final_syncs
+                .lock()
+                .map_err(|_| RunnerError::Source("poisoned test lock".into()))?,
+            0
+        );
         let _ = std::fs::remove_file(path);
         Ok(())
     }

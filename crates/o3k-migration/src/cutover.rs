@@ -40,12 +40,7 @@ pub fn prepare_server_cutover(
     authorization: &CutoverAuthorization,
 ) -> Result<ServerCutoverPlan, CutoverError> {
     crate::manifest::validate(manifest).map_err(map_manifest)?;
-    if authorization.principal_id != manifest.actor.principal_id
-        || authorization.destination_scope_id != manifest.destination.scope_id
-        || authorization.action != "migrate:commit"
-    {
-        return Err(CutoverError::Unauthorized);
-    }
+    validate_cutover_authorization(manifest, authorization)?;
     if manifest.phase != ManifestPhase::CutoverPending || !manifest.cutover.source_quiesced {
         return Err(CutoverError::NotReady(
             "manifest is not quiesced and cutover-pending".into(),
@@ -94,6 +89,21 @@ pub fn prepare_server_cutover(
         dependency_ids,
         ownership_marker: format!("o3k:migration:{}:cutover", manifest.migration_id),
     })
+}
+
+/// Validate authorization before any source-side quiesce or final-sync side
+/// effect. Readiness checks remain in `prepare_server_cutover`.
+pub fn validate_cutover_authorization(
+    manifest: &MigrationManifest,
+    authorization: &CutoverAuthorization,
+) -> Result<(), CutoverError> {
+    if authorization.principal_id != manifest.actor.principal_id
+        || authorization.destination_scope_id != manifest.destination.scope_id
+        || authorization.action != "migrate:commit"
+    {
+        return Err(CutoverError::Unauthorized);
+    }
+    Ok(())
 }
 
 pub fn commit_cutover(
