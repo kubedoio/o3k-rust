@@ -1,8 +1,20 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: e47a81861f1f2c5dac125d017366a959dca39d1b
+source_commit: cde27affc11d3501291fa11a173e5ebedd8a2de1
 updated_at: 2026-09-06T00:00:00Z
 milestones:
+  p14:
+    status: architecture-defined
+    source_commit: cde27affc11d3501291fa11a173e5ebedd8a2de1
+    evidence: >-
+      P14.0 architecture/contracts are defined by ADR-0180 and SPEC-0037;
+      runtime migration is not implemented and no cross-cloud support claim is
+      made. Ordered prompts and the independent review procedure are committed
+      under docs/prompts/p14/.
+    claim_scope: >-
+      Architecture-only bounded p14-openstack-cold-migration-v1 profile. It is
+      not evidence of runtime migration, generic OpenStack compatibility, HA,
+      multi-region support, or production readiness.
   p12-iam:
     status: completed
     source_commit: e47a81861f1f2c5dac125d017366a959dca39d1b
@@ -61,6 +73,34 @@ release_context: >-
 # tracker remains blocked).
 
 profiles:
+  p14-openstack-cold-migration-v1:
+    implementation_state: >-
+      Architecture-defined only. ADR-0180, SPEC-0037, and the ordered P14
+      prompt/review set are present. Runtime implementation and real two-cloud
+      evidence are intentionally not started by P14.0.
+    source_commit: cde27affc11d3501291fa11a173e5ebedd8a2de1
+    portable_evidence:
+      - name: p14-architecture-contracts
+        state: passed
+        note: ADR/spec/prompt/profile governance validation passed; runtime evidence is owned by later slices.
+    protected_component_evidence:
+      - name: p14-real-two-cloud
+        state: not-executed
+        note: Owned by P14.9.
+    full_profile_evidence:
+      - name: p14-profile-gate
+        state: not-executed
+        note: No P14 runtime support claim exists at architecture stage.
+    release_relevance: >-
+      Not release-blocking for the current alpha and not a runtime support claim.
+    blockers:
+      - P14.1-P14.9 implementation and evidence are outstanding.
+    next_evidence_action: Execute P14.1 only after P14.0 exact-head review and merge.
+    explicitly_unproven_claims:
+      - runtime cold migration
+      - generic cross-cloud support
+      - live migration
+      - active-active or multi-region support
   native-rust-testlab:
     implementation_state: >-
       Architecture convergence is complete: SPEC-0025 steps 1-7 are merged,

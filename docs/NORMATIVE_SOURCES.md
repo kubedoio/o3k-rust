@@ -52,6 +52,16 @@ by SPEC-0032.
 |---|---|
 | OpenStack Ecosystem and Infrastructure-as-Code Compatibility Boundary | `docs/adr/ADR-0175-openstack-ecosystem-and-iac-compatibility-boundary.md`, `docs/specs/SPEC-0032-openstack-terraform-opentofu-compatibility-profile-v1.md`, `contracts/iac-openstack-profile-v1.yaml` |
 
+## Accepted P14.0 sources — active architecture authority
+
+P14.0 is architecture-only. Its accepted boundary is ADR-0180 and SPEC-0037;
+runtime implementation and product claims remain evidence-gated by the P14
+profile and ordered prompts.
+
+| Subject | Authority |
+| --- | --- |
+| OpenStack cold migration authority, cutover, and bounded profile | `docs/adr/ADR-0180-openstack-cold-migration-authority-and-cutover.md`, `docs/specs/SPEC-0037-openstack-cold-migration-v1.md`, `docs/prompts/p14/` |
+
 ## Core rules
 
 - O3K owns public identity, ownership, desired state, scheduling, operations,

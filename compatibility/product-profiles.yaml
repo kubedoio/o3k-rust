@@ -8,6 +8,33 @@ product_identity:
   openstack_role: northbound-compatibility-contract
   canonical_internal_platform: o3k-cloud-kernel
 profiles:
+  - id: p14-openstack-cold-migration-v1
+    maturity: specified
+    parent_profile: p13-iac-compatibility-v1
+    user_outcome: >
+      Move the bounded resource set from a declared OpenStack source into
+      canonical O3K resources through a durable, resumable, cold migration
+      with explicit cutover and rollback semantics.
+    o3k_owned_capabilities:
+      - iam
+      - authorization
+      - canonical-resource-authority
+      - durable-migration-operations
+      - reconciliation
+      - cutover-and-audit
+    external_hosted_services:
+      - declared-openstack-source
+    database:
+      o3k_default: sqlite
+      o3k_production_target: postgres
+      source_database_access: forbidden
+    release_blocking_for_first_alpha: false
+    footprint_claim: unmeasured
+    evidence_state: specified
+    normative_adr: docs/adr/ADR-0180-openstack-cold-migration-authority-and-cutover.md
+    normative_spec: docs/specs/SPEC-0037-openstack-cold-migration-v1.md
+    contract: docs/specs/SPEC-0037-openstack-cold-migration-v1.md
+
   - id: p13-iac-compatibility-v1
     maturity: verified
     parent_profile: native-rust-testlab
