@@ -1817,6 +1817,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "o3k-migration"
+version = "0.4.0-alpha.1"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "o3k-native-api"
 version = "0.4.0-alpha.1"
 dependencies = [
