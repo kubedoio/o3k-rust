@@ -1,0 +1,285 @@
+openapi: 3.1.2
+x-o3k-openapi-policy:
+  target: 3.1.2
+  status: target
+x-o3k-baseline:
+  path: docs/specs/testlab-api-baseline.json
+  status: partial
+  coverage: native-iam
+info:
+  title: O3K Native IAM API
+  version: 0.1.0
+  description: >-
+    The versioned native O3K IAM ingress. This contract covers the bounded
+    password/token/federated exchange, canonical AuthContext projection, and
+    operator-console probe. It does not advertise OpenStack parity.
+servers:
+  - url: http://127.0.0.1:8080/o3k/v1
+security: []
+paths:
+  /identity/tokens:
+    post:
+      operationId: issueNativeToken
+      summary: Issue a native O3K token
+      description: >-
+        Issues a native token from exactly one supported credential form.
+        Federated project exchange is bounded by the validated external
+        identity expiry. System exchange requires an explicit durable
+        operator-console assignment and never accepts a caller-selected role.
+        The native API limits request bodies to 1 MiB.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NativeTokenRequest'
+            examples:
+              projectFederated:
+                $ref: '#/components/examples/ProjectFederatedRequest'
+              systemOperator:
+                $ref: '#/components/examples/SystemOperatorRequest'
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '201':
+          description: Native token issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeTokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
+  /identity/me:
+    get:
+      operationId: getNativeIdentityContext
+      summary: Read the canonical authenticated context
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Public-safe canonical principal and effective scope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentContext'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /operator/profile:
+    get:
+      operationId: getOperatorProfile
+      summary: Read the bounded operator-console profile
+      description: >-
+        This is a server-authorized probe only. It does not grant shell,
+        host, data-plane, or arbitrary system mutation access.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: The authenticated operator profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+components:
+  parameters:
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: Bounded request correlation value echoed in Problem Details.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: '^[A-Za-z0-9._:-]+$'
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: O3K-native-token
+  schemas:
+    NativeTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [auth]
+      properties:
+        auth:
+          oneOf:
+            - $ref: '#/components/schemas/PasswordAuth'
+            - $ref: '#/components/schemas/TokenAuth'
+            - $ref: '#/components/schemas/ProjectFederatedAuth'
+            - $ref: '#/components/schemas/SystemFederatedAuth'
+    PasswordAuth:
+      type: object
+      additionalProperties: false
+      required: [method, password]
+      properties:
+        method: {const: password}
+        password: {$ref: '#/components/schemas/PasswordCredentials'}
+    TokenAuth:
+      type: object
+      additionalProperties: false
+      required: [method, token]
+      properties:
+        method: {const: token}
+        token: {type: string, minLength: 1, writeOnly: true}
+    ProjectFederatedAuth:
+      type: object
+      additionalProperties: false
+      required: [method, project_id, federated]
+      properties:
+        method: {const: federated}
+        project_id: {type: string, minLength: 1, maxLength: 255}
+        federated: {$ref: '#/components/schemas/FederatedCredentials'}
+    SystemFederatedAuth:
+      type: object
+      additionalProperties: false
+      required: [method, federated]
+      properties:
+        method: {const: federated}
+        federated:
+          type: object
+          additionalProperties: false
+          required: [access_token, scope]
+          properties:
+            access_token: {type: string, minLength: 1, maxLength: 8192, writeOnly: true}
+            scope:
+              type: object
+              additionalProperties: false
+              required: [kind]
+              properties:
+                kind: {const: system}
+    PasswordCredentials:
+      type: object
+      additionalProperties: false
+      required: [user_id, password]
+      properties:
+        user_id: {type: string, minLength: 1, maxLength: 255}
+        password: {type: string, minLength: 1, maxLength: 4096, writeOnly: true}
+    FederatedCredentials:
+      type: object
+      additionalProperties: false
+      required: [access_token]
+      properties:
+        access_token: {type: string, minLength: 1, maxLength: 8192, writeOnly: true}
+    NativeTokenResponse:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token: {$ref: '#/components/schemas/IssuedToken'}
+    IssuedToken:
+      type: object
+      additionalProperties: false
+      required: [id, issued_at, expires_at, project, user]
+      properties:
+        id: {type: string, minLength: 1, readOnly: true}
+        issued_at: {type: string, format: date-time, readOnly: true}
+        expires_at: {type: string, format: date-time, readOnly: true}
+        project: {$ref: '#/components/schemas/ScopeProjection'}
+        user: {$ref: '#/components/schemas/PrincipalProjection'}
+    CurrentContext:
+      type: object
+      additionalProperties: false
+      required: [authenticated, principal_id, principal_kind, principal_name, effective_scope_id, effective_scope_kind]
+      properties:
+        authenticated: {const: true}
+        principal_id: {type: string, minLength: 1}
+        principal_kind: {type: string, enum: [user, service]}
+        principal_name: {type: string, minLength: 1}
+        effective_scope_id: {type: string, minLength: 1}
+        effective_scope_kind: {type: string, enum: [project, domain, system]}
+    OperatorProfile:
+      type: object
+      additionalProperties: false
+      required: [profile, scope, principal_id, audit_id]
+      properties:
+        profile: {const: operator-console}
+        scope: {const: system}
+        principal_id: {type: string, minLength: 1}
+        audit_id: {type: string, minLength: 1}
+    PrincipalProjection:
+      type: object
+      additionalProperties: false
+      required: [id, name, domain]
+      properties:
+        id: {type: string, minLength: 1}
+        name: {type: string, minLength: 1}
+        domain: {$ref: '#/components/schemas/DomainProjection'}
+    ScopeProjection:
+      type: object
+      additionalProperties: false
+      required: [id, name, domain]
+      properties:
+        id: {type: string, minLength: 1}
+        name: {type: string, minLength: 1}
+        domain: {$ref: '#/components/schemas/DomainProjection'}
+    DomainProjection:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id: {type: string, minLength: 1}
+        name: {type: string, minLength: 1}
+    ProblemDetails:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code]
+      properties:
+        type: {type: string, format: uri-reference}
+        title: {type: string}
+        status: {type: integer, minimum: 400, maximum: 599}
+        code:
+          type: string
+          enum: [BAD_REQUEST, UNSUPPORTED_OPERATION, UNAUTHORIZED, FORBIDDEN, RESOURCE_NOT_FOUND, CONFLICT, REQUEST_TOO_LARGE, INVALID_CURSOR, UNSUPPORTED_MEDIA_TYPE, NOT_AVAILABLE, INTERNAL_ERROR]
+        detail: {type: string}
+        request_id: {type: string}
+        resource_id: {type: string}
+  responses:
+    BadRequest:
+      description: Invalid or unsupported request.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetails'}
+    Unauthorized:
+      description: Missing, malformed, expired, or unauthorized credentials.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetails'}
+    Forbidden:
+      description: Authenticated caller lacks the required authorization.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetails'}
+    NotAvailable:
+      description: IAM is not configured or the service is unavailable.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetails'}
+  examples:
+    ProjectFederatedRequest:
+      value:
+        auth:
+          method: federated
+          project_id: project-a
+          federated:
+            access_token: REDACTED_EXTERNAL_TOKEN
+    SystemOperatorRequest:
+      value:
+        auth:
+          method: federated
+          federated:
+            access_token: REDACTED_EXTERNAL_TOKEN
+            scope: {kind: system}

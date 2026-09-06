@@ -139,6 +139,8 @@ jobs:
         run: bash tests/lvm-testlab-profile.sh
       - name: Test OpenAPI contract governance
         run: bash tests/openapi-governance.sh
+      - name: Test native IAM public contract
+        run: bash tests/native-iam-contract.sh
       - name: Test static compatibility target
         run: bash tests/compatibility-target.sh
       - name: Test requirements-to-evidence traceability
