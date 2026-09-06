@@ -506,3 +506,11 @@ evidence exists.
 - P12 must not hard-code a new service into the Cloud Kernel merely to satisfy
   the conformance example;
 - architecture direction does not replace executable evidence or human review.
+
+# P14 — OpenStack Adoption & Migration v1
+
+P14.0 architecture and contracts are defined in ADR-0180 and SPEC-0037. The
+bounded `p14-openstack-cold-migration-v1` profile is specified only; runtime
+implementation, real two-cloud evidence, cutover, rollback, and the final
+OpenTofu NO-OP remain ordered P14.1-P14.9 gates. This does not expand P13,
+P12-IAM, the current alpha gate, or any generic cross-cloud claim.
