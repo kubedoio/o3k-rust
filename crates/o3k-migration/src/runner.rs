@@ -183,6 +183,7 @@ where
                     let document = documents.get(&node.key).ok_or_else(|| {
                         RunnerError::Source(format!("source document missing for {}", node.key))
                     })?;
+                    let expected_destination_id = node.destination_id.clone();
                     let value = self
                         .destination
                         .create(&manifest.migration_id, &node, document)
@@ -190,6 +191,12 @@ where
                     if value.destination_id.trim().is_empty() {
                         return Err(RunnerError::Destination(format!(
                             "create omitted canonical destination id for {}",
+                            node.key
+                        )));
+                    }
+                    if expected_destination_id.as_deref() != Some(value.destination_id.as_str()) {
+                        return Err(RunnerError::Fenced(format!(
+                            "create returned a conflicting destination mapping for {}",
                             node.key
                         )));
                     }
@@ -637,6 +644,8 @@ mod tests {
     use super::*;
     use crate::{Classification, SourceResource};
     use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     struct Source;
 
@@ -654,11 +663,23 @@ mod tests {
             &self,
             kind: ResourceKind,
         ) -> Result<Vec<SourceDocument>, crate::DiscoveryError> {
+            let id = format!("{}-a", kind_name(kind));
             Ok(vec![SourceDocument {
                 kind,
-                body: json!({"id":"network-a","project_id":"project-a"}),
+                body: json!({"id":id,"project_id":"project-a"}),
                 generation_input: "network".into(),
             }])
+        }
+    }
+
+    #[async_trait]
+    impl SourceControl for Source {
+        async fn quiesce(&self, _server_source_id: &str) -> Result<(), RunnerError> {
+            Ok(())
+        }
+
+        async fn final_sync(&self, _snapshot: &SourceSnapshot) -> Result<(), RunnerError> {
+            Ok(())
         }
     }
 
@@ -666,6 +687,8 @@ mod tests {
     struct Destination {
         creates: Arc<Mutex<usize>>,
         observations: Arc<Mutex<usize>>,
+        deletes: Arc<Mutex<Vec<String>>>,
+        forced_create_id: Arc<Mutex<Option<String>>>,
     }
 
     #[async_trait]
@@ -707,8 +730,15 @@ mod tests {
                 .creates
                 .lock()
                 .map_err(|_| RunnerError::Destination("poisoned test lock".into()))? += 1;
+            let destination_id = self
+                .forced_create_id
+                .lock()
+                .map_err(|_| RunnerError::Destination("poisoned test lock".into()))?
+                .clone()
+                .or_else(|| node.destination_id.clone())
+                .unwrap_or_default();
             Ok(DestinationObservation {
-                destination_id: node.destination_id.clone().unwrap_or_default(),
+                destination_id,
                 migration_id: migration_id.into(),
                 owner_scope_id: node.owner_scope_id.clone(),
                 source_key: node.key.clone(),
@@ -720,8 +750,12 @@ mod tests {
         async fn delete_owned(
             &self,
             _migration_id: &str,
-            _node: &ManifestNode,
+            node: &ManifestNode,
         ) -> Result<(), RunnerError> {
+            self.deletes
+                .lock()
+                .map_err(|_| RunnerError::Destination("poisoned test lock".into()))?
+                .push(node.destination_id.clone().unwrap_or_default());
             Ok(())
         }
 
@@ -765,6 +799,39 @@ mod tests {
         Ok((snapshot, manifest))
     }
 
+    fn server_fixture() -> Result<(SourceSnapshot, MigrationManifest), RunnerError> {
+        let snapshot = SourceSnapshot {
+            schema: "o3k.migration.source-snapshot/v1".into(),
+            source_cloud_id: "source-a".into(),
+            project_id: "project-a".into(),
+            generation_inputs: vec!["server".into()],
+            resources: vec![SourceResource {
+                kind: ResourceKind::Server,
+                source_id: "server-a".into(),
+                project_id: Some("project-a".into()),
+                name: Some("server".into()),
+                dependencies: vec![],
+                fingerprint: "fingerprint-server".into(),
+                classification: Classification::Supported,
+                reasons: vec![],
+            }],
+            snapshot_fingerprint: "snapshot-server".into(),
+        };
+        let request = crate::manifest::ManifestRequest {
+            migration_id: "migration-server".into(),
+            endpoint_fingerprint: "endpoint-a".into(),
+            profile: "p14-openstack-cold-migration-v1".into(),
+            destination_scope_id: "destination-a".into(),
+            destination_profile: "native-rust-testlab".into(),
+            actor_principal_id: "actor-a".into(),
+            authenticated_service_principal_id: "service-a".into(),
+        };
+        Ok((
+            snapshot.clone(),
+            crate::manifest::build_manifest(&snapshot, &request)?,
+        ))
+    }
+
     #[tokio::test]
     async fn restart_resumes_owned_nodes_without_duplicate_create() -> Result<(), RunnerError> {
         let (snapshot, manifest) = fixture()?;
@@ -791,6 +858,190 @@ mod tests {
                 >= 2
         );
         let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conflicting_replay_is_fenced() -> Result<(), RunnerError> {
+        let (snapshot, manifest) = fixture()?;
+        let destination = Destination::default();
+        let path = std::env::temp_dir().join(format!("o3k-p14-9a-{}.json", uuid::Uuid::new_v4()));
+        let conflicting = manifest.clone();
+        *destination
+            .forced_create_id
+            .lock()
+            .map_err(|_| RunnerError::Destination("poisoned test lock".into()))? =
+            Some("foreign-id".into());
+        let runner = MigrationRunner::new(Source, destination, &path);
+        let error = match runner.execute(conflicting, &snapshot).await {
+            Err(error) => error,
+            Ok(_) => return Err(RunnerError::Invalid("conflict was not fenced".into())),
+        };
+        assert!(matches!(error, RunnerError::Fenced(_)));
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_outcome_is_fenced_before_replay_or_rollback() -> Result<(), RunnerError> {
+        let (snapshot, mut manifest) = fixture()?;
+        manifest.phase = ManifestPhase::UnknownOutcome;
+        crate::manifest::refresh_integrity(&mut manifest)?;
+        let destination = Destination::default();
+        let path = std::env::temp_dir().join(format!("o3k-p14-9a-{}.json", uuid::Uuid::new_v4()));
+        let runner = MigrationRunner::new(Source, destination, &path);
+        assert!(matches!(
+            runner.execute(manifest.clone(), &snapshot).await,
+            Err(RunnerError::Fenced(_))
+        ));
+        assert!(matches!(
+            runner.rollback(manifest).await,
+            Err(RunnerError::Recovery(RecoveryError::InvalidState(_)))
+        ));
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rollback_deletes_only_owned_resources_in_reverse_order() -> Result<(), RunnerError> {
+        let (_snapshot, mut manifest) = fixture()?;
+        manifest.nodes[0].destination_id = Some("owned-network".into());
+        manifest.nodes[0].rollback = RollbackState::Owned;
+        manifest.nodes[0].verification = VerificationState::Verified;
+        crate::manifest::refresh_integrity(&mut manifest)?;
+        let destination = Destination::default();
+        let path = std::env::temp_dir().join(format!("o3k-p14-9a-{}.json", uuid::Uuid::new_v4()));
+        let runner = MigrationRunner::new(Source, destination.clone(), &path);
+        runner.rollback(manifest).await?;
+        assert_eq!(
+            *destination
+                .deletes
+                .lock()
+                .map_err(|_| RunnerError::Destination("poisoned test lock".into()))?,
+            vec!["owned-network"]
+        );
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cutover_requires_authorization_and_keeps_source_deletion_separate()
+    -> Result<(), RunnerError> {
+        let (snapshot, manifest) = server_fixture()?;
+        let destination = Destination::default();
+        let path = std::env::temp_dir().join(format!("o3k-p14-9a-{}.json", uuid::Uuid::new_v4()));
+        let runner = MigrationRunner::new(Source, destination, &path);
+        runner.execute(manifest, &snapshot).await?;
+        let validated = runner.load()?;
+        let unauthorized = CutoverAuthorization {
+            principal_id: "wrong-actor".into(),
+            destination_scope_id: "destination-a".into(),
+            action: "migrate:commit".into(),
+        };
+        let error = match runner
+            .cutover(validated, &snapshot, &unauthorized, "server-a", "commit-a")
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => {
+                return Err(RunnerError::Invalid(
+                    "unauthorized cutover succeeded".into(),
+                ));
+            }
+        };
+        assert!(matches!(error, RunnerError::Fenced(_)));
+        assert_eq!(runner.load()?.phase, ManifestPhase::CutoverPending);
+        assert!(runner.load()?.cutover.source_quiesced);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_http_adapter_composes_observe_create_and_verify_without_db_access()
+    -> Result<(), RunnerError> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|error| RunnerError::Destination(error.to_string()))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| RunnerError::Destination(error.to_string()))?;
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response_body in [
+                None,
+                Some(r#"{"resource":{"metadata":{"id":"dest-1"}}}"#),
+                Some(
+                    r#"{"metadata":{"id":"dest-1","migration_id":"migration-a","owner_scope":"destination-a","source_key":"network/network-a"}}"#,
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = stream
+                        .read(&mut buffer)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8_lossy(&request).into_owned());
+                if let Some(body) = response_body {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .await
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    stream
+                        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Ok::<_, String>(requests)
+        });
+
+        let endpoint = Url::parse(&format!("http://{address}/")).map_err(|error| {
+            RunnerError::Invalid(format!("test endpoint URL is invalid: {error}"))
+        })?;
+        let destination = HttpNativeDestination::new(endpoint, "capability-a".into())?;
+        let (_snapshot, manifest) = fixture()?;
+        let mut node = manifest.nodes[0].clone();
+        node.destination_id = None;
+        assert!(destination.observe("migration-a", &node).await?.is_none());
+        let created = destination
+            .create(
+                "migration-a",
+                &node,
+                &SourceDocument {
+                    kind: ResourceKind::Network,
+                    body: json!({"id":"network-a","token":"must-not-cross-boundary"}),
+                    generation_input: "network".into(),
+                },
+            )
+            .await?;
+        assert_eq!(created.destination_id, "dest-1");
+        node.destination_id = Some(created.destination_id);
+        destination.verify("migration-a", &node).await?;
+        let requests = server
+            .await
+            .map_err(|error| RunnerError::Destination(error.to_string()))?
+            .map_err(RunnerError::Destination)?;
+        assert!(requests[0].contains(
+            "GET /o3k/v1/network/networks?migration_id=migration-a&source_key=network%2Fnetwork-a"
+        ));
+        assert!(requests[0].contains("authorization: Bearer capability-a"));
+        assert!(requests[1].contains("POST /o3k/v1/network/networks"));
+        assert!(requests[1].contains("idempotency-key: migration-a:create:network/network-a"));
+        assert!(!requests[1].contains("must-not-cross-boundary"));
+        assert!(requests[2].contains("GET /o3k/v1/network/networks/dest-1"));
         Ok(())
     }
 }

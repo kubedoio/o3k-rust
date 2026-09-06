@@ -51,3 +51,20 @@ fn redact_process_output(value: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn subprocess_exit_code_defines_noop() {
+        let directory = std::env::temp_dir();
+        let output = run_opentofu_noop("/bin/true", &directory, &[]).await;
+        assert!(output.is_ok());
+        let output = output.unwrap_or_default();
+        assert!(output.is_empty());
+
+        let error = run_opentofu_noop("/bin/false", &directory, &[]).await;
+        assert!(matches!(error, Err(error) if error.to_string().contains("not NO-OP")));
+    }
+}
