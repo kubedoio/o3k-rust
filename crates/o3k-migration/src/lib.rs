@@ -18,6 +18,7 @@ use std::{
 use thiserror::Error;
 use url::Url;
 pub mod cutover;
+pub mod handoff;
 pub mod manifest;
 pub mod recovery;
 pub mod transfer;
