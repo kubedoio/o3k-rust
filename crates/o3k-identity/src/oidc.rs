@@ -122,6 +122,8 @@ struct Claims {
     iss: String,
     sub: String,
     exp: u64,
+    #[serde(default)]
+    typ: Option<String>,
 }
 
 #[derive(Clone)]
@@ -221,7 +223,10 @@ impl OidcValidator {
         }
         let key = DecodingKey::from_jwk(jwk).map_err(|_| OidcError::AuthenticationFailed)?;
         let header = decode_header(token).map_err(|_| OidcError::AuthenticationFailed)?;
-        if header.typ.as_deref() != Some("at+jwt") {
+        let header_is_access_token =
+            matches!(header.typ.as_deref(), Some("at+jwt" | "application/at+jwt"));
+        let keycloak_compatible_access_token = header.typ.as_deref() == Some("JWT");
+        if !header_is_access_token && !keycloak_compatible_access_token {
             return Err(OidcError::AuthenticationFailed);
         }
         let mut validation = Validation::new(algorithm);
@@ -234,6 +239,13 @@ impl OidcValidator {
             .extend(["iss", "aud", "sub"].into_iter().map(str::to_owned));
         let TokenData { claims, .. }: TokenData<Claims> =
             decode(token, &key, &validation).map_err(|_| OidcError::AuthenticationFailed)?;
+        // RFC 9068 access tokens use an `at+jwt` media type.  Some otherwise
+        // standards-based OIDC providers emit a generic JWT header and mark
+        // the OAuth access token in the payload instead.  Accept that bounded
+        // form without accepting an untyped ID token.
+        if keycloak_compatible_access_token && claims.typ.as_deref() != Some("Bearer") {
+            return Err(OidcError::AuthenticationFailed);
+        }
         if claims.sub.is_empty() || claims.sub.len() > 512 {
             return Err(OidcError::AuthenticationFailed);
         }
