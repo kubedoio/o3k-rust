@@ -122,6 +122,7 @@ APPROVED_SQL_PATHS = {
     "crates/o3k-store/src/artifact_transfer.rs",
     "crates/o3k-store/src/server_state.rs",
     "crates/o3k-store/src/conformance.rs",
+    "crates/o3k-migration/src/acceptance_process.rs",
     "bins/o3k/src/db.rs",
     "bins/o3k/src/upgrade/runner.rs",
 }
@@ -254,6 +255,7 @@ APPROVED_HOST_EXECUTION_PATHS = {
     "crates/o3k-storage/src/ceph.rs",
     "crates/o3k-storage/src/lib.rs",
     "crates/o3k-migration/src/tofu.rs",
+    "crates/o3k-migration/src/acceptance_process.rs",
     # These crates are themselves explicit provider/host-execution adapters.
     "crates/o3k-cellhv/src",
     "crates/o3k-libvirt/src",

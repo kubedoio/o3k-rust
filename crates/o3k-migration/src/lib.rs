@@ -17,6 +17,8 @@ use std::{
 };
 use thiserror::Error;
 use url::Url;
+pub mod acceptance;
+pub mod acceptance_process;
 pub mod cutover;
 pub mod handoff;
 pub mod manifest;
