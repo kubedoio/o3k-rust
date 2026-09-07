@@ -194,6 +194,129 @@ impl NetworkBindingProjector {
             .map(Some)
             .map_err(std::io::Error::other)
     }
+
+    async fn remove_public_binding(
+        &self,
+        project_id: &str,
+        allocation_id: Uuid,
+    ) -> Result<(), String> {
+        let Some(dispatcher) = self.network_dispatcher.as_ref() else {
+            return Ok(());
+        };
+        let Some(binding) = self
+            .public_allocator
+            .as_ref()
+            .ok_or_else(|| "public allocator is not configured".to_owned())?
+            .get(project_id, allocation_id)
+            .map_err(|error| error.to_string())?
+            .endpoint_id
+            .map(|endpoint_id| (endpoint_id, allocation_id))
+        else {
+            return Ok(());
+        };
+        let _guard = self.unbind_lock.lock().await;
+        let allocator = self
+            .public_allocator
+            .as_ref()
+            .ok_or_else(|| "public allocator is not configured".to_owned())?;
+        let allocation = allocator
+            .get(project_id, binding.1)
+            .map_err(|error| error.to_string())?;
+        let port = self
+            .network
+            .get_port_for_project(project_id, binding.0)
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(host) = port.binding_host.as_deref() else {
+            return Ok(());
+        };
+        let agent = if let Some(configured) = self.network_agent.as_ref() {
+            if configured.agent_id != host {
+                return Err("bound network agent identity changed".to_owned());
+            }
+            configured.clone()
+        } else {
+            let snapshot = self
+                .registry
+                .snapshot(host)
+                .await
+                .ok_or_else(|| "network agent snapshot unavailable".to_owned())?;
+            o3k_network::NetworkAgentIdentity {
+                agent_id: snapshot.agent_id,
+                agent_epoch: snapshot.agent_epoch,
+            }
+        };
+        let subnet_id = port
+            .subnet_id
+            .ok_or_else(|| "bound port has no subnet".to_owned())?;
+        let subnet = self
+            .network
+            .get_subnet_for_project(project_id, subnet_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let realms = self
+            .network
+            .list_canonical_realms_for_project(project_id, port.network_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let realm_id = select_active_external_realm(&realms).map_err(str::to_owned)?;
+        let external_realm_route_id = self
+            .resolve_external_realm_route_id(project_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:native:network:public-remove:{allocation_id}:{}",
+                allocation.generation
+            )
+            .as_bytes(),
+        );
+        let deadline_unix_ms = super::unix_time_millis().saturating_add(30_000);
+        let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
+            endpoint_id: binding.0,
+            realm_id,
+            project_id,
+            mac: &port.mac_address,
+            fixed_ip: port.fixed_ip,
+            subnet_cidr: &subnet.cidr,
+            node_id: host,
+            operation_id,
+            deadline_unix_ms,
+            public_address: Some(allocation.public_address),
+            external_realm_id: external_realm_route_id,
+            policies: Vec::new(),
+        })
+        .map_err(|error| error.to_string())?;
+        let command_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:native:network:public-remove-command:{operation_id}").as_bytes(),
+        );
+        let status = dispatcher
+            .dispatch(o3k_network::NetworkPlanCommand {
+                command_id,
+                operation_id,
+                idempotency_key: format!("o3k:native:network:public-remove:{allocation_id}"),
+                action: o3k_network::NetworkPlanAction::Remove,
+                target: agent,
+                controller: self.network_controller.clone(),
+                deadline_unix_ms,
+                plan,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        if status != o3k_network::NetworkPlanStatus::Succeeded {
+            return Err("public binding removal requires observed provider success".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::native_adapters::resource::PublicAddressWorkflow for NetworkBindingProjector {
+    async fn remove(&self, project_id: &str, allocation_id: Uuid) -> Result<(), String> {
+        self.remove_public_binding(project_id, allocation_id).await
+    }
 }
 
 fn select_active_external_realm(

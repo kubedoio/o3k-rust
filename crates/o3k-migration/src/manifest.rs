@@ -199,11 +199,26 @@ pub fn build_manifest(
     let mut nodes = Vec::with_capacity(snapshot.resources.len());
     for resource in &snapshot.resources {
         let key = format!("{}/{}", resource.kind_string(), resource.source_id);
-        let depends_on = resource
+        let mut depends_on = resource
             .dependencies
             .iter()
             .filter_map(|dependency| source_to_key.get(dependency).cloned())
             .collect::<Vec<_>>();
+        if resource.kind == ResourceKind::VolumeAttachment {
+            // Nova's attachment inventory commonly uses the Cinder volume
+            // UUID as the attachment source ID.  That identity is also
+            // present on the Volume node, but the source dependency list may
+            // only name the server.  Add the volume edge explicitly so
+            // create and rollback both honor the real attachment ordering.
+            if let Some(volume) = snapshot.resources.iter().find(|candidate| {
+                candidate.kind == ResourceKind::Volume && candidate.source_id == resource.source_id
+            }) {
+                let volume_key = format!("{}/{}", volume.kind_string(), volume.source_id);
+                if !depends_on.contains(&volume_key) {
+                    depends_on.push(volume_key);
+                }
+            }
+        }
         let destination_id = if resource.classification == Classification::Blocked {
             None
         } else {
@@ -215,11 +230,17 @@ pub fn build_manifest(
                 .to_string(),
             )
         };
-        let unsupported = resource
+        let mut unsupported = resource
             .reasons
             .iter()
             .map(|reason| format!("{}:{}", reason.code, reason.detail))
             .collect::<Vec<_>>();
+        if resource.kind == ResourceKind::Project {
+            unsupported.push(
+                "DESTINATION_SCOPE_BOUNDARY:source project is represented by the bound destination scope"
+                    .into(),
+            );
+        }
         nodes.push(ManifestNode {
             key,
             resource_type: resource.kind,
@@ -414,6 +435,7 @@ fn contains_secret(value: &str) -> bool {
     .any(|part| lower.contains(part))
 }
 
+#[derive(Debug, Clone)]
 pub struct FileManifestStore {
     path: PathBuf,
 }

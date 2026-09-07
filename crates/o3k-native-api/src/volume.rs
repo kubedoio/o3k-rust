@@ -71,7 +71,7 @@ pub struct VolumeListResponse {
 }
 
 fn volume_to_native_v1(vol: &VolumeItem) -> serde_json::Value {
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "api_version": "o3k.io/v1",
         "kind": "volume:volume",
         "metadata": {
@@ -91,7 +91,13 @@ fn volume_to_native_v1(vol: &VolumeItem) -> serde_json::Value {
         "status": {
             "state": vol.state,
         }
-    })
+    });
+    for key in ["migration_id", "source_key"] {
+        if let Some(metadata_value) = vol.metadata.get(key).and_then(serde_json::Value::as_str) {
+            body["metadata"][key] = metadata_value.into();
+        }
+    }
+    body
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────

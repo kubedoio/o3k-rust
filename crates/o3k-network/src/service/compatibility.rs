@@ -85,6 +85,16 @@ impl NetworkService {
         project_id: &str,
         name: String,
     ) -> Result<NetworkRecord, NetworkError> {
+        self.create_network_for_project_with_id(project_id, Uuid::now_v7(), name)
+            .await
+    }
+
+    pub async fn create_network_for_project_with_id(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        name: String,
+    ) -> Result<NetworkRecord, NetworkError> {
         if name.trim().is_empty() {
             return Err(NetworkError::InvalidRequest);
         }
@@ -101,7 +111,7 @@ impl NetworkService {
             return Err(NetworkError::Conflict);
         }
         let network = NetworkRecord {
-            id: Uuid::now_v7(),
+            id,
             name,
             project_id: project_id.to_owned(),
             status: "ACTIVE".to_owned(),

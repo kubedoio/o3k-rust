@@ -60,11 +60,35 @@ pub fn plan_rollback(manifest: &MigrationManifest) -> Result<RollbackPlan, Recov
     {
         return Err(RecoveryError::OwnershipBlocked);
     }
+    // Deletion must be the reverse of the dependency graph, not merely the
+    // reverse of the manifest's serialization order.  Source APIs often
+    // return resources in a stable lexical order that does not put a port,
+    // attachment, or router interface after the subnet/router it depends on.
+    // Select a leaf repeatedly so every dependent is removed before its
+    // dependency, while retaining deterministic source-key ordering.
+    let mut remaining = owned;
+    let mut ordered = Vec::with_capacity(remaining.len());
+    while !remaining.is_empty() {
+        let position = remaining.iter().position(|candidate| {
+            !remaining.iter().any(|other| {
+                other.key != candidate.key
+                    && other
+                        .depends_on
+                        .iter()
+                        .any(|dependency| dependency == &candidate.key)
+            })
+        });
+        let Some(position) = position else {
+            return Err(RecoveryError::InvalidState(
+                "owned resource dependency graph contains a cycle".into(),
+            ));
+        };
+        ordered.push(remaining.remove(position));
+    }
     Ok(RollbackPlan {
         migration_id: manifest.migration_id.clone(),
-        resource_ids: owned
+        resource_ids: ordered
             .into_iter()
-            .rev()
             .filter_map(|node| node.destination_id.clone())
             .collect(),
         ownership_marker: format!("o3k:migration:{}", manifest.migration_id),

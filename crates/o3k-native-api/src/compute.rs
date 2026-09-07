@@ -47,6 +47,10 @@ pub struct ServerItem {
     pub state: String,
     pub created_at: Option<String>,
     pub generation: i64,
+    #[serde(skip_serializing)]
+    pub migration_id: Option<String>,
+    #[serde(skip_serializing)]
+    pub source_key: Option<String>,
 }
 
 // ── Query parameters ──────────────────────────────────────────────────────
@@ -67,7 +71,7 @@ pub struct ServerListResponse {
 }
 
 fn server_to_native_v1(server: &ServerItem) -> serde_json::Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "api_version": "o3k.io/v1",
         "kind": "compute:server",
         "metadata": {
@@ -84,7 +88,14 @@ fn server_to_native_v1(server: &ServerItem) -> serde_json::Value {
         "status": {
             "state": server.state,
         }
-    })
+    });
+    if let Some(migration_id) = &server.migration_id {
+        value["metadata"]["migration_id"] = migration_id.clone().into();
+    }
+    if let Some(source_key) = &server.source_key {
+        value["metadata"]["source_key"] = source_key.clone().into();
+    }
+    value
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────
@@ -252,6 +263,8 @@ mod envelope_tests {
             state: "active".into(),
             created_at: None,
             generation: 1,
+            migration_id: None,
+            source_key: None,
         });
         crate::assert_resource_envelope_schema(&value);
     }

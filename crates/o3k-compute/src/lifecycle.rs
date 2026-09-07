@@ -141,6 +141,17 @@ impl ComputeService {
     /// Returns the deterministic canonical identity used by the Nova create
     /// adapter before the durable server intent exists.
     pub fn server_id_for_create(project_id: &str, idempotency_key: &str) -> Uuid {
+        let canonical = idempotency_key
+            .strip_prefix("canonical:")
+            .or_else(|| {
+                idempotency_key
+                    .split_once(":canonical:")
+                    .map(|(_, value)| value)
+            })
+            .and_then(|value| value.parse().ok());
+        if let Some(canonical) = canonical {
+            return canonical;
+        }
         Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!("o3k:server:{project_id}:{idempotency_key}").as_bytes(),

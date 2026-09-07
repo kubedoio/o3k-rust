@@ -1,27 +1,110 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use o3k_domain::{StorageExecutionScope, Volume, VolumeId, VolumeState};
+use o3k_domain::{
+    AttachmentAccessMode, StorageExecutionScope, Volume, VolumeAttachment, VolumeAttachmentId,
+    VolumeAttachmentState, VolumeId, VolumeState,
+};
 use o3k_kernel::Controller;
 use o3k_native_api::{
     compute::ServerItem,
     network::AddressRealmItem,
     resource::{
         CreateRequest, MutationResult, ResourceApplication, ResourceApplicationError,
-        ResourceDescriptor,
+        ResourceDescriptor, VolumeAttachmentWorkflow,
     },
 };
 use o3k_store::{DurableStore, storage::StorageRepository};
 use uuid::Uuid;
 
+#[async_trait::async_trait]
+pub(crate) trait PublicAddressWorkflow: Send + Sync {
+    async fn remove(&self, project_id: &str, allocation_id: Uuid) -> Result<(), String>;
+}
+
 /// Application adapter for generic native resource reads and mutations.
 pub struct GenericResourceApplication {
     pub compute: Arc<o3k_compute::ComputeService>,
+    pub image: Option<Arc<o3k_image::ImageService>>,
     pub network_service: Arc<o3k_network::NetworkService>,
     pub store: Arc<o3k_store::unified::O3kStore>,
     pub storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>>,
     pub server: Arc<dyn o3k_native_api::compute::ServerReader>,
     pub network: Arc<dyn o3k_native_api::network::NetworkReader>,
     pub external_controllers: Arc<BTreeMap<String, Arc<o3k_service_sdk::GrpcControllerAdapter>>>,
+    pub public_allocator: Option<Arc<o3k_network::PublicAddressAllocator>>,
+    pub(crate) public_address_workflow: Option<Arc<dyn PublicAddressWorkflow>>,
+    pub network_external_realm_id: Option<Uuid>,
+    pub attachment_workflow: Option<Arc<dyn VolumeAttachmentWorkflow>>,
+}
+
+impl GenericResourceApplication {
+    /// The process configuration historically names the external network
+    /// selector `...REALM_ID`, while compute/network composition consumes it
+    /// as a canonical external-network ID. Resolve the active realm at the
+    /// authority boundary before gateway/address operations use it.
+    async fn external_realm_id(&self, project_id: &str) -> Result<Uuid, ResourceApplicationError> {
+        let network_id = self
+            .network_external_realm_id
+            .ok_or(ResourceApplicationError::NotReady)?;
+        self.network_service
+            .list_canonical_realms_for_project(project_id, network_id)
+            .await
+            .map_err(|_| ResourceApplicationError::Conflict)?
+            .into_iter()
+            .find(|realm| realm.state == "active")
+            .map(|realm| realm.id)
+            .ok_or(ResourceApplicationError::Conflict)
+    }
+
+    async fn annotate_server_migration_metadata(
+        &self,
+        resource_id: Uuid,
+        migration_id: &Uuid,
+        source_key: &str,
+    ) -> Result<o3k_store::ResourceRecord, ResourceApplicationError> {
+        for _ in 0..4 {
+            let resource = self
+                .store
+                .get_resource(resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            let mut desired = serde_json::from_str::<serde_json::Value>(&resource.desired_state)
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            let object = desired
+                .as_object_mut()
+                .ok_or(ResourceApplicationError::Internal)?;
+            object.insert(
+                "migration_id".to_owned(),
+                serde_json::Value::String(migration_id.to_string()),
+            );
+            object.insert(
+                "source_key".to_owned(),
+                serde_json::Value::String(source_key.to_owned()),
+            );
+            let desired_state =
+                serde_json::to_string(&desired).map_err(|_| ResourceApplicationError::Internal)?;
+            if desired_state == resource.desired_state {
+                return Ok(resource);
+            }
+            match self
+                .store
+                .update_resource(
+                    resource.id,
+                    resource.generation,
+                    &desired_state,
+                    &resource.observed_state,
+                    resource.observed_generation,
+                    resource.provider_id.as_deref(),
+                )
+                .await
+            {
+                Ok(updated) => return Ok(updated),
+                Err(o3k_store::StoreError::StaleGeneration) => continue,
+                Err(_) => return Err(ResourceApplicationError::Internal),
+            }
+        }
+        Err(ResourceApplicationError::Conflict)
+    }
 }
 
 fn compute_error(error: o3k_compute::ComputeError) -> ResourceApplicationError {
@@ -30,6 +113,18 @@ fn compute_error(error: o3k_compute::ComputeError) -> ResourceApplicationError {
         o3k_compute::ComputeError::NotFound => ResourceApplicationError::NotFound,
         o3k_compute::ComputeError::InvalidRequest => ResourceApplicationError::Validation,
         o3k_compute::ComputeError::Conflict => ResourceApplicationError::Conflict,
+        _ => ResourceApplicationError::Internal,
+    }
+}
+
+fn image_error(error: o3k_image::ImageError) -> ResourceApplicationError {
+    match error {
+        o3k_image::ImageError::Unauthorized => ResourceApplicationError::Forbidden,
+        o3k_image::ImageError::NotFound => ResourceApplicationError::NotFound,
+        o3k_image::ImageError::Conflict => ResourceApplicationError::Conflict,
+        o3k_image::ImageError::InvalidMetadata
+        | o3k_image::ImageError::UnsupportedFormat
+        | o3k_image::ImageError::ChecksumMismatch => ResourceApplicationError::Validation,
         _ => ResourceApplicationError::Internal,
     }
 }
@@ -46,6 +141,23 @@ fn server_json(item: ServerItem) -> serde_json::Value {
     serde_json::json!({"api_version":"o3k.io/v1","kind":"compute:server","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"name":item.name,"flavor_id":item.flavor_id,"image_id":item.image_id},"status":{"state":item.state}})
 }
 
+fn server_json_with_resource(
+    item: ServerItem,
+    resource: Option<&o3k_store::ResourceRecord>,
+) -> serde_json::Value {
+    let mut value = server_json(item);
+    if let Some(resource) = resource
+        && let Ok(spec) = serde_json::from_str::<serde_json::Value>(&resource.desired_state)
+    {
+        for key in ["migration_id", "source_key"] {
+            if let Some(text) = spec.get(key).and_then(serde_json::Value::as_str) {
+                value["metadata"][key] = serde_json::Value::String(text.to_owned());
+            }
+        }
+    }
+    value
+}
+
 fn realm_json(item: AddressRealmItem) -> serde_json::Value {
     serde_json::json!({"api_version":"o3k.io/v1","kind":"network:address_realm","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"prefix":item.prefix,"overlapping_prefixes":item.overlapping_prefixes},"status":{"state":item.state}})
 }
@@ -60,26 +172,151 @@ fn network_json(item: &o3k_store::CanonicalNetworkRecord) -> serde_json::Value {
     })
 }
 
+fn flavor_json(item: &o3k_compute::Flavor, owner_scope: &str) -> serde_json::Value {
+    serde_json::json!({
+        "api_version": "o3k.io/v1",
+        "kind": "compute:flavor",
+        "metadata": {"id": item.id, "owner_scope": owner_scope},
+        "spec": {
+            "name": item.name,
+            "vcpus": item.vcpus,
+            "ram_mib": item.ram_mib,
+            "disk_gib": item.disk_gib
+        },
+        "status": {"state": "ACTIVE"}
+    })
+}
+
+fn image_json(item: &o3k_image::ImageRecord) -> serde_json::Value {
+    serde_json::json!({
+        "api_version": "o3k.io/v1",
+        "kind": "image:image",
+        "metadata": {"id": item.id, "owner_scope": item.project_id},
+        "spec": {
+            "name": item.name,
+            "visibility": item.visibility,
+            "container_format": item.container_format,
+            "disk_format": item.disk_format
+        },
+        "status": {"state": item.status}
+    })
+}
+
+fn image_json_with_resource(
+    item: &o3k_image::ImageRecord,
+    resource: Option<&o3k_store::ResourceRecord>,
+) -> serde_json::Value {
+    let mut value = image_json(item);
+    if let Some(resource) = resource {
+        value["metadata"]["owner_scope"] = serde_json::Value::String(resource.project_id.clone());
+        if let Ok(spec) = serde_json::from_str::<serde_json::Value>(&resource.desired_state) {
+            if let Some(migration_id) = spec.get("migration_id").and_then(serde_json::Value::as_str)
+            {
+                value["metadata"]["migration_id"] =
+                    serde_json::Value::String(migration_id.to_owned());
+            }
+            if let Some(source_key) = spec.get("source_key").and_then(serde_json::Value::as_str) {
+                value["metadata"]["source_key"] = serde_json::Value::String(source_key.to_owned());
+            }
+        }
+    }
+    value
+}
+
 fn native_volume_json(record: &o3k_store::VolumeRecord) -> serde_json::Value {
+    let mut metadata = serde_json::json!({
+        "id": record.volume.id.to_string(),
+        "owner_scope": record.volume.project_id,
+        "generation": record.volume.generation,
+        "created_at": record.created_at,
+    });
+    for key in ["migration_id", "source_key"] {
+        if let Some(value) = record.volume.metadata.get(key) {
+            metadata[key] = serde_json::Value::String(value.clone());
+        }
+    }
     serde_json::json!({
         "api_version":"o3k.io/v1",
         "kind":"volume:volume",
-        "metadata":{"id":record.volume.id.to_string(),"owner_scope":record.volume.project_id,"generation":record.volume.generation,"created_at":record.created_at},
+        "metadata":metadata,
         "spec":{"size_bytes":record.volume.size_bytes,"volume_type":record.volume.volume_type,"name":record.volume.name,"description":record.volume.description,"metadata":record.volume.metadata,"availability_zone":record.volume.availability_zone},
         "status":{"state":record.volume.state}
     })
 }
 
+fn native_attachment_json(
+    record: &o3k_store::storage::VolumeAttachmentRecordV1,
+    resource: Option<&o3k_store::ResourceRecord>,
+) -> serde_json::Value {
+    let mut metadata = serde_json::json!({
+        "id": record.attachment.id.to_string(),
+        "owner_scope": record.attachment.project_id,
+        "generation": record.attachment.generation,
+    });
+    if let Some(resource) = resource
+        && let Ok(spec) = serde_json::from_str::<serde_json::Value>(&resource.desired_state)
+    {
+        for key in ["migration_id", "source_key"] {
+            if let Some(value) = spec.get(key) {
+                metadata[key] = value.clone();
+            }
+        }
+    }
+    serde_json::json!({
+        "api_version": "o3k.io/v1",
+        "kind": "volume:volume_attachment",
+        "metadata": metadata,
+        "spec": {
+            "server_id": record.attachment.server_id,
+            "volume_id": record.attachment.volume_id,
+            "delete_on_termination": record.attachment.delete_on_termination,
+        },
+        "status": {"state": record.attachment.state},
+    })
+}
+
+fn floating_ip_json(
+    binding: &o3k_network::PublicAddressBinding,
+    realm_id: Option<Uuid>,
+    owner: &str,
+    migration_id: Option<&str>,
+    source_key: Option<&str>,
+) -> serde_json::Value {
+    let mut metadata = serde_json::json!({
+        "id": binding.allocation_id,
+        "owner_scope": owner,
+        "generation": binding.generation,
+    });
+    if let Some(value) = migration_id {
+        metadata["migration_id"] = value.into();
+    }
+    if let Some(value) = source_key {
+        metadata["source_key"] = value.into();
+    }
+    serde_json::json!({
+        "api_version":"o3k.io/v1", "kind":"network:floating_ip", "metadata":metadata,
+        "spec":{"floating_network_id":realm_id,"floating_ip_address":binding.public_address,"port_id":binding.endpoint_id},
+        "status":{"state":"ACTIVE"}
+    })
+}
+
 fn generic_external_json(resource: &o3k_store::ResourceRecord) -> serde_json::Value {
     let spec = serde_json::from_str(&resource.desired_state).unwrap_or(serde_json::Value::Null);
+    let mut metadata = serde_json::json!({
+        "id": resource.id,
+        "owner_scope": resource.project_id,
+        "generation": resource.generation
+    });
+    if let Some(migration_id) = spec.get("migration_id").and_then(serde_json::Value::as_str) {
+        metadata["migration_id"] = serde_json::Value::String(migration_id.to_owned());
+    }
+    if let Some(source_key) = spec.get("source_key").and_then(serde_json::Value::as_str) {
+        metadata["source_key"] = serde_json::Value::String(source_key.to_owned());
+    }
     serde_json::json!({
         "api_version": "o3k.io/v1",
         "kind": resource.kind,
-        "metadata": {
-            "id": resource.id,
-            "owner_scope": resource.project_id,
-            "generation": resource.generation
-        },
+        "metadata": metadata,
         "spec": spec,
         "status": {"state": resource.observed_state}
     })
@@ -92,6 +329,19 @@ impl ResourceApplication for GenericResourceApplication {
         descriptor: &ResourceDescriptor,
         auth: &o3k_kernel::AuthContext,
     ) -> Result<Vec<serde_json::Value>, ResourceApplicationError> {
+        if descriptor.resource_type.to_string() == "image:image" {
+            let service = self
+                .image
+                .as_ref()
+                .ok_or(ResourceApplicationError::NotReady)?;
+            let items = service.list(auth).await.map_err(image_error)?;
+            let mut result = Vec::with_capacity(items.len());
+            for item in items {
+                let resource = self.store.get_resource(item.id).await.ok();
+                result.push(image_json_with_resource(&item, resource.as_ref()));
+            }
+            return Ok(result);
+        }
         if self
             .external_controllers
             .contains_key(&descriptor.owning_service)
@@ -106,7 +356,39 @@ impl ResourceApplication for GenericResourceApplication {
                 .map(|resources| resources.iter().map(generic_external_json).collect())
                 .map_err(|_| ResourceApplicationError::Internal);
         }
+        if matches!(
+            descriptor.resource_type.to_string().as_str(),
+            "network:network"
+                | "network:subnet"
+                | "network:port"
+                | "network:security_group"
+                | "network:security_group_rule"
+                | "network:router"
+                | "network:router_interface"
+                | "network:floating_ip"
+        ) {
+            return self
+                .store
+                .list_resources(
+                    auth.effective_scope().id().as_str(),
+                    &descriptor.resource_type.to_string(),
+                )
+                .await
+                .map(|resources| resources.iter().map(generic_external_json).collect())
+                .map_err(|_| ResourceApplicationError::Internal);
+        }
         match descriptor.resource_type.to_string().as_str() {
+            "compute:flavor" => self
+                .compute
+                .flavors_for_auth(auth)
+                .await
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| flavor_json(item, auth.effective_scope().id().as_str()))
+                        .collect()
+                })
+                .map_err(compute_error),
             "compute:server" => self
                 .server
                 .list_servers(auth)
@@ -125,12 +407,62 @@ impl ResourceApplication for GenericResourceApplication {
                 .await
                 .map(|items| items.iter().map(network_json).collect())
                 .map_err(|_| ResourceApplicationError::Internal),
+            "network:floating_ip" => {
+                let allocator = self
+                    .public_allocator
+                    .as_ref()
+                    .ok_or(ResourceApplicationError::NotReady)?;
+                let items = allocator
+                    .list(auth.effective_scope().id().as_str())
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                let mut result = Vec::with_capacity(items.len());
+                for item in items {
+                    let record = self.store.get_resource(item.allocation_id).await.ok();
+                    let spec = record.as_ref().and_then(|r| {
+                        serde_json::from_str::<serde_json::Value>(&r.desired_state).ok()
+                    });
+                    result.push(floating_ip_json(
+                        &item,
+                        Some(
+                            self.external_realm_id(auth.effective_scope().id().as_str())
+                                .await?,
+                        ),
+                        auth.effective_scope().id().as_str(),
+                        spec.as_ref()
+                            .and_then(|v| v.get("migration_id"))
+                            .and_then(serde_json::Value::as_str),
+                        spec.as_ref()
+                            .and_then(|v| v.get("source_key"))
+                            .and_then(serde_json::Value::as_str),
+                    ));
+                }
+                Ok(result)
+            }
             "volume:volume" => self
                 .store
                 .list_volumes(auth.effective_scope().id().as_str())
                 .await
                 .map(|items| items.iter().map(native_volume_json).collect())
                 .map_err(|_| ResourceApplicationError::Internal),
+            "volume:volume_attachment" => {
+                let items = self
+                    .store
+                    .list_volume_attachments_v1(auth.effective_scope().id().as_str())
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                let mut result = Vec::new();
+                for item in items {
+                    if item.attachment.state == VolumeAttachmentState::Attached {
+                        let resource = self
+                            .store
+                            .get_resource(item.attachment.id.as_uuid())
+                            .await
+                            .ok();
+                        result.push(native_attachment_json(&item, resource.as_ref()));
+                    }
+                }
+                Ok(result)
+            }
             _ => Err(ResourceApplicationError::NotFound),
         }
     }
@@ -141,6 +473,18 @@ impl ResourceApplication for GenericResourceApplication {
         auth: &o3k_kernel::AuthContext,
         id: &str,
     ) -> Result<serde_json::Value, ResourceApplicationError> {
+        if descriptor.resource_type.to_string() == "image:image" {
+            let service = self
+                .image
+                .as_ref()
+                .ok_or(ResourceApplicationError::NotReady)?;
+            let id = id
+                .parse::<Uuid>()
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            let item = service.get(auth, id).await.map_err(image_error)?;
+            let resource = self.store.get_resource(id).await.ok();
+            return Ok(image_json_with_resource(&item, resource.as_ref()));
+        }
         if self
             .external_controllers
             .contains_key(&descriptor.owning_service)
@@ -163,13 +507,64 @@ impl ResourceApplication for GenericResourceApplication {
         let id = id
             .parse::<Uuid>()
             .map_err(|_| ResourceApplicationError::NotFound)?;
+        // Flavor resources created through the generic canonical path carry
+        // migration ownership in their durable record.  Preserve that
+        // metadata on read so the migration runner can fence and verify the
+        // exact resource it created; seeded compatibility flavors continue
+        // through the concrete compute read below.
+        if descriptor.resource_type.to_string() == "compute:flavor"
+            && let Ok(resource) = self.store.get_resource(id).await
+            && resource.kind == "compute_flavor"
+            && resource.project_id == auth.effective_scope().id().as_str()
+        {
+            return Ok(generic_external_json(&resource));
+        }
+        if descriptor.resource_type.to_string() == "network:network"
+            && let Ok(resource) = self.store.get_resource(id).await
+            && resource.kind == "network:network"
+            && resource.project_id == auth.effective_scope().id().as_str()
+        {
+            return Ok(generic_external_json(&resource));
+        }
+        if matches!(
+            descriptor.resource_type.to_string().as_str(),
+            "network:subnet"
+                | "network:port"
+                | "network:security_group"
+                | "network:security_group_rule"
+                | "network:router"
+                | "network:router_interface"
+                | "network:floating_ip"
+        ) && let Ok(resource) = self.store.get_resource(id).await
+            && resource.kind == descriptor.resource_type.to_string()
+            && resource.project_id == auth.effective_scope().id().as_str()
+        {
+            return Ok(generic_external_json(&resource));
+        }
         match descriptor.resource_type.to_string().as_str() {
-            "compute:server" => self
-                .server
-                .show_server(auth, id)
+            "compute:flavor" => self
+                .compute
+                .flavor_for_auth(auth, id)
                 .await
-                .map(server_json)
-                .map_err(generic_read_error),
+                .map(|item| flavor_json(&item, auth.effective_scope().id().as_str()))
+                .map_err(compute_error),
+            "compute:server" => {
+                let item = self
+                    .server
+                    .show_server(auth, id)
+                    .await
+                    .map_err(generic_read_error)?;
+                let resource = self
+                    .store
+                    .get_resource(
+                        item.id
+                            .parse::<Uuid>()
+                            .map_err(|_| ResourceApplicationError::Internal)?,
+                    )
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                Ok(server_json_with_resource(item, Some(&resource)))
+            }
             "network:address_realm" => self
                 .network
                 .show_address_realm(auth, id)
@@ -180,8 +575,39 @@ impl ResourceApplication for GenericResourceApplication {
                 .network_service
                 .get_canonical_network(auth, id)
                 .await
-                .map(|item| network_json(&item))
+                .map(|item| {
+                    // Native migration records are an ownership/evidence
+                    // projection over the canonical network authority.
+                    network_json(&item)
+                })
                 .map_err(|_| ResourceApplicationError::NotFound),
+            "network:floating_ip" => {
+                let allocator = self
+                    .public_allocator
+                    .as_ref()
+                    .ok_or(ResourceApplicationError::NotReady)?;
+                let item = allocator
+                    .get(auth.effective_scope().id().as_str(), id)
+                    .map_err(|_| ResourceApplicationError::NotFound)?;
+                let record = self.store.get_resource(id).await.ok();
+                let spec = record
+                    .as_ref()
+                    .and_then(|r| serde_json::from_str::<serde_json::Value>(&r.desired_state).ok());
+                Ok(floating_ip_json(
+                    &item,
+                    Some(
+                        self.external_realm_id(auth.effective_scope().id().as_str())
+                            .await?,
+                    ),
+                    auth.effective_scope().id().as_str(),
+                    spec.as_ref()
+                        .and_then(|v| v.get("migration_id"))
+                        .and_then(serde_json::Value::as_str),
+                    spec.as_ref()
+                        .and_then(|v| v.get("source_key"))
+                        .and_then(serde_json::Value::as_str),
+                ))
+            }
             "volume:volume" => self
                 .store
                 .get_volume(id)
@@ -195,6 +621,20 @@ impl ResourceApplication for GenericResourceApplication {
                     }
                     _ => Err(ResourceApplicationError::NotFound),
                 }),
+            "volume:volume_attachment" => {
+                let record = self
+                    .store
+                    .get_volume_attachment_v1(id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?
+                    .filter(|item| {
+                        item.attachment.project_id == auth.effective_scope().id().as_str()
+                            && item.attachment.state == VolumeAttachmentState::Attached
+                    })
+                    .ok_or(ResourceApplicationError::NotFound)?;
+                let resource = self.store.get_resource(id).await.ok();
+                Ok(native_attachment_json(&record, resource.as_ref()))
+            }
             _ => Err(ResourceApplicationError::NotFound),
         }
     }
@@ -206,6 +646,178 @@ impl ResourceApplication for GenericResourceApplication {
         request: CreateRequest,
         idempotency_key: Option<&str>,
     ) -> Result<MutationResult, ResourceApplicationError> {
+        if descriptor.resource_type.to_string() == "image:image" {
+            let service = self
+                .image
+                .as_ref()
+                .ok_or(ResourceApplicationError::NotReady)?;
+            let source = request
+                .spec
+                .get("source")
+                .filter(|value| value.is_object())
+                .unwrap_or(&request.spec);
+            let source = source
+                .get("image")
+                .filter(|value| value.is_object())
+                .unwrap_or(source);
+            let name = source
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ResourceApplicationError::Validation)?
+                .to_owned();
+            let visibility = source
+                .get("visibility")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("private")
+                .to_owned();
+            let container_format = source
+                .get("container_format")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("bare")
+                .to_owned();
+            let disk_format = source
+                .get("disk_format")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("qcow2")
+                .to_owned();
+            let canonical_id = request
+                .spec
+                .get("canonical_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::parse::<Uuid>)
+                .transpose()
+                .map_err(|_| ResourceApplicationError::Validation)?;
+            let image = match canonical_id {
+                Some(id) => {
+                    service
+                        .create_with_id(auth, id, name, visibility, container_format, disk_format)
+                        .await
+                }
+                None => {
+                    service
+                        .create(auth, name, visibility, container_format, disk_format)
+                        .await
+                }
+            }
+            .map_err(image_error)?;
+            self.store
+                .insert_resource(&o3k_store::ResourceRecord {
+                    id: image.id,
+                    kind: "image:image".to_owned(),
+                    project_id: auth.effective_scope().id().as_str().to_owned(),
+                    generation: 1,
+                    observed_generation: 1,
+                    desired_state: serde_json::to_string(&request.spec)
+                        .map_err(|_| ResourceApplicationError::Validation)?,
+                    observed_state: "active".to_owned(),
+                    provider_id: None,
+                })
+                .await
+                .map_err(|error| match error {
+                    o3k_store::StoreError::ResourceAlreadyExists => {
+                        ResourceApplicationError::Conflict
+                    }
+                    _ => ResourceApplicationError::Internal,
+                })?;
+            return Ok(MutationResult {
+                operation_id: format!("native:image:create:{}", image.id),
+                resource_id: Some(image.id.to_string()),
+                complete: true,
+                resource: Some(image_json(&image)),
+            });
+        }
+        if descriptor.resource_type.to_string() == "compute:flavor" {
+            let source = request
+                .spec
+                .get("source")
+                .filter(|value| value.is_object())
+                .unwrap_or(&request.spec);
+            let source = source
+                .get("flavor")
+                .filter(|value| value.is_object())
+                .unwrap_or(source);
+            let name = source
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ResourceApplicationError::Validation)?
+                .to_owned();
+            let vcpus = source
+                .get("vcpus")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or(ResourceApplicationError::Validation)?;
+            let ram_mib = source
+                .get("ram_mib")
+                .or_else(|| source.get("ram"))
+                .or_else(|| source.get("memory_mib"))
+                .and_then(serde_json::Value::as_u64)
+                .ok_or(ResourceApplicationError::Validation)?;
+            let disk_gib = source
+                .get("disk_gib")
+                .or_else(|| source.get("disk"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
+            let flavor = self
+                .compute
+                .create_flavor_for_auth(
+                    auth,
+                    name,
+                    u32::try_from(vcpus).map_err(|_| ResourceApplicationError::Validation)?,
+                    ram_mib,
+                    disk_gib,
+                )
+                .await
+                .map_err(compute_error)?;
+            // The concrete compute service owns the flavor fields, while the
+            // generic migration envelope owns run correlation.  Retain the
+            // latter in the durable desired state so later reads can prove
+            // migration ownership without trusting an in-memory response.
+            if request.spec.get("migration_id").is_some()
+                || request.spec.get("source_key").is_some()
+            {
+                let mut desired = serde_json::to_value(&flavor)
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                if let Some(object) = desired.as_object_mut() {
+                    for key in ["migration_id", "source_key"] {
+                        if let Some(value) = request.spec.get(key) {
+                            object.insert(key.to_owned(), value.clone());
+                        }
+                    }
+                }
+                let record = self
+                    .store
+                    .get_resource(flavor.id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                let desired = serde_json::to_string(&desired)
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                self.store
+                    .update_resource(
+                        flavor.id,
+                        record.generation,
+                        &desired,
+                        &record.observed_state,
+                        record.observed_generation,
+                        record.provider_id.as_deref(),
+                    )
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+            }
+            return Ok(MutationResult {
+                operation_id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!(
+                        "native:compute-flavor:{}:{}",
+                        auth.effective_scope().id(),
+                        flavor.id
+                    )
+                    .as_bytes(),
+                )
+                .to_string(),
+                resource_id: Some(flavor.id.to_string()),
+                complete: true,
+                resource: Some(flavor_json(&flavor, auth.effective_scope().id().as_str())),
+            });
+        }
         if let Some(controller) = self.external_controllers.get(&descriptor.owning_service) {
             if !controller.health().await.healthy {
                 return Err(ResourceApplicationError::NotReady);
@@ -420,6 +1032,109 @@ impl ResourceApplication for GenericResourceApplication {
                 })),
             });
         }
+        if descriptor.resource_type.to_string() == "volume:volume_attachment" {
+            let workflow = self
+                .attachment_workflow
+                .as_ref()
+                .ok_or(ResourceApplicationError::NotReady)?;
+            let source = request.spec.get("source").unwrap_or(&request.spec);
+            let server_id = source
+                .get("server_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.parse::<Uuid>().ok())
+                .ok_or(ResourceApplicationError::Validation)?;
+            let volume_id = source
+                .get("volume_id")
+                .or_else(|| source.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.parse::<Uuid>().ok())
+                .ok_or(ResourceApplicationError::Validation)?;
+            self.server
+                .show_server(auth, server_id)
+                .await
+                .map_err(generic_read_error)?;
+            let volume = self
+                .store
+                .get_volume(volume_id)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?
+                .filter(|record| {
+                    record.volume.project_id == auth.effective_scope().id().as_str()
+                        && record.volume.state == VolumeState::Available
+                })
+                .ok_or(ResourceApplicationError::Conflict)?;
+            let key = idempotency_key
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
+            let attachment_id = request
+                .spec
+                .get("canonical_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.parse::<Uuid>().ok())
+                .unwrap_or_else(|| {
+                    Uuid::new_v5(
+                        &Uuid::NAMESPACE_OID,
+                        format!("{}:{}", auth.effective_scope().id(), key).as_bytes(),
+                    )
+                });
+            let record = o3k_store::storage::VolumeAttachmentRecordV1 {
+                attachment: VolumeAttachment {
+                    id: VolumeAttachmentId::from_uuid(attachment_id),
+                    project_id: auth.effective_scope().id().as_str().to_owned(),
+                    volume_id: volume.volume.id,
+                    server_id,
+                    execution_scope: StorageExecutionScope::Host("local".to_owned()),
+                    access_mode: AttachmentAccessMode::ReadWrite,
+                    delete_on_termination: request
+                        .spec
+                        .get("delete_on_termination")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    state: VolumeAttachmentState::Reserved,
+                    generation: 1,
+                    operation_id: None,
+                },
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+            self.store
+                .insert_volume_attachment_v1(&record)
+                .await
+                .map_err(|_| ResourceApplicationError::Conflict)?;
+            let resource = o3k_store::ResourceRecord {
+                id: attachment_id,
+                kind: "native_volume_attachment".to_owned(),
+                project_id: record.attachment.project_id.clone(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::to_string(&request.spec)
+                    .map_err(|_| ResourceApplicationError::Validation)?,
+                observed_state: "reserved".to_owned(),
+                provider_id: None,
+            };
+            if self.store.insert_resource(&resource).await.is_err() {
+                let _ = self
+                    .store
+                    .delete_volume_attachment_v1(&resource.project_id, attachment_id)
+                    .await;
+                return Err(ResourceApplicationError::Internal);
+            }
+            workflow
+                .attach(attachment_id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotReady)?;
+            let attached = self
+                .store
+                .get_volume_attachment_v1(attachment_id)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?
+                .ok_or(ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id: format!("native:volume-attachment:create:{attachment_id}"),
+                resource_id: Some(attachment_id.to_string()),
+                complete: attached.attachment.state == VolumeAttachmentState::Attached,
+                resource: Some(native_attachment_json(&attached, Some(&resource))),
+            });
+        }
         if descriptor.resource_type.to_string() == "volume:volume" {
             #[derive(serde::Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -434,6 +1149,12 @@ impl ResourceApplication for GenericResourceApplication {
                 metadata: Option<std::collections::BTreeMap<String, String>>,
                 #[serde(default)]
                 availability_zone: Option<String>,
+                #[serde(default, rename = "canonical_id")]
+                _canonical_id: Option<Uuid>,
+                #[serde(default)]
+                migration_id: Option<Uuid>,
+                #[serde(default)]
+                source_key: Option<String>,
             }
             let spec: VolumeSpec = serde_json::from_value(request.spec.clone())
                 .map_err(|_| ResourceApplicationError::Validation)?;
@@ -443,20 +1164,29 @@ impl ResourceApplication for GenericResourceApplication {
             let key = idempotency_key
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
-            let resource_id = Uuid::new_v5(
-                &Uuid::NAMESPACE_OID,
-                format!("{}:{}", auth.effective_scope().id(), key).as_bytes(),
-            );
+            let resource_id = spec._canonical_id.unwrap_or_else(|| {
+                Uuid::new_v5(
+                    &Uuid::NAMESPACE_OID,
+                    format!("{}:{}", auth.effective_scope().id(), key).as_bytes(),
+                )
+            });
             let operation_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
                 format!("volume:create:{resource_id}").as_bytes(),
             );
+            let mut metadata = spec.metadata.unwrap_or_default();
+            if let Some(migration_id) = spec.migration_id {
+                metadata.insert("migration_id".to_owned(), migration_id.to_string());
+            }
+            if let Some(source_key) = spec.source_key {
+                metadata.insert("source_key".to_owned(), source_key);
+            }
             let volume = Volume {
                 id: VolumeId::from_uuid(resource_id),
                 project_id: auth.effective_scope().id().as_str().to_owned(),
                 name: spec.name.unwrap_or_else(|| resource_id.to_string()),
                 description: spec.description.unwrap_or_default(),
-                metadata: spec.metadata.unwrap_or_default(),
+                metadata,
                 availability_zone: spec.availability_zone,
                 size_bytes: spec.size_bytes,
                 volume_type: spec.volume_type,
@@ -471,6 +1201,7 @@ impl ResourceApplication for GenericResourceApplication {
                 volume,
                 created_at: chrono::Utc::now().to_rfc3339(),
             };
+            let compatibility_generation = record.volume.generation;
             let Some(provider) = self.storage_provider.clone() else {
                 return Err(ResourceApplicationError::NotReady);
             };
@@ -504,8 +1235,12 @@ impl ResourceApplication for GenericResourceApplication {
                     id: resource_id,
                     kind: "volume".to_owned(),
                     project_id: auth.effective_scope().id().as_str().to_owned(),
-                    generation: 1,
-                    observed_generation: 1,
+                    // The native volume row is authoritative and has already
+                    // advanced through provider realization.  Keep the
+                    // compatibility projection at the same generation so
+                    // later lifecycle updates cannot be rejected as stale.
+                    generation: compatibility_generation as i64,
+                    observed_generation: compatibility_generation as i64,
                     desired_state: "available".to_owned(),
                     observed_state: "available".to_owned(),
                     provider_id: None,
@@ -545,16 +1280,28 @@ impl ResourceApplication for GenericResourceApplication {
             });
         }
         if descriptor.resource_type.to_string() == "network:network" {
-            #[derive(serde::Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct NetworkSpec {
-                name: String,
-            }
-            let spec: NetworkSpec = serde_json::from_value(request.spec)
-                .map_err(|_| ResourceApplicationError::Validation)?;
+            let source = request.spec.get("source").unwrap_or(&request.spec);
+            let source = source.get("network").unwrap_or(source);
+            let name = source
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ResourceApplicationError::Validation)?
+                .to_owned();
+            let canonical_id = request
+                .spec
+                .get("canonical_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::parse::<Uuid>)
+                .transpose()
+                .map_err(|_| ResourceApplicationError::Validation)?
+                .unwrap_or_else(Uuid::now_v7);
             let network = self
                 .network_service
-                .create_network(auth, spec.name)
+                .create_network_for_project_with_id(
+                    auth.effective_scope().id().as_str(),
+                    canonical_id,
+                    name,
+                )
                 .await
                 .map_err(|_| ResourceApplicationError::Conflict)?;
             let canonical = self
@@ -562,6 +1309,25 @@ impl ResourceApplication for GenericResourceApplication {
                 .get_canonical_network(auth, network.id)
                 .await
                 .map_err(|_| ResourceApplicationError::Internal)?;
+            if request.spec.get("migration_id").is_some()
+                || request.spec.get("source_key").is_some()
+            {
+                let record = o3k_store::ResourceRecord {
+                    id: network.id,
+                    kind: "network:network".to_owned(),
+                    project_id: auth.effective_scope().id().as_str().to_owned(),
+                    generation: 1,
+                    observed_generation: 1,
+                    desired_state: serde_json::to_string(&request.spec)
+                        .map_err(|_| ResourceApplicationError::Internal)?,
+                    observed_state: "READY".to_owned(),
+                    provider_id: None,
+                };
+                self.store
+                    .insert_resource(&record)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+            }
             return Ok(MutationResult {
                 operation_id: Uuid::new_v5(
                     &Uuid::NAMESPACE_URL,
@@ -570,7 +1336,494 @@ impl ResourceApplication for GenericResourceApplication {
                 .to_string(),
                 resource_id: Some(network.id.to_string()),
                 complete: true,
-                resource: Some(network_json(&canonical)),
+                resource: Some(if request.spec.get("migration_id").is_some() {
+                    generic_external_json(
+                        &self
+                            .store
+                            .get_resource(network.id)
+                            .await
+                            .map_err(|_| ResourceApplicationError::Internal)?,
+                    )
+                } else {
+                    network_json(&canonical)
+                }),
+            });
+        }
+        if descriptor.resource_type.to_string() == "network:subnet" {
+            let source = request.spec.get("source").unwrap_or(&request.spec);
+            let source = source.get("subnet").unwrap_or(source);
+            let network_id = source
+                .get("network_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|v| v.parse::<Uuid>().ok())
+                .ok_or(ResourceApplicationError::Validation)?;
+            let cidr = source
+                .get("cidr")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ResourceApplicationError::Validation)?
+                .to_owned();
+            let name = source
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("migrated-subnet")
+                .to_owned();
+            let canonical_id = request
+                .spec
+                .get("canonical_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::parse::<Uuid>)
+                .transpose()
+                .map_err(|_| ResourceApplicationError::Validation)?
+                .unwrap_or_else(Uuid::now_v7);
+            let subnet = self
+                .network_service
+                .create_subnet_for_project_with_id(
+                    auth.effective_scope().id().as_str(),
+                    canonical_id,
+                    network_id,
+                    name,
+                    cidr,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Conflict)?;
+            let id = subnet.id;
+            let record = o3k_store::ResourceRecord {
+                id,
+                kind: "network:subnet".into(),
+                project_id: auth.effective_scope().id().as_str().into(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::to_string(&request.spec)
+                    .map_err(|_| ResourceApplicationError::Internal)?,
+                observed_state: "READY".into(),
+                provider_id: None,
+            };
+            self.store
+                .insert_resource(&record)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id: format!("native:subnet:create:{id}"),
+                resource_id: Some(id.to_string()),
+                complete: true,
+                resource: Some(generic_external_json(&record)),
+            });
+        }
+        if descriptor.resource_type.to_string() == "network:port" {
+            let source = request.spec.get("source").unwrap_or(&request.spec);
+            let source = source.get("port").unwrap_or(source);
+            let network_id = source
+                .get("network_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|v| v.parse::<Uuid>().ok())
+                .ok_or(ResourceApplicationError::Validation)?;
+            let name = source
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("migrated-port")
+                .to_owned();
+            let canonical_id = request
+                .spec
+                .get("canonical_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::parse::<Uuid>)
+                .transpose()
+                .map_err(|_| ResourceApplicationError::Validation)?
+                .unwrap_or_else(Uuid::now_v7);
+            let requested_fixed_ip = source
+                .get("fixed_ips")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|item| {
+                    Some((
+                        item.get("subnet_id")?.as_str()?.parse().ok()?,
+                        item.get("ip_address")?.as_str()?.parse().ok(),
+                    ))
+                });
+            let port = self
+                .network_service
+                .create_port_for_project_with_id_and_fixed_ip(
+                    auth.effective_scope().id().as_str(),
+                    canonical_id,
+                    network_id,
+                    name,
+                    requested_fixed_ip,
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Conflict)?;
+            let id = port.id;
+            let record = o3k_store::ResourceRecord {
+                id,
+                kind: "network:port".into(),
+                project_id: auth.effective_scope().id().as_str().into(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::to_string(&request.spec)
+                    .map_err(|_| ResourceApplicationError::Internal)?,
+                observed_state: "READY".into(),
+                provider_id: None,
+            };
+            self.store
+                .insert_resource(&record)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id: format!("native:port:create:{id}"),
+                resource_id: Some(id.to_string()),
+                complete: true,
+                resource: Some(generic_external_json(&record)),
+            });
+        }
+        if descriptor.resource_type.to_string() == "network:security_group" {
+            let source = request.spec.get("source").unwrap_or(&request.spec);
+            let source = source.get("security_group").unwrap_or(source);
+            let group = self
+                .network_service
+                .create_security_group_for_project(
+                    auth.effective_scope().id().as_str(),
+                    source
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or(ResourceApplicationError::Validation)?
+                        .to_owned(),
+                    source
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Conflict)?;
+            let record = o3k_store::ResourceRecord {
+                id: group.id,
+                kind: "network:security_group".into(),
+                project_id: auth.effective_scope().id().as_str().into(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::to_string(&request.spec)
+                    .map_err(|_| ResourceApplicationError::Internal)?,
+                observed_state: "READY".into(),
+                provider_id: None,
+            };
+            self.store
+                .insert_resource(&record)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id: format!("native:security-group:create:{}", group.id),
+                resource_id: Some(group.id.to_string()),
+                complete: true,
+                resource: Some(generic_external_json(&record)),
+            });
+        }
+        if descriptor.resource_type.to_string() == "network:security_group_rule" {
+            let source = request.spec.get("source").unwrap_or(&request.spec);
+            let source = source.get("security_group_rule").unwrap_or(source);
+            let group_id = source
+                .get("security_group_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.parse::<Uuid>().ok())
+                .ok_or(ResourceApplicationError::Validation)?;
+            let rule = self
+                .network_service
+                .create_security_group_rule_for_project(
+                    auth.effective_scope().id().as_str(),
+                    group_id,
+                    source
+                        .get("direction")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("ingress")
+                        .to_owned(),
+                    source
+                        .get("protocol")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("tcp")
+                        .to_owned(),
+                    source
+                        .get("port_range_min")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|value| {
+                            u16::try_from(value).map_err(|_| ResourceApplicationError::Validation)
+                        })
+                        .transpose()?,
+                    source
+                        .get("port_range_max")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|value| {
+                            u16::try_from(value).map_err(|_| ResourceApplicationError::Validation)
+                        })
+                        .transpose()?,
+                    source
+                        .get("remote_ip_prefix")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Conflict)?;
+            let record = o3k_store::ResourceRecord {
+                id: rule.id,
+                kind: "network:security_group_rule".into(),
+                project_id: auth.effective_scope().id().as_str().into(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::to_string(&request.spec)
+                    .map_err(|_| ResourceApplicationError::Internal)?,
+                observed_state: "READY".into(),
+                provider_id: None,
+            };
+            self.store
+                .insert_resource(&record)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id: format!("native:security-group-rule:create:{}", rule.id),
+                resource_id: Some(rule.id.to_string()),
+                complete: true,
+                resource: Some(generic_external_json(&record)),
+            });
+        }
+        if descriptor.resource_type.to_string() == "network:router" {
+            let source = request.spec.get("source").unwrap_or(&request.spec);
+            let source = source.get("router").unwrap_or(source);
+            let canonical_id = request
+                .spec
+                .get("canonical_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::parse::<Uuid>)
+                .transpose()
+                .map_err(|_| ResourceApplicationError::Validation)?
+                .unwrap_or_else(Uuid::now_v7);
+            let gateway = self
+                .network_service
+                .create_l3_gateway_for_project_with_id(
+                    canonical_id,
+                    auth.effective_scope().id().as_str(),
+                    source
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or(ResourceApplicationError::Validation)?
+                        .to_owned(),
+                    Some(
+                        self.external_realm_id(auth.effective_scope().id().as_str())
+                            .await?,
+                    ),
+                    source
+                        .get("enable_snat")
+                        .and_then(serde_json::Value::as_bool)
+                        .or_else(|| {
+                            source
+                                .get("external_gateway_info")
+                                .and_then(|value| value.get("enable_snat"))
+                                .and_then(serde_json::Value::as_bool)
+                        })
+                        .unwrap_or(true),
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Conflict)?;
+            let record = o3k_store::ResourceRecord {
+                id: gateway.id,
+                kind: "network:router".into(),
+                project_id: auth.effective_scope().id().as_str().into(),
+                generation: gateway.generation as i64,
+                observed_generation: gateway.generation as i64,
+                desired_state: serde_json::to_string(&request.spec)
+                    .map_err(|_| ResourceApplicationError::Internal)?,
+                observed_state: "READY".into(),
+                provider_id: None,
+            };
+            self.store
+                .insert_resource(&record)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id: format!("native:router:create:{}", gateway.id),
+                resource_id: Some(gateway.id.to_string()),
+                complete: true,
+                resource: Some(generic_external_json(&record)),
+            });
+        }
+        if descriptor.resource_type.to_string() == "network:router_interface" {
+            let source = request.spec.get("source").unwrap_or(&request.spec);
+            let source = source.get("router_interface").unwrap_or(source);
+            let router_id = source
+                .get("router_id")
+                .or_else(|| source.get("device_id"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.parse::<Uuid>().ok())
+                .ok_or(ResourceApplicationError::Validation)?;
+            let subnet_id = source
+                .get("subnet_id")
+                .or_else(|| {
+                    source
+                        .get("fixed_ips")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|items| items.first())
+                        .and_then(|item| item.get("subnet_id"))
+                })
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.parse::<Uuid>().ok())
+                .ok_or(ResourceApplicationError::Validation)?;
+            let canonical_id = request
+                .spec
+                .get("canonical_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::parse::<Uuid>)
+                .transpose()
+                .map_err(|_| ResourceApplicationError::Validation)?
+                .unwrap_or_else(Uuid::now_v7);
+            let attachment = self
+                .network_service
+                .attach_l3_gateway_realm_with_id(
+                    canonical_id,
+                    auth.effective_scope().id().as_str(),
+                    &router_id,
+                    &subnet_id,
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Conflict)?;
+            let record = o3k_store::ResourceRecord {
+                id: attachment.id,
+                kind: "network:router_interface".into(),
+                project_id: auth.effective_scope().id().as_str().into(),
+                generation: attachment.generation as i64,
+                observed_generation: attachment.generation as i64,
+                desired_state: serde_json::to_string(&request.spec)
+                    .map_err(|_| ResourceApplicationError::Internal)?,
+                observed_state: "READY".into(),
+                provider_id: None,
+            };
+            self.store
+                .insert_resource(&record)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id: format!("native:router-interface:create:{}", attachment.id),
+                resource_id: Some(attachment.id.to_string()),
+                complete: true,
+                resource: Some(generic_external_json(&record)),
+            });
+        }
+        if descriptor.resource_type.to_string() == "network:floating_ip" {
+            let allocator = self
+                .public_allocator
+                .as_ref()
+                .ok_or(ResourceApplicationError::NotReady)?;
+            let realm_id = self
+                .external_realm_id(auth.effective_scope().id().as_str())
+                .await?;
+            let source = request.spec.get("source").unwrap_or(&request.spec);
+            let source = source.get("floatingip").unwrap_or(source);
+            // The source cloud's external-network UUID is not a destination
+            // identity and is therefore intentionally not rewritten when the
+            // source project cannot read the shared public network.  The
+            // destination's configured external realm is the authority for
+            // this bounded public-address pool; require the source request to
+            // carry an external-network reference, but never treat its UUID
+            // as an O3K resource identity.
+            if source
+                .get("floating_network_id")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+            {
+                return Err(ResourceApplicationError::Validation);
+            }
+            let port_id = source
+                .get("port_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.parse::<Uuid>().ok());
+            if let Some(port_id) = port_id {
+                self.network_service
+                    .get_port(auth, port_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Validation)?;
+            }
+            let operation_id = format!(
+                "native:{}:{}",
+                request
+                    .spec
+                    .get("migration_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown"),
+                request
+                    .spec
+                    .get("source_key")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| idempotency_key.unwrap_or("floating-ip"))
+            );
+            let canonical_id = request
+                .spec
+                .get("canonical_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::parse::<Uuid>)
+                .transpose()
+                .map_err(|_| ResourceApplicationError::Validation)?;
+            let mut binding = allocator
+                .allocate_with_id(
+                    auth.effective_scope().id().as_str(),
+                    &operation_id,
+                    canonical_id.unwrap_or_else(Uuid::now_v7),
+                )
+                .map_err(|error| {
+                    tracing::warn!(
+                        error = %error,
+                        operation_id = %operation_id,
+                        "floating address allocation rejected"
+                    );
+                    ResourceApplicationError::Conflict
+                })?;
+            if let Some(port_id) = port_id {
+                binding = allocator
+                    .associate(
+                        auth.effective_scope().id().as_str(),
+                        binding.allocation_id,
+                        port_id,
+                    )
+                    .map_err(|error| {
+                        tracing::warn!(
+                            error = %error,
+                            allocation_id = %binding.allocation_id,
+                            port_id = %port_id,
+                            "floating address association rejected"
+                        );
+                        ResourceApplicationError::Conflict
+                    })?;
+            }
+            let id = binding.allocation_id;
+            let record = o3k_store::ResourceRecord {
+                id,
+                kind: "network:floating_ip".to_owned(),
+                project_id: auth.effective_scope().id().as_str().to_owned(),
+                generation: binding.generation as i64,
+                observed_generation: binding.generation as i64,
+                desired_state: serde_json::to_string(&request.spec)
+                    .map_err(|_| ResourceApplicationError::Validation)?,
+                observed_state: "READY".to_owned(),
+                provider_id: None,
+            };
+            self.store
+                .insert_resource(&record)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id,
+                resource_id: Some(id.to_string()),
+                complete: true,
+                resource: Some(floating_ip_json(
+                    &binding,
+                    Some(realm_id),
+                    auth.effective_scope().id().as_str(),
+                    request
+                        .spec
+                        .get("migration_id")
+                        .and_then(serde_json::Value::as_str),
+                    request
+                        .spec
+                        .get("source_key")
+                        .and_then(serde_json::Value::as_str),
+                )),
             });
         }
         if descriptor.resource_type.to_string() != "compute:server" {
@@ -578,6 +1831,7 @@ impl ResourceApplication for GenericResourceApplication {
         }
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
         struct ComputeSpec {
             name: String,
             image_id: String,
@@ -585,6 +1839,18 @@ impl ResourceApplication for GenericResourceApplication {
             network_ids: Vec<String>,
             #[serde(default)]
             key_name: Option<String>,
+            #[serde(default)]
+            ssh_public_key: Option<String>,
+            // MigrationRunner carries source identity alongside the
+            // destination compute intent. Keep the semantic payload strict
+            // while accepting that bounded execution metadata at this
+            // compatibility edge.
+            #[serde(default, rename = "canonical_id")]
+            _canonical_id: Option<Uuid>,
+            #[serde(default)]
+            migration_id: Option<Uuid>,
+            #[serde(default)]
+            source_key: Option<String>,
         }
         let semantic_request = serde_json::json!({"spec": request.spec});
         let spec: ComputeSpec = serde_json::from_value(semantic_request["spec"].clone())
@@ -619,6 +1885,9 @@ impl ResourceApplication for GenericResourceApplication {
         let key = idempotency_key
             .map(str::to_owned)
             .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
+        let key = key.replace('/', "_");
+        let canonical_id = spec._canonical_id;
+        let compute_key = canonical_id.map_or_else(|| key.clone(), |id| format!("canonical:{id}"));
         let action = descriptor
             .lifecycle_actions
             .get(&o3k_native_api::resource::LifecycleOperation::Create)
@@ -629,10 +1898,13 @@ impl ResourceApplication for GenericResourceApplication {
             auth.principal().id().to_string(),
             auth.effective_scope().clone(),
             None,
-            key.clone(),
+            compute_key.clone(),
             semantic_request,
         )
-        .map_err(|_| ResourceApplicationError::Validation)?;
+        .map_err(|error| {
+            tracing::warn!(error = ?error, "canonical native server context rejected");
+            ResourceApplicationError::Validation
+        })?;
         let receipt = self
             .compute
             .create_server_for_auth_canonical(
@@ -645,21 +1917,36 @@ impl ResourceApplication for GenericResourceApplication {
                     flavor_id: spec.flavor_id,
                     network_ids: spec.network_ids,
                     key_name: spec.key_name,
-                    config_drive: None,
+                    config_drive: spec.ssh_public_key.map(|ssh_public_key| {
+                        o3k_provider::ConfigDriveRequest {
+                            user_data: Vec::new(),
+                            vendor_data: None,
+                            ssh_public_key,
+                        }
+                    }),
                     // Keep provider command identity scoped even when the
                     // client reuses the same canonical key in another tenant.
-                    idempotency_key: format!("{}:{key}", auth.effective_scope().id()),
+                    idempotency_key: format!("{}:{compute_key}", auth.effective_scope().id()),
                 },
                 context,
             )
             .await
-            .map_err(compute_error)?;
+            .map_err(|error| {
+                tracing::warn!(error = ?error, "canonical native server create failed");
+                compute_error(error)
+            })?;
         let server = receipt.resource;
-        let resource = self
-            .store
-            .get_resource(server.id.as_uuid())
-            .await
-            .map_err(|_| ResourceApplicationError::Internal)?;
+        let resource = if let (Some(migration_id), Some(source_key)) =
+            (spec.migration_id.as_ref(), spec.source_key.as_deref())
+        {
+            self.annotate_server_migration_metadata(server.id.as_uuid(), migration_id, source_key)
+                .await?
+        } else {
+            self.store
+                .get_resource(server.id.as_uuid())
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?
+        };
         Ok(MutationResult {
             operation_id: receipt.operation_id.to_string(),
             resource_id: Some(server.id.as_uuid().to_string()),
@@ -667,16 +1954,41 @@ impl ResourceApplication for GenericResourceApplication {
                 receipt.operation_state,
                 o3k_store::OperationState::Succeeded
             ),
-            resource: Some(server_json(ServerItem {
-                id: server.id.as_uuid().to_string(),
-                project_id: server.project_id,
-                name: server.name,
-                flavor_id: server.flavor_id.to_string(),
-                image_id: server.image_id,
-                state: format!("{:?}", server.state),
-                generation: resource.generation,
-                created_at: None,
-            })),
+            resource: Some(server_json_with_resource(
+                ServerItem {
+                    id: server.id.as_uuid().to_string(),
+                    project_id: server.project_id,
+                    name: server.name,
+                    flavor_id: server.flavor_id.to_string(),
+                    image_id: server.image_id,
+                    state: format!("{:?}", server.state),
+                    generation: resource.generation,
+                    created_at: None,
+                    migration_id: resource
+                        .desired_state
+                        .as_str()
+                        .parse::<serde_json::Value>()
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("migration_id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToOwned::to_owned)
+                        }),
+                    source_key: resource
+                        .desired_state
+                        .as_str()
+                        .parse::<serde_json::Value>()
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("source_key")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToOwned::to_owned)
+                        }),
+                },
+                Some(&resource),
+            )),
         })
     }
 
@@ -688,6 +2000,279 @@ impl ResourceApplication for GenericResourceApplication {
         idempotency_key: Option<&str>,
         expected_generation: Option<i64>,
     ) -> Result<MutationResult, ResourceApplicationError> {
+        if descriptor.resource_type.to_string() == "volume:volume_attachment" {
+            let workflow = self
+                .attachment_workflow
+                .as_ref()
+                .ok_or(ResourceApplicationError::NotReady)?;
+            let attachment_id = id
+                .parse::<Uuid>()
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            let record = self
+                .store
+                .get_volume_attachment_v1(attachment_id)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?
+                .filter(|record| {
+                    record.attachment.project_id == auth.effective_scope().id().as_str()
+                })
+                .ok_or(ResourceApplicationError::NotFound)?;
+            workflow
+                .detach(attachment_id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotReady)?;
+            self.store
+                .delete_volume_attachment_v1(
+                    auth.effective_scope().id().as_str(),
+                    record.attachment.id.as_uuid(),
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id: format!("native:volume-attachment:delete:{attachment_id}"),
+                resource_id: Some(id.to_owned()),
+                complete: true,
+                resource: None,
+            });
+        }
+        if descriptor.resource_type.to_string() == "compute:flavor" {
+            let resource_id = id
+                .parse::<Uuid>()
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            self.compute
+                .delete_flavor_for_auth(auth, resource_id)
+                .await
+                .map_err(compute_error)?;
+            return Ok(MutationResult {
+                operation_id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("native:compute-flavor-delete:{id}").as_bytes(),
+                )
+                .to_string(),
+                resource_id: Some(id.to_owned()),
+                complete: true,
+                resource: None,
+            });
+        }
+        if descriptor.resource_type.to_string() == "image:image" {
+            let resource_id = id
+                .parse::<Uuid>()
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            let resource = self
+                .store
+                .get_resource(resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            if resource.kind != "image:image"
+                || resource.project_id != auth.effective_scope().id().as_str()
+            {
+                return Err(ResourceApplicationError::NotFound);
+            }
+            if expected_generation.is_some_and(|expected| expected != resource.generation) {
+                return Err(ResourceApplicationError::PreconditionConflict);
+            }
+            let service = self
+                .image
+                .as_ref()
+                .ok_or(ResourceApplicationError::NotReady)?;
+            service
+                .delete(auth, resource_id)
+                .await
+                .map_err(image_error)?;
+            self.store
+                .update_resource(
+                    resource_id,
+                    resource.generation,
+                    "DELETED",
+                    "DELETED",
+                    resource.generation.saturating_add(1),
+                    None,
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id: format!("native:image:delete:{id}"),
+                resource_id: Some(id.to_owned()),
+                complete: true,
+                resource: None,
+            });
+        }
+        // Migration-owned compatibility projections are backed by canonical
+        // network operations.  Do not route their deletion through the
+        // generic execution controller: these records have no provider
+        // lifecycle session of their own, and that path correctly rejects a
+        // missing provider operation with 501.  The canonical network service
+        // is the authority and the sidecar is marked deleted only after the
+        // operation succeeds.
+        let network_kind = descriptor.resource_type.to_string();
+        if matches!(
+            network_kind.as_str(),
+            "network:network"
+                | "network:subnet"
+                | "network:port"
+                | "network:security_group"
+                | "network:security_group_rule"
+                | "network:router"
+                | "network:router_interface"
+        ) {
+            let resource_id = id
+                .parse::<Uuid>()
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            let resource = self
+                .store
+                .get_resource(resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            if resource.kind != network_kind
+                || resource.project_id != auth.effective_scope().id().as_str()
+            {
+                return Err(ResourceApplicationError::NotFound);
+            }
+            if expected_generation.is_some_and(|expected| expected != resource.generation) {
+                return Err(ResourceApplicationError::PreconditionConflict);
+            }
+            let project_id = auth.effective_scope().id().as_str();
+            match network_kind.as_str() {
+                "network:network" => self
+                    .network_service
+                    .delete_network_for_project(project_id, resource_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Conflict)?,
+                "network:subnet" => self
+                    .network_service
+                    .delete_subnet_for_project(project_id, resource_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Conflict)?,
+                "network:port" => self
+                    .network_service
+                    .delete_port_for_project(project_id, resource_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Conflict)?,
+                "network:security_group" => self
+                    .network_service
+                    .delete_security_group_for_project(project_id, resource_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Conflict)?,
+                "network:security_group_rule" => self
+                    .network_service
+                    .delete_security_group_rule_for_project(project_id, resource_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Conflict)?,
+                "network:router" => {
+                    let gateway = self
+                        .network_service
+                        .delete_l3_gateway_for_project(
+                            project_id,
+                            &resource_id,
+                            resource.generation as u64,
+                        )
+                        .await
+                        .map_err(|_| ResourceApplicationError::Conflict)?;
+                    self.network_service
+                        .finalize_l3_gateway_deletion_for_project(
+                            project_id,
+                            &resource_id,
+                            gateway.generation,
+                        )
+                        .await
+                        .map_err(|_| ResourceApplicationError::Conflict)?;
+                }
+                "network:router_interface" => {
+                    let attachment = self
+                        .network_service
+                        .detach_l3_gateway_realm(
+                            project_id,
+                            &resource_id,
+                            resource.generation as u64,
+                        )
+                        .await
+                        .map_err(|_| ResourceApplicationError::Conflict)?;
+                    self.network_service
+                        .finalize_l3_gateway_realm_detachment_for_project(
+                            project_id,
+                            &resource_id,
+                            attachment.generation,
+                        )
+                        .await
+                        .map_err(|_| ResourceApplicationError::Conflict)?;
+                }
+                _ => unreachable!(),
+            }
+            self.store
+                .update_resource(
+                    resource_id,
+                    resource.generation,
+                    "DELETED",
+                    "DELETED",
+                    resource.generation.saturating_add(1),
+                    None,
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id: format!("native:{network_kind}:delete:{id}"),
+                resource_id: Some(id.to_owned()),
+                complete: true,
+                resource: None,
+            });
+        }
+        if network_kind == "network:floating_ip" {
+            let resource_id = id
+                .parse::<Uuid>()
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            let resource = self
+                .store
+                .get_resource(resource_id)
+                .await
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            if resource.kind != network_kind
+                || resource.project_id != auth.effective_scope().id().as_str()
+            {
+                return Err(ResourceApplicationError::NotFound);
+            }
+            if expected_generation.is_some_and(|expected| expected != resource.generation) {
+                return Err(ResourceApplicationError::PreconditionConflict);
+            }
+            let allocator = self
+                .public_allocator
+                .as_ref()
+                .ok_or(ResourceApplicationError::NotReady)?;
+            let project_id = auth.effective_scope().id().as_str();
+            let binding = allocator
+                .get(project_id, resource_id)
+                .map_err(|_| ResourceApplicationError::NotFound)?;
+            if binding.endpoint_id.is_some() {
+                if let Some(workflow) = self.public_address_workflow.as_ref() {
+                    workflow
+                        .remove(project_id, resource_id)
+                        .await
+                        .map_err(|_| ResourceApplicationError::Conflict)?;
+                }
+                allocator
+                    .disassociate(project_id, resource_id)
+                    .map_err(|_| ResourceApplicationError::Conflict)?;
+            }
+            allocator
+                .release(project_id, resource_id)
+                .map_err(|_| ResourceApplicationError::Conflict)?;
+            self.store
+                .update_resource(
+                    resource_id,
+                    resource.generation,
+                    "DELETED",
+                    "DELETED",
+                    resource.generation.saturating_add(1),
+                    None,
+                )
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Ok(MutationResult {
+                operation_id: format!("native:network:floating_ip:delete:{id}"),
+                resource_id: Some(id.to_owned()),
+                complete: true,
+                resource: None,
+            });
+        }
         // Native volumes are owned by the in-process storage boundary even
         // when a compatibility controller with the same service identity is
         // registered.  The provider-backed native lifecycle must run first;
@@ -875,14 +2460,17 @@ impl ResourceApplication for GenericResourceApplication {
                                 return Err(ResourceApplicationError::NotFound);
                             }
                             o3k_api::remove_native_volume(
-                                self.store.clone(),
-                                provider,
-                                auth.effective_scope().id().as_str(),
-                                resource_id,
-                                Some(operation_id),
-                            )
-                            .await
-                            .map_err(|_| ResourceApplicationError::Retryable)?;
+                    self.store.clone(),
+                    provider,
+                    auth.effective_scope().id().as_str(),
+                    resource_id,
+                    Some(operation_id),
+                )
+                .await
+                .map_err(|error| {
+                    tracing::error!(volume_id = %resource_id, %error, "native volume delete failed");
+                    ResourceApplicationError::Retryable
+                })?;
                             let bookkeeping = self
                                 .store
                                 .get_resource(resource_id)
@@ -1060,13 +2648,23 @@ impl ResourceApplication for GenericResourceApplication {
                     tracing::error!(volume_id = %resource_id, %error, "native volume delete failed");
                     ResourceApplicationError::Retryable
                 })?;
+                let bookkeeping = self
+                    .store
+                    .get_resource(resource_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                if bookkeeping.project_id != auth.effective_scope().id().as_str()
+                    || bookkeeping.kind != "volume"
+                {
+                    return Err(ResourceApplicationError::NotFound);
+                }
                 self.store
                     .update_resource(
                         resource_id,
-                        record.volume.generation as i64,
+                        bookkeeping.generation,
                         "DELETED",
                         "DELETED",
-                        record.volume.generation.saturating_add(1) as i64,
+                        bookkeeping.generation.saturating_add(1),
                         None,
                     )
                     .await

@@ -141,6 +141,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     let application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: compute.clone(),
+            image: None,
             network_service: network_service.clone(),
             store: store.clone(),
             storage_provider: Some(Arc::new(
@@ -236,6 +237,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     let api_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: compute.clone(),
+            image: None,
             network_service: network_service.clone(),
             store: store.clone(),
             storage_provider: Some(Arc::new(
@@ -748,6 +750,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     let independent_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: independent_compute.clone(),
+            image: None,
             network_service: independent_network,
             store: store.clone(),
             storage_provider: Some(Arc::new(
@@ -1251,6 +1254,7 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
         let application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
             Arc::new(o3kd::native_adapters::GenericResourceApplication {
                 compute: compute.clone(),
+                image: None,
                 network_service: network.clone(),
                 store: store.clone(),
                 storage_provider: Some(Arc::new(
@@ -1453,6 +1457,7 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
     let application_b: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: compute_b.clone(),
+            image: None,
             network_service: network_b,
             store: store_b.clone(),
             storage_provider: Some(Arc::new(
@@ -1709,6 +1714,7 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
     let left_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: left_compute.clone(),
+            image: None,
             network_service: left_network,
             store: left_store.clone(),
             storage_provider: Some(Arc::new(
@@ -1726,6 +1732,7 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
     let right_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: right_compute.clone(),
+            image: None,
             network_service: right_network,
             store: right_store.clone(),
             storage_provider: Some(Arc::new(

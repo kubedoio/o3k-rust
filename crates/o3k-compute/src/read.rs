@@ -58,6 +58,38 @@ impl ComputeService {
         Ok(record.generation)
     }
 
+    /// Returns migration ownership metadata from the durable server intent.
+    /// This read-only projection is consumed by the native compatibility edge;
+    /// the compute domain remains authoritative for the resource record.
+    pub async fn server_migration_metadata_for_auth(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+    ) -> Result<(Option<String>, Option<String>), ComputeError> {
+        let record = self
+            .store
+            .get_resource(id.as_uuid())
+            .await
+            .map_err(ComputeError::Store)?;
+        if record.project_id != auth.effective_scope().id().as_str()
+            || record.kind != "compute_instance"
+        {
+            return Err(ComputeError::NotFound);
+        }
+        let desired = serde_json::from_str::<serde_json::Value>(&record.desired_state)
+            .map_err(|_| ComputeError::InvalidRequest)?;
+        Ok((
+            desired
+                .get("migration_id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+            desired
+                .get("source_key")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+        ))
+    }
+
     pub async fn list_servers(&self, project_id: &str) -> Result<Vec<Server>, ComputeError> {
         let flavors = self.flavors_for_project(project_id).await?;
         let resources = self

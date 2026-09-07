@@ -156,6 +156,113 @@ impl StaticAuthorizer {
         reg("network", "CreatePort", "network", "port", true);
         reg("network", "ReadPort", "network", "port", true);
         reg("network", "DeletePort", "network", "port", true);
+        reg(
+            "network",
+            "ListSecurityGroups",
+            "network",
+            "security_group",
+            true,
+        );
+        reg(
+            "network",
+            "ReadSecurityGroup",
+            "network",
+            "security_group",
+            true,
+        );
+        reg(
+            "network",
+            "CreateSecurityGroup",
+            "network",
+            "security_group",
+            true,
+        );
+        reg(
+            "network",
+            "DeleteSecurityGroup",
+            "network",
+            "security_group",
+            true,
+        );
+        reg(
+            "network",
+            "ListSecurityGroupRules",
+            "network",
+            "security_group_rule",
+            true,
+        );
+        reg(
+            "network",
+            "ReadSecurityGroupRule",
+            "network",
+            "security_group_rule",
+            true,
+        );
+        reg(
+            "network",
+            "CreateSecurityGroupRule",
+            "network",
+            "security_group_rule",
+            true,
+        );
+        reg(
+            "network",
+            "DeleteSecurityGroupRule",
+            "network",
+            "security_group_rule",
+            true,
+        );
+        reg("network", "ListRouters", "network", "router", true);
+        reg("network", "ReadRouter", "network", "router", true);
+        reg("network", "CreateRouter", "network", "router", true);
+        reg("network", "DeleteRouter", "network", "router", true);
+        reg(
+            "network",
+            "ListRouterInterfaces",
+            "network",
+            "router_interface",
+            true,
+        );
+        reg(
+            "network",
+            "ReadRouterInterface",
+            "network",
+            "router_interface",
+            true,
+        );
+        reg(
+            "network",
+            "CreateRouterInterface",
+            "network",
+            "router_interface",
+            true,
+        );
+        reg(
+            "network",
+            "DeleteRouterInterface",
+            "network",
+            "router_interface",
+            true,
+        );
+        // Public addresses are the native projection of the bounded routed
+        // fabric allocator. Keep their authorization distinct from address
+        // realms and endpoints so ownership is checked on the allocation.
+        reg(
+            "network",
+            "ListAddressAllocations",
+            "network",
+            "floating_ip",
+            true,
+        );
+        reg(
+            "network",
+            "ReadAddressAllocation",
+            "network",
+            "floating_ip",
+            true,
+        );
+        reg("network", "AllocateAddress", "network", "floating_ip", true);
+        reg("network", "ReleaseAddress", "network", "floating_ip", true);
         reg("network", "ListExtensions", "network", "extension", false);
 
         // Compute

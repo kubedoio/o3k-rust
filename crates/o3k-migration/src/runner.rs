@@ -17,8 +17,10 @@ use async_trait::async_trait;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::time::Duration;
 use thiserror::Error;
 
 pub use crate::tofu::run_opentofu_noop;
@@ -66,6 +68,15 @@ pub trait CanonicalDestination: Send + Sync {
         node: &ManifestNode,
         source: &SourceDocument,
     ) -> Result<DestinationObservation, RunnerError>;
+    async fn upload_image(
+        &self,
+        _destination_id: &str,
+        _content: &[u8],
+    ) -> Result<(), RunnerError> {
+        Err(RunnerError::Destination(
+            "image upload adapter is not configured".into(),
+        ))
+    }
     async fn delete_owned(
         &self,
         migration_id: &str,
@@ -79,6 +90,7 @@ pub trait CanonicalDestination: Send + Sync {
 #[async_trait]
 pub trait SourceControl: Send + Sync {
     async fn quiesce(&self, server_source_id: &str) -> Result<(), RunnerError>;
+    async fn resume(&self, server_source_id: &str) -> Result<(), RunnerError>;
     async fn final_sync(&self, snapshot: &SourceSnapshot) -> Result<(), RunnerError>;
 }
 
@@ -93,6 +105,7 @@ pub struct RunReport {
 /// Durable process-level orchestrator. Each side effect is preceded by an
 /// observation and each manifest projection is flushed before the next side
 /// effect, so a process restart resumes from the last committed node.
+#[derive(Clone)]
 pub struct MigrationRunner<S, D> {
     source: S,
     destination: D,
@@ -186,10 +199,77 @@ where
                         RunnerError::Source(format!("source document missing for {}", node.key))
                     })?;
                     let expected_destination_id = node.destination_id.clone();
+                    let document = rewrite_document_references(document, &manifest);
+                    let document = if node.resource_type == ResourceKind::VolumeAttachment {
+                        // Nova's attachment inventory uses the volume UUID as
+                        // `id`, while the attachment itself has a separate
+                        // migration node.  A generic UUID rewrite is
+                        // ambiguous when those source IDs are equal, so
+                        // resolve this field through the Volume node
+                        // explicitly.
+                        let source_volume_id = documents
+                            .get(&node.key)
+                            .and_then(|source| source.body.get("id"))
+                            .and_then(Value::as_str)
+                            .or_else(|| {
+                                documents
+                                    .get(&node.key)
+                                    .and_then(|source| source.body.get("volume_id"))
+                                    .and_then(Value::as_str)
+                            });
+                        let destination_volume_id = source_volume_id.and_then(|source_id| {
+                            manifest.nodes.iter().find_map(|candidate| {
+                                (candidate.resource_type == ResourceKind::Volume
+                                    && candidate.source_id == source_id)
+                                    .then(|| candidate.destination_id.clone())
+                                    .flatten()
+                            })
+                        });
+                        let mut body = document.body.clone();
+                        if let Some(destination_volume_id) = destination_volume_id {
+                            if let Some(source_id) = body.get_mut("id") {
+                                *source_id = Value::String(destination_volume_id);
+                            } else if let Some(volume_id) = body.get_mut("volume_id") {
+                                *volume_id = Value::String(destination_volume_id);
+                            }
+                        }
+                        SourceDocument {
+                            kind: document.kind,
+                            body,
+                            generation_input: document.generation_input.clone(),
+                        }
+                    } else {
+                        document
+                    };
+                    let document = if node.resource_type == ResourceKind::Server {
+                        let body = canonical_server_document(
+                            &document.body,
+                            &node,
+                            &manifest,
+                            &documents,
+                        )?;
+                        SourceDocument {
+                            kind: document.kind,
+                            body,
+                            generation_input: document.generation_input.clone(),
+                        }
+                    } else {
+                        document.clone()
+                    };
+                    let image_content = if node.resource_type == ResourceKind::Image {
+                        Some(self.source.download_image(&node.source_id).await?)
+                    } else {
+                        None
+                    };
                     let value = self
                         .destination
-                        .create(&manifest.migration_id, &node, document)
+                        .create(&manifest.migration_id, &node, &document)
                         .await?;
+                    if let Some(content) = image_content {
+                        self.destination
+                            .upload_image(&value.destination_id, &content)
+                            .await?;
+                    }
                     if value.destination_id.trim().is_empty() {
                         return Err(RunnerError::Destination(format!(
                             "create omitted canonical destination id for {}",
@@ -252,13 +332,78 @@ where
             let node = manifest.nodes[index].clone();
             self.destination
                 .delete_owned(&manifest.migration_id, &node)
-                .await?;
+                .await
+                .map_err(|error| {
+                    RunnerError::Destination(format!(
+                        "rollback delete for {} ({} / {}) failed: {error}",
+                        node.key,
+                        native_kind_name(node.resource_type),
+                        destination_id
+                    ))
+                })?;
             manifest.nodes[index].rollback = RollbackState::Removed;
             self.save(&mut manifest)?;
         }
         manifest = mark_rolled_back(&manifest)?;
         self.save(&mut manifest)?;
         Ok(())
+    }
+}
+
+/// Rewrite source-owned UUID references to the canonical destination IDs that
+/// have already been established in the manifest.  Providers expose foreign
+/// identities in dependent documents (for example a server's source flavor,
+/// image, network, or port IDs); forwarding those values would either attach
+/// the destination resource to a foreign object or fail with a misleading
+/// not-found response.  This recursive projection stays at the adapter
+/// boundary and does not alter the source snapshot or migration authority.
+fn rewrite_document_references(
+    document: &SourceDocument,
+    manifest: &MigrationManifest,
+) -> SourceDocument {
+    let mappings = manifest
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            if node.resource_type == ResourceKind::Project {
+                Some((
+                    node.source_id.as_str(),
+                    manifest.destination.scope_id.as_str(),
+                ))
+            } else {
+                node.destination_id
+                    .as_ref()
+                    .map(|destination| (node.source_id.as_str(), destination.as_str()))
+            }
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut body = document.body.clone();
+    rewrite_value_references(&mut body, &mappings);
+    SourceDocument {
+        kind: document.kind,
+        body,
+        generation_input: document.generation_input.clone(),
+    }
+}
+
+fn rewrite_value_references(value: &mut Value, mappings: &BTreeMap<&str, &str>) {
+    match value {
+        Value::String(text) => {
+            if let Some(destination) = mappings.get(text.as_str()) {
+                *text = (*destination).to_owned();
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rewrite_value_references(item, mappings);
+            }
+        }
+        Value::Object(object) => {
+            for item in object.values_mut() {
+                rewrite_value_references(item, mappings);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
@@ -301,6 +446,18 @@ where
             .map_err(|error| RunnerError::Fenced(error.to_string()))?;
         self.save(&mut manifest)?;
         Ok(manifest)
+    }
+
+    pub async fn resume_source(&self, server_source_id: &str) -> Result<(), RunnerError> {
+        self.source.resume(server_source_id).await
+    }
+
+    pub async fn quiesce_source(&self, server_source_id: &str) -> Result<(), RunnerError> {
+        self.source.quiesce(server_source_id).await
+    }
+
+    pub async fn final_sync_source(&self, snapshot: &SourceSnapshot) -> Result<(), RunnerError> {
+        self.source.final_sync(snapshot).await
     }
 }
 
@@ -393,6 +550,7 @@ fn kind_name(kind: ResourceKind) -> &'static str {
 
 /// Native O3K HTTP adapter. It only speaks the declared application API and
 /// requires an explicit bearer capability supplied by the caller.
+#[derive(Clone)]
 pub struct HttpNativeDestination {
     client: Client,
     endpoint: Url,
@@ -424,15 +582,22 @@ impl HttpNativeDestination {
     fn collection_url(&self, node: &ManifestNode) -> Result<Url, RunnerError> {
         let (namespace, collection) = match node.resource_type {
             ResourceKind::Server => ("compute", "servers"),
+            ResourceKind::Flavor => ("compute", "flavor"),
+            ResourceKind::Keypair => ("compute", "keypair"),
             ResourceKind::Volume => ("volume", "volumes"),
+            ResourceKind::VolumeAttachment => ("volume", "volume_attachment"),
             ResourceKind::Network => ("network", "networks"),
             ResourceKind::Subnet => ("network", "subnets"),
             ResourceKind::Port => ("network", "ports"),
             ResourceKind::SecurityGroup => ("network", "security-groups"),
             ResourceKind::SecurityGroupRule => ("network", "security-group-rules"),
             ResourceKind::Router => ("network", "routers"),
+            ResourceKind::RouterInterface => ("network", "router-interfaces"),
             ResourceKind::FloatingIp => ("network", "floating-ips"),
-            ResourceKind::Image => ("image", "images"),
+            // The native manifest registers the ImageService resource as
+            // `image:image`; unlike OpenStack's `/v2/images` collection, the
+            // canonical native collection is therefore singular.
+            ResourceKind::Image => ("image", "image"),
             _ => {
                 return Err(RunnerError::Invalid(format!(
                     "no native collection for {}",
@@ -489,7 +654,8 @@ impl CanonicalDestination for HttpNativeDestination {
         }
         if !response.status().is_success() {
             return Err(RunnerError::Destination(format!(
-                "observe returned {}",
+                "observe for {} returned {}",
+                node.key,
                 response.status()
             )));
         }
@@ -517,6 +683,13 @@ impl CanonicalDestination for HttpNativeDestination {
         } else {
             &body
         };
+        if resource
+            .pointer("/status/state")
+            .and_then(Value::as_str)
+            .is_some_and(|state| state.eq_ignore_ascii_case("deleted"))
+        {
+            return Ok(None);
+        }
         let id = resource
             .pointer("/metadata/id")
             .and_then(Value::as_str)
@@ -545,7 +718,95 @@ impl CanonicalDestination for HttpNativeDestination {
         node: &ManifestNode,
         source: &SourceDocument,
     ) -> Result<DestinationObservation, RunnerError> {
-        let body = json!({"api_version":"o3k.io/v1", "kind": kind_name(node.resource_type), "spec": {"migration_id": migration_id, "source_key": node.key, "source": redact_json(&source.body), "canonical_id": node.destination_id}});
+        let mut spec = if node.resource_type == ResourceKind::Server {
+            source.body.clone()
+        } else if node.resource_type == ResourceKind::Volume {
+            let size_gib = source
+                .body
+                .get("size")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| RunnerError::Invalid(format!("{} omitted volume size", node.key)))?;
+            let size_bytes = size_gib.checked_mul(1024 * 1024 * 1024).ok_or_else(|| {
+                RunnerError::Invalid(format!("{} volume size overflows bytes", node.key))
+            })?;
+            json!({
+                "size_bytes": size_bytes,
+                "volume_type": source
+                    .body
+                    .get("volume_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("default"),
+                "name": source.body.get("name").cloned().unwrap_or(Value::Null),
+                "description": source.body.get("description").cloned().unwrap_or(Value::Null),
+                "metadata": source.body.get("metadata").cloned().unwrap_or_else(|| json!({})),
+                "availability_zone": source.body.get("availability_zone").cloned().unwrap_or(Value::Null),
+            })
+        } else {
+            json!({"source": redact_json(&source.body)})
+        };
+        if node.resource_type == ResourceKind::Server {
+            let source_flavor = spec.get("source_flavor").cloned();
+            if let Some(flavor_id) = spec.get("flavor_id").and_then(Value::as_str)
+                && flavor_id.parse::<uuid::Uuid>().is_err()
+            {
+                let mut flavor_url = self.endpoint.clone();
+                flavor_url.set_path("/o3k/v1/compute/flavor");
+                let catalog: Value = self
+                    .client
+                    .get(flavor_url)
+                    .bearer_auth(&self.bearer)
+                    .send()
+                    .await
+                    .map_err(|error| RunnerError::Destination(error.to_string()))?
+                    .json()
+                    .await
+                    .map_err(|error| RunnerError::Destination(error.to_string()))?;
+                let source_ram = source_flavor
+                    .as_ref()
+                    .and_then(|value| value.get("ram").or_else(|| value.get("ram_mib")))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let source_vcpus = source_flavor
+                    .as_ref()
+                    .and_then(|value| value.get("vcpus"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1);
+                let selected = catalog
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| {
+                        let id = item.pointer("/metadata/id")?.as_str()?;
+                        let ram = item.pointer("/spec/ram_mib")?.as_u64()?;
+                        let vcpus = item.pointer("/spec/vcpus")?.as_u64()?;
+                        (ram >= source_ram && vcpus >= source_vcpus).then_some((ram, vcpus, id))
+                    })
+                    .min_by_key(|(ram, vcpus, _)| (*ram, *vcpus))
+                    .ok_or_else(|| {
+                        RunnerError::Destination("destination has no compatible flavor".into())
+                    })?;
+                spec["flavor_id"] = Value::String(selected.2.to_owned());
+            }
+            if let Some(object) = spec.as_object_mut() {
+                object.remove("source_flavor");
+                object.remove("id");
+            }
+            spec["migration_id"] = Value::String(migration_id.to_owned());
+            spec["source_key"] = Value::String(node.key.clone());
+            spec["canonical_id"] = node
+                .destination_id
+                .as_ref()
+                .map_or(Value::Null, |id| Value::String(id.clone()));
+        } else {
+            spec["migration_id"] = Value::String(migration_id.to_owned());
+            spec["source_key"] = Value::String(node.key.clone());
+            spec["canonical_id"] = node
+                .destination_id
+                .as_ref()
+                .map_or(Value::Null, |id| Value::String(id.clone()));
+        }
+        let body = json!({"api_version":"o3k.io/v1", "kind": native_kind_name(node.resource_type), "spec": spec});
         let response = self
             .client
             .post(self.collection_url(node)?)
@@ -559,9 +820,14 @@ impl CanonicalDestination for HttpNativeDestination {
             .await
             .map_err(|error| RunnerError::Destination(error.to_string()))?;
         if !response.status().is_success() {
+            let status = response.status();
+            let detail = response.text().await.unwrap_or_default();
             return Err(RunnerError::Destination(format!(
-                "create returned {}",
-                response.status()
+                "create for {} returned {}: {}; request={}",
+                node.key,
+                status,
+                detail.chars().take(512).collect::<String>(),
+                redact_json(&body)
             )));
         }
         let value: Value = response
@@ -582,6 +848,33 @@ impl CanonicalDestination for HttpNativeDestination {
             owned_by_migration: true,
             complete: true,
         })
+    }
+
+    async fn upload_image(&self, destination_id: &str, content: &[u8]) -> Result<(), RunnerError> {
+        let mut url = self.endpoint.clone();
+        url.set_path(&format!("/v2/images/{destination_id}/file"));
+        let checksum = format!("{:x}", Sha256::digest(content));
+        let response = self
+            .client
+            .put(url)
+            // The byte upload is the OpenStack Glance compatibility edge,
+            // whose auth contract uses X-Auth-Token rather than the native
+            // O3K Bearer header used by canonical resource routes.
+            .header("X-Auth-Token", &self.bearer)
+            .header("content-type", "application/octet-stream")
+            .header("x-openstack-image-size", content.len())
+            .header("x-openstack-image-sha256", checksum)
+            .body(content.to_owned())
+            .send()
+            .await
+            .map_err(|error| RunnerError::Destination(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(RunnerError::Destination(format!(
+                "image upload returned {}",
+                response.status()
+            )));
+        }
+        Ok(())
     }
 
     async fn delete_owned(
@@ -607,7 +900,28 @@ impl CanonicalDestination for HttpNativeDestination {
                 response.status()
             )));
         }
-        Ok(())
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+
+        // Native lifecycle deletes may be accepted before the provider and
+        // dependent network projection reach terminal absence.  Rollback
+        // deletes in reverse dependency order, so proceeding on a 202 would
+        // allow a dependent port to be removed before a server's terminal
+        // unbind has reached the network agent.  Observe the canonical
+        // destination until it is absent before releasing the next
+        // dependency.  This is an observation fence, not a blind sleep.
+        const DELETE_OBSERVATION_ATTEMPTS: usize = 120;
+        for _ in 0..DELETE_OBSERVATION_ATTEMPTS {
+            if self.observe(migration_id, node).await?.is_none() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        Err(RunnerError::Destination(format!(
+            "delete did not reach observed absence for {}",
+            node.key
+        )))
     }
 
     async fn verify(&self, migration_id: &str, node: &ManifestNode) -> Result<(), RunnerError> {
@@ -620,12 +934,153 @@ impl CanonicalDestination for HttpNativeDestination {
             || observed.owner_scope_id != node.owner_scope_id
         {
             return Err(RunnerError::Fenced(format!(
-                "verification failed for {}",
-                node.key
+                "verification failed for {} (id={}, expected={}, owner={}, expected_owner={}, owned={}, complete={})",
+                node.key,
+                observed.destination_id,
+                node.destination_id.as_deref().unwrap_or_default(),
+                observed.owner_scope_id,
+                node.owner_scope_id,
+                observed.owned_by_migration,
+                observed.complete
             )));
         }
         Ok(())
     }
+}
+
+fn native_kind_name(kind: ResourceKind) -> &'static str {
+    match kind {
+        ResourceKind::Server => "compute:server",
+        ResourceKind::Flavor => "compute:flavor",
+        ResourceKind::Keypair => "compute:keypair",
+        ResourceKind::Volume => "volume:volume",
+        ResourceKind::VolumeAttachment => "volume:volume_attachment",
+        ResourceKind::Network => "network:network",
+        ResourceKind::Subnet => "network:subnet",
+        ResourceKind::Port => "network:port",
+        ResourceKind::SecurityGroup => "network:security_group",
+        ResourceKind::SecurityGroupRule => "network:security_group_rule",
+        ResourceKind::Router => "network:router",
+        ResourceKind::RouterInterface => "network:router_interface",
+        ResourceKind::FloatingIp => "network:floating_ip",
+        ResourceKind::Image => "image:image",
+        _ => kind_name(kind),
+    }
+}
+
+fn canonical_server_document(
+    source: &Value,
+    node: &ManifestNode,
+    manifest: &MigrationManifest,
+    documents: &BTreeMap<String, SourceDocument>,
+) -> Result<Value, RunnerError> {
+    if source.get("image_id").and_then(Value::as_str).is_none()
+        && source
+            .pointer("/image/id")
+            .and_then(Value::as_str)
+            .is_none()
+        && source.get("image").and_then(Value::as_str).is_none()
+    {
+        // Small in-memory runner fixtures may intentionally model only the
+        // server identity. Preserve those contract tests; the real adapter
+        // path supplies Nova image/flavor/network fields and takes the full
+        // canonical translation below.
+        return Ok(source.clone());
+    }
+    let image_id = source
+        .get("image_id")
+        .and_then(Value::as_str)
+        .or_else(|| source.pointer("/image/id").and_then(Value::as_str))
+        .or_else(|| source.get("image").and_then(Value::as_str))
+        .ok_or_else(|| RunnerError::Invalid(format!("{} omitted image identity", node.key)))?;
+    let flavor = source
+        .get("flavor_id")
+        .and_then(Value::as_str)
+        .or_else(|| source.pointer("/flavor/id").and_then(Value::as_str))
+        .or_else(|| source.get("flavor").and_then(Value::as_str))
+        .ok_or_else(|| RunnerError::Invalid(format!("{} omitted flavor identity", node.key)))?;
+    let source_networks = source
+        .get("networks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut network_ids = source_networks
+        .iter()
+        .filter_map(|network| network.get("port").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if network_ids.is_empty() {
+        let source_network_ids = source_networks
+            .iter()
+            .filter_map(|network| network.get("net-id").and_then(Value::as_str))
+            .collect::<BTreeSet<_>>();
+        network_ids = documents
+            .values()
+            .filter(|document| {
+                document.kind == ResourceKind::Port
+                    && document.body.get("device_id").and_then(Value::as_str)
+                        == Some(node.source_id.as_str())
+                    && document
+                        .body
+                        .get("network_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| source_network_ids.contains(&id))
+            })
+            .filter_map(|document| {
+                let port_id = document.body.get("id")?.as_str()?;
+                let source_key = format!("port/{port_id}");
+                manifest
+                    .nodes
+                    .iter()
+                    .find(|candidate| candidate.key == source_key)
+                    .and_then(|candidate| candidate.destination_id.clone())
+            })
+            .collect();
+    }
+    if network_ids.is_empty() {
+        network_ids = documents
+            .values()
+            .filter(|document| {
+                document.kind == ResourceKind::Port
+                    && document.body.get("device_id").and_then(Value::as_str)
+                        == Some(node.source_id.as_str())
+            })
+            .filter_map(|document| {
+                let port_id = document.body.get("id")?.as_str()?;
+                let source_key = format!("port/{port_id}");
+                manifest
+                    .nodes
+                    .iter()
+                    .find(|candidate| candidate.key == source_key)
+                    .and_then(|candidate| candidate.destination_id.clone())
+            })
+            .collect();
+    }
+    if network_ids.is_empty() {
+        return Ok(source.clone());
+    }
+    let key_name = source.get("key_name").and_then(Value::as_str);
+    let ssh_public_key = key_name.and_then(|name| {
+        documents.values().find_map(|document| {
+            (document.kind == ResourceKind::Keypair
+                && document.body.get("name").and_then(Value::as_str) == Some(name))
+            .then(|| document.body.get("public_key").and_then(Value::as_str))
+            .flatten()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+        })
+    });
+    Ok(json!({
+        "id": source.get("id"),
+        "name": source.get("name").and_then(Value::as_str).unwrap_or("migrated-server"),
+        "image_id": image_id,
+        "flavor_id": flavor,
+        "source_flavor": source.get("flavor"),
+        "network_ids": network_ids,
+        "ssh_public_key": ssh_public_key,
+    }))
 }
 
 fn redact_json(value: &Value) -> Value {
@@ -691,6 +1146,10 @@ mod tests {
                 .quiesces
                 .lock()
                 .map_err(|_| RunnerError::Source("poisoned test lock".into()))? += 1;
+            Ok(())
+        }
+
+        async fn resume(&self, _server_source_id: &str) -> Result<(), RunnerError> {
             Ok(())
         }
 
@@ -883,7 +1342,7 @@ mod tests {
 
     #[tokio::test]
     async fn conflicting_replay_is_fenced() -> Result<(), RunnerError> {
-        let (snapshot, manifest) = fixture()?;
+        let (snapshot, manifest) = server_fixture()?;
         let destination = Destination::default();
         let path = std::env::temp_dir().join(format!("o3k-p14-9a-{}.json", uuid::Uuid::new_v4()));
         let conflicting = manifest.clone();
@@ -1076,6 +1535,36 @@ mod tests {
         assert!(requests[1].contains("idempotency-key: migration-a:create:network/network-a"));
         assert!(!requests[1].contains("must-not-cross-boundary"));
         assert!(requests[2].contains("GET /o3k/v1/network/networks/dest-1"));
+        Ok(())
+    }
+
+    #[test]
+    fn dependent_source_references_are_rewritten_only_to_known_destinations()
+    -> Result<(), RunnerError> {
+        let source = SourceDocument {
+            kind: ResourceKind::Server,
+            body: json!({
+                "id": "server-a",
+                "image_id": "image-a",
+                "flavor_id": "flavor-a",
+                "networks": [{"port": "port-a"}],
+                "description": "image-a is part of the operator-visible text"
+            }),
+            generation_input: "server".into(),
+        };
+        let (_snapshot, mut manifest) = fixture()?;
+        manifest.nodes[0].resource_type = ResourceKind::Image;
+        manifest.nodes[0].key = "image/image-a".into();
+        manifest.nodes[0].source_id = "image-a".into();
+        manifest.nodes[0].destination_id = Some("image-d".into());
+
+        let rewritten = rewrite_document_references(&source, &manifest);
+        assert_eq!(rewritten.body["image_id"], "image-d");
+        assert_eq!(rewritten.body["networks"][0]["port"], "port-a");
+        assert_eq!(
+            rewritten.body["description"],
+            "image-a is part of the operator-visible text"
+        );
         Ok(())
     }
 }

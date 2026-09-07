@@ -98,6 +98,24 @@ impl NetworkService {
         name: String,
         requested_fixed_ip: Option<(Uuid, Option<Ipv4Addr>)>,
     ) -> Result<PortRecord, NetworkError> {
+        self.create_port_for_project_with_id_and_fixed_ip(
+            project_id,
+            Uuid::now_v7(),
+            network_id,
+            name,
+            requested_fixed_ip,
+        )
+        .await
+    }
+
+    pub async fn create_port_for_project_with_id_and_fixed_ip(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        network_id: Uuid,
+        name: String,
+        requested_fixed_ip: Option<(Uuid, Option<Ipv4Addr>)>,
+    ) -> Result<PortRecord, NetworkError> {
         self.get_canonical_network_for_project(project_id, network_id)
             .await?;
         let realms = self
@@ -142,7 +160,6 @@ impl NetworkService {
                 && candidate >= u32::from(pool.first_usable)
                 && candidate <= u32::from(pool.last_usable)
             {
-                let id = Uuid::now_v7();
                 let port = PortRecord {
                     id,
                     network_id,
