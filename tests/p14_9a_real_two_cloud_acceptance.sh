@@ -19,7 +19,11 @@ python3 "$ROOT_DIR/scripts/validate_p14_9a_evidence.py" "$OUTPUT" \
 result="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["execution_result"])' "$OUTPUT")"
 ready="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1], encoding="utf-8"))["environment_ready"]).lower())' "$OUTPUT")"
 printf 'P14.9 %s execution result: %s\n' "$MODE" "$result"
-printf 'P14.9 environment ready: %s\n' "${ready^^}"
+if [[ "$ready" == "true" ]]; then
+  printf 'P14.9 environment ready: YES\n'
+else
+  printf 'P14.9 environment ready: NO\n'
+fi
 if [[ "$MODE" == "prerequisites" ]]; then
   [[ "$ready" == "true" ]] || exit 2
 else
