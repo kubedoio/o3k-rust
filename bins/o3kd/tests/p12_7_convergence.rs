@@ -189,6 +189,7 @@ async fn build_http_runtime(
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: compute.clone(),
             image: None,
+            public_address_workflow: None,
             network_service: network.clone(),
             store: store.clone(),
             storage_provider: Some(Arc::new(
@@ -301,6 +302,7 @@ async fn run_native_openstack_http_conformance(
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: compute.clone(),
             image: None,
+            public_address_workflow: None,
             network_service: network.clone(),
             store: store.clone(),
             storage_provider: Some(Arc::new(
