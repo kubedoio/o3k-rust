@@ -22,7 +22,7 @@ jobs:
           ref: chore/repository-identity-migration
           fetch-depth: 0
 
-      - name: Replace legacy canonical repository references
+      - name: Replace legacy canonical repository references outside workflows
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -33,6 +33,7 @@ jobs:
           NEW = "o3kio/o3k"
           excluded_prefixes = (
               "docs/reports/",
+              ".github/workflows/",
               ".git/",
           )
 
@@ -41,8 +42,6 @@ jobs:
               if not path.is_file():
                   continue
               rel = path.as_posix().removeprefix("./")
-              if rel == ".github/workflows/repository-identity-migration.yml":
-                  continue
               if rel.startswith(excluded_prefixes):
                   continue
               try:
@@ -58,10 +57,6 @@ jobs:
           for rel in changed:
               print(rel)
           PY
-
-      - name: Remove temporary migration workflow
-        shell: bash
-        run: rm -f .github/workflows/repository-identity-migration.yml
 
       - name: Commit migration
         shell: bash
