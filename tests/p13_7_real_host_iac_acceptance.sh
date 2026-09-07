@@ -209,13 +209,14 @@ BRIDGE="o3kp137${RUN_SLUG:0:6}"
 UPLINK="p137up${RUN_SLUG:0:6}"
 EXT_PEER="p137peer${RUN_SLUG:0:6}"
 EXT_NETNS="o3k-p137-ext-${RUN_SLUG:0:6}"
-# TEST-NET-2 transit to the external netns; TEST-NET-1 tenant subnet;
-# TEST-NET-3-style public pool kept distinct from p9/p13_6f pools.
-EXT_HOST_IP="198.51.100.1"
-EXT_PEER_IP="198.51.100.2"
-PUBLIC_POOL_CIDR="198.51.100.0/24"
-PUBLIC_POOL_FIRST="198.51.100.10"
-PUBLIC_POOL_LAST="198.51.100.20"
+# TEST-NET-3 transit/public pool to keep this smoke isolated from the
+# dedicated P14 host network (which uses 198.51.100.0/24); TEST-NET-1
+# remains the tenant subnet.
+EXT_HOST_IP="203.0.113.1"
+EXT_PEER_IP="203.0.113.2"
+PUBLIC_POOL_CIDR="203.0.113.0/24"
+PUBLIC_POOL_FIRST="203.0.113.10"
+PUBLIC_POOL_LAST="203.0.113.20"
 TENANT_CIDR="192.0.2.0/24"
 DB_NAME="o3k_p137_${RUN_SLUG}"
 DB_USER="o3k_p137_${RUN_SLUG}"
@@ -431,7 +432,7 @@ cleanup() {
     ip netns del "$EXT_NETNS" 2>/dev/null
     ip link del "$UPLINK" 2>/dev/null
     ip link del "$BRIDGE" 2>/dev/null
-    for table in o3k_policy o3k_public o3k_p137; do
+    for table in o3k_policy o3k_public o3k_p137 o3k_p9; do
         # Never remove a table that existed before this run.
         if ! grep -Fqx "table ip $table" "$STATE_ROOT/foreign-before.txt" 2>/dev/null; then
             nft delete table ip "$table" >/dev/null 2>&1 || true
@@ -1384,7 +1385,7 @@ ZERO_NFT=1; ZERO_BRIDGES=1; ZERO_DNSMASQ=1
 # completed successfully (as R10's independent inventory would show).
 for _ in $(seq 1 150); do
     ZERO_NFT=1
-    for table in o3k_policy o3k_public o3k_p137; do
+    for table in o3k_policy o3k_public o3k_p137 o3k_p9; do
         nft list table ip "$table" >/dev/null 2>&1 && ZERO_NFT=0
     done
     [[ "$ZERO_NFT" == 1 ]] && break
@@ -1464,7 +1465,7 @@ stop_o3kd
 ip netns del "$EXT_NETNS" 2>/dev/null || true
 [[ -n "$EXT_NS_PID" ]] && { kill "$EXT_NS_PID" 2>/dev/null || true; wait "$EXT_NS_PID" 2>/dev/null || true; EXT_NS_PID=""; }
 ip link del "$UPLINK" 2>/dev/null || true
-for table in o3k_policy o3k_public o3k_p137; do
+for table in o3k_policy o3k_public o3k_p137 o3k_p9; do
     # Preserve pre-existing tables; R10 compares them independently.
     if ! grep -Fqx "table ip $table" "$STATE_ROOT/foreign-before.txt" 2>/dev/null; then
         nft delete table ip "$table" >/dev/null 2>&1 || true
@@ -1492,7 +1493,7 @@ def load(path):
     return sections
 
 before, after = load(before_path), load(after_path)
-owned_markers = (bridge, vg, slug, "o3ktap-", "o3k_policy", "o3k_public", "o3k_p137")
+owned_markers = (bridge, vg, slug, "o3ktap-", "o3k_policy", "o3k_public", "o3k_p137", "o3k_p9")
 
 def split(rows):
     owned, foreign = set(), set()
