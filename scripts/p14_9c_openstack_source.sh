@@ -156,12 +156,14 @@ create() {
         printf 'O3K_P14_SOURCE_ADMIN_PASSWORD=%s\n' "$ADMIN_PASSWORD"
         printf 'O3K_P14_SOURCE_REGION=RegionOne\nO3K_P14_SOURCE_CLOUD_ID=p14-openstack-source\n'
         printf 'O3K_P14_SOURCE_ALLOWED_HOSTS=%s\n' "$SOURCE_IP"
+        printf 'O3K_P14_SOURCE_NETWORK_XML_SHA256=%s\n' "$(virsh -c qemu:///system net-dumpxml "$NETWORK_NAME" | sha256sum | awk '{print $1}')"
     } >"$ENV_FILE"
     chmod 600 "$ENV_FILE"
     virt-install --connect qemu:///system --name "$DOMAIN_NAME" --memory 20480 --vcpus 8 \
         --disk path="$IMAGE",format=qcow2,bus=virtio \
         --os-variant ubuntu22.04 --import --network network="$NETWORK_NAME",model=virtio \
         --graphics none --noautoconsole --cloud-init user-data="$USER_DATA",network-config="$NETWORK_CONFIG"
+    printf 'O3K_P14_SOURCE_DOMAIN_UUID=%s\n' "$(virsh -c qemu:///system domuuid "$DOMAIN_NAME")" >>"$ENV_FILE"
     echo "P14.9C source VM created: $DOMAIN_NAME"
     echo "Protected runtime credentials: $ENV_FILE"
 }
@@ -173,13 +175,26 @@ status() {
 }
 
 cleanup() {
+    [[ -f "$NETWORK_XML" ]] || die "refusing cleanup without run-owned network metadata"
+    [[ -f "$ENV_FILE" ]] || die "refusing cleanup without run-owned environment metadata"
+    expected_domain_uuid="$(awk -F= '$1 == "O3K_P14_SOURCE_DOMAIN_UUID" {print $2}' "$ENV_FILE")"
+    expected_network_hash="$(awk -F= '$1 == "O3K_P14_SOURCE_NETWORK_XML_SHA256" {print $2}' "$ENV_FILE")"
+    [[ "$expected_domain_uuid" =~ ^[0-9a-fA-F-]{36}$ ]] || die "invalid run-owned domain identity"
+    [[ "$expected_network_hash" =~ ^[0-9a-f]{64}$ ]] || die "invalid run-owned network identity"
     if virsh -c qemu:///system dominfo "$DOMAIN_NAME" >/dev/null 2>&1; then
-        virsh -c qemu:///system destroy "$DOMAIN_NAME" 2>/dev/null || true
-        virsh -c qemu:///system undefine "$DOMAIN_NAME" --remove-all-storage 2>/dev/null || true
+        [[ "$(virsh -c qemu:///system domuuid "$DOMAIN_NAME")" == "$expected_domain_uuid" ]] || die "domain identity mismatch"
+        virsh -c qemu:///system destroy "$DOMAIN_NAME" 2>/dev/null || {
+            virsh -c qemu:///system domstate "$DOMAIN_NAME" | grep -q '^shut off$' || die "could not stop run-owned VM"
+        }
+        virsh -c qemu:///system undefine "$DOMAIN_NAME" --remove-all-storage || die "could not remove run-owned VM"
     fi
     if virsh -c qemu:///system net-info "$NETWORK_NAME" >/dev/null 2>&1; then
-        virsh -c qemu:///system net-destroy "$NETWORK_NAME" 2>/dev/null || true
-        virsh -c qemu:///system net-undefine "$NETWORK_NAME" 2>/dev/null || true
+        actual_network_hash="$(virsh -c qemu:///system net-dumpxml "$NETWORK_NAME" | sha256sum | awk '{print $1}')"
+        [[ "$actual_network_hash" == "$expected_network_hash" ]] || die "network identity mismatch"
+        virsh -c qemu:///system net-destroy "$NETWORK_NAME" || {
+            virsh -c qemu:///system net-dumpxml "$NETWORK_NAME" >/dev/null || die "could not stop run-owned network"
+        }
+        virsh -c qemu:///system net-undefine "$NETWORK_NAME" || die "could not remove run-owned network"
     fi
     echo "P14.9C source owned VM/network removed; credentials and state retained at $STATE_ROOT"
 }

@@ -68,6 +68,11 @@ protected run inventory rather than committed to the repository.
 - Destination: canonical O3K APIs and the existing libvirt, network, and LVM
   execution providers; no direct destination database writes are used by the
   migration runner.
+- Readiness requires `O3K_P14_DESTINATION_SMOKE_PROGRAM` to point at the
+  run-owned `scripts/p14_9c_destination_smoke.sh`. It executes the real-host
+  smoke journey and reports observed compute-guest boot, permitted/denied
+  packet-path behavior, and volume write/read plus detach/reattach persistence;
+  endpoint health and CRUD alone are not destination evidence.
 - IaC: OpenTofu 1.12.6 with the unmodified OpenStack provider 3.4.0, per the
   P13 compatibility profile.
 

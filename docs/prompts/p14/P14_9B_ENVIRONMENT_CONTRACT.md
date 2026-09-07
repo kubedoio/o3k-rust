@@ -32,6 +32,9 @@ O3K_P14_SOURCE_CLOUD_ID
 O3K_P14_SOURCE_REGION             (optional; defaults to RegionOne)
 O3K_P14_SOURCE_ALLOWED_HOSTS
 O3K_P14_SOURCE_ALLOW_INSECURE_TLS (only for an explicitly isolated lab)
+P14_SOURCE_FLOATING_IP             protected Project A guest address
+P14_SOURCE_SSH_PRIVATE_KEY         protected Project A probe key path
+P14_SOURCE_VOLUME_SHA256            protected guest-volume checksum
 O3K_P14_DESTINATION_URL
 O3K_P14_DESTINATION_TOKEN
 O3K_P14_DATABASE_URL

@@ -7,6 +7,29 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path, str::FromStr};
 use tokio::process::Command;
 
+/// Run the repository-owned destination smoke probe.  The probe is an
+/// explicit execution boundary: it must exercise the real provider and emit
+/// machine-readable observations for all three destination capabilities.
+pub async fn probe_destination_smoke(program: &Path, refs: &mut Vec<String>) -> bool {
+    let output = Command::new(program).output().await;
+    let Ok(output) = output else { return false };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(evidence) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return false;
+    };
+    let observed = ["compute_guest", "packet_path", "volume_persistence"]
+        .into_iter()
+        .all(|name| evidence.get(name).and_then(serde_json::Value::as_bool) == Some(true));
+    if observed {
+        refs.push("o3k:real-destination-compute-guest".into());
+        refs.push("o3k:real-destination-packet-path".into());
+        refs.push("o3k:real-destination-volume-persistence".into());
+    }
+    observed
+}
+
 pub async fn probe_postgres(database_url: &str, refs: &mut Vec<String>) -> bool {
     let options = match sqlx::postgres::PgConnectOptions::from_str(database_url) {
         Ok(options) => options,
@@ -39,6 +62,33 @@ pub async fn probe_postgres(database_url: &str, refs: &mut Vec<String>) -> bool 
         refs.push("postgresql:select-1".into());
     }
     passed
+}
+
+pub async fn probe_guest_checksum(key: &Path, guest_ip: &str, expected_sha256: &str) -> bool {
+    Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-i",
+        ])
+        .arg(key)
+        .arg(format!("cirros@{guest_ip}"))
+        .arg("sudo sha256sum /mnt/p14-volume/p14-checksum-input")
+        .output()
+        .await
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .split_whitespace()
+                    .next()
+                    == Some(expected_sha256)
+        })
 }
 
 pub async fn probe_toolchain(
