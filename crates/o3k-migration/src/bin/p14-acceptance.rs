@@ -634,13 +634,24 @@ async fn delete_readiness_resource(
         return false;
     };
     client
-        .delete(delete_url)
+        .delete(delete_url.clone())
         .bearer_auth(token)
         .header("Idempotency-Key", idempotency_key)
         .header("If-Match", format!("generation-{generation}"))
         .send()
         .await
         .is_ok_and(|response| response.status().is_success())
+        && verify_readiness_absence(client, token, delete_url).await
+}
+
+async fn verify_readiness_absence(client: &Client, token: &str, url: Url) -> bool {
+    for _ in 0..10 {
+        match client.get(url.clone()).bearer_auth(token).send().await {
+            Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => return true,
+            Ok(_) | Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    false
 }
 
 fn bind_external_network(
