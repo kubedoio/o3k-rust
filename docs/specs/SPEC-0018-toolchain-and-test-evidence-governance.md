@@ -161,4 +161,4 @@ affected requirements as `missing` or `partial`, not as verified.
 - [ADR-0153 static Rust/OpenStack target](../adr/ADR-0153-static-rust-and-openstack-release-policy.md)
 - [Repository test strategy](../TEST_STRATEGY.md)
 - [Repository agent contract](../../AGENTS.md)
-- [Issue #332](https://github.com/kubedoio/o3k-rust/issues/332)
+- [Issue #332](https://github.com/o3kio/o3k/issues/332)

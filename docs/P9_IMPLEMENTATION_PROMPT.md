@@ -4,7 +4,7 @@ Use the prompt below with a coding LLM after the P9 architecture has received
 human acceptance.
 
 ```text
-Repository: kubedoio/o3k-rust
+Repository: o3kio/o3k
 Program: P9 — O3K Routed Fabric v1 / routable tenant networking and network security
 Program tracker: #655
 

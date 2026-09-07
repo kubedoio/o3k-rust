@@ -1,7 +1,7 @@
 # Goal Part 1/3 — Objective, Issues, Audit, and Release Profile
 
 Goal: Execute and Prove the Real Gazpacho Cinder Service-Testbed Profile.
-Repository: `kubedoio/o3k-rust` | Starting point: `main` at or after `1cec5ccd7d5f005e571eb5b0219ee84782b19a95`
+Repository: `o3kio/o3k` | Starting point: `main` at or after `1cec5ccd7d5f005e571eb5b0219ee84782b19a95`
 This is file 1 of 3: `01-goal-and-audit.md` (sections A–D). See `02-protected-runner-and-execution.md` (sections E–M) and `03-evidence-closure.md` (sections N–T).
 
 ## A. Objective

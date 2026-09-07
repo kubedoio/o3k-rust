@@ -60,7 +60,7 @@ for df in "${ROOT_DIR}/deployments/docker/Dockerfile.o3kd" "${ROOT_DIR}/deployme
         echo "ERROR: ${rel_path} missing org.opencontainers.image.revision label" >&2
         exit 1
     }
-    grep -Fq 'org.opencontainers.image.source="https://github.com/kubedoio/o3k-rust"' "${df}" || {
+    grep -Fq 'org.opencontainers.image.source="https://github.com/o3kio/o3k"' "${df}" || {
         echo "ERROR: ${rel_path} missing org.opencontainers.image.source label" >&2
         exit 1
     }

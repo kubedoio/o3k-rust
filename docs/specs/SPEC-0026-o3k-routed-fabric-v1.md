@@ -14,7 +14,7 @@ Related decisions and specifications:
 - [SPEC-0024 — product profiles and claims](SPEC-0024-product-profiles-and-claims.md)
 - [Execution-boundary contract](../../contracts/execution-boundaries.md)
 
-Program tracker: [#655](https://github.com/kubedoio/o3k-rust/issues/655)
+Program tracker: [#655](https://github.com/o3kio/o3k/issues/655)
 
 This specification is accepted together with ADR-0168. Runtime P9 work remains
 issue- and evidence-gated; acceptance of this contract does not claim that any

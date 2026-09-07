@@ -13,7 +13,7 @@ the already-working TestLab behavior.
 Use this preamble before the task-specific text:
 
 ```text
-Repository: kubedoio/o3k-rust
+Repository: o3kio/o3k
 Product profile: native-rust-testlab unless explicitly stated otherwise.
 
 Before editing, read AGENTS.md, docs/NORMATIVE_SOURCES.md,

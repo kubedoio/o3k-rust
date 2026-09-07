@@ -21,7 +21,7 @@ assert doc["format"] == "json-compatible-yaml-1.2"
 assert re.fullmatch(r"[0-9a-f]{40}", doc["go_reference"]["commit"]), "go commit must be a pinned 40-hex sha"
 assert doc["go_reference"]["repository"] == "https://github.com/kubedoio/o3k"
 assert re.fullmatch(r"[0-9a-f]{40}", doc["rust_reference"]["commit"]), "rust commit must be a pinned 40-hex sha"
-assert doc["rust_reference"]["repository"] == "https://github.com/kubedoio/o3k-rust"
+assert doc["rust_reference"]["repository"] == "https://github.com/o3kio/o3k"
 
 registry_path = __import__("pathlib").Path(artifact_path).resolve().parents[1] / "../compatibility/product-profiles.yaml"
 registry_text = registry_path.read_text(encoding="utf-8")

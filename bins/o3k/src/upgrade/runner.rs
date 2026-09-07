@@ -30,13 +30,13 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// GitHub Releases API for the official O3K Rust repository.
-pub const DEFAULT_RELEASES_URL: &str = "https://api.github.com/repos/kubedoio/o3k-rust/releases";
+pub const DEFAULT_RELEASES_URL: &str = "https://api.github.com/repos/o3kio/o3k/releases";
 /// The canonical GitHub release-asset download base. The asset naming is a
 /// fixed release contract (`o3k-<version>-linux-x86_64.tar.gz(.sha256)` +
 /// `install.sh` under `v<version>/`), so when the releases API is
 /// unreachable the engine can construct the same URLs directly — integrity
 /// still comes from the published checksums, never from the API.
-pub const DEFAULT_DOWNLOAD_BASE: &str = "https://github.com/kubedoio/o3k-rust/releases/download";
+pub const DEFAULT_DOWNLOAD_BASE: &str = "https://github.com/o3kio/o3k/releases/download";
 /// Bound on release-asset downloads (a release is tens of MB).
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 /// Bound on the GitHub API call.
@@ -1904,21 +1904,21 @@ dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd  ./docs/readme.
             }
         };
         let assets = SystemUpgradeIo::canonical_assets(
-            "https://github.com/kubedoio/o3k-rust/releases/download/",
+            "https://github.com/o3kio/o3k/releases/download/",
             &target,
             "o3k-0.4.0-alpha.1-linux-x86_64.tar.gz",
         );
         assert_eq!(
             assets.tarball,
-            "https://github.com/kubedoio/o3k-rust/releases/download/v0.4.0-alpha.1/o3k-0.4.0-alpha.1-linux-x86_64.tar.gz"
+            "https://github.com/o3kio/o3k/releases/download/v0.4.0-alpha.1/o3k-0.4.0-alpha.1-linux-x86_64.tar.gz"
         );
         assert_eq!(
             assets.sha256,
-            "https://github.com/kubedoio/o3k-rust/releases/download/v0.4.0-alpha.1/o3k-0.4.0-alpha.1-linux-x86_64.tar.gz.sha256"
+            "https://github.com/o3kio/o3k/releases/download/v0.4.0-alpha.1/o3k-0.4.0-alpha.1-linux-x86_64.tar.gz.sha256"
         );
         assert_eq!(
             assets.install,
-            "https://github.com/kubedoio/o3k-rust/releases/download/v0.4.0-alpha.1/install.sh"
+            "https://github.com/o3kio/o3k/releases/download/v0.4.0-alpha.1/install.sh"
         );
     }
 }

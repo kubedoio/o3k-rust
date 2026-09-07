@@ -4,7 +4,7 @@
 implementation that follows those normative documents; it does not authorize
 unsupported product or real-host claims.**
 
-Repository: `kubedoio/o3k-rust`
+Repository: `o3kio/o3k`
 
 ---
 

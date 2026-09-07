@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/kubedoio/o3k-rust/blob/main/contracts/o3k-doctor-output.schema.json",
+  "$id": "https://github.com/o3kio/o3k/blob/main/contracts/o3k-doctor-output.schema.json",
   "title": "O3K Doctor machine output",
   "description": "Stable machine-readable output of `o3k doctor --json`. Read-only by construction; MUST NOT contain secrets (passwords, tokens, private keys, user-data, or unredacted configuration). The schema version is the o3k doctor binary version (workspace version).",
   "type": "object",

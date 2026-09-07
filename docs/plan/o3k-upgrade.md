@@ -111,7 +111,7 @@ target:
 
 1. Resolve the target release: explicit `--to vX.Y.Z` or the newest published
    release in the same channel family as the installed version (alpha), via
-   the GitHub Releases API (repository `kubedoio/o3k-rust`).
+   the GitHub Releases API (repository `o3kio/o3k`).
 2. Download `o3k-<version>-linux-x86_64.tar.gz` + `.sha256` + `install.sh`
    into a private temporary directory (`/var/lib/o3k/upgrade-download`, mode
    0700).

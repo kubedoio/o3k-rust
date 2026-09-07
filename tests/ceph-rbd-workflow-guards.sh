@@ -14,7 +14,7 @@ workflow, profile, gate = (pathlib.Path(item).read_text(encoding="utf-8") for it
 for needle in (
     "workflow_dispatch:",
     "runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]",
-    'test "${GITHUB_REPOSITORY}" = "kubedoio/o3k-rust"',
+    'test "${GITHUB_REPOSITORY}" = "o3kio/o3k"',
     'test "${GITHUB_REF}" = "refs/heads/main"',
     "microceph cluster bootstrap",
     "microceph disk add loop,4G,3",

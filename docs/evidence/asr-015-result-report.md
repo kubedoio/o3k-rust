@@ -9,7 +9,7 @@ and left no owned residue or foreign-state change.
 
 ## Source and ownership
 
-- Repository: `kubedoio/o3k-rust`
+- Repository: `o3kio/o3k`
 - Tested source SHA: `294940ec6acf1dbbcc860f66568418c42feeab05`
 - Fail-before source SHA: `633f8cb49f225394968bc90c8b2124257f28ffad`
 - Owning issue: #83

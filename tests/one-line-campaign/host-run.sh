@@ -241,7 +241,7 @@ if [ -n "${O3K_UPGRADE_TARGET_VERSION:-}" ]; then
   for run in 1 2 3; do
     [ "$run" -gt 1 ] && log "upgrade phase re-run #$run after the reboot boundary"
     ssh_vm "sudo nohup env O3K_UPGRADE_TARGET_VERSION=$O3K_UPGRADE_TARGET_VERSION \
-      O3K_UPGRADE_RELEASE_BASE=${O3K_UPGRADE_RELEASE_BASE:-https://github.com/kubedoio/o3k-rust/releases/download} \
+      O3K_UPGRADE_RELEASE_BASE=${O3K_UPGRADE_RELEASE_BASE:-https://github.com/o3kio/o3k/releases/download} \
       bash $VM_SCRIPTS/in-vm-upgrade.sh $DISTRO $VM_EVID $SOURCE_SHA \
       >$VM_EVID/upgrade-console.log 2>&1 </dev/null &"
     UPGRADE_MARKER=""

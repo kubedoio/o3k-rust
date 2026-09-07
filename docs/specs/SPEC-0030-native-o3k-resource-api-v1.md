@@ -3,7 +3,7 @@
 Status: Accepted
 
 Related decision: [ADR-0173](../adr/ADR-0173-native-o3k-resource-api-and-resource-model.md) (human architecture/security approval 2026-08-21; this spec derives acceptance from that decision)
-Related issue: [#727](https://github.com/kubedoio/o3k-rust/issues/727)
+Related issue: [#727](https://github.com/o3kio/o3k/issues/727)
 Related contract: [native resource envelope v1](../../contracts/native-resource-envelope-v1.schema.json)
 
 Related normative sources:

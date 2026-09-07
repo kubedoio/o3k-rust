@@ -1,6 +1,6 @@
 # Release v0.2.0-alpha.2 — install.sh first-class release asset (agent plan)
 
-- Issue: [#615](https://github.com/kubedoio/o3k-rust/issues/615)
+- Issue: [#615](https://github.com/o3kio/o3k/issues/615)
 - Full specification: `/tmp/p1-link.md` (this plan is the implementation record).
 - Deployment/evidence profile: libvirt TestLab alpha, `o3k-implemented` authority mode; supported targets unchanged (Ubuntu 24.04 x86_64, Debian 12 x86_64).
 - Authority model: GitHub Releases is the authoritative distribution source. `get.o3k.io` is a convenience 302 redirect only. The installer (`packaging/get-o3k.sh` exported byte-for-byte as `install.sh`) stays a thin bootstrap: OS/arch guard, minimal deps, tagged-tarball download, published-SHA256 verify-before-extract, safe extraction, bundled verification, then the authoritative hardened packaging scripts from inside the verified archive. All security-sensitive logic stays in the archive (preflight/bootstrap-certs/install.sh/bootstrap-testlab.sh/uninstall.sh/reset.sh).

@@ -32,7 +32,7 @@ with the code.
 Release archives (`o3k-<version>-linux-x86_64.tar.gz` and its `.sha256`) are
 **served by GitHub Releases, never proxied through this worker**. The pinned
 script downloads them directly from
-`https://github.com/kubedoio/o3k-rust/releases/download/v<version>/`.
+`https://github.com/o3kio/o3k/releases/download/v<version>/`.
 
 ## How the channel table works
 

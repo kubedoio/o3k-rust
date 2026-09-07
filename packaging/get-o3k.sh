@@ -5,7 +5,7 @@
 # release generator exports this file byte-for-byte as dist/install.sh
 # (packaging/make-release.sh, 0755, drift-gated by cmp), so the canonical
 # alpha invocation is
-#   curl -sfL https://github.com/kubedoio/o3k-rust/releases/download/v0.3.0-alpha.1/install.sh | sudo sh -
+#   curl -sfL https://github.com/o3kio/o3k/releases/download/v0.3.0-alpha.1/install.sh | sudo sh -
 # get.o3k.io is only a convenience 302 redirect to that exact asset:
 #   curl -sfL https://get.o3k.io | sudo sh -
 #
@@ -62,7 +62,7 @@
 #
 # Overrides for testing/campaigns (the only knobs):
 #   O3K_RELEASE_BASE  release asset base (default
-#                     https://github.com/kubedoio/o3k-rust/releases/download)
+#                     https://github.com/o3kio/o3k/releases/download)
 # Local campaigns serve the release assets from one http server:
 # /releases/v<version>/<assets>; HTTP is permitted only for this explicit
 # override, production URLs are pinned to HTTPS.
@@ -89,7 +89,7 @@ fi
 # so an installer downloaded from .../releases/download/v<version>/install.sh
 # installs exactly <version> by default.
 O3K_INSTALLER_VERSION="v0.4.0-alpha.1"
-O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/kubedoio/o3k-rust/releases/download}"
+O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/o3kio/o3k/releases/download}"
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 
 die() { printf 'O3K installer: %s\n' "$1" >&2; exit 1; }

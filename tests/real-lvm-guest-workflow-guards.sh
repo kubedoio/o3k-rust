@@ -17,7 +17,7 @@ text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 required = (
     "workflow_dispatch:",
     "runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]",
-    'test "${GITHUB_REPOSITORY}" = "kubedoio/o3k-rust"',
+    'test "${GITHUB_REPOSITORY}" = "o3kio/o3k"',
     'test "${GITHUB_REF}" = "refs/heads/main"',
     "sudo -n true",
     "CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img",

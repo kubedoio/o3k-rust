@@ -3,7 +3,7 @@
 Status: Accepted
 
 Related decision: [ADR-0174](../adr/ADR-0174-service-manifest-and-resource-provider-controller.md) (human architecture/security approval 2026-08-21; this spec derives acceptance from that decision)
-Related issue: [#727](https://github.com/kubedoio/o3k-rust/issues/727)
+Related issue: [#727](https://github.com/o3kio/o3k/issues/727)
 Related contracts:
 
 - [Service Manifest v1](../../contracts/service-manifest-v1.schema.json)
