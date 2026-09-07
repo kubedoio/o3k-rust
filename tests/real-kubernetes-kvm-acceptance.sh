@@ -8,7 +8,7 @@ umask 022
 CLUSTER_NAME="o3k-k8s-kvm-testlab"
 NAMESPACE="o3k-system"
 IMAGE_TAG="$(python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('${ROOT_DIR}/Cargo.toml').read_text(encoding='utf-8'))['workspace']['package']['version'])")"
-IMAGE_NAME="ghcr.io/kubedoio/o3kd:${IMAGE_TAG}"
+IMAGE_NAME="ghcr.io/o3kio/o3kd:${IMAGE_TAG}"
 COMPUTE_PID=""
 BRIDGE_NAME="o3k-br-p6"
 

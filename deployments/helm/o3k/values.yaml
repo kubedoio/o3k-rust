@@ -12,7 +12,7 @@ multiController:
   enabled: false
 
 image:
-  repository: ghcr.io/kubedoio/o3kd
+  repository: ghcr.io/o3kio/o3kd
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""

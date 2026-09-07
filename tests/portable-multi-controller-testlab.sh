@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLUSTER_NAME="o3k-multi-controller-testlab"
 NAMESPACE="o3k-system"
 IMAGE_TAG="$(python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('${ROOT_DIR}/Cargo.toml').read_text(encoding='utf-8'))['workspace']['package']['version'])")"
-IMAGE_NAME="ghcr.io/kubedoio/o3kd:${IMAGE_TAG}"
+IMAGE_NAME="ghcr.io/o3kio/o3kd:${IMAGE_TAG}"
 
 cleanup() {
     echo "==> Cleaning up multi-controller testlab..."
