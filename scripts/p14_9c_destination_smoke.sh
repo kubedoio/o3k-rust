@@ -9,10 +9,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 evidence="${O3K_P14_DESTINATION_SMOKE_EVIDENCE:-$ROOT_DIR/target/p14-9c/destination-smoke.json}"
 mkdir -p "$(dirname "$evidence")"
 
+set +e
 O3K_P13_7_EVIDENCE_OUTPUT="$evidence" \
   "$ROOT_DIR/tests/p13_7_real_host_iac_acceptance.sh" >/dev/null
+source_harness_status=$?
+set -e
 
-python3 - "$evidence" <<'PY'
+python3 - "$evidence" "$source_harness_status" <<'PY'
 import json, sys
 
 with open(sys.argv[1], encoding="utf-8") as stream:
@@ -23,6 +26,7 @@ json.dump({
     "compute_guest": passed("R3"),
     "packet_path": passed("R4"),
     "volume_persistence": passed("R5"),
+    "source_harness_status": int(sys.argv[2]),
 }, sys.stdout, sort_keys=True)
 print()
 if not all((passed("R3"), passed("R4"), passed("R5"))):
