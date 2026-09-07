@@ -1191,19 +1191,6 @@ fn uses_openstack_compatibility_auth(resource_type: ResourceKind) -> bool {
     resource_type == ResourceKind::FloatingIp
 }
 
-#[cfg(test)]
-mod tests {
-    use super::uses_openstack_compatibility_auth;
-    use o3k_migration::ResourceKind;
-
-    #[test]
-    fn compatibility_observation_uses_openstack_token_header() {
-        assert!(uses_openstack_compatibility_auth(ResourceKind::FloatingIp));
-        assert!(!uses_openstack_compatibility_auth(ResourceKind::Network));
-        assert!(!uses_openstack_compatibility_auth(ResourceKind::Port));
-    }
-}
-
 fn fingerprint(value: &str) -> String {
     format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
 }
@@ -1267,4 +1254,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     evidence.write_json(output.as_ref())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uses_openstack_compatibility_auth;
+    use o3k_migration::ResourceKind;
+
+    #[test]
+    fn compatibility_observation_uses_openstack_token_header() {
+        assert!(uses_openstack_compatibility_auth(ResourceKind::FloatingIp));
+        assert!(!uses_openstack_compatibility_auth(ResourceKind::Network));
+        assert!(!uses_openstack_compatibility_auth(ResourceKind::Port));
+    }
 }
