@@ -259,9 +259,13 @@ impl RealProbeDriver {
                 format!("/o3k/v1/{collection}/{destination_id}")
             };
             url.set_path(&path);
-            let response = client
-                .get(url)
-                .bearer_auth(&self.config.destination_token)
+            let mut request = client.get(url);
+            request = if uses_openstack_compatibility_auth(node.resource_type) {
+                request.header("X-Auth-Token", &self.config.destination_token)
+            } else {
+                request.bearer_auth(&self.config.destination_token)
+            };
+            let response = request
                 .send()
                 .await
                 .map_err(|error| AcceptanceFailure::Driver {
@@ -1178,6 +1182,25 @@ impl AcceptanceDriver for RealProbeDriver {
                 ("foreign_state_changes".into(), "0".into()),
             ]),
         })
+    }
+}
+
+fn uses_openstack_compatibility_auth(resource_type: ResourceKind) -> bool {
+    // Floating-IP observation uses the Neutron compatibility edge. Native
+    // O3K resource routes use the bearer capability instead.
+    resource_type == ResourceKind::FloatingIp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uses_openstack_compatibility_auth;
+    use o3k_migration::ResourceKind;
+
+    #[test]
+    fn compatibility_observation_uses_openstack_token_header() {
+        assert!(uses_openstack_compatibility_auth(ResourceKind::FloatingIp));
+        assert!(!uses_openstack_compatibility_auth(ResourceKind::Network));
+        assert!(!uses_openstack_compatibility_auth(ResourceKind::Port));
     }
 }
 
