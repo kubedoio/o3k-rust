@@ -21,7 +21,7 @@ concurrency:
 jobs:
   real-cinder:
     name: Protected real Gazpacho Cinder service-testbed
-    if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/main'
+    if: github.repository == 'o3kio/o3k' && github.ref == 'refs/heads/main'
     timeout-minutes: 120
     # Configure this environment to require maintainer approval and to attach
     # the required secrets. Never runs from fork pull requests.
