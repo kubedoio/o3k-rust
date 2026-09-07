@@ -5,7 +5,7 @@ use o3k_migration::acceptance::{
     AcceptanceDriver, AcceptanceEvidence, AcceptanceFailure, AcceptanceHarness, FailureClass,
     GateContext, GateId, GateProof, ReadinessReport,
 };
-use o3k_migration::acceptance_process::{probe_postgres, probe_toolchain};
+use o3k_migration::acceptance_process::{probe_guest_checksum, probe_postgres, probe_toolchain};
 use o3k_migration::cutover::CutoverAuthorization;
 use o3k_migration::manifest::{
     ManifestRequest, MigrationManifest, build_manifest, refresh_integrity,
@@ -28,6 +28,9 @@ struct RuntimeConfig {
     source_project_b: String,
     source_project_b_username: String,
     source_project_b_password: Secret,
+    source_guest_ip: String,
+    source_guest_ssh_key: PathBuf,
+    source_volume_sha256: String,
     destination: Url,
     destination_token: String,
     database_url: String,
@@ -79,6 +82,9 @@ impl RuntimeConfig {
                 .unwrap_or_else(|_| "p14-source-b-user".into()),
             source_project_b_password: Secret::new(value("O3K_P14_SOURCE_PROJECT_B_PASSWORD")?)
                 .map_err(|error| error.to_string())?,
+            source_guest_ip: value("P14_SOURCE_FLOATING_IP")?,
+            source_guest_ssh_key: PathBuf::from(value("P14_SOURCE_SSH_PRIVATE_KEY")?),
+            source_volume_sha256: value("P14_SOURCE_VOLUME_SHA256")?,
             destination: value("O3K_P14_DESTINATION_URL")?
                 .parse()
                 .map_err(|_| "invalid O3K_P14_DESTINATION_URL".to_owned())?,
@@ -334,8 +340,31 @@ impl RealProbeDriver {
         let request = DiscoveryRequest::bounded_default();
         match discover(&source, &source_config, &request).await {
             Ok(snapshot) if snapshot.project_id == self.config.source.project_id => {
-                refs.push(format!("openstack:project:{}", snapshot.project_id));
-                true
+                let required = [
+                    ResourceKind::Server,
+                    ResourceKind::Volume,
+                    ResourceKind::VolumeAttachment,
+                    ResourceKind::FloatingIp,
+                ];
+                let inventory_complete = required.iter().all(|kind| {
+                    snapshot
+                        .resources
+                        .iter()
+                        .any(|resource| resource.kind == *kind)
+                });
+                let guest_probe = probe_guest_checksum(
+                    &self.config.source_guest_ssh_key,
+                    &self.config.source_guest_ip,
+                    &self.config.source_volume_sha256,
+                )
+                .await;
+                if inventory_complete && guest_probe {
+                    refs.push(format!("openstack:project:{}", snapshot.project_id));
+                    refs.push("openstack:guest-volume-checksum".into());
+                    true
+                } else {
+                    false
+                }
             }
             Err(error) => {
                 eprintln!("source Project A discovery failed: {error}");
@@ -403,10 +432,106 @@ impl RealProbeDriver {
                 passed = false;
             }
         }
-        if passed {
-            refs.push("o3k:active-api-probes".into());
+        if !passed {
+            return false;
         }
-        passed
+
+        let run_id = uuid::Uuid::new_v4();
+        let mut network_url = self.config.destination.clone();
+        network_url.set_path("/o3k/v1/network/networks");
+        let network = match client
+            .post(network_url)
+            .bearer_auth(&self.config.destination_token)
+            .header("Idempotency-Key", format!("p14-readiness-network-{run_id}"))
+            .json(&serde_json::json!({
+                "kind": "network:network",
+                "spec": {"name": format!("p14-readiness-{run_id}")}
+            }))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                response.json::<serde_json::Value>().await.ok()
+            }
+            _ => None,
+        };
+        let Some(network_id) = network
+            .as_ref()
+            .and_then(|body| body.get("resource_id"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
+
+        let mut volume_url = self.config.destination.clone();
+        volume_url.set_path("/o3k/v1/volume/volumes");
+        let volume = match client
+            .post(volume_url.clone())
+            .bearer_auth(&self.config.destination_token)
+            .header("Idempotency-Key", format!("p14-readiness-volume-{run_id}"))
+            .json(&serde_json::json!({
+                "kind": "volume:volume",
+                "spec": {"name": format!("p14-readiness-{run_id}"), "size_bytes": 1073741824u64}
+            }))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                response.json::<serde_json::Value>().await.ok()
+            }
+            _ => None,
+        };
+        let Some(volume_id) = volume
+            .as_ref()
+            .and_then(|body| body.get("resource_id"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            let _ = client
+                .delete(network_delete_url(&self.config.destination, network_id))
+                .bearer_auth(&self.config.destination_token)
+                .send()
+                .await;
+            return false;
+        };
+
+        let mut network_delete = self.config.destination.clone();
+        network_delete.set_path(&format!("/o3k/v1/network/networks/{network_id}"));
+        let mut volume_delete = self.config.destination.clone();
+        volume_delete.set_path(&format!("/o3k/v1/volume/volumes/{volume_id}"));
+        let network_deleted = client
+            .delete(network_delete)
+            .bearer_auth(&self.config.destination_token)
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success());
+        let volume_deleted = client
+            .delete(volume_delete)
+            .bearer_auth(&self.config.destination_token)
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success());
+        if !network_deleted || !volume_deleted {
+            // Retry failed cleanup once. A failed deletion is a hard
+            // readiness failure, never a successful probe with residue.
+            if !network_deleted {
+                let _ = client
+                    .delete(network_delete_url(&self.config.destination, network_id))
+                    .bearer_auth(&self.config.destination_token)
+                    .send()
+                    .await;
+            }
+            if !volume_deleted {
+                let _ = client
+                    .delete(volume_delete_url(&self.config.destination, volume_id))
+                    .bearer_auth(&self.config.destination_token)
+                    .send()
+                    .await;
+            }
+            return false;
+        }
+        refs.push("o3k:active-api-probes".into());
+        refs.push("o3k:canonical-network-volume-smoke".into());
+        true
     }
 
     async fn prepare_fresh_runner(&mut self) -> Result<String, AcceptanceFailure> {
@@ -465,6 +590,18 @@ impl RealProbeDriver {
         ));
         Ok(migration_id)
     }
+}
+
+fn network_delete_url(base: &Url, id: &str) -> Url {
+    let mut url = base.clone();
+    url.set_path(&format!("/o3k/v1/network/networks/{id}"));
+    url
+}
+
+fn volume_delete_url(base: &Url, id: &str) -> Url {
+    let mut url = base.clone();
+    url.set_path(&format!("/o3k/v1/volume/volumes/{id}"));
+    url
 }
 
 fn bind_external_network(

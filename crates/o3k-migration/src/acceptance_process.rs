@@ -41,6 +41,33 @@ pub async fn probe_postgres(database_url: &str, refs: &mut Vec<String>) -> bool 
     passed
 }
 
+pub async fn probe_guest_checksum(key: &Path, guest_ip: &str, expected_sha256: &str) -> bool {
+    Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-i",
+        ])
+        .arg(key)
+        .arg(format!("cirros@{guest_ip}"))
+        .arg("sudo sha256sum /mnt/p14-volume/p14-checksum-input")
+        .output()
+        .await
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .split_whitespace()
+                    .next()
+                    == Some(expected_sha256)
+        })
+}
+
 pub async fn probe_toolchain(
     tofu: &str,
     provider: &Path,

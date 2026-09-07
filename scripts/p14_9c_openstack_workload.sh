@@ -165,9 +165,20 @@ create() {
     set_env O3K_P14_SOURCE_PROJECT_B_PASSWORD "$B_PASSWORD"
     set_env O3K_P14_SOURCE_IMAGE_ID "$IMAGE_ID"
     set_env O3K_P14_SOURCE_EXTERNAL_NETWORK_ID "$EXT_NET"
-    set_env P14_SOURCE_GUEST_PROBE "PASS"
+    set_env P14_SOURCE_SSH_PRIVATE_KEY "$KEY_FILE"
     set_env P14_SOURCE_VOLUME_SHA256 "$expected_digest"
     set_env P14_SOURCE_FLOATING_IP "$FIP_ADDR"
+    {
+        printf 'project_a_id=%s\n' "$A_PROJECT"
+        printf 'project_b_id=%s\n' "$B_PROJECT"
+        printf 'project_a_network_id=%s\n' "$(project_a network show p14-source-a-net -f value -c id)"
+        printf 'project_b_network_id=%s\n' "$(project_b network show p14-source-b-net -f value -c id)"
+        printf 'project_a_volume_id=%s\n' "$(project_a volume show p14-source-a-volume -f value -c id)"
+        printf 'project_b_volume_id=%s\n' "$(project_b volume show p14-source-b-sentinel -f value -c id)"
+        printf 'project_a_server_id=%s\n' "$(project_a server show p14-source-a-server -f value -c id)"
+        printf 'project_a_floating_ip=%s\n' "$FIP_ADDR"
+    } >"$INVENTORY"
+    chmod 600 "$INVENTORY"
     chmod 600 "$ENV_FILE"
     os project show p14-source-a -f value -c id >/dev/null
     os project show p14-source-b -f value -c id >/dev/null
