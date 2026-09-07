@@ -64,19 +64,30 @@ pub async fn probe_postgres(database_url: &str, refs: &mut Vec<String>) -> bool 
     passed
 }
 
-pub async fn probe_guest_checksum(key: &Path, guest_ip: &str, expected_sha256: &str) -> bool {
-    Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-i",
-        ])
+pub async fn probe_guest_checksum(
+    key: &Path,
+    guest_ip: &str,
+    expected_sha256: &str,
+    proxy_command: Option<&str>,
+) -> bool {
+    let mut command = Command::new("ssh");
+    command.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-i",
+    ]);
+    if let Some(proxy_command) = proxy_command {
+        command
+            .arg("-o")
+            .arg(format!("ProxyCommand={proxy_command}"));
+    }
+    command
         .arg(key)
         .arg(format!("cirros@{guest_ip}"))
         .arg("sudo sha256sum /mnt/p14-volume/p14-checksum-input")

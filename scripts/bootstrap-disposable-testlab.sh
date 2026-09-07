@@ -423,6 +423,11 @@ fi
 if [[ -n "${O3K_DATABASE_URL:-}" ]]; then
   printf 'O3K_DATABASE_URL=%s\n' "$(printf '%q' "$O3K_DATABASE_URL")" >>"$o3kd_env_tmp"
 fi
+for lvm_variable in O3K_LVM_VOLUME_GROUP O3K_LVM_THIN_POOL O3K_LVM_PROVIDER_NAMESPACE; do
+  if [[ -n "${!lvm_variable:-}" ]]; then
+    printf '%s=%s\n' "$lvm_variable" "$(printf '%q' "${!lvm_variable}")" >>"$o3kd_env_tmp"
+  fi
+done
 cat >"$compute_env_tmp" <<EOF
 O3K_COMPUTE_DATA_DIR=$(printf '%q' "$STATE_ROOT/compute-data")
 O3K_COMPUTE_CONTROL_ENDPOINT=$(printf '%q' "https://127.0.0.1:${CONTROL_PORT}")

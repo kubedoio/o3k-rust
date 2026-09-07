@@ -32,6 +32,7 @@ struct RuntimeConfig {
     source_project_b_password: Secret,
     source_guest_ip: String,
     source_guest_ssh_key: PathBuf,
+    source_guest_proxy_command: Option<String>,
     source_volume_sha256: String,
     destination: Url,
     destination_token: String,
@@ -87,6 +88,7 @@ impl RuntimeConfig {
                 .map_err(|error| error.to_string())?,
             source_guest_ip: value("P14_SOURCE_FLOATING_IP")?,
             source_guest_ssh_key: PathBuf::from(value("P14_SOURCE_SSH_PRIVATE_KEY")?),
+            source_guest_proxy_command: env::var("P14_SOURCE_SSH_PROXY_COMMAND").ok(),
             source_volume_sha256: value("P14_SOURCE_VOLUME_SHA256")?,
             destination: value("O3K_P14_DESTINATION_URL")?
                 .parse()
@@ -360,6 +362,7 @@ impl RealProbeDriver {
                     &self.config.source_guest_ssh_key,
                     &self.config.source_guest_ip,
                     &self.config.source_volume_sha256,
+                    self.config.source_guest_proxy_command.as_deref(),
                 )
                 .await;
                 if inventory_complete && guest_probe {
