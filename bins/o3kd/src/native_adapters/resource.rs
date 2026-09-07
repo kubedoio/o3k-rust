@@ -17,7 +17,7 @@ use o3k_store::{DurableStore, storage::StorageRepository};
 use uuid::Uuid;
 
 #[async_trait::async_trait]
-pub(crate) trait PublicAddressWorkflow: Send + Sync {
+pub trait PublicAddressWorkflow: Send + Sync {
     async fn remove(&self, project_id: &str, allocation_id: Uuid) -> Result<(), String>;
 }
 
@@ -32,7 +32,7 @@ pub struct GenericResourceApplication {
     pub network: Arc<dyn o3k_native_api::network::NetworkReader>,
     pub external_controllers: Arc<BTreeMap<String, Arc<o3k_service_sdk::GrpcControllerAdapter>>>,
     pub public_allocator: Option<Arc<o3k_network::PublicAddressAllocator>>,
-    pub(crate) public_address_workflow: Option<Arc<dyn PublicAddressWorkflow>>,
+    pub public_address_workflow: Option<Arc<dyn PublicAddressWorkflow>>,
     pub network_external_realm_id: Option<Uuid>,
     pub attachment_workflow: Option<Arc<dyn VolumeAttachmentWorkflow>>,
 }
