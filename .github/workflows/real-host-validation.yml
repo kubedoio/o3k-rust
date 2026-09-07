@@ -19,7 +19,7 @@ jobs:
   real-host:
     name: Protected TestLab real-host validation
     if: >-
-      github.repository == 'kubedoio/o3k-rust' &&
+      github.repository == 'o3kio/o3k' &&
       github.event_name == 'workflow_dispatch' &&
       (github.ref == 'refs/heads/main' || inputs.target_sha != '')
     env:
