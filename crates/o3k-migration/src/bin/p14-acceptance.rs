@@ -18,7 +18,7 @@ use o3k_migration::{
     DiscoveryRequest, EndpointInterface, ReqwestOpenStackSource, ResourceKind, Secret,
     SourceCloudConfig, SourceSnapshot, discover,
 };
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, env, path::PathBuf, time::Duration};
 use url::Url;
@@ -253,19 +253,14 @@ impl RealProbeDriver {
             };
             let mut url = self.config.destination.clone();
             let destination_id = node.destination_id.as_deref().unwrap_or_default();
-            let path = if node.resource_type == ResourceKind::FloatingIp {
-                format!("/v2.0/floatingips/{destination_id}")
-            } else {
-                format!("/o3k/v1/{collection}/{destination_id}")
+            let (path_template, auth_route) = observation_route(node.resource_type);
+            let path = match path_template {
+                Some(template) => template.replace("{}", destination_id),
+                None => format!("/o3k/v1/{collection}/{destination_id}"),
             };
             url.set_path(&path);
-            let mut request = client.get(url);
-            request = if uses_openstack_compatibility_auth(node.resource_type) {
-                request.header("X-Auth-Token", &self.config.destination_token)
-            } else {
-                request.bearer_auth(&self.config.destination_token)
-            };
-            let response = request
+            let response = auth_route
+                .apply(client.get(url), &self.config.destination_token)
                 .send()
                 .await
                 .map_err(|error| AcceptanceFailure::Driver {
@@ -1185,10 +1180,35 @@ impl AcceptanceDriver for RealProbeDriver {
     }
 }
 
-fn uses_openstack_compatibility_auth(resource_type: ResourceKind) -> bool {
-    // Floating-IP observation uses the Neutron compatibility edge. Native
-    // O3K resource routes use the bearer capability instead.
-    resource_type == ResourceKind::FloatingIp
+/// Destination observation boundary: floating-IP observation uses the Neutron
+/// compatibility edge (`/v2.0/...` + `X-Auth-Token`); every other observed
+/// kind is a native O3K resource route (`/o3k/v1/...` + Bearer). The compat
+/// route returns its full path template with `{}` for the resource id; the
+/// native route shares the caller-built collection path.
+fn observation_route(resource_type: ResourceKind) -> (Option<&'static str>, AuthRoute) {
+    if resource_type == ResourceKind::FloatingIp {
+        (
+            Some("/v2.0/floatingips/{}"),
+            AuthRoute::OpenStackCompatibility,
+        )
+    } else {
+        (None, AuthRoute::Native)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AuthRoute {
+    OpenStackCompatibility,
+    Native,
+}
+
+impl AuthRoute {
+    fn apply(self, request: RequestBuilder, token: &str) -> RequestBuilder {
+        match self {
+            AuthRoute::OpenStackCompatibility => request.header("X-Auth-Token", token),
+            AuthRoute::Native => request.bearer_auth(token),
+        }
+    }
 }
 
 fn fingerprint(value: &str) -> String {
@@ -1258,13 +1278,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::uses_openstack_compatibility_auth;
+    use super::{AuthRoute, observation_route};
     use o3k_migration::ResourceKind;
 
     #[test]
     fn compatibility_observation_uses_openstack_token_header() {
-        assert!(uses_openstack_compatibility_auth(ResourceKind::FloatingIp));
-        assert!(!uses_openstack_compatibility_auth(ResourceKind::Network));
-        assert!(!uses_openstack_compatibility_auth(ResourceKind::Port));
+        assert_eq!(
+            observation_route(ResourceKind::FloatingIp),
+            (
+                Some("/v2.0/floatingips/{}"),
+                AuthRoute::OpenStackCompatibility
+            )
+        );
+        let (native_path, native_auth) = observation_route(ResourceKind::Network);
+        assert_eq!(native_auth, AuthRoute::Native);
+        assert_eq!(native_path, None);
+        assert_eq!(observation_route(ResourceKind::Port).1, AuthRoute::Native);
     }
 }
