@@ -252,10 +252,13 @@ impl RealProbeDriver {
                 _ => continue,
             };
             let mut url = self.config.destination.clone();
-            url.set_path(&format!(
-                "/o3k/v1/{collection}/{}",
-                node.destination_id.as_deref().unwrap_or_default()
-            ));
+            let destination_id = node.destination_id.as_deref().unwrap_or_default();
+            let path = if node.resource_type == ResourceKind::FloatingIp {
+                format!("/v2.0/floatingips/{destination_id}")
+            } else {
+                format!("/o3k/v1/{collection}/{destination_id}")
+            };
+            url.set_path(&path);
             let response = client
                 .get(url)
                 .bearer_auth(&self.config.destination_token)
