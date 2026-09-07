@@ -1,8 +1,9 @@
 # O3K
 
 <p align="center">
-  <strong>Rust-native Cloud Operating System with an OpenStack-compatible northbound surface.</strong><br />
-  OpenStack compatibility northbound. O3K Cloud Kernel in the middle. Typed infrastructure execution southbound.
+  <strong>A cloud kernel — literally born in the cloud.</strong><br />
+  Rust-native Cloud Operating System designed from first principles for cloud infrastructure.<br />
+  OpenStack-compatible northbound. O3K-native cloud authority in the middle. Provider-neutral typed execution southbound.
 </p>
 
 <p align="center">
@@ -13,6 +14,8 @@
 </p>
 
 ![O3K Cloud Operating System architecture](docs/architecture/o3k-cloud-os.svg)
+
+O3K is a **cloud kernel — literally born in the cloud**. It is built from scratch in Rust around a shared cloud authority rather than inherited service boundaries. The Cloud Kernel owns identity and authorization, resource ownership, desired state, operations, scheduling, reconciliation, quotas, audit/event identity, and failure semantics; compatibility APIs stay northbound and infrastructure execution stays southbound.
 
 O3K is **not** a service-for-service Rust rewrite of Nova, Neutron, Keystone,
 Glance, Placement, and Cinder. OpenStack service names define compatibility
