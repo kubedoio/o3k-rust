@@ -308,9 +308,11 @@ impl AcceptanceEvidence {
 
     #[must_use]
     pub fn readiness_only(context: &GateContext, readiness: ReadinessReport) -> Self {
+        let environment_ready = readiness.ready;
         let mut evidence = Self::blocked(context, readiness.diagnostic.clone());
         evidence.readiness = readiness.clone();
         evidence.toolchain = readiness.toolchain;
+        evidence.environment_ready = environment_ready;
         evidence
     }
 

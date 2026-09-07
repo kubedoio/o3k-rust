@@ -17,9 +17,11 @@ O3K_P14_9A_EVIDENCE_OUTPUT="$OUTPUT" \
 python3 "$ROOT_DIR/scripts/validate_p14_9a_evidence.py" "$OUTPUT" \
   --expected-head "$O3K_P14_TESTED_RUNTIME_HEAD_SHA"
 result="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["execution_result"])' "$OUTPUT")"
+ready="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1], encoding="utf-8"))["environment_ready"]).lower())' "$OUTPUT")"
 printf 'P14.9 %s execution result: %s\n' "$MODE" "$result"
+printf 'P14.9 environment ready: %s\n' "${ready^^}"
 if [[ "$MODE" == "prerequisites" ]]; then
-  [[ "$result" == "blocked" ]] && exit 2
+  [[ "$ready" == "true" ]] || exit 2
 else
   [[ "$result" == "passed" ]] || exit 2
 fi
