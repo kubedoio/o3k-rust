@@ -20,6 +20,7 @@ command -v curl >/dev/null || die "missing curl"
 command -v sha256sum >/dev/null || die "missing sha256sum"
 command -v jq >/dev/null || die "missing jq"
 command -v ssh >/dev/null || die "missing ssh"
+command -v sshpass >/dev/null || die "missing sshpass"
 command -v openssl >/dev/null || die "missing openssl"
 command -v ssh-keygen >/dev/null || die "missing ssh-keygen"
 [[ "$(id -u)" == 0 ]] || die "must run as root"
@@ -100,7 +101,7 @@ create() {
     echo "workload-step: project-a compute"
     project_a volume show p14-source-a-volume >/dev/null 2>&1 || project_a volume create --size 2 p14-source-a-volume >/dev/null
     if ! project_a server show p14-source-a-server >/dev/null 2>&1; then
-        project_a server create --image "$IMAGE_ID" --flavor m1.small --network p14-source-a-net --key-name p14-source-a-key --security-group p14-source-a-sg p14-source-a-server >/dev/null
+        project_a server create --image "$IMAGE_ID" --flavor m1.small --network p14-source-a-net --key-name p14-source-a-key --config-drive true --security-group p14-source-a-sg p14-source-a-server >/dev/null
     else
         CURRENT_IMAGE_ID="$(project_a server show p14-source-a-server -f json | jq -r 'if (.image | type) == "object" then (.image.id // empty) else (.image // empty) end')"
         if [[ "$CURRENT_IMAGE_ID" != "$IMAGE_ID" ]]; then
@@ -112,6 +113,16 @@ create() {
         fi
     fi
     SERVER_STATE="$(project_a server show p14-source-a-server -f value -c status)"
+    # A newly created server is normally BUILD.  Do not issue a second
+    # lifecycle mutation until Nova has reported a stable state; doing so
+    # turns a harmless rerun into a 409 race with the build operation.
+    if [[ "$SERVER_STATE" == "BUILD" || "$SERVER_STATE" == "SPAWNING" ]]; then
+        for _ in {1..90}; do
+            SERVER_STATE="$(project_a server show p14-source-a-server -f value -c status)"
+            [[ "$SERVER_STATE" != "BUILD" && "$SERVER_STATE" != "SPAWNING" ]] && break
+            sleep 2
+        done
+    fi
     if [[ "$SERVER_STATE" != "ACTIVE" ]]; then
         project_a server start p14-source-a-server >/dev/null
         for _ in {1..60}; do
@@ -146,8 +157,17 @@ create() {
     expected_digest="$(printf '%b' "$payload" | sha256sum | awk '{print $1}')"
     guest_command="set -eu; mountpoint -q /mnt/p14-volume || (sudo mkfs.ext4 -F /dev/vdb >/dev/null 2>&1 && sudo mkdir -p /mnt/p14-volume && sudo mount /dev/vdb /mnt/p14-volume); printf '%b' '$payload' | sudo tee /mnt/p14-volume/p14-checksum-input >/dev/null; sudo sha256sum /mnt/p14-volume/p14-checksum-input | awk '{print \$1}'"
     observed_digest=""
+    guest_ssh_opts=(-o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+    guest_proxy=(-o "ProxyCommand=ssh -i $STATE_ROOT/ssh_ed25519 -o StrictHostKeyChecking=no stack@$O3K_P14_SOURCE_ALLOWED_HOSTS -W %h:%p")
     for _ in {1..30}; do
-        observed_digest="$(ssh -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$KEY_FILE" cirros@"$FIP_ADDR" "$guest_command" 2>/dev/null || true)"
+        observed_digest="$(ssh "${guest_ssh_opts[@]}" "${guest_proxy[@]}" -i "$KEY_FILE" cirros@"$FIP_ADDR" "$guest_command" 2>/dev/null || true)"
+        if [[ "$observed_digest" != "$expected_digest" ]]; then
+            # CirrOS 0.6.3's stock image may expose its documented disposable
+            # console password while ignoring injected keys.  Keep the key
+            # path first, and use that bounded fallback only for this real
+            # guest probe; no credential is written to evidence.
+            observed_digest="$(sshpass -p "${P14_SOURCE_GUEST_PASSWORD:-gocubsgo}" ssh "${guest_ssh_opts[@]}" "${guest_proxy[@]}" -o PreferredAuthentications=password -o PubkeyAuthentication=no cirros@"$FIP_ADDR" "$guest_command" 2>/dev/null || true)"
+        fi
         [[ "$observed_digest" == "$expected_digest" ]] && break
         sleep 2
     done

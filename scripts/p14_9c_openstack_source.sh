@@ -119,6 +119,11 @@ write_files:
       RABBIT_PASSWORD=$RABBIT_PASSWORD
       SERVICE_PASSWORD=$SERVICE_PASSWORD
       disable_service horizon
+      # Tempest is outside the bounded P14 source profile.  Disabling it keeps
+      # DevStack from resolving its unrelated test-only tox environment (the
+      # 2025.1 branch currently conflicts with the moving upper constraints)
+      # after the required cloud services have been configured.
+      disable_service tempest
       enable_service key
       enable_service n-api n-cpu n-cond n-sch n-novnc
       enable_service q-svc q-dhcp q-meta ovn-controller ovn-northd q-ovn-metadata-agent
