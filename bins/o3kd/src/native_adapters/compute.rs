@@ -28,6 +28,14 @@ impl o3k_native_api::compute::ServerReader for ServerReaderAdapter {
                             tracing::error!(%error, server_id = %id, "native server metadata read failed");
                             NativeReadError::Internal
                         })?;
+                    let (migration_id, source_key) = self
+                        .service
+                        .server_migration_metadata_for_auth(auth, s.id)
+                        .await
+                        .map_err(|error| {
+                            tracing::error!(%error, server_id = %id, "native server ownership metadata read failed");
+                            NativeReadError::Internal
+                        })?;
                     items.push(ServerItem {
                         id: id.to_string(),
                         name: s.name,
@@ -39,6 +47,8 @@ impl o3k_native_api::compute::ServerReader for ServerReaderAdapter {
                             .unwrap_or_else(|_| "unknown".to_owned()),
                         created_at: None, // No durable timestamp available from domain Server
                         generation,
+                        migration_id,
+                        source_key,
                     });
                 }
                 Ok(items)
@@ -70,6 +80,14 @@ impl o3k_native_api::compute::ServerReader for ServerReaderAdapter {
                         tracing::error!(%error, server_id = %id, "native server metadata read failed");
                         NativeReadError::Internal
                     })?;
+                let (migration_id, source_key) = self
+                    .service
+                    .server_migration_metadata_for_auth(auth, s.id)
+                    .await
+                    .map_err(|error| {
+                        tracing::error!(%error, server_id = %id, "native server ownership metadata read failed");
+                        NativeReadError::Internal
+                    })?;
                 Ok(ServerItem {
                     id: id.to_string(),
                     name: s.name,
@@ -81,6 +99,8 @@ impl o3k_native_api::compute::ServerReader for ServerReaderAdapter {
                         .unwrap_or_else(|_| "unknown".to_owned()),
                     created_at: None,
                     generation,
+                    migration_id,
+                    source_key,
                 })
             }
             Err(e) => {

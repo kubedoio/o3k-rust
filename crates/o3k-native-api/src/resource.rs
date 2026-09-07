@@ -258,6 +258,15 @@ pub trait ResourceApplication: Send + Sync {
     ) -> Result<serde_json::Value, ResourceApplicationError>;
 }
 
+/// Canonical native attachment orchestration supplied by the composition
+/// root. The resource application persists the intent and delegates the
+/// provider crossing to this restartable workflow.
+#[async_trait]
+pub trait VolumeAttachmentWorkflow: Send + Sync {
+    async fn attach(&self, attachment_id: uuid::Uuid) -> Result<(), String>;
+    async fn detach(&self, attachment_id: uuid::Uuid) -> Result<(), String>;
+}
+
 pub type SharedResourceApplication = Arc<dyn ResourceApplication>;
 
 fn application_problem(error: ResourceApplicationError) -> Response {

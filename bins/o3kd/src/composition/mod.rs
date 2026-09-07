@@ -12,6 +12,19 @@ use std::{sync::Arc, time::Duration};
 use tracing::info;
 use uuid::Uuid;
 
+struct NativeAttachmentWorkflowAdapter(Arc<dyn o3k_api::NativeAttachmentWorkflow>);
+
+#[async_trait::async_trait]
+impl o3k_native_api::resource::VolumeAttachmentWorkflow for NativeAttachmentWorkflowAdapter {
+    async fn attach(&self, attachment_id: Uuid) -> Result<(), String> {
+        self.0.attach(attachment_id).await
+    }
+
+    async fn detach(&self, attachment_id: Uuid) -> Result<(), String> {
+        self.0.detach(attachment_id).await
+    }
+}
+
 fn federated_oidc_validator_from_env()
 -> Result<Option<Arc<o3k_identity::oidc::OidcValidator>>, Box<dyn std::error::Error>> {
     let values = [
@@ -684,9 +697,34 @@ pub async fn build_composition(
         }
         native_manifest_registry.register_in_process_controller(service_id, ready, detail)?;
     }
+    let storage_intent_epoch = storage_intent_epoch(&controller_epoch);
+    let native_attachment_workflow: Option<Arc<dyn o3k_api::NativeAttachmentWorkflow>> =
+        native_lvm_provider.as_ref().map(|provider| {
+            let workflow = o3k_reconciler::storage_workflow::StorageAttachmentWorkflow::new(
+                store.clone(),
+                provider.clone(),
+                Arc::new(LocalComputeAttachmentExecutor {
+                    compute: Arc::new(compute_service.clone()),
+                }),
+                Arc::new(LocalStorageFence {
+                    coordination: coordination_store.clone(),
+                    controller_id: controller_id.clone(),
+                    controller_epoch: controller_epoch.clone(),
+                    intent_epoch: storage_intent_epoch,
+                    execution_lock_path: config.data_dir.join("storage.execution.lock"),
+                    attempt: Arc::new(tokio::sync::Mutex::new(None)),
+                }),
+            );
+            Arc::new(NativeStorageAttachmentWorkflow {
+                store: store.clone(),
+                controller_epoch: storage_intent_epoch,
+                workflow,
+            }) as Arc<dyn o3k_api::NativeAttachmentWorkflow>
+        });
     let generic_application: std::sync::Arc<dyn o3k_native_api::resource::ResourceApplication> =
         std::sync::Arc::new(crate::native_adapters::GenericResourceApplication {
             compute: std::sync::Arc::new(compute_service.clone()),
+            image: Some(std::sync::Arc::new(image_service.clone())),
             network_service: std::sync::Arc::new(network_service.clone()),
             store: native_api_store.clone(),
             storage_provider: native_storage_provider.clone(),
@@ -697,6 +735,13 @@ pub async fn build_composition(
                 .clone()
                 .ok_or("generic native application requires network reader")?,
             external_controllers: std::sync::Arc::new(external_controllers),
+            public_allocator: public_allocator_for_binding.clone(),
+            public_address_workflow: Some(binding_projector.clone()),
+            network_external_realm_id,
+            attachment_workflow: native_attachment_workflow.as_ref().map(|workflow| {
+                Arc::new(NativeAttachmentWorkflowAdapter(workflow.clone()))
+                    as Arc<dyn o3k_native_api::resource::VolumeAttachmentWorkflow>
+            }),
         });
 
     let composition_task = if let Ok(listen_addr) = std::env::var("O3K_COMPOSITION_LISTEN_ADDR") {
@@ -766,30 +811,6 @@ pub async fn build_composition(
     };
 
     let inspect_compute_service = compute_service.clone();
-    let storage_intent_epoch = storage_intent_epoch(&controller_epoch);
-    let native_attachment_workflow: Option<Arc<dyn o3k_api::NativeAttachmentWorkflow>> =
-        native_lvm_provider.as_ref().map(|provider| {
-            let workflow = o3k_reconciler::storage_workflow::StorageAttachmentWorkflow::new(
-                store.clone(),
-                provider.clone(),
-                Arc::new(LocalComputeAttachmentExecutor {
-                    compute: Arc::new(compute_service.clone()),
-                }),
-                Arc::new(LocalStorageFence {
-                    coordination: coordination_store.clone(),
-                    controller_id: controller_id.clone(),
-                    controller_epoch: controller_epoch.clone(),
-                    intent_epoch: storage_intent_epoch,
-                    execution_lock_path: config.data_dir.join("storage.execution.lock"),
-                    attempt: Arc::new(tokio::sync::Mutex::new(None)),
-                }),
-            );
-            Arc::new(NativeStorageAttachmentWorkflow {
-                store: store.clone(),
-                controller_epoch: storage_intent_epoch,
-                workflow,
-            }) as Arc<dyn o3k_api::NativeAttachmentWorkflow>
-        });
     // Native storage is always wired in this composition root; the adapter
     // selects the canonical native path when external Cinder is absent.
     let volume_attachments_enabled = true;

@@ -196,6 +196,24 @@ impl NetworkService {
         external_realm_id: Option<Uuid>,
         enable_snat: bool,
     ) -> Result<o3k_store::CanonicalL3GatewayRecord, NetworkError> {
+        self.create_l3_gateway_for_project_with_id(
+            Uuid::now_v7(),
+            project_id,
+            name,
+            external_realm_id,
+            enable_snat,
+        )
+        .await
+    }
+
+    pub async fn create_l3_gateway_for_project_with_id(
+        &self,
+        id: Uuid,
+        project_id: &str,
+        name: String,
+        external_realm_id: Option<Uuid>,
+        enable_snat: bool,
+    ) -> Result<o3k_store::CanonicalL3GatewayRecord, NetworkError> {
         if name.trim().is_empty() {
             return Err(NetworkError::InvalidRequest);
         }
@@ -212,7 +230,7 @@ impl NetworkService {
             }
         }
         let gateway = o3k_store::CanonicalL3GatewayRecord {
-            id: Uuid::now_v7(),
+            id,
             project_id: project_id.to_owned(),
             name,
             external_realm_id,
@@ -328,6 +346,17 @@ impl NetworkService {
         gateway_id: &Uuid,
         realm_id: &Uuid,
     ) -> Result<o3k_store::CanonicalL3GatewayAttachmentRecord, NetworkError> {
+        self.attach_l3_gateway_realm_with_id(Uuid::now_v7(), project_id, gateway_id, realm_id)
+            .await
+    }
+
+    pub async fn attach_l3_gateway_realm_with_id(
+        &self,
+        id: Uuid,
+        project_id: &str,
+        gateway_id: &Uuid,
+        realm_id: &Uuid,
+    ) -> Result<o3k_store::CanonicalL3GatewayAttachmentRecord, NetworkError> {
         let gateway = self
             .get_l3_gateway_for_project(project_id, gateway_id)
             .await?;
@@ -359,7 +388,7 @@ impl NetworkService {
             return Err(NetworkError::Conflict);
         }
         let attachment = o3k_store::CanonicalL3GatewayAttachmentRecord {
-            id: Uuid::now_v7(),
+            id,
             gateway_id: *gateway_id,
             realm_id: *realm_id,
             project_id: project_id.to_owned(),

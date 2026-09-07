@@ -760,7 +760,7 @@ impl LibvirtAdapter {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum DomainAction {
     Start,
     Shutdown,
@@ -888,7 +888,12 @@ fn version(value: u32) -> String {
 #[cfg(feature = "libvirt")]
 fn backend_define(uri: &str, definition: &DomainDefinition) -> Result<(), LibvirtError> {
     let connection = open(uri)?;
-    Domain::define_xml(&connection, &definition.xml).map_err(|_| {
+    Domain::define_xml(&connection, &definition.xml).map_err(|error| {
+        tracing::error!(
+            domain = %definition.name,
+            error = %error,
+            "libvirt domain definition failed"
+        );
         LibvirtError::new(ErrorCategory::OperationFailed, "domain definition failed")
     })?;
     Ok(())
@@ -946,7 +951,8 @@ fn backend_action(uri: &str, name: &str, action: DomainAction) -> Result<(), Lib
         DomainAction::Reboot => domain.reboot(0),
         DomainAction::Undefine => domain.undefine(),
     };
-    result.map_err(|_| {
+    result.map_err(|error| {
+        tracing::error!(domain = %name, ?action, error = %error, "libvirt domain lifecycle operation failed");
         LibvirtError::new(
             ErrorCategory::OperationFailed,
             "domain lifecycle operation failed",
@@ -983,7 +989,8 @@ fn backend_owned_action(
         DomainAction::Reboot => domain.reboot(0),
         DomainAction::Undefine => domain.undefine(),
     };
-    result.map_err(|_| {
+    result.map_err(|error| {
+        tracing::error!(domain = %name, ?action, error = %error, "libvirt owned domain lifecycle operation failed");
         LibvirtError::new(
             ErrorCategory::OperationFailed,
             "owned domain lifecycle operation failed",

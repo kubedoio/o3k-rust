@@ -93,6 +93,15 @@ impl PublicAddressAllocator {
         project_id: &str,
         operation_id: &str,
     ) -> Result<PublicAddressBinding, PublicAddressError> {
+        self.allocate_with_id(project_id, operation_id, Uuid::now_v7())
+    }
+
+    pub fn allocate_with_id(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        allocation_id: Uuid,
+    ) -> Result<PublicAddressBinding, PublicAddressError> {
         if project_id.trim().is_empty() || operation_id.trim().is_empty() {
             return Err(PublicAddressError::NotFound);
         }
@@ -121,7 +130,7 @@ impl PublicAddressAllocator {
             return Err(PublicAddressError::Exhausted);
         };
         let binding = PublicAddressBinding {
-            allocation_id: Uuid::now_v7(),
+            allocation_id,
             operation_id: operation_id.to_owned(),
             project_id: project_id.to_owned(),
             public_address,

@@ -4352,6 +4352,18 @@ mod tests {
             first,
             ComputeService::server_id_for_create("project-a", "request-2")
         );
+        let canonical = uuid::Uuid::new_v4();
+        assert_eq!(
+            canonical,
+            ComputeService::server_id_for_create(
+                "project-a",
+                &format!("project-a:canonical:{canonical}")
+            )
+        );
+        assert_eq!(
+            canonical,
+            ComputeService::server_id_for_create("project-a", &format!("canonical:{canonical}"))
+        );
     }
 
     /// A retry of the recreation (a crash between the revive persist and the

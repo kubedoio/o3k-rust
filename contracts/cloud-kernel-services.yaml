@@ -45,7 +45,7 @@ services:
     namespace: "network"
     ownership: "o3k-implemented"
     profiles: ["native-rust-testlab", "openstack-service-testbed"]
-    resource_types: ["network", "subnet", "port", "extension"]
+    resource_types: ["network", "subnet", "port", "extension", "security_group", "security_group_rule", "router", "router_interface"]
     actions:
       - "network:ListNetworks"
       - "network:CreateNetwork"
@@ -60,6 +60,22 @@ services:
       - "network:CreatePort"
       - "network:ReadPort"
       - "network:DeletePort"
+      - "network:ListSecurityGroups"
+      - "network:ReadSecurityGroup"
+      - "network:CreateSecurityGroup"
+      - "network:DeleteSecurityGroup"
+      - "network:ListSecurityGroupRules"
+      - "network:ReadSecurityGroupRule"
+      - "network:CreateSecurityGroupRule"
+      - "network:DeleteSecurityGroupRule"
+      - "network:ListRouters"
+      - "network:ReadRouter"
+      - "network:CreateRouter"
+      - "network:DeleteRouter"
+      - "network:ListRouterInterfaces"
+      - "network:ReadRouterInterface"
+      - "network:CreateRouterInterface"
+      - "network:DeleteRouterInterface"
       - "network:ListExtensions"
       - "network:CreateAddressRealm"
       - "network:DeleteAddressRealm"

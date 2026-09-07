@@ -953,6 +953,43 @@ impl ImageService {
         container_format: String,
         disk_format: String,
     ) -> Result<ImageRecord, ImageError> {
+        self.create_authorized(
+            auth,
+            Uuid::now_v7(),
+            name,
+            visibility,
+            container_format,
+            disk_format,
+        )
+        .await
+    }
+
+    /// Creates an image with a caller-selected ID for an accepted migration
+    /// import.  The authorization and validation path is identical to the
+    /// ordinary create operation; only the durable identity is supplied by
+    /// the migration authority.
+    pub async fn create_with_id(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+        name: String,
+        visibility: String,
+        container_format: String,
+        disk_format: String,
+    ) -> Result<ImageRecord, ImageError> {
+        self.create_authorized(auth, id, name, visibility, container_format, disk_format)
+            .await
+    }
+
+    async fn create_authorized(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+        name: String,
+        visibility: String,
+        container_format: String,
+        disk_format: String,
+    ) -> Result<ImageRecord, ImageError> {
         let ns = ServiceNamespace::new("image")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("image".to_owned()));
         let act = ActionId::new("image", "CreateImage").unwrap_or_else(|_| {
@@ -975,8 +1012,9 @@ impl ImageService {
             return Err(ImageError::Unauthorized);
         }
         match self
-            .create_for_project(
+            .create_for_project_with_id(
                 auth.effective_scope().id().as_str(),
+                id,
                 name,
                 visibility,
                 container_format,
@@ -1013,6 +1051,26 @@ impl ImageService {
         container_format: String,
         disk_format: String,
     ) -> Result<ImageRecord, ImageError> {
+        self.create_for_project_with_id(
+            project_id,
+            Uuid::now_v7(),
+            name,
+            visibility,
+            container_format,
+            disk_format,
+        )
+        .await
+    }
+
+    async fn create_for_project_with_id(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        name: String,
+        visibility: String,
+        container_format: String,
+        disk_format: String,
+    ) -> Result<ImageRecord, ImageError> {
         if name.trim().is_empty()
             || container_format.trim().is_empty()
             || disk_format.trim().is_empty()
@@ -1023,7 +1081,7 @@ impl ImageService {
             return Err(ImageError::InvalidMetadata);
         }
         let record = ImageMetadataRecord {
-            id: Uuid::now_v7(),
+            id,
             name,
             project_id: project_id.to_owned(),
             status: "queued".to_owned(),

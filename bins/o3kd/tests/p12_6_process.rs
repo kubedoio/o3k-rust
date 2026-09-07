@@ -141,6 +141,8 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     let application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: compute.clone(),
+            image: None,
+            public_address_workflow: None,
             network_service: network_service.clone(),
             store: store.clone(),
             storage_provider: Some(Arc::new(
@@ -154,6 +156,9 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
                 authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
             }),
             external_controllers: Arc::new(Default::default()),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     let mut manifests = ManifestRegistry::new();
     manifests.seed_core()?;
@@ -236,6 +241,8 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     let api_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: compute.clone(),
+            image: None,
+            public_address_workflow: None,
             network_service: network_service.clone(),
             store: store.clone(),
             storage_provider: Some(Arc::new(
@@ -252,6 +259,9 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
                 "database-example".to_owned(),
                 controller.clone(),
             )])),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     manifests.register_controller("database-example", controller.session().clone())?;
     manifests.activate_controller("database-example")?;
@@ -748,6 +758,8 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     let independent_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: independent_compute.clone(),
+            image: None,
+            public_address_workflow: None,
             network_service: independent_network,
             store: store.clone(),
             storage_provider: Some(Arc::new(
@@ -761,6 +773,9 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
                 authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
             }),
             external_controllers: Arc::new(Default::default()),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     let independent_dispatcher =
         o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&manifests)
@@ -1251,6 +1266,8 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
         let application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
             Arc::new(o3kd::native_adapters::GenericResourceApplication {
                 compute: compute.clone(),
+                image: None,
+                public_address_workflow: None,
                 network_service: network.clone(),
                 store: store.clone(),
                 storage_provider: Some(Arc::new(
@@ -1264,6 +1281,9 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
                     authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
                 }),
                 external_controllers: Arc::new(Default::default()),
+                public_allocator: None,
+                network_external_realm_id: None,
+                attachment_workflow: None,
             });
         let dispatcher =
             o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&registry)
@@ -1453,6 +1473,8 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
     let application_b: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: compute_b.clone(),
+            image: None,
+            public_address_workflow: None,
             network_service: network_b,
             store: store_b.clone(),
             storage_provider: Some(Arc::new(
@@ -1466,6 +1488,9 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
                 authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
             }),
             external_controllers: Arc::new(Default::default()),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     let dispatcher_b =
         o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&registry_b)
@@ -1709,6 +1734,8 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
     let left_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: left_compute.clone(),
+            image: None,
+            public_address_workflow: None,
             network_service: left_network,
             store: left_store.clone(),
             storage_provider: Some(Arc::new(
@@ -1722,10 +1749,15 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
                 authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
             }),
             external_controllers: Arc::new(Default::default()),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     let right_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: right_compute.clone(),
+            image: None,
+            public_address_workflow: None,
             network_service: right_network,
             store: right_store.clone(),
             storage_provider: Some(Arc::new(
@@ -1739,6 +1771,9 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
                 authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
             }),
             external_controllers: Arc::new(Default::default()),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     let mut child_registry = ManifestRegistry::new();
     child_registry.seed_core()?;

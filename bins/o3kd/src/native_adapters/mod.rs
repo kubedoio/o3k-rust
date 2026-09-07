@@ -3,7 +3,7 @@ mod compute;
 mod helpers;
 mod network;
 mod operation;
-mod resource;
+pub(crate) mod resource;
 mod token;
 mod volume;
 

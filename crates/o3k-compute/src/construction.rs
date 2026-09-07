@@ -322,7 +322,34 @@ impl ComputeService {
         &self,
         observation: &o3k_provider::AgentObservation,
     ) -> Result<(), ComputeError> {
-        Ok(self.journal.apply_agent_observation(observation).await?)
+        let operation = self.store.get_operation(observation.operation_id).await?;
+        self.journal.apply_agent_observation(observation).await?;
+
+        // Canonical deletes may return before the provider command has
+        // finished.  The terminal provider observation is therefore the
+        // durable point at which placement can be released.  Keep this
+        // idempotent: the synchronous delete path may already have released
+        // the allocation before a duplicate observation arrives.
+        if operation.kind == "lifecycle:delete"
+            && observation.state == o3k_provider::InstanceState::Deleted
+        {
+            let resource = self.store.get_resource(observation.resource_id).await?;
+            let request: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
+                .map_err(|_| ComputeError::InvalidRequest)?;
+            if let (Some(scheduler), Some(provider_id), Some(allocation_id)) = (
+                self.scheduler.as_ref(),
+                request.placement_provider_id.as_deref(),
+                request.placement_allocation_id.as_deref(),
+            ) && scheduler
+                .validate_allocation(provider_id, allocation_id, &resource.id.to_string())
+                .await
+                .is_ok()
+            {
+                self.release_placement_allocation(resource.id, &request)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     /// Starts the in-memory event bridge used by the control-plane binary.

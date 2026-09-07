@@ -187,6 +187,7 @@ mod native_compute_tests {
 
         let app = GenericResourceApplication {
             compute: compute.clone(),
+            image: None,
             network_service,
             store: store.clone(),
             storage_provider: None,
@@ -198,6 +199,10 @@ mod native_compute_tests {
                 authorizer: Arc::new(o3k_kernel::StaticAuthorizer::empty()),
             }),
             external_controllers: Arc::new(BTreeMap::new()),
+            public_allocator: None,
+            public_address_workflow: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         };
 
         let native = o3k_native_api::NativeApiState::new(

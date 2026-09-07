@@ -183,6 +183,134 @@ actions:
     require_ownership: true
     public_discovery: false
 
+  - action_id: "network:ListSecurityGroups"
+    service_namespace: "network"
+    resource_type: "security_group"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ReadSecurityGroup"
+    service_namespace: "network"
+    resource_type: "security_group"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:CreateSecurityGroup"
+    service_namespace: "network"
+    resource_type: "security_group"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:DeleteSecurityGroup"
+    service_namespace: "network"
+    resource_type: "security_group"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ListSecurityGroupRules"
+    service_namespace: "network"
+    resource_type: "security_group_rule"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ReadSecurityGroupRule"
+    service_namespace: "network"
+    resource_type: "security_group_rule"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:CreateSecurityGroupRule"
+    service_namespace: "network"
+    resource_type: "security_group_rule"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:DeleteSecurityGroupRule"
+    service_namespace: "network"
+    resource_type: "security_group_rule"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ListRouters"
+    service_namespace: "network"
+    resource_type: "router"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ReadRouter"
+    service_namespace: "network"
+    resource_type: "router"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:CreateRouter"
+    service_namespace: "network"
+    resource_type: "router"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:DeleteRouter"
+    service_namespace: "network"
+    resource_type: "router"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ListRouterInterfaces"
+    service_namespace: "network"
+    resource_type: "router_interface"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ReadRouterInterface"
+    service_namespace: "network"
+    resource_type: "router_interface"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:CreateRouterInterface"
+    service_namespace: "network"
+    resource_type: "router_interface"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:DeleteRouterInterface"
+    service_namespace: "network"
+    resource_type: "router_interface"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
   - action_id: "network:ListExtensions"
     service_namespace: "network"
     resource_type: "extension"

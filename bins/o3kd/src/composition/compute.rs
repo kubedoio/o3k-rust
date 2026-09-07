@@ -278,10 +278,10 @@ impl DaemonCreateResolver {
             .as_ref()
             .ok_or(ProviderError::InvalidRequest)?;
         let input = Self::config_drive_input(request, config, network_data);
-        let generated = self
-            .config_drive
-            .generate(&input)
-            .map_err(|_| ProviderError::InvalidRequest)?;
+        let generated = self.config_drive.generate(&input).map_err(|error| {
+            tracing::warn!(error = %error, "config-drive generation failed");
+            ProviderError::InvalidRequest
+        })?;
         // ConfigDriveStore authenticates the ISO against its managed root and
         // expects the published ISO beside the instance directory. Derive the
         // output location from the generated directory so the resolver cannot
@@ -290,11 +290,14 @@ impl DaemonCreateResolver {
         let iso = self
             .config_drive
             .materialize_iso(&generated.directory, output)
-            .map_err(|_| ProviderError::InvalidRequest)?;
-        let bytes = self
-            .config_drive
-            .read_verified_iso(&iso)
-            .map_err(|_| ProviderError::InvalidRequest)?;
+            .map_err(|error| {
+                tracing::warn!(error = %error, "config-drive ISO materialization failed");
+                ProviderError::InvalidRequest
+            })?;
+        let bytes = self.config_drive.read_verified_iso(&iso).map_err(|error| {
+            tracing::warn!(error = %error, "config-drive ISO verification failed");
+            ProviderError::InvalidRequest
+        })?;
         Ok((iso, bytes))
     }
 }
@@ -377,11 +380,21 @@ impl ResolvedCreateResolver for DaemonCreateResolver {
         agent: &AgentNodeSnapshot,
     ) -> Result<ResolvedCreateInputs, ProviderError> {
         self.ensure_create_operation_active(request).await?;
-        let image = self.resolve_image(request).await?;
+        let image = self.resolve_image(request).await.map_err(|error| {
+            tracing::warn!(resource_id = %request.o3k_server_id, error = %error, "compute create image resolution rejected");
+            error
+        })?;
         let (network_attachments, network_data) = self
             .resolve_network(request, &agent.agent_id, &agent.agent_epoch)
-            .await?;
-        let (iso, _) = self.materialize_config_drive(request, network_data)?;
+            .await
+            .map_err(|error| {
+                tracing::warn!(resource_id = %request.o3k_server_id, error = %error, "compute create network resolution rejected");
+                error
+            })?;
+        let (iso, _) = self.materialize_config_drive(request, network_data).map_err(|error| {
+            tracing::warn!(resource_id = %request.o3k_server_id, error = %error, "compute create config-drive resolution rejected");
+            error
+        })?;
         let flavor_id = (!request.flavor_id.trim().is_empty())
             .then(|| request.flavor_id.clone())
             .ok_or(ProviderError::InvalidRequest)?;

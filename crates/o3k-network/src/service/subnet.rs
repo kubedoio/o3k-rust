@@ -86,6 +86,31 @@ impl NetworkService {
         allocation_start: Option<Ipv4Addr>,
         allocation_end: Option<Ipv4Addr>,
     ) -> Result<SubnetRecord, NetworkError> {
+        self.create_subnet_for_project_with_id(
+            project_id,
+            Uuid::now_v7(),
+            network_id,
+            name,
+            cidr,
+            gateway_ip,
+            allocation_start,
+            allocation_end,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_subnet_for_project_with_id(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        network_id: Uuid,
+        name: String,
+        cidr: String,
+        gateway_ip: Option<Ipv4Addr>,
+        allocation_start: Option<Ipv4Addr>,
+        allocation_end: Option<Ipv4Addr>,
+    ) -> Result<SubnetRecord, NetworkError> {
         let net = Ipv4Net::parse(&cidr)?;
         let cidr = net.canonical();
         let gateway = gateway_ip.unwrap_or(net.first_host());
@@ -105,7 +130,7 @@ impl NetworkService {
         self.get_canonical_network_for_project(project_id, network_id)
             .await?;
         let subnet = SubnetRecord {
-            id: Uuid::now_v7(),
+            id,
             network_id,
             name,
             project_id: project_id.to_owned(),

@@ -30,6 +30,7 @@ pub mod translation;
 pub mod volume;
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RESOURCES: usize = 50_000;
 const MAX_NAME_BYTES: usize = 256;
 
@@ -91,8 +92,8 @@ pub enum DiscoveryError {
     InsecureEndpoint,
     #[error("source response exceeded the bounded response limit")]
     ResponseTooLarge,
-    #[error("source returned HTTP {status}")]
-    HttpStatus { status: u16 },
+    #[error("source returned HTTP {status} for {path}")]
+    HttpStatus { status: u16, path: String },
     #[error("source response was malformed: {0}")]
     MalformedResponse(String),
     #[error("source request failed: {0}")]
@@ -159,7 +160,7 @@ impl ResourceKind {
             | Self::Router
             | Self::RouterInterface
             | Self::FloatingIp => "network",
-            Self::Volume | Self::VolumeAttachment => "volumev3",
+            Self::Volume | Self::VolumeAttachment => "block-storage",
         }
     }
 }
@@ -221,6 +222,14 @@ pub struct SourceDocument {
 pub trait OpenStackSource: Send + Sync {
     async fn project(&self) -> Result<SourceDocument, DiscoveryError>;
     async fn list(&self, kind: ResourceKind) -> Result<Vec<SourceDocument>, DiscoveryError>;
+    async fn download_image(
+        &self,
+        _source_id: &str,
+    ) -> Result<Vec<u8>, crate::runner::RunnerError> {
+        Err(crate::runner::RunnerError::Source(
+            "image download adapter is not configured".into(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -280,14 +289,54 @@ pub async fn discover<S: OpenStackSource>(
         }
     }
     documents.sort_by_key(|document| (document.kind, id(&document.body)));
+    // Nova server responses commonly omit the Neutron port IDs from the
+    // `networks` field while Neutron still reports the server relationship on
+    // each port.  Preserve that observed relationship in the snapshot so
+    // dependency ordering creates ports before the canonical compute API is
+    // asked to create the server.
+    let mut server_ports = BTreeMap::<String, Vec<String>>::new();
+    for document in documents
+        .iter()
+        .filter(|document| document.kind == ResourceKind::Port)
+    {
+        let Some(server_id) = document
+            .body
+            .get("device_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let port_id = id(&document.body);
+        if !port_id.is_empty() {
+            server_ports
+                .entry(server_id.to_owned())
+                .or_default()
+                .push(port_id);
+        }
+    }
     let mut generation_inputs = documents
         .iter()
         .map(|document| document.generation_input.clone())
         .collect::<Vec<_>>();
-    let resources = documents
+    let mut resources = documents
         .into_iter()
         .map(|document| classify(document, &config.project_id))
         .collect::<Result<Vec<_>, _>>()?;
+    for resource in &mut resources {
+        if resource.kind == ResourceKind::Server
+            && let Some(port_ids) = server_ports.get(&resource.source_id)
+        {
+            let missing_port_ids = port_ids
+                .iter()
+                .filter(|port_id| !resource.dependencies.contains(port_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            resource.dependencies.extend(missing_port_ids);
+            resource.dependencies.sort();
+            resource.dependencies.dedup();
+        }
+    }
     generation_inputs.extend(
         resources
             .iter()
@@ -372,11 +421,25 @@ fn classify(document: SourceDocument, project_id: &str) -> Result<SourceResource
     }
     let (classification, mut reasons) = classify_semantics(document.kind, &document.body);
     let dependencies = dependencies(document.kind, &document.body);
+    // Several OpenStack APIs omit the project field from a response even
+    // though the request was made with a project-scoped token (notably Nova
+    // server detail and Cinder volume/attachment detail).  For those
+    // project-scoped collections, the authenticated endpoint is the
+    // authority for ownership; treating the omission as unknown would make a
+    // real tenant workload impossible to migrate while still allowing
+    // cross-project network objects to be rejected below.
     let project = document
         .body
         .get("project_id")
         .and_then(Value::as_str)
-        .map(str::to_owned);
+        .map(str::to_owned)
+        .or_else(|| {
+            matches!(
+                document.kind,
+                ResourceKind::Server | ResourceKind::Volume | ResourceKind::VolumeAttachment
+            )
+            .then(|| project_id.to_owned())
+        });
     if project.as_deref().is_some_and(|value| value != project_id) {
         reasons.push(reason(
             "CROSS_PROJECT_RESOURCE",
@@ -504,9 +567,17 @@ fn reason(code: &str, detail: &str) -> ClassificationReason {
 fn dependencies(kind: ResourceKind, body: &Value) -> Vec<String> {
     let keys: &[&str] = match kind {
         ResourceKind::Subnet => &["network_id"],
-        ResourceKind::Port => &["network_id", "device_id"],
+        // A Neutron port may report its current server device owner, but
+        // destination port creation must precede compute server creation so
+        // the canonical compute path can attach an already-realized port.
+        // The device relationship is therefore observed metadata, not a
+        // creation dependency.
+        ResourceKind::Port => &["network_id"],
         ResourceKind::SecurityGroupRule => &["security_group_id", "remote_group_id"],
-        ResourceKind::RouterInterface => &["router_id", "port_id", "subnet_id"],
+        // Neutron represents a router interface as a router-owned port.  The
+        // port's `device_id` is therefore the source router dependency when
+        // the compatibility response does not expose `router_id` directly.
+        ResourceKind::RouterInterface => &["router_id", "device_id", "port_id", "subnet_id"],
         ResourceKind::FloatingIp => &["floating_network_id", "port_id"],
         ResourceKind::Server => &["image_id", "flavor_id", "key_name", "network_id"],
         ResourceKind::VolumeAttachment => &["volume_id", "server_id"],
@@ -523,6 +594,24 @@ fn dependencies(kind: ResourceKind, body: &Value) -> Vec<String> {
             ["net-id", "port"]
                 .into_iter()
                 .filter_map(move |key| item.get(key).and_then(Value::as_str).map(str::to_owned))
+        }));
+    }
+    if kind == ResourceKind::Port
+        && let Some(items) = body.get("fixed_ips").and_then(Value::as_array)
+    {
+        dependencies.extend(items.iter().filter_map(|item| {
+            item.get("subnet_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }));
+    }
+    if kind == ResourceKind::RouterInterface
+        && let Some(items) = body.get("fixed_ips").and_then(Value::as_array)
+    {
+        dependencies.extend(items.iter().filter_map(|item| {
+            item.get("subnet_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
         }));
     }
     dependencies.sort();
@@ -575,6 +664,7 @@ pub struct ReqwestOpenStackSource {
     token: String,
     catalog: BTreeMap<String, Url>,
     project_id: String,
+    project_body: Value,
 }
 
 impl ReqwestOpenStackSource {
@@ -588,7 +678,15 @@ impl ReqwestOpenStackSource {
             .map_err(|error| DiscoveryError::Request(error.to_string()))?;
         let auth_url = append_path(&config.auth_url, "auth/tokens")?;
         validate_url(&auth_url, config)?;
+        let auth_path = auth_url.path().to_owned();
         let response = client.post(auth_url).json(&json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":config.username,"domain":{"name":config.user_domain_name},"password":config.password.expose()}}},"scope":{"project":{"id":config.project_id}}}})).send().await.map_err(|error| DiscoveryError::Request(error.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(DiscoveryError::HttpStatus {
+                status: status.as_u16(),
+                path: auth_path,
+            });
+        }
         let token = response
             .headers()
             .get("x-subject-token")
@@ -598,19 +696,25 @@ impl ReqwestOpenStackSource {
                 "authentication response omitted token".to_owned(),
             ))?
             .to_owned();
-        let status = response.status();
-        let body = bounded_json(response).await?;
-        if !status.is_success() {
-            return Err(DiscoveryError::HttpStatus {
-                status: status.as_u16(),
-            });
-        }
+        let body = bounded_json(response).await.map_err(|error| {
+            DiscoveryError::MalformedResponse(format!("{}: {error}", auth_path))
+        })?;
         let catalog = parse_catalog(&body, config)?;
+        let project_body = body
+            .get("token")
+            .and_then(|token| token.get("project"))
+            .cloned()
+            .ok_or_else(|| {
+                DiscoveryError::MalformedResponse(
+                    "authentication response omitted scoped project".to_owned(),
+                )
+            })?;
         Ok(Self {
             client,
             token,
             catalog,
             project_id: config.project_id.clone(),
+            project_body,
         })
     }
 }
@@ -618,40 +722,213 @@ impl ReqwestOpenStackSource {
 #[async_trait]
 impl OpenStackSource for ReqwestOpenStackSource {
     async fn project(&self) -> Result<SourceDocument, DiscoveryError> {
-        let endpoint = self
-            .catalog
-            .get("identity")
-            .ok_or(DiscoveryError::MalformedResponse(
-                "catalog has no identity endpoint".to_owned(),
-            ))?;
-        let url = append_path(endpoint, &format!("projects/{}", self.project_id))?;
-        let (body, generation_input) = self.get_json(url).await?;
         Ok(SourceDocument {
             kind: ResourceKind::Project,
-            generation_input,
-            body,
+            generation_input: format!("scoped-project:{}", self.project_id),
+            body: self.project_body.clone(),
         })
     }
 
     async fn list(&self, kind: ResourceKind) -> Result<Vec<SourceDocument>, DiscoveryError> {
-        let endpoint = self.catalog.get(kind.service()).ok_or_else(|| {
-            DiscoveryError::MalformedResponse(format!("catalog has no {} endpoint", kind.service()))
+        let service = if kind == ResourceKind::VolumeAttachment {
+            "compute"
+        } else {
+            kind.service()
+        };
+        let endpoint = self.catalog.get(service).ok_or_else(|| {
+            DiscoveryError::MalformedResponse(format!("catalog has no {service} endpoint"))
         })?;
-        let url = append_path(endpoint, kind.path())?;
+        // Keystone catalogs commonly publish service roots rather than the
+        // versioned REST base.  Resolve those public API bases explicitly;
+        // otherwise a valid Neutron `/networking` or Glance `/image` catalog
+        // entry is queried as a non-existent root.  Cinder's v3 contract also
+        // permits (and DevStack advertises) a project-id path segment.
+        let versioned = match kind {
+            ResourceKind::Image => append_path(endpoint, "v2")?,
+            ResourceKind::Network
+            | ResourceKind::Subnet
+            | ResourceKind::Port
+            | ResourceKind::SecurityGroup
+            | ResourceKind::SecurityGroupRule
+            | ResourceKind::Router
+            | ResourceKind::RouterInterface
+            | ResourceKind::FloatingIp => append_path(endpoint, "v2.0")?,
+            ResourceKind::Volume => append_path(endpoint, &self.project_id)?,
+            ResourceKind::VolumeAttachment => endpoint.clone(),
+            _ => endpoint.clone(),
+        };
+        let url = if kind == ResourceKind::RouterInterface {
+            // Neutron exposes router interfaces as ports with a router
+            // interface device owner; there is no portable collection route
+            // named /router-interfaces in the v2.0 API.
+            append_path(&versioned, "ports")?
+        } else if kind == ResourceKind::VolumeAttachment {
+            append_path(&versioned, "servers/detail")?
+        } else {
+            append_path(&versioned, kind.path())?
+        };
         let (body, generation_input) = self.get_json(url).await?;
         let items = body
-            .get(kind.path().split('/').next().unwrap_or(kind.path()))
+            .get(if kind == ResourceKind::RouterInterface {
+                "ports"
+            } else if kind == ResourceKind::VolumeAttachment {
+                "servers"
+            } else if kind == ResourceKind::Keypair {
+                "keypairs"
+            } else {
+                kind.path().split('/').next().unwrap_or(kind.path())
+            })
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_else(|| body.as_array().cloned().unwrap_or_default());
+        let items = if kind == ResourceKind::Keypair {
+            items
+                .into_iter()
+                .filter_map(|item| item.get("keypair").cloned().or(Some(item)))
+                .map(|mut item| {
+                    // Nova keypair responses identify the resource by name;
+                    // normalize that stable identity at the OpenStack edge so
+                    // the migration manifest can retain its required id field.
+                    if item.get("id").is_none()
+                        && let Some(name) = item.get("name").and_then(Value::as_str)
+                    {
+                        item["id"] = Value::String(name.to_owned());
+                    }
+                    item
+                })
+                .collect()
+        } else if kind == ResourceKind::VolumeAttachment {
+            items
+                .into_iter()
+                .flat_map(|server| {
+                    let server_id = server.get("id").cloned();
+                    server
+                        .get("os-extended-volumes:volumes_attached")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(move |mut attachment| {
+                            if let (Some(object), Some(server_id)) =
+                                (attachment.as_object_mut(), server_id.clone())
+                            {
+                                object.insert("server_id".into(), server_id);
+                            }
+                            attachment
+                        })
+                })
+                .collect()
+        } else {
+            items
+        };
+        // Nova's flavor collection intentionally omits the sizing fields that
+        // are required to recreate a flavor.  Enrich each listed flavor from
+        // the public Nova show operation; this keeps the source authority at
+        // Nova's API and avoids treating an incomplete collection response as
+        // a migratable resource.
+        let items = if kind == ResourceKind::Flavor {
+            let mut detailed = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(id) = item.get("id").and_then(Value::as_str) else {
+                    return Err(DiscoveryError::MalformedResponse(
+                        "flavor collection item omitted id".to_owned(),
+                    ));
+                };
+                let detail_url = append_path(&versioned, &format!("flavors/{id}"))?;
+                let (detail, _) = self.get_json(detail_url).await?;
+                let detail = detail.get("flavor").cloned().unwrap_or(detail);
+                // Public Nova flavors are cloud-wide catalog data, not
+                // project-owned migration resources.  The destination
+                // profile supplies its own public catalog; attempting
+                // to recreate those entries both creates a name
+                // collision and would incorrectly claim ownership.
+                if detail
+                    .get("os-flavor-access:is_public")
+                    .and_then(Value::as_bool)
+                    != Some(true)
+                {
+                    detailed.push(detail);
+                }
+            }
+            detailed
+        } else {
+            items
+        };
+        let items = if kind == ResourceKind::Image {
+            // Public Glance images are shared cloud catalog entries rather
+            // than project-owned workload state.  The destination must use
+            // its own catalog entry; importing one as a tenant-owned image
+            // would both alter authority and fail the native image contract,
+            // which intentionally accepts private images only.
+            items
+                .into_iter()
+                .filter(|item| item.get("visibility").and_then(Value::as_str) != Some("public"))
+                .collect()
+        } else {
+            items
+        };
         Ok(items
             .into_iter()
+            .filter(|body| {
+                if kind == ResourceKind::RouterInterface {
+                    body.get("device_owner")
+                        .and_then(Value::as_str)
+                        .is_some_and(|owner| owner.starts_with("network:router_interface"))
+                } else if kind == ResourceKind::Port {
+                    !body
+                        .get("device_owner")
+                        .and_then(Value::as_str)
+                        .is_some_and(|owner| owner.starts_with("network:router_interface"))
+                } else {
+                    true
+                }
+            })
             .map(|body| SourceDocument {
                 kind,
                 body,
                 generation_input: generation_input.clone(),
             })
             .collect())
+    }
+
+    async fn download_image(&self, source_id: &str) -> Result<Vec<u8>, crate::runner::RunnerError> {
+        let endpoint = self.catalog.get("image").ok_or_else(|| {
+            crate::runner::RunnerError::Source("catalog has no image endpoint".into())
+        })?;
+        let url = append_path(endpoint, &format!("v2/images/{source_id}/file"))
+            .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+        let response = self
+            .client
+            .get(url.clone())
+            .header("X-Auth-Token", &self.token)
+            .send()
+            .await
+            .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(crate::runner::RunnerError::Source(format!(
+                "image download returned {} for {}",
+                response.status(),
+                url.path()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_IMAGE_BYTES as u64)
+        {
+            return Err(crate::runner::RunnerError::Source(
+                "image download exceeds the bounded transfer limit".into(),
+            ));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err(crate::runner::RunnerError::Source(
+                "image download exceeds the bounded transfer limit".into(),
+            ));
+        }
+        Ok(bytes.to_vec())
     }
 }
 
@@ -660,23 +937,185 @@ impl ReqwestOpenStackSource {
         let response = self
             .client
             .get(url.clone())
-            .bearer_auth(&self.token)
+            .header("X-Auth-Token", &self.token)
             .send()
             .await
             .map_err(|error| DiscoveryError::Request(error.to_string()))?;
         let status = response.status();
         let generation_input = generation_input(&url, &response);
-        let body = bounded_json(response).await?;
+        let body = bounded_json(response).await.map_err(|error| {
+            DiscoveryError::MalformedResponse(format!("{}: {error}", url.path()))
+        })?;
         if !status.is_success() {
             return Err(DiscoveryError::HttpStatus {
                 status: status.as_u16(),
+                path: url.path().to_owned(),
             });
         }
         Ok((body, generation_input))
     }
+
+    async fn post_json(&self, url: Url, body: Value) -> Result<Value, DiscoveryError> {
+        let response = self
+            .client
+            .post(url.clone())
+            .header("X-Auth-Token", &self.token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| DiscoveryError::Request(error.to_string()))?;
+        let status = response.status();
+        let body = bounded_json_allow_empty(response).await.map_err(|error| {
+            DiscoveryError::MalformedResponse(format!("{}: {error}", url.path()))
+        })?;
+        if !status.is_success() && status.as_u16() != 202 {
+            return Err(DiscoveryError::HttpStatus {
+                status: status.as_u16(),
+                path: url.path().to_owned(),
+            });
+        }
+        Ok(body)
+    }
+}
+
+#[async_trait]
+impl crate::runner::SourceControl for ReqwestOpenStackSource {
+    async fn quiesce(&self, server_source_id: &str) -> Result<(), crate::runner::RunnerError> {
+        let endpoint = self.catalog.get("compute").ok_or_else(|| {
+            crate::runner::RunnerError::Source("catalog has no compute endpoint".into())
+        })?;
+        let action = append_path(endpoint, &format!("servers/{server_source_id}/action"))
+            .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+        let current = append_path(endpoint, &format!("servers/{server_source_id}"))
+            .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+        let (current_body, _) = self
+            .get_json(current)
+            .await
+            .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+        let current_state = current_body
+            .get("server")
+            .and_then(|value| value.get("OS-EXT-STS:vm_state"))
+            .and_then(Value::as_str)
+            .or_else(|| current_body.get("status").and_then(Value::as_str));
+        if matches!(current_state, Some("stopped" | "shutoff" | "SHUTOFF")) {
+            return Ok(());
+        }
+        self.post_json(action, json!({"os-stop": null}))
+            .await
+            .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+        for _ in 0..30 {
+            let server = append_path(endpoint, &format!("servers/{server_source_id}"))
+                .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+            let (body, _) = self
+                .get_json(server)
+                .await
+                .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+            let state = body
+                .get("server")
+                .and_then(|value| value.get("OS-EXT-STS:vm_state"))
+                .and_then(Value::as_str)
+                .or_else(|| body.get("status").and_then(Value::as_str));
+            if matches!(state, Some("stopped" | "shutoff" | "SHUTOFF")) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err(crate::runner::RunnerError::Source(
+            "Nova server did not reach SHUTOFF during quiesce".into(),
+        ))
+    }
+
+    async fn resume(&self, server_source_id: &str) -> Result<(), crate::runner::RunnerError> {
+        let endpoint = self.catalog.get("compute").ok_or_else(|| {
+            crate::runner::RunnerError::Source("catalog has no compute endpoint".into())
+        })?;
+        let action = append_path(endpoint, &format!("servers/{server_source_id}/action"))
+            .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+        let current = append_path(endpoint, &format!("servers/{server_source_id}"))
+            .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+        let (current_body, _) = self
+            .get_json(current)
+            .await
+            .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+        let current_state = current_body
+            .get("server")
+            .and_then(|value| value.get("OS-EXT-STS:vm_state"))
+            .and_then(Value::as_str)
+            .or_else(|| current_body.get("status").and_then(Value::as_str));
+        if matches!(current_state, Some("active" | "ACTIVE" | "running")) {
+            return Ok(());
+        }
+        self.post_json(action, json!({"os-start": null}))
+            .await
+            .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+        for _ in 0..30 {
+            let server = append_path(endpoint, &format!("servers/{server_source_id}"))
+                .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+            let (body, _) = self
+                .get_json(server)
+                .await
+                .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+            let state = body
+                .get("server")
+                .and_then(|value| value.get("OS-EXT-STS:vm_state"))
+                .and_then(Value::as_str)
+                .or_else(|| body.get("status").and_then(Value::as_str));
+            if matches!(state, Some("active" | "ACTIVE" | "running")) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err(crate::runner::RunnerError::Source(
+            "Nova server did not return to ACTIVE during resume".into(),
+        ))
+    }
+
+    async fn final_sync(
+        &self,
+        snapshot: &SourceSnapshot,
+    ) -> Result<(), crate::runner::RunnerError> {
+        let server_id = snapshot
+            .resources
+            .iter()
+            .find(|resource| resource.kind == ResourceKind::Server)
+            .map(|resource| resource.source_id.as_str())
+            .ok_or_else(|| crate::runner::RunnerError::Source("snapshot has no server".into()))?;
+        let endpoint = self.catalog.get("compute").ok_or_else(|| {
+            crate::runner::RunnerError::Source("catalog has no compute endpoint".into())
+        })?;
+        let server = append_path(endpoint, &format!("servers/{server_id}"))
+            .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+        let (body, _) = self
+            .get_json(server)
+            .await
+            .map_err(|error| crate::runner::RunnerError::Source(error.to_string()))?;
+        let state = body
+            .get("server")
+            .and_then(|value| value.get("OS-EXT-STS:vm_state"))
+            .and_then(Value::as_str)
+            .or_else(|| body.get("status").and_then(Value::as_str));
+        if matches!(state, Some("stopped" | "shutoff" | "SHUTOFF")) {
+            Ok(())
+        } else {
+            Err(crate::runner::RunnerError::Source(
+                "Nova server changed or is not quiesced for final sync".into(),
+            ))
+        }
+    }
 }
 
 async fn bounded_json(response: reqwest::Response) -> Result<Value, DiscoveryError> {
+    bounded_json_inner(response, false).await
+}
+
+async fn bounded_json_allow_empty(response: reqwest::Response) -> Result<Value, DiscoveryError> {
+    bounded_json_inner(response, true).await
+}
+
+async fn bounded_json_inner(
+    response: reqwest::Response,
+    allow_empty: bool,
+) -> Result<Value, DiscoveryError> {
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
@@ -694,6 +1133,9 @@ async fn bounded_json(response: reqwest::Response) -> Result<Value, DiscoveryErr
             return Err(DiscoveryError::ResponseTooLarge);
         }
         bytes.extend_from_slice(&chunk);
+    }
+    if allow_empty && bytes.is_empty() {
+        return Ok(Value::Null);
     }
     serde_json::from_slice(&bytes)
         .map_err(|error| DiscoveryError::MalformedResponse(error.to_string()))
@@ -862,6 +1304,30 @@ mod tests {
             .find(|resource| resource.kind == ResourceKind::Port)
             .expect("fixture includes port");
         assert_eq!(port.dependencies, vec!["network-a"]);
+    }
+
+    #[test]
+    fn port_dependencies_include_fixed_ip_subnets() {
+        let values = dependencies(
+            ResourceKind::Port,
+            &json!({
+                "network_id": "network-a",
+                "fixed_ips": [{"subnet_id": "subnet-a", "ip_address": "10.0.0.5"}]
+            }),
+        );
+        assert_eq!(values, vec!["network-a", "subnet-a"]);
+    }
+
+    #[test]
+    fn router_interface_dependencies_include_router_and_fixed_ip_subnet() {
+        let values = dependencies(
+            ResourceKind::RouterInterface,
+            &json!({
+                "device_id": "router-a",
+                "fixed_ips": [{"subnet_id": "subnet-a"}]
+            }),
+        );
+        assert_eq!(values, vec!["router-a", "subnet-a"]);
     }
 
     #[tokio::test]

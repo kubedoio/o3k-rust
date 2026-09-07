@@ -1623,7 +1623,24 @@ impl ManifestRegistry {
                     schema_version: "v1".to_owned(),
                     collection: None,
                     scope: ResourceScope::Tenant,
-                    operations: std::collections::HashMap::new(),
+                    operations: std::collections::HashMap::from([
+                        (
+                            "list".to_owned(),
+                            ActionId::new_unchecked("image", "ListImages"),
+                        ),
+                        (
+                            "show".to_owned(),
+                            ActionId::new_unchecked("image", "ReadImage"),
+                        ),
+                        (
+                            "create".to_owned(),
+                            ActionId::new_unchecked("image", "CreateImage"),
+                        ),
+                        (
+                            "delete".to_owned(),
+                            ActionId::new_unchecked("image", "DeleteImage"),
+                        ),
+                    ]),
                 }],
                 // Accepted in contracts/cloud-kernel-actions.yaml
                 actions: vec![
@@ -1683,7 +1700,24 @@ impl ManifestRegistry {
                         schema_version: "v1".to_owned(),
                         collection: None,
                         scope: ResourceScope::Tenant,
-                        operations: std::collections::HashMap::new(),
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".to_owned(),
+                                ActionId::new_unchecked("compute", "ListFlavors"),
+                            ),
+                            (
+                                "show".to_owned(),
+                                ActionId::new_unchecked("compute", "ReadFlavor"),
+                            ),
+                            (
+                                "create".to_owned(),
+                                ActionId::new_unchecked("compute", "CreateFlavor"),
+                            ),
+                            (
+                                "delete".to_owned(),
+                                ActionId::new_unchecked("compute", "DeleteFlavor"),
+                            ),
+                        ]),
                     },
                     RegisteredResourceType {
                         resource_type: ResourceType::new_unchecked("compute", "keypair"),
@@ -1776,6 +1810,177 @@ impl ManifestRegistry {
                             ),
                         ]),
                     },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("network", "subnet"),
+                        schema_version: "v1".into(),
+                        collection: Some("subnets".into()),
+                        scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".into(),
+                                ActionId::new_unchecked("network", "ListSubnets"),
+                            ),
+                            (
+                                "show".into(),
+                                ActionId::new_unchecked("network", "ReadSubnet"),
+                            ),
+                            (
+                                "create".into(),
+                                ActionId::new_unchecked("network", "CreateSubnet"),
+                            ),
+                            (
+                                "delete".into(),
+                                ActionId::new_unchecked("network", "DeleteSubnet"),
+                            ),
+                        ]),
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("network", "port"),
+                        schema_version: "v1".into(),
+                        collection: Some("ports".into()),
+                        scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".into(),
+                                ActionId::new_unchecked("network", "ListPorts"),
+                            ),
+                            (
+                                "show".into(),
+                                ActionId::new_unchecked("network", "ReadPort"),
+                            ),
+                            (
+                                "create".into(),
+                                ActionId::new_unchecked("network", "CreatePort"),
+                            ),
+                            (
+                                "delete".into(),
+                                ActionId::new_unchecked("network", "DeletePort"),
+                            ),
+                        ]),
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("network", "security_group"),
+                        schema_version: "v1".into(),
+                        collection: Some("security-groups".into()),
+                        scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".into(),
+                                ActionId::new_unchecked("network", "ListSecurityGroups"),
+                            ),
+                            (
+                                "show".into(),
+                                ActionId::new_unchecked("network", "ReadSecurityGroup"),
+                            ),
+                            (
+                                "create".into(),
+                                ActionId::new_unchecked("network", "CreateSecurityGroup"),
+                            ),
+                            (
+                                "delete".into(),
+                                ActionId::new_unchecked("network", "DeleteSecurityGroup"),
+                            ),
+                        ]),
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked(
+                            "network",
+                            "security_group_rule",
+                        ),
+                        schema_version: "v1".into(),
+                        collection: Some("security-group-rules".into()),
+                        scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".into(),
+                                ActionId::new_unchecked("network", "ListSecurityGroupRules"),
+                            ),
+                            (
+                                "show".into(),
+                                ActionId::new_unchecked("network", "ReadSecurityGroupRule"),
+                            ),
+                            (
+                                "create".into(),
+                                ActionId::new_unchecked("network", "CreateSecurityGroupRule"),
+                            ),
+                            (
+                                "delete".into(),
+                                ActionId::new_unchecked("network", "DeleteSecurityGroupRule"),
+                            ),
+                        ]),
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("network", "router"),
+                        schema_version: "v1".into(),
+                        collection: Some("routers".into()),
+                        scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".into(),
+                                ActionId::new_unchecked("network", "ListRouters"),
+                            ),
+                            (
+                                "show".into(),
+                                ActionId::new_unchecked("network", "ReadRouter"),
+                            ),
+                            (
+                                "create".into(),
+                                ActionId::new_unchecked("network", "CreateRouter"),
+                            ),
+                            (
+                                "delete".into(),
+                                ActionId::new_unchecked("network", "DeleteRouter"),
+                            ),
+                        ]),
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("network", "router_interface"),
+                        schema_version: "v1".into(),
+                        collection: Some("router-interfaces".into()),
+                        scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".into(),
+                                ActionId::new_unchecked("network", "ListRouterInterfaces"),
+                            ),
+                            (
+                                "show".into(),
+                                ActionId::new_unchecked("network", "ReadRouterInterface"),
+                            ),
+                            (
+                                "create".into(),
+                                ActionId::new_unchecked("network", "CreateRouterInterface"),
+                            ),
+                            (
+                                "delete".into(),
+                                ActionId::new_unchecked("network", "DeleteRouterInterface"),
+                            ),
+                        ]),
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("network", "floating_ip"),
+                        schema_version: "v1".to_owned(),
+                        collection: Some("floating-ips".to_owned()),
+                        scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".to_owned(),
+                                ActionId::new_unchecked("network", "ListAddressAllocations"),
+                            ),
+                            (
+                                "show".to_owned(),
+                                ActionId::new_unchecked("network", "ReadAddressAllocation"),
+                            ),
+                            (
+                                "create".to_owned(),
+                                ActionId::new_unchecked("network", "AllocateAddress"),
+                            ),
+                            (
+                                "delete".to_owned(),
+                                ActionId::new_unchecked("network", "ReleaseAddress"),
+                            ),
+                        ]),
+                    },
                 ],
                 actions: vec![
                     "network:ListAddressRealms".to_owned(),
@@ -1785,6 +1990,34 @@ impl ManifestRegistry {
                     "network:ReadNetwork".to_owned(),
                     "network:UpdateNetwork".to_owned(),
                     "network:DeleteNetwork".to_owned(),
+                    "network:ListSubnets".to_owned(),
+                    "network:CreateSubnet".to_owned(),
+                    "network:ReadSubnet".to_owned(),
+                    "network:DeleteSubnet".to_owned(),
+                    "network:ListPorts".to_owned(),
+                    "network:CreatePort".to_owned(),
+                    "network:ReadPort".to_owned(),
+                    "network:DeletePort".to_owned(),
+                    "network:ListSecurityGroups".to_owned(),
+                    "network:ReadSecurityGroup".to_owned(),
+                    "network:CreateSecurityGroup".to_owned(),
+                    "network:DeleteSecurityGroup".to_owned(),
+                    "network:ListSecurityGroupRules".to_owned(),
+                    "network:ReadSecurityGroupRule".to_owned(),
+                    "network:CreateSecurityGroupRule".to_owned(),
+                    "network:DeleteSecurityGroupRule".to_owned(),
+                    "network:ListRouters".to_owned(),
+                    "network:ReadRouter".to_owned(),
+                    "network:CreateRouter".to_owned(),
+                    "network:DeleteRouter".to_owned(),
+                    "network:ListRouterInterfaces".to_owned(),
+                    "network:ReadRouterInterface".to_owned(),
+                    "network:CreateRouterInterface".to_owned(),
+                    "network:DeleteRouterInterface".to_owned(),
+                    "network:ListAddressAllocations".to_owned(),
+                    "network:ReadAddressAllocation".to_owned(),
+                    "network:AllocateAddress".to_owned(),
+                    "network:ReleaseAddress".to_owned(),
                 ],
                 capabilities: vec![],
                 dependencies: vec![],
@@ -1805,35 +2038,65 @@ impl ManifestRegistry {
                 namespace: "volume".to_owned(),
                 service_version: "0.4.0".to_owned(),
                 ownership: ServiceOwnership::O3kImplemented,
-                resource_types: vec![RegisteredResourceType {
-                    resource_type: ResourceType::new_unchecked("volume", "volume"),
-                    schema_version: "v1".to_owned(),
-                    collection: Some("volumes".to_owned()),
-                    scope: ResourceScope::Tenant,
-                    operations: std::collections::HashMap::from([
-                        (
-                            "list".to_owned(),
-                            ActionId::new_unchecked("volume", "ListVolumes"),
-                        ),
-                        (
-                            "show".to_owned(),
-                            ActionId::new_unchecked("volume", "ReadVolume"),
-                        ),
-                        (
-                            "create".to_owned(),
-                            ActionId::new_unchecked("volume", "CreateVolume"),
-                        ),
-                        (
-                            "delete".to_owned(),
-                            ActionId::new_unchecked("volume", "DeleteVolume"),
-                        ),
-                    ]),
-                }],
+                resource_types: vec![
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("volume", "volume"),
+                        schema_version: "v1".to_owned(),
+                        collection: Some("volumes".to_owned()),
+                        scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".to_owned(),
+                                ActionId::new_unchecked("volume", "ListVolumes"),
+                            ),
+                            (
+                                "show".to_owned(),
+                                ActionId::new_unchecked("volume", "ReadVolume"),
+                            ),
+                            (
+                                "create".to_owned(),
+                                ActionId::new_unchecked("volume", "CreateVolume"),
+                            ),
+                            (
+                                "delete".to_owned(),
+                                ActionId::new_unchecked("volume", "DeleteVolume"),
+                            ),
+                        ]),
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("volume", "volume_attachment"),
+                        schema_version: "v1".to_owned(),
+                        collection: None,
+                        scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".to_owned(),
+                                ActionId::new_unchecked("volume", "ListVolumeAttachments"),
+                            ),
+                            (
+                                "show".to_owned(),
+                                ActionId::new_unchecked("volume", "ReadVolumeAttachment"),
+                            ),
+                            (
+                                "create".to_owned(),
+                                ActionId::new_unchecked("volume", "AttachVolume"),
+                            ),
+                            (
+                                "delete".to_owned(),
+                                ActionId::new_unchecked("volume", "DetachVolume"),
+                            ),
+                        ]),
+                    },
+                ],
                 actions: vec![
                     "volume:ListVolumes".to_owned(),
                     "volume:CreateVolume".to_owned(),
                     "volume:ReadVolume".to_owned(),
                     "volume:DeleteVolume".to_owned(),
+                    "volume:ListVolumeAttachments".to_owned(),
+                    "volume:AttachVolume".to_owned(),
+                    "volume:ReadVolumeAttachment".to_owned(),
+                    "volume:DetachVolume".to_owned(),
                 ],
                 capabilities: vec![],
                 dependencies: vec![],

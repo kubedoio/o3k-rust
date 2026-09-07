@@ -1190,7 +1190,7 @@ fn validate_command_with_deadline(
 ) -> Result<(), AgentError> {
     if !valid_reference(&command.command_id)
         || !valid_reference(&command.operation_id)
-        || !valid_reference(&command.idempotency_key)
+        || !valid_idempotency_key(&command.idempotency_key)
         || !valid_reference(&command.agent_id)
         || !valid_reference(&command.agent_epoch)
         || !valid_reference(&command.resource_id)
@@ -1394,7 +1394,7 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
         || !valid_reference(&project_id)
         || operation_id.trim().is_empty()
         || resource_id.trim().is_empty()
-        || idempotency_key.trim().is_empty()
+        || !valid_idempotency_key(&idempotency_key)
         || image_id.trim().is_empty()
         || flavor_id.trim().is_empty()
         || deadline_unix_ms <= unix_ms()
@@ -1831,6 +1831,14 @@ fn valid_reference(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn valid_idempotency_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-' | b'/')
+        })
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -5268,6 +5276,17 @@ mod tests {
 
         let mut invalid = valid_create_spec();
         invalid.network_attachments.clear();
+        assert!(build_create_command(invalid).is_err());
+    }
+
+    #[test]
+    fn create_command_accepts_scoped_idempotency_keys_with_resource_paths() {
+        let mut spec = valid_create_spec();
+        spec.idempotency_key = "scope:create:server/resource".to_owned();
+        assert!(build_create_command(spec).is_ok());
+
+        let mut invalid = valid_create_spec();
+        invalid.idempotency_key = "scope:create:server/resource with spaces".to_owned();
         assert!(build_create_command(invalid).is_err());
     }
 
