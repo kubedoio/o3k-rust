@@ -80,7 +80,6 @@ pub async fn probe_guest_checksum(
         "StrictHostKeyChecking=no",
         "-o",
         "UserKnownHostsFile=/dev/null",
-        "-i",
     ]);
     if let Some(proxy_command) = proxy_command {
         command
@@ -88,6 +87,7 @@ pub async fn probe_guest_checksum(
             .arg(format!("ProxyCommand={proxy_command}"));
     }
     command
+        .arg("-i")
         .arg(key)
         .arg(format!("cirros@{guest_ip}"))
         .arg("sudo sha256sum /mnt/p14-volume/p14-checksum-input")

@@ -23,6 +23,11 @@ else
 fi
 SERVICE_ACCOUNT=o3k
 COMPUTE_ACCOUNT=o3k-compute
+# Native LVM commands require access to the device-mapper control node.  The
+# disposable real-host profile may therefore run only the control-plane daemon
+# as root when an explicitly configured LVM provider is selected; compute
+# remains confined to its dedicated service account.
+O3KD_ACCOUNT="${O3K_TESTLAB_O3KD_ACCOUNT:-o3k}"
 ACCOUNT_LOCK=/run/lock/o3k-testlab-account.lock
 APT_LOCK=/run/lock/o3k-testlab-apt.lock
 AUTH_PORT="${O3K_TESTLAB_PORT:-18080}"
@@ -126,7 +131,7 @@ write_result() {
   local status="$1" reason="$2"
   mkdir -p "$ARTIFACT_DIR"
   python3 - "$ARTIFACT_DIR/disposable-testlab-bootstrap.json" "$status" "$reason" \
-    "$SOURCE_COMMIT" "$STATE_ROOT" "$SERVICE_ACCOUNT" "$AUTH_PORT" \
+    "$SOURCE_COMMIT" "$STATE_ROOT" "$O3KD_ACCOUNT" "$AUTH_PORT" \
     "${O3KD_PID:-}" "${COMPUTE_PID:-}" "$O3KD_READY" "$COMPUTE_READY" "$O3K_PROVIDER" <<'PY'
 import json, sys, time
 path, status, reason, commit, state, account, port, o3kd_pid, compute_pid, o3kd_ready, compute_ready, provider = sys.argv[1:]
@@ -237,7 +242,7 @@ if [[ -e "$STATE_ROOT" ]]; then
     && "$O3KD_START" =~ ^[0-9]+$ && "$COMPUTE_START" =~ ^[0-9]+$ \
     && "$O3KD_BINARY" == o3kd && "$COMPUTE_BINARY" == o3k-compute ]] \
     || fail "existing run state has an invalid process identity"
-  process_record_matches "$O3KD_PID" "$O3KD_START" "$O3KD_UID" o3kd "$SERVICE_ACCOUNT" \
+  process_record_matches "$O3KD_PID" "$O3KD_START" "$O3KD_UID" o3kd "$O3KD_ACCOUNT" \
     && process_record_matches "$COMPUTE_PID" "$COMPUTE_START" "$COMPUTE_UID" o3k-compute "$COMPUTE_ACCOUNT" \
     && sudo -n kill -0 "$O3KD_PID" 2>/dev/null && sudo -n kill -0 "$COMPUTE_PID" 2>/dev/null \
     || fail "existing run state services are not running"
@@ -299,7 +304,8 @@ account_state="$(sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
     "$compute_account_created" "$compute_group_created"
 ' _ "$STATE_ROOT/home")" || fail "cannot provision packaged o3k service account"
 read -r ACCOUNT_CREATED GROUP_CREATED COMPUTE_ACCOUNT_CREATED COMPUTE_GROUP_CREATED <<<"$account_state"
-[[ "$(id -u "$SERVICE_ACCOUNT")" != 0 ]] || fail "o3k service account is root"
+[[ "$O3KD_ACCOUNT" == root || "$(id -u "$O3KD_ACCOUNT")" != 0 ]] \
+  || fail "o3k service account is root"
 [[ "$(id -u "$COMPUTE_ACCOUNT")" != 0 ]] || fail "o3k-compute service account is root"
 control_record="$(getent passwd "$SERVICE_ACCOUNT" || true)"
 [[ "$control_record" == *":/usr/sbin/nologin" ]] \
@@ -607,7 +613,7 @@ wait_for_compute_ready() {
   COMPUTE_READY=true
 }
 
-start_service o3kd "$SERVICE_ACCOUNT" "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" "$PID_ROOT/o3kd.pid"
+start_service o3kd "$O3KD_ACCOUNT" "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" "$PID_ROOT/o3kd.pid"
 wait_for_o3kd_health
 if [[ "$O3K_PROVIDER" == agent ]]; then
   start_compute
