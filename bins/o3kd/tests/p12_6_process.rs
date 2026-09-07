@@ -156,6 +156,9 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
                 authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
             }),
             external_controllers: Arc::new(Default::default()),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     let mut manifests = ManifestRegistry::new();
     manifests.seed_core()?;
@@ -767,6 +770,9 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
                 authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
             }),
             external_controllers: Arc::new(Default::default()),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     let independent_dispatcher =
         o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&manifests)
@@ -1272,6 +1278,9 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
                     authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
                 }),
                 external_controllers: Arc::new(Default::default()),
+                public_allocator: None,
+                network_external_realm_id: None,
+                attachment_workflow: None,
             });
         let dispatcher =
             o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&registry)
@@ -1476,6 +1485,9 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
                 authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
             }),
             external_controllers: Arc::new(Default::default()),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     let dispatcher_b =
         o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&registry_b)
@@ -1734,6 +1746,9 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
                 authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
             }),
             external_controllers: Arc::new(Default::default()),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     let right_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
@@ -1753,6 +1768,9 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
                 authorizer: Arc::new(o3k_kernel::StaticAuthorizer::standard()),
             }),
             external_controllers: Arc::new(Default::default()),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     let mut child_registry = ManifestRegistry::new();
     child_registry.seed_core()?;

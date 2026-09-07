@@ -198,6 +198,9 @@ async fn build_http_runtime(
             server: server_reader.clone(),
             network: network_reader.clone(),
             external_controllers: Arc::new(Default::default()),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     let token_issuer: Arc<dyn TokenIssuer> = Arc::new(o3kd::native_adapters::TokenIssuerAdapter {
         service: Arc::new(identity.clone()),
@@ -311,6 +314,9 @@ async fn run_native_openstack_http_conformance(
             server: server_reader.clone(),
             network: network_reader.clone(),
             external_controllers: Arc::new(Default::default()),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     let token_issuer: Arc<dyn TokenIssuer> = Arc::new(o3kd::native_adapters::TokenIssuerAdapter {
         service: Arc::new(identity.clone()),
