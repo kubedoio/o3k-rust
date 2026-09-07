@@ -259,6 +259,9 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
                 "database-example".to_owned(),
                 controller.clone(),
             )])),
+            public_allocator: None,
+            network_external_realm_id: None,
+            attachment_workflow: None,
         });
     manifests.register_controller("database-example", controller.session().clone())?;
     manifests.activate_controller("database-example")?;
