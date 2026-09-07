@@ -19,15 +19,19 @@ pub async fn probe_destination_smoke(program: &Path, refs: &mut Vec<String>) -> 
     let Ok(evidence) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
         return false;
     };
-    let observed = ["compute_guest", "packet_path", "volume_persistence"]
-        .into_iter()
-        .all(|name| evidence.get(name).and_then(serde_json::Value::as_bool) == Some(true));
+    let observed = destination_smoke_evidence_passes(&evidence);
     if observed {
         refs.push("o3k:real-destination-compute-guest".into());
         refs.push("o3k:real-destination-packet-path".into());
         refs.push("o3k:real-destination-volume-persistence".into());
     }
     observed
+}
+
+fn destination_smoke_evidence_passes(evidence: &serde_json::Value) -> bool {
+    ["compute_guest", "packet_path", "volume_persistence"]
+        .into_iter()
+        .all(|name| evidence.get(name).and_then(serde_json::Value::as_bool) == Some(true))
 }
 
 pub async fn probe_postgres(database_url: &str, refs: &mut Vec<String>) -> bool {
@@ -133,4 +137,28 @@ pub async fn probe_toolchain(
     }
     toolchain.insert("provider_modified".into(), "false".into());
     (tofu_ok && provider_ok, toolchain)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::destination_smoke_evidence_passes;
+    use serde_json::json;
+
+    #[test]
+    fn destination_smoke_requires_all_real_capabilities() {
+        assert!(destination_smoke_evidence_passes(&json!({
+            "compute_guest": true,
+            "packet_path": true,
+            "volume_persistence": true
+        })));
+        assert!(!destination_smoke_evidence_passes(&json!({
+            "compute_guest": true,
+            "packet_path": true,
+            "volume_persistence": false
+        })));
+        assert!(!destination_smoke_evidence_passes(&json!({
+            "compute_guest": true,
+            "packet_path": true
+        })));
+    }
 }

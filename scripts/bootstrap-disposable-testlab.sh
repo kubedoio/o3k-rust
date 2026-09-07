@@ -28,6 +28,14 @@ COMPUTE_ACCOUNT=o3k-compute
 # as root when an explicitly configured LVM provider is selected; compute
 # remains confined to its dedicated service account.
 O3KD_ACCOUNT="${O3K_TESTLAB_O3KD_ACCOUNT:-o3k}"
+if [[ "$O3KD_ACCOUNT" != "$SERVICE_ACCOUNT" && "$O3KD_ACCOUNT" != root ]]; then
+  echo "disposable TestLab bootstrap failed: O3KD account must be o3k or root" >&2
+  exit 1
+fi
+if [[ "$O3KD_ACCOUNT" == root ]] && [[ -z "${O3K_LVM_VOLUME_GROUP:-}" || -z "${O3K_LVM_THIN_POOL:-}" || -z "${O3K_LVM_PROVIDER_NAMESPACE:-}" ]]; then
+  echo "disposable TestLab bootstrap failed: root O3KD account requires the explicit native-LVM profile" >&2
+  exit 1
+fi
 ACCOUNT_LOCK=/run/lock/o3k-testlab-account.lock
 APT_LOCK=/run/lock/o3k-testlab-apt.lock
 AUTH_PORT="${O3K_TESTLAB_PORT:-18080}"
