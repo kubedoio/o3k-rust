@@ -11,9 +11,9 @@ keywords:
   - cloud-os
   - control-plane
   - iaas
-home: https://github.com/kubedoio/o3k-rust
+home: https://github.com/o3kio/o3k
 sources:
-  - https://github.com/kubedoio/o3k-rust
+  - https://github.com/o3kio/o3k
 maintainers:
   - name: O3K Authors
     email: info@kubedo.com
