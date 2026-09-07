@@ -7,6 +7,29 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path, str::FromStr};
 use tokio::process::Command;
 
+/// Run the repository-owned destination smoke probe.  The probe is an
+/// explicit execution boundary: it must exercise the real provider and emit
+/// machine-readable observations for all three destination capabilities.
+pub async fn probe_destination_smoke(program: &Path, refs: &mut Vec<String>) -> bool {
+    let output = Command::new(program).output().await;
+    let Ok(output) = output else { return false };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(evidence) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return false;
+    };
+    let observed = ["compute_guest", "packet_path", "volume_persistence"]
+        .into_iter()
+        .all(|name| evidence.get(name).and_then(serde_json::Value::as_bool) == Some(true));
+    if observed {
+        refs.push("o3k:real-destination-compute-guest".into());
+        refs.push("o3k:real-destination-packet-path".into());
+        refs.push("o3k:real-destination-volume-persistence".into());
+    }
+    observed
+}
+
 pub async fn probe_postgres(database_url: &str, refs: &mut Vec<String>) -> bool {
     let options = match sqlx::postgres::PgConnectOptions::from_str(database_url) {
         Ok(options) => options,

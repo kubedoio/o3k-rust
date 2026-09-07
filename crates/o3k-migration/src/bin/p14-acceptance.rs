@@ -5,7 +5,9 @@ use o3k_migration::acceptance::{
     AcceptanceDriver, AcceptanceEvidence, AcceptanceFailure, AcceptanceHarness, FailureClass,
     GateContext, GateId, GateProof, ReadinessReport,
 };
-use o3k_migration::acceptance_process::{probe_guest_checksum, probe_postgres, probe_toolchain};
+use o3k_migration::acceptance_process::{
+    probe_destination_smoke, probe_guest_checksum, probe_postgres, probe_toolchain,
+};
 use o3k_migration::cutover::CutoverAuthorization;
 use o3k_migration::manifest::{
     ManifestRequest, MigrationManifest, build_manifest, refresh_integrity,
@@ -39,6 +41,7 @@ struct RuntimeConfig {
     provider_version: String,
     destination_scope: String,
     destination_external_network: String,
+    destination_smoke_program: PathBuf,
     actor_principal: String,
     service_principal: String,
     manifest_path: PathBuf,
@@ -96,6 +99,7 @@ impl RuntimeConfig {
                 .unwrap_or_else(|_| "3.4.0".into()),
             destination_scope: value("O3K_P14_DESTINATION_SCOPE")?,
             destination_external_network: value("O3K_P14_DESTINATION_EXTERNAL_NETWORK")?,
+            destination_smoke_program: PathBuf::from(value("O3K_P14_DESTINATION_SMOKE_PROGRAM")?),
             actor_principal: value("O3K_P14_ACTOR_PRINCIPAL")?,
             service_principal: value("O3K_P14_SERVICE_PRINCIPAL")?,
             manifest_path: PathBuf::from(
@@ -433,6 +437,10 @@ impl RealProbeDriver {
             }
         }
         if !passed {
+            return false;
+        }
+
+        if !probe_destination_smoke(&self.config.destination_smoke_program, refs).await {
             return false;
         }
 
