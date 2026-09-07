@@ -1,0 +1,23 @@
+name: Update repository About metadata
+
+on:
+  push:
+    branches:
+      - docs/cloud-kernel-positioning
+
+permissions:
+  contents: read
+
+jobs:
+  update-about:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update repository description and homepage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}" \
+            -f description='O3K — a cloud kernel, literally born in the cloud. Rust-native cloud infrastructure with OpenStack-compatible APIs.' \
+            -f homepage='https://o3k.io' >/dev/null
