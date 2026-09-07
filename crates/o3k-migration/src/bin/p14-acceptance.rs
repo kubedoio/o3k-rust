@@ -10,7 +10,7 @@ use o3k_migration::cutover::CutoverAuthorization;
 use o3k_migration::manifest::{
     ManifestRequest, MigrationManifest, build_manifest, refresh_integrity,
 };
-use o3k_migration::runner::{HttpNativeDestination, MigrationRunner};
+use o3k_migration::runner::{CanonicalDestination, HttpNativeDestination, MigrationRunner};
 use o3k_migration::tofu::run_opentofu_noop;
 use o3k_migration::{
     DiscoveryRequest, EndpointInterface, ReqwestOpenStackSource, ResourceKind, Secret,
@@ -104,6 +104,7 @@ struct RealProbeDriver {
     config: RuntimeConfig,
     readiness: Option<ReadinessReport>,
     source_snapshot: Option<SourceSnapshot>,
+    project_b_snapshot: Option<SourceSnapshot>,
     manifest: Option<MigrationManifest>,
     runner: Option<MigrationRunner<ReqwestOpenStackSource, HttpNativeDestination>>,
 }
@@ -114,6 +115,7 @@ impl RealProbeDriver {
             config,
             readiness: None,
             source_snapshot: None,
+            project_b_snapshot: None,
             manifest: None,
             runner: None,
         }
@@ -123,6 +125,33 @@ impl RealProbeDriver {
         let mut config = self.config.source.clone();
         config.project_id = project_id.to_owned();
         config
+    }
+
+    async fn discover_project_b_snapshot(&self) -> Result<SourceSnapshot, AcceptanceFailure> {
+        let mut config = self.config.source.clone();
+        config.username = self.config.source_project_b_username.clone();
+        config.password = self.config.source_project_b_password.clone();
+        config.project_id = self.config.source_project_b.clone();
+        let source = ReqwestOpenStackSource::authenticate(&config)
+            .await
+            .map_err(|error| AcceptanceFailure::Driver {
+                class: FailureClass::Environment,
+                message: format!("Project B authentication failed: {error}"),
+            })?;
+        discover(
+            &source,
+            &config,
+            &DiscoveryRequest {
+                selected_kinds: [ResourceKind::Project, ResourceKind::Volume]
+                    .into_iter()
+                    .collect(),
+            },
+        )
+        .await
+        .map_err(|error| AcceptanceFailure::Driver {
+            class: FailureClass::Environment,
+            message: format!("Project B inventory failed: {error}"),
+        })
     }
 
     async fn prepare_runner(&mut self, context: &GateContext) -> Result<(), AcceptanceFailure> {
@@ -175,9 +204,88 @@ impl RealProbeDriver {
         })?;
         let runner = MigrationRunner::new(source, destination, &self.config.manifest_path);
         self.source_snapshot = Some(snapshot);
+        self.project_b_snapshot = Some(self.discover_project_b_snapshot().await?);
         self.manifest = Some(manifest);
         self.runner = Some(runner);
         Ok(())
+    }
+
+    async fn observe_destination_nodes(
+        &self,
+        manifest: &MigrationManifest,
+        kinds: &[ResourceKind],
+    ) -> Result<usize, AcceptanceFailure> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|error| AcceptanceFailure::Driver {
+                class: FailureClass::Environment,
+                message: format!("destination observer construction failed: {error}"),
+            })?;
+        let mut observed = 0;
+        for node in manifest
+            .nodes
+            .iter()
+            .filter(|node| kinds.contains(&node.resource_type) && node.destination_id.is_some())
+        {
+            let collection = match node.resource_type {
+                ResourceKind::Network => "network/networks",
+                ResourceKind::Subnet => "network/subnets",
+                ResourceKind::Volume => "volume/volumes",
+                ResourceKind::VolumeAttachment => "volume/volume_attachment",
+                ResourceKind::Port => "network/ports",
+                ResourceKind::SecurityGroup => "network/security-groups",
+                ResourceKind::SecurityGroupRule => "network/security-group-rules",
+                ResourceKind::FloatingIp => "network/floating-ips",
+                _ => continue,
+            };
+            let mut url = self.config.destination.clone();
+            url.set_path(&format!(
+                "/o3k/v1/{collection}/{}",
+                node.destination_id.as_deref().unwrap_or_default()
+            ));
+            let response = client
+                .get(url)
+                .bearer_auth(&self.config.destination_token)
+                .send()
+                .await
+                .map_err(|error| AcceptanceFailure::Driver {
+                    class: FailureClass::Environment,
+                    message: format!(
+                        "destination resource probe failed for {}: {error}",
+                        node.key
+                    ),
+                })?;
+            if !response.status().is_success() {
+                return Err(AcceptanceFailure::Driver {
+                    class: FailureClass::Implementation,
+                    message: format!(
+                        "destination resource probe for {} returned {}",
+                        node.key,
+                        response.status()
+                    ),
+                });
+            }
+            let _: serde_json::Value =
+                response
+                    .json()
+                    .await
+                    .map_err(|error| AcceptanceFailure::Driver {
+                        class: FailureClass::Evidence,
+                        message: format!(
+                            "destination resource probe for {} was not JSON: {error}",
+                            node.key
+                        ),
+                    })?;
+            observed += 1;
+        }
+        if observed == 0 {
+            return Err(AcceptanceFailure::Driver {
+                class: FailureClass::Evidence,
+                message: format!("no destination resources observed for {:?}", kinds),
+            });
+        }
+        Ok(observed)
     }
 
     async fn probe(&mut self) -> ReadinessReport {
@@ -348,6 +456,7 @@ impl RealProbeDriver {
             message: format!("fresh destination construction failed: {error}"),
         })?;
         self.source_snapshot = Some(snapshot);
+        self.project_b_snapshot = Some(self.discover_project_b_snapshot().await?);
         self.manifest = Some(manifest);
         self.runner = Some(MigrationRunner::new(
             source,
@@ -579,9 +688,24 @@ impl AcceptanceDriver for RealProbeDriver {
                         message: format!("source resume after rollback failed: {error}"),
                     }
                 })?;
+                let rolled_back = runner.load().map_err(|error| AcceptanceFailure::Driver {
+                    class: FailureClass::Evidence,
+                    message: format!("rollback manifest reload failed: {error}"),
+                })?;
+                let owned_leaks = rolled_back
+                    .nodes
+                    .iter()
+                    .filter(|node| node.rollback == o3k_migration::manifest::RollbackState::Owned)
+                    .count();
                 details.insert("rollback_migration_id".into(), context.migration_id.clone());
                 details.insert("source_resumed".into(), "true".into());
-                details.insert("owned_leaks".into(), "0".into());
+                details.insert("owned_leaks".into(), owned_leaks.to_string());
+                if owned_leaks != 0 {
+                    return Err(AcceptanceFailure::Driver {
+                        class: FailureClass::Evidence,
+                        message: format!("rollback left {owned_leaks} owned destination nodes"),
+                    });
+                }
                 Ok(GateProof {
                     evidence_refs: vec!["migration:rollback-and-source-resume".into()],
                     source_bound: true,
@@ -684,25 +808,53 @@ impl AcceptanceDriver for RealProbeDriver {
                             class: FailureClass::Evidence,
                             message: format!("{gate} malformed server observation: {error}"),
                         })?;
+                let server_state = body
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
                 details.insert("server_observed".into(), "true".into());
+                details.insert("server_state".into(), server_state.to_owned());
+                let observed = match gate {
+                    GateId::G12 => 1,
+                    GateId::G13 => {
+                        self.observe_destination_nodes(
+                            manifest,
+                            &[
+                                ResourceKind::Network,
+                                ResourceKind::Subnet,
+                                ResourceKind::Port,
+                            ],
+                        )
+                        .await?
+                    }
+                    GateId::G14 => {
+                        self.observe_destination_nodes(
+                            manifest,
+                            &[ResourceKind::FloatingIp, ResourceKind::Port],
+                        )
+                        .await?
+                    }
+                    GateId::G15 => {
+                        self.observe_destination_nodes(
+                            manifest,
+                            &[ResourceKind::Volume, ResourceKind::VolumeAttachment],
+                        )
+                        .await?
+                    }
+                    _ => unreachable!(),
+                };
+                details.insert("supporting_resources_observed".into(), observed.to_string());
+                details.insert(format!("{gate}_observation",), "active-api-read".into());
                 details.insert(
-                    "server_state".into(),
-                    body.get("status")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("observed")
-                        .to_owned(),
-                );
-                details.insert(
-                    "network_policy_observed".into(),
-                    (gate == GateId::G13).to_string(),
-                );
-                details.insert(
-                    "public_address_observed".into(),
-                    (gate == GateId::G14).to_string(),
-                );
-                details.insert(
-                    "volume_attachment_observed".into(),
-                    (gate == GateId::G15).to_string(),
+                    match gate {
+                        GateId::G13 => "network_policy_observed",
+                        GateId::G14 => "public_address_observed",
+                        GateId::G15 => "volume_attachment_observed",
+                        GateId::G12 => "server_observed",
+                        _ => unreachable!(),
+                    }
+                    .into(),
+                    "true".into(),
                 );
                 Ok(GateProof {
                     evidence_refs: vec![format!("o3k:{gate}:live-observation")],
@@ -802,9 +954,33 @@ impl AcceptanceDriver for RealProbeDriver {
                 })
             }
             GateId::G19 => {
-                details.insert("project_b_unchanged".into(), "true".into());
-                details.insert("cross_project_reads".into(), "0".into());
+                let before =
+                    self.project_b_snapshot
+                        .as_ref()
+                        .ok_or_else(|| AcceptanceFailure::Driver {
+                            class: FailureClass::Evidence,
+                            message: "Project B baseline inventory is missing".into(),
+                        })?;
+                let after = self.discover_project_b_snapshot().await?;
+                let unchanged = before.project_id == after.project_id
+                    && before.snapshot_fingerprint == after.snapshot_fingerprint;
+                details.insert("project_b_unchanged".into(), unchanged.to_string());
+                details.insert(
+                    "project_b_before_fingerprint".into(),
+                    before.snapshot_fingerprint.clone(),
+                );
+                details.insert(
+                    "project_b_after_fingerprint".into(),
+                    after.snapshot_fingerprint.clone(),
+                );
+                details.insert("cross_project_reads".into(), "1".into());
                 details.insert("cross_project_writes".into(), "0".into());
+                if !unchanged {
+                    return Err(AcceptanceFailure::Driver {
+                        class: FailureClass::Evidence,
+                        message: "Project B inventory changed during migration".into(),
+                    });
+                }
                 Ok(GateProof {
                     evidence_refs: vec!["openstack:project-b-before-after".into()],
                     source_bound: true,
@@ -813,9 +989,55 @@ impl AcceptanceDriver for RealProbeDriver {
                 })
             }
             GateId::G20 => {
-                details.insert("owned_leaks".into(), "0".into());
-                details.insert("inconsistencies".into(), "0".into());
-                details.insert("foreign_state_changes".into(), "0".into());
+                let current = runner.load().map_err(|error| AcceptanceFailure::Driver {
+                    class: FailureClass::Evidence,
+                    message: format!("G20 manifest reload failed: {error}"),
+                })?;
+                let destination = HttpNativeDestination::new(
+                    self.config.destination.clone(),
+                    self.config.destination_token.clone(),
+                )
+                .map_err(|error| AcceptanceFailure::Driver {
+                    class: FailureClass::Environment,
+                    message: format!("G20 destination observer construction failed: {error}"),
+                })?;
+                let mut missing = 0_u64;
+                let mut foreign = 0_u64;
+                for node in current
+                    .nodes
+                    .iter()
+                    .filter(|node| node.rollback == o3k_migration::manifest::RollbackState::Owned)
+                {
+                    match destination.observe(&current.migration_id, node).await {
+                        Ok(Some(observation))
+                            if observation.owned_by_migration && observation.complete => {}
+                        Ok(Some(_)) => foreign += 1,
+                        Ok(None) | Err(_) => missing += 1,
+                    }
+                }
+                details.insert("owned_leaks".into(), missing.to_string());
+                details.insert("inconsistencies".into(), missing.to_string());
+                details.insert("foreign_state_changes".into(), foreign.to_string());
+                details.insert(
+                    "owned_nodes_observed".into(),
+                    current
+                        .nodes
+                        .iter()
+                        .filter(|node| {
+                            node.rollback == o3k_migration::manifest::RollbackState::Owned
+                        })
+                        .count()
+                        .to_string(),
+                );
+                details.insert("foreign_owned_observations".into(), foreign.to_string());
+                if missing != 0 || foreign != 0 {
+                    return Err(AcceptanceFailure::Driver {
+                        class: FailureClass::Evidence,
+                        message: format!(
+                            "G20 destination ownership verification failed: missing={missing}, foreign={foreign}"
+                        ),
+                    });
+                }
                 Ok(GateProof {
                     evidence_refs: vec!["inventory:owned-before-after".into()],
                     source_bound: true,
