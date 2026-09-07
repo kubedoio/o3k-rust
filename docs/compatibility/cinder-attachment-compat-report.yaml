@@ -7,7 +7,7 @@ proves it. The normative interaction contract is
 transcript is `tests/real-cinder-evidence/cinder-attachment-golden-transcript.yaml`.
 
 schema_version: 1
-issue: "https://github.com/kubedoio/o3k-rust/issues/500"
+issue: "https://github.com/o3kio/o3k/issues/500"
 product_profile: openstack-service-testbed
 cinder_pin: "28.0.0"
 generated_after_gates: all-five

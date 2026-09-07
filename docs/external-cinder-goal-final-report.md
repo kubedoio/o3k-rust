@@ -2,7 +2,7 @@
 
 Date: 2026-08-04
 Goal: Reconcile and Complete the External Cinder Service-Testbed Implementation
-Repository: kubedoio/o3k-rust
+Repository: o3kio/o3k
 
 ## Answer
 

@@ -62,7 +62,7 @@ The container image packages `o3kd` (Cloud Kernel daemon) and `o3k` (diagnostic 
 
 - **Source Dockerfile**: [`deployments/docker/Dockerfile.o3kd`](../deployments/docker/Dockerfile.o3kd)
 - **Local build Dockerfile**: [`deployments/docker/Dockerfile.o3kd-local`](../deployments/docker/Dockerfile.o3kd-local)
-- **Image Name**: `ghcr.io/kubedoio/o3kd:0.4.0-alpha.1` (matching Cargo workspace version)
+- **Image Name**: `ghcr.io/o3kio/o3kd:0.4.0-alpha.1` (matching Cargo workspace version)
 - **Security Posture**:
   - Base: Ubuntu 24.04 (matching host glibc)
   - Non-root user: `o3k:o3k` (UID/GID `10001`)

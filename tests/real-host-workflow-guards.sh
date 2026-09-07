@@ -69,7 +69,7 @@ SH
 chmod +x "${FAKE_BIN}/openstack"
 
 export PATH="${FAKE_BIN}:${PATH}" O3K_REAL_HOST_ARTIFACT_DIR="${WORK_DIR}/artifacts"
-export O3K_REAL_HOST_KVM_PATH=/dev/null GITHUB_REPOSITORY=kubedoio/o3k-rust
+export O3K_REAL_HOST_KVM_PATH=/dev/null GITHUB_REPOSITORY=o3kio/o3k
 export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_HEAD_REF= GITHUB_BASE_REF= GITHUB_REF=refs/heads/main
 export GITHUB_OUTPUT="${WORK_DIR}/github-output" O3K_TEST_SECRET=do-not-upload-this-value
 export O3K_REAL_HOST_OPENSTACK_INVENTORY=true OS_PASSWORD=fake-password
@@ -229,7 +229,7 @@ value = json.load(open(sys.argv[1], encoding="utf-8"))
 assert value["status"] == "blocked" and value["reason"] == "non_canonical_repository"
 PY
 
-export GITHUB_REPOSITORY=kubedoio/o3k-rust
+export GITHUB_REPOSITORY=o3kio/o3k
 export GITHUB_REF=refs/heads/feature-untrusted
 if bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"; then
     echo "non-main source ref was accepted" >&2
@@ -478,7 +478,7 @@ for needle in ("workflow_dispatch:",
 assert "Repair prior protected artifact ownership" in text
 assert 'sudo -n chown -R "$(id -u):$(id -g)"' in text
 assert '"${GITHUB_WORKSPACE}/target/debug"' in text
-assert "github.repository == 'kubedoio/o3k-rust'" in text
+assert "github.repository == 'o3kio/o3k'" in text
 assert "github.event_name == 'workflow_dispatch'" in text
 assert "github.ref == 'refs/heads/main' || inputs.target_sha != ''" in text
 assert "ref: ${{ inputs.target_sha || github.sha }}" in text

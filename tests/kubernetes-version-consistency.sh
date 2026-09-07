@@ -28,7 +28,7 @@ for d in docs:
         print(d['spec']['template']['spec']['containers'][0]['image'])
 " <<< "${RENDERED_DEPLOYMENT}")
 
-EXPECTED_IMAGE="ghcr.io/kubedoio/o3kd:${CARGO_VERSION}"
+EXPECTED_IMAGE="ghcr.io/o3kio/o3kd:${CARGO_VERSION}"
 if [ "${RENDERED_IMAGE}" != "${EXPECTED_IMAGE}" ]; then
     echo "ERROR: Helm default rendered image '${RENDERED_IMAGE}' does not match expected '${EXPECTED_IMAGE}'" >&2
     exit 1
@@ -60,7 +60,7 @@ for df in "${ROOT_DIR}/deployments/docker/Dockerfile.o3kd" "${ROOT_DIR}/deployme
         echo "ERROR: ${rel_path} missing org.opencontainers.image.revision label" >&2
         exit 1
     }
-    grep -Fq 'org.opencontainers.image.source="https://github.com/kubedoio/o3k-rust"' "${df}" || {
+    grep -Fq 'org.opencontainers.image.source="https://github.com/o3kio/o3k"' "${df}" || {
         echo "ERROR: ${rel_path} missing org.opencontainers.image.source label" >&2
         exit 1
     }

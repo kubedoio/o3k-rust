@@ -19,7 +19,7 @@ mkdir -p "${ARTIFACT_DIR}"
 rm -f -- "${RESULT_PATH}"
 
 blocked_reason=
-if [[ "${GITHUB_REPOSITORY:-}" != "kubedoio/o3k-rust" ]]; then
+if [[ "${GITHUB_REPOSITORY:-}" != "o3kio/o3k" ]]; then
     blocked_reason=non_canonical_repository
 elif [[ "${GITHUB_EVENT_NAME:-}" != workflow_dispatch ]]; then
     blocked_reason=untrusted_event_context

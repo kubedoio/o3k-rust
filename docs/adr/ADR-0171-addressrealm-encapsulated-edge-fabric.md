@@ -8,7 +8,7 @@ Supersedes: ADR-0170
 Superseded-by: none
 Affected-services: network, compute, placement, scheduler, storage, kernel, edge, governance
 
-Related issue: [#705](https://github.com/kubedoio/o3k-rust/issues/705)
+Related issue: [#705](https://github.com/o3kio/o3k/issues/705)
 
 Related decisions and specifications:
 

@@ -301,8 +301,8 @@ implementation path, test, CI workflow, and evidence artifact.
 
 ## Provenance
 
-- Issue bodies #420, #421, #424, #429, #432 (kubedoio/o3k-rust).
-- PR bodies #449, #450, #451, #452 (kubedoio/o3k-rust).
+- Issue bodies #420, #421, #424, #429, #432 (o3kio/o3k).
+- PR bodies #449, #450, #451, #452 (o3kio/o3k).
 - `main` at commit 107e96c plus the uncommitted store identity work on branch
   `issue-420-durable-keystone-identity`.
 - No public Go O3K source was consulted for this reconciliation.

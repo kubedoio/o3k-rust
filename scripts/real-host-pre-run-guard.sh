@@ -5,7 +5,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-${ROOT_DIR}/target/real-host-workflow-artifacts}"
 RESULT_PATH="${ARTIFACT_DIR}/real-host-workflow-result.json"
-EXPECTED_REPOSITORY="kubedoio/o3k-rust"
+EXPECTED_REPOSITORY="o3kio/o3k"
 KVM_PATH="${O3K_REAL_HOST_KVM_PATH:-/dev/kvm}"
 INVENTORY_PATH="${ARTIFACT_DIR}/real-host-owned-inventory-baseline.json"
 CAPABILITY_PATH="${O3K_REAL_HOST_CAPABILITY_OUTPUT:-${ARTIFACT_DIR}/runner-capabilities.json}"

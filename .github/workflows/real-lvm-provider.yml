@@ -25,7 +25,7 @@ jobs:
         id: runner
         run: |
           set -euo pipefail
-          test "${GITHUB_REPOSITORY}" = "kubedoio/o3k-rust"
+          test "${GITHUB_REPOSITORY}" = "o3kio/o3k"
           test "${GITHUB_REF}" = "refs/heads/main"
           sudo -n true
           test -w "${GITHUB_WORKSPACE}"

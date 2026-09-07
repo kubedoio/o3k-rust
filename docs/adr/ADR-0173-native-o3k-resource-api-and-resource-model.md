@@ -7,7 +7,7 @@ Supersedes: none
 Superseded-by: none
 Affected-services: governance, cloud-kernel, identity, compute, network, image, placement, volume, api, cli, future-services
 
-Related issue: [#727](https://github.com/kubedoio/o3k-rust/issues/727)
+Related issue: [#727](https://github.com/o3kio/o3k/issues/727)
 
 Related decisions and specifications:
 

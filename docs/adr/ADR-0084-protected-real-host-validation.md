@@ -21,7 +21,7 @@ Add a manually dispatched workflow using exactly the labels `self-hosted`,
 `o3k-real-host-validation` environment; repository settings must require
 maintainer approval for that environment. It grants `contents: read`, uses a
 non-canceling fixed concurrency group, and accepts only
-`kubedoio/o3k-rust` `workflow_dispatch` runs with no fork refs.
+`o3kio/o3k` `workflow_dispatch` runs with no fork refs.
 
 The pre-run guard runs before the lifecycle step and checks trust context,
 required tools, `/dev/kvm`, and `qemu:///system`. It then performs a read-only

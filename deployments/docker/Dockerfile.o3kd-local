@@ -5,8 +5,8 @@ ARG VCS_REF="HEAD"
 
 LABEL org.opencontainers.image.title="o3kd" \
       org.opencontainers.image.description="O3K Cloud Operating System Control Plane Daemon" \
-      org.opencontainers.image.url="https://github.com/kubedoio/o3k-rust" \
-      org.opencontainers.image.source="https://github.com/kubedoio/o3k-rust" \
+      org.opencontainers.image.url="https://github.com/o3kio/o3k" \
+      org.opencontainers.image.source="https://github.com/o3kio/o3k" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.vendor="Kubedo" \

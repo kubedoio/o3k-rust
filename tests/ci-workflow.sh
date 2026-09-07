@@ -70,7 +70,7 @@ for workflow in pathlib.Path(sys.argv[1]).parent.glob("*.y*ml"):
             assert re.search(r"uses:\s+[^\s]+@[0-9a-f]{40}(?:\s+#.*)?$", line), line
 real_host = pathlib.Path(sys.argv[1]).parent / "real-host-validation.yml"
 real_host_text = real_host.read_text(encoding="utf-8")
-assert "github.repository == 'kubedoio/o3k-rust'" in real_host_text
+assert "github.repository == 'o3kio/o3k'" in real_host_text
 assert "github.event_name == 'workflow_dispatch'" in real_host_text
 assert "github.ref == 'refs/heads/main' || inputs.target_sha != ''" in real_host_text
 assert "target_sha:" in real_host_text
@@ -94,7 +94,7 @@ assert "scripts/cleanup-disposable-testlab.sh" in real_host_text
 assert "disposable-testlab-bootstrap.json" in real_host_text
 real_cinder = pathlib.Path(sys.argv[1]).parent / "real-cinder-testbed.yml"
 real_cinder_text = real_cinder.read_text(encoding="utf-8")
-assert "if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/main'" in real_cinder_text
+assert "if: github.repository == 'o3kio/o3k' && github.ref == 'refs/heads/main'" in real_cinder_text
 assert "scripts/real-cinder-testbed-runner.sh --keep" in real_cinder_text
 assert "scripts/real-cinder-pre-run-guard.sh" in real_cinder_text
 assert "scripts/real-cinder-post-run-guard.sh" in real_cinder_text

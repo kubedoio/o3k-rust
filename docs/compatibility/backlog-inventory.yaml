@@ -13,7 +13,7 @@
     "policy": "Non-normative secondary reference under ADR-0151: route/field inventory, failure scenarios, and operational lessons only. No Go architecture, package layout, or database layout is proposed for reuse."
   },
   "rust_reference": {
-    "repository": "https://github.com/kubedoio/o3k-rust",
+    "repository": "https://github.com/o3kio/o3k",
     "commit": "5e03d2e4cc8c895ee6eacbd87fda1eb4ceaf2020"
   },
   "priorities": {
@@ -2054,7 +2054,7 @@
         {
           "id": "operator-012",
           "user_outcome": "Operator verifies release artifacts are signed by the project identity before deployment.",
-          "client_command": "cosign verify-blob --bundle o3kd.sigstore.json bin/o3kd --certificate-identity-regexp 'https://github.com/kubedoio/o3k-rust/.github/workflows/.*' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'",
+          "client_command": "cosign verify-blob --bundle o3kd.sigstore.json bin/o3kd --certificate-identity-regexp 'https://github.com/o3kio/o3k/.github/workflows/.*' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'",
           "official_sources": [
             "https://docs.sigstore.dev/cosign/overview/"
           ],

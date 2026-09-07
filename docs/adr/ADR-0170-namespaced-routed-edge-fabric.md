@@ -8,7 +8,7 @@ Supersedes: none
 Superseded-by: none
 Affected-services: network, compute, placement, scheduler, storage, kernel, edge, governance
 
-Related issue: [#701](https://github.com/kubedoio/o3k-rust/issues/701)
+Related issue: [#701](https://github.com/o3kio/o3k/issues/701)
 
 Related decisions and specifications:
 

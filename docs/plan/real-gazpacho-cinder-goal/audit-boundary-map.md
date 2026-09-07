@@ -1,6 +1,6 @@
 # Phase 1 — Boundary Implementation Map (audit, 2026-08-04)
 
-Repo: `kubedoio/o3k-rust` @ `main` = `1cec5cc` (after PR #453). Audit output for the Real Gazpacho Cinder Service-Testbed goal.
+Repo: `o3kio/o3k` @ `main` = `1cec5cc` (after PR #453). Audit output for the Real Gazpacho Cinder Service-Testbed goal.
 
 ## identity_boundary
 - implementation: `crates/o3k-identity/src/lib.rs` — `BootstrapConfig` L446, `seed_identity_defaults()` L464 (service project L491, `cinder` user L522, assignments L558), durable catalog L594 (volumev3 when `cinder_endpoint` L611), `TokenService` L659 `issue` L720 `verify` L791 `verify_details` L851 `auth_context` L869 `catalog` L1046; PBKDF2 `PasswordHash` L288; routes `crates/o3k-api/src/lib.rs` L118-121 (`/v3/auth/tokens`), `issue_token` L486, `validate_token` L551, `check_token` L599, `require_token` L712; migrations 0012/0013; wiring `bins/o3kd/src/main.rs` L343-370 (`O3K_BOOTSTRAP_PASSWORD`, `O3K_TOKEN_SIGNING_KEY`, `O3K_CINDER_PASSWORD`, `O3K_CINDER_ENDPOINT`).

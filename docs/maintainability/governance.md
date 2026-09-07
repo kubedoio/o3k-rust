@@ -66,7 +66,7 @@ recommendations, not additional GitHub rules claimed by this document.
 Inspect the live ruleset before each protected merge:
 
 ```bash
-gh api repos/kubedoio/o3k-rust/rulesets --jq ".[] | select(.name == \"main-protection\")"
+gh api repos/o3kio/o3k/rulesets --jq ".[] | select(.name == \"main-protection\")"
 ```
 
 The current required-check names are the five listed in the state table above.

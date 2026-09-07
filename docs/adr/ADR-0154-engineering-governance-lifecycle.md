@@ -15,7 +15,7 @@ evidence that the corresponding automation or artifacts already exist.
 
 ## Context
 
-Issue [#332](https://github.com/kubedoio/o3k-rust/issues/332) identified four
+Issue [#332](https://github.com/o3kio/o3k/issues/332) identified four
 related control gaps: the API contract did not have a governed lifecycle,
 decisions did not have a machine-checkable supersession policy, the exact
 toolchain needed a single reproducibility rule, and test output did not have a
@@ -96,4 +96,4 @@ not silently redefine a public contract or release claim.
 - [Repository agent contract](../../AGENTS.md)
 - [Public Go reference policy](ADR-0151-public-go-o3k-reference-policy.md)
 - [Static Rust/OpenStack target](ADR-0153-static-rust-and-openstack-release-policy.md)
-- [Issue #332](https://github.com/kubedoio/o3k-rust/issues/332)
+- [Issue #332](https://github.com/o3kio/o3k/issues/332)

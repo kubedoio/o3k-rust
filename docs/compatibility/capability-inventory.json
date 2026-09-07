@@ -1121,7 +1121,7 @@
   ],
   "rust_reference": {
     "commit": "3e508ea72e55a4c1e0113fbcf3643f4ffdbda735",
-    "repository": "https://github.com/kubedoio/o3k-rust"
+    "repository": "https://github.com/o3kio/o3k"
   },
   "schema_version": 1
 }

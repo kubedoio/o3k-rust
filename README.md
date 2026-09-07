@@ -52,11 +52,11 @@ curl -sfL https://get.o3k.io | sudo sh -
 asset. The canonical direct alpha URL is:
 
 ```bash
-curl -sfL https://github.com/kubedoio/o3k-rust/releases/download/v0.2.0-alpha.2/install.sh | sudo sh -
+curl -sfL https://github.com/o3kio/o3k/releases/download/v0.2.0-alpha.2/install.sh | sudo sh -
 ```
 
 The future stable URL will be
-`https://github.com/kubedoio/o3k-rust/releases/latest/download/install.sh` —
+`https://github.com/o3kio/o3k/releases/latest/download/install.sh` —
 it is **not** the alpha source and must not be used before a stable release
 exists.
 

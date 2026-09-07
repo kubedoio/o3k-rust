@@ -108,7 +108,7 @@ workflow is Sigstore Cosign from a protected GitHub Actions release workflow:
 ```bash
 cosign sign-blob --yes --bundle o3kd.sigstore.json bin/o3kd
 cosign verify-blob --bundle o3kd.sigstore.json bin/o3kd \
-  --certificate-identity-regexp 'https://github.com/kubedoio/o3k-rust/.github/workflows/.*' \
+  --certificate-identity-regexp 'https://github.com/o3kio/o3k/.github/workflows/.*' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
 ```
 

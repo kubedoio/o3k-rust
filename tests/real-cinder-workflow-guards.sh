@@ -48,7 +48,7 @@ export O3K_CINDER_STATE_BASE="${STATE_BASE}"
 export O3K_REAL_HOST_WORKFLOW_RUN_ID=guard-run-1
 export O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT=1
 export GITHUB_SHA=0123456789abcdef0123456789abcdef01234567
-export GITHUB_REPOSITORY=kubedoio/o3k-rust
+export GITHUB_REPOSITORY=o3kio/o3k
 export GITHUB_EVENT_NAME=workflow_dispatch
 export GITHUB_HEAD_REF=
 export GITHUB_BASE_REF=
@@ -76,7 +76,7 @@ import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 assert value["status"] == "blocked" and value["reason"] == "non_canonical_repository", value
 PY
-GITHUB_REPOSITORY=kubedoio/o3k-rust
+GITHUB_REPOSITORY=o3kio/o3k
 
 # Non-main source ref blocks.
 GITHUB_REF=refs/heads/feature-untrusted

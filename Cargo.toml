@@ -40,7 +40,7 @@ version = "0.4.0-alpha.1"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.97.1"
-repository = "https://github.com/kubedoio/o3k-rust"
+repository = "https://github.com/o3kio/o3k"
 
 [workspace.dependencies]
 axum = "0.8"

@@ -13,7 +13,7 @@ tagged GitHub Release asset. Cloudflare is never a trust dependency.
   - `/install.sh`
   - `/v0.2.0-alpha.2`
 - Redirect target (all three paths):
-  `https://github.com/kubedoio/o3k-rust/releases/download/v0.2.0-alpha.2/install.sh`
+  `https://github.com/o3kio/o3k/releases/download/v0.2.0-alpha.2/install.sh`
 - Status: `302` (temporary redirect; move to `308` only with a deliberate
   stable decision)
 
@@ -21,7 +21,7 @@ tagged GitHub Release asset. Cloudflare is never a trust dependency.
 
 Enable the rule **only after the release asset exists**: the target URL
 
-https://github.com/kubedoio/o3k-rust/releases/download/v0.2.0-alpha.2/install.sh
+https://github.com/o3kio/o3k/releases/download/v0.2.0-alpha.2/install.sh
 
 must return HTTP 200 before the redirect rule is turned on. Never point
 get.o3k.io at an unpublished asset.
@@ -33,7 +33,7 @@ After enabling the rule:
 ```bash
 curl -sI https://get.o3k.io
 # expect: HTTP/2 302 with location:
-# https://github.com/kubedoio/o3k-rust/releases/download/v0.2.0-alpha.2/install.sh
+# https://github.com/o3kio/o3k/releases/download/v0.2.0-alpha.2/install.sh
 
 curl -sfL https://get.o3k.io | sha256sum
 # must equal the SHA256 of the published install.sh asset (recorded in the
@@ -44,7 +44,7 @@ The direct GitHub URL must behave identically:
 
 ```bash
 curl -sfL \
-  https://github.com/kubedoio/o3k-rust/releases/download/v0.2.0-alpha.2/install.sh \
+  https://github.com/o3kio/o3k/releases/download/v0.2.0-alpha.2/install.sh \
   | sha256sum
 ```
 

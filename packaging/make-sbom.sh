@@ -56,11 +56,11 @@ document = {
     "spdxVersion": "SPDX-2.3",
     "dataLicense": "CC0-1.0",
     "SPDXID": "SPDXRef-DOCUMENT",
-    "name": "o3k-rust dependency SBOM",
-    "documentNamespace": f"https://github.com/kubedoio/o3k-rust/sbom/{os.environ['COMMIT']}",
+    "name": "o3k dependency SBOM",
+    "documentNamespace": f"https://github.com/o3kio/o3k/sbom/{os.environ['COMMIT']}",
     "creationInfo": {
         "created": created.isoformat().replace("+00:00", "Z"),
-        "creators": ["Tool: o3k-rust packaging/make-sbom.sh"],
+        "creators": ["Tool: o3k packaging/make-sbom.sh"],
         "licenseListVersion": "3.23",
     },
     "packages": packages,
@@ -68,7 +68,7 @@ document = {
     "annotations": [{
         "annotationDate": created.isoformat().replace("+00:00", "Z"),
         "annotationType": "OTHER",
-        "annotator": "Tool: o3k-rust packaging/make-sbom.sh",
+        "annotator": "Tool: o3k packaging/make-sbom.sh",
         "comment": f"source_commit={os.environ['COMMIT']}; workflow={os.environ.get('GITHUB_WORKFLOW', 'local')}",
         "SPDXID": "SPDXRef-DOCUMENT",
     }],

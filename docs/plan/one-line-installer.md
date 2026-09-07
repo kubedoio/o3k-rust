@@ -6,7 +6,7 @@
 > get.o3k.io reduced to a redirect). The record below documents the original
 > #613 milestone as implemented.
 
-- Issue: [#613](https://github.com/kubedoio/o3k-rust/issues/613)
+- Issue: [#613](https://github.com/o3kio/o3k/issues/613)
 - Full specification: goal file circulated as `/tmp/p1-goal.md` (same content as the issue body; this plan is the implementation record, not a redefinition).
 - Deployment/evidence profile: libvirt TestLab alpha, `o3k-implemented` authority mode.
 - Canonical O3K service/domain: Cloud Kernel control plane (`o3kd`) + `o3k-compute` execution provider. No new daemons, no new OpenStack API surface.

@@ -157,12 +157,12 @@ for arg in "$@"; do
 done
 if [ -n "$url" ]; then
   case "$url" in
-    https://api.github.com/repos/kubedoio/o3k-rust/*)
-      rewritten="${O3K_TEST_ENDPOINT:?}/api/${url#https://api.github.com/repos/kubedoio/o3k-rust/}" ;;
-    https://github.com/kubedoio/o3k-rust/releases/download/*)
-      rewritten="${O3K_TEST_ENDPOINT:?}/releases/${url#https://github.com/kubedoio/o3k-rust/releases/download/}" ;;
-    https://github.com/kubedoio/o3k-rust/releases/*)
-      rewritten="${O3K_TEST_ENDPOINT:?}/releases/${url#https://github.com/kubedoio/o3k-rust/releases/}" ;;
+    https://api.github.com/repos/o3kio/o3k/*)
+      rewritten="${O3K_TEST_ENDPOINT:?}/api/${url#https://api.github.com/repos/o3kio/o3k/}" ;;
+    https://github.com/o3kio/o3k/releases/download/*)
+      rewritten="${O3K_TEST_ENDPOINT:?}/releases/${url#https://github.com/o3kio/o3k/releases/download/}" ;;
+    https://github.com/o3kio/o3k/releases/*)
+      rewritten="${O3K_TEST_ENDPOINT:?}/releases/${url#https://github.com/o3kio/o3k/releases/}" ;;
     *) rewritten="$url" ;;
   esac
 fi

@@ -7,7 +7,7 @@ Supersedes: none
 Superseded-by: none
 Affected-services: network, compute, kernel, api, store, governance, edge
 
-Related issue: [#654](https://github.com/kubedoio/o3k-rust/issues/654)
+Related issue: [#654](https://github.com/o3kio/o3k/issues/654)
 
 Related decisions and specifications:
 

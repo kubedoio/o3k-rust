@@ -10,7 +10,7 @@
     "license": "Apache-2.0"
   },
   "rust_reference": {
-    "repository": "https://github.com/kubedoio/o3k-rust",
+    "repository": "https://github.com/o3kio/o3k",
     "commit": "3e508ea72e55a4c1e0113fbcf3643f4ffdbda735"
   },
   "operations": [
