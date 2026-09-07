@@ -486,46 +486,50 @@ impl RealProbeDriver {
             .and_then(|body| body.get("resource_id"))
             .and_then(serde_json::Value::as_str)
         else {
-            let _ = client
-                .delete(network_delete_url(&self.config.destination, network_id))
-                .bearer_auth(&self.config.destination_token)
-                .send()
-                .await;
+            let _ = delete_readiness_resource(
+                &client,
+                &self.config.destination_token,
+                network_delete_url(&self.config.destination, network_id),
+                format!("p14-readiness-network-delete-invalid-volume-{run_id}"),
+            )
+            .await;
             return false;
         };
 
-        let mut network_delete = self.config.destination.clone();
-        network_delete.set_path(&format!("/o3k/v1/network/networks/{network_id}"));
-        let mut volume_delete = self.config.destination.clone();
-        volume_delete.set_path(&format!("/o3k/v1/volume/volumes/{volume_id}"));
-        let network_deleted = client
-            .delete(network_delete)
-            .bearer_auth(&self.config.destination_token)
-            .send()
-            .await
-            .is_ok_and(|response| response.status().is_success());
-        let volume_deleted = client
-            .delete(volume_delete)
-            .bearer_auth(&self.config.destination_token)
-            .send()
-            .await
-            .is_ok_and(|response| response.status().is_success());
+        let network_deleted = delete_readiness_resource(
+            &client,
+            &self.config.destination_token,
+            network_delete_url(&self.config.destination, network_id),
+            format!("p14-readiness-network-delete-{run_id}"),
+        )
+        .await;
+        let volume_deleted = delete_readiness_resource(
+            &client,
+            &self.config.destination_token,
+            volume_delete_url(&self.config.destination, volume_id),
+            format!("p14-readiness-volume-delete-{run_id}"),
+        )
+        .await;
         if !network_deleted || !volume_deleted {
             // Retry failed cleanup once. A failed deletion is a hard
             // readiness failure, never a successful probe with residue.
             if !network_deleted {
-                let _ = client
-                    .delete(network_delete_url(&self.config.destination, network_id))
-                    .bearer_auth(&self.config.destination_token)
-                    .send()
-                    .await;
+                let _ = delete_readiness_resource(
+                    &client,
+                    &self.config.destination_token,
+                    network_delete_url(&self.config.destination, network_id),
+                    format!("p14-readiness-network-delete-retry-{run_id}"),
+                )
+                .await;
             }
             if !volume_deleted {
-                let _ = client
-                    .delete(volume_delete_url(&self.config.destination, volume_id))
-                    .bearer_auth(&self.config.destination_token)
-                    .send()
-                    .await;
+                let _ = delete_readiness_resource(
+                    &client,
+                    &self.config.destination_token,
+                    volume_delete_url(&self.config.destination, volume_id),
+                    format!("p14-readiness-volume-delete-retry-{run_id}"),
+                )
+                .await;
             }
             return false;
         }
@@ -602,6 +606,41 @@ fn volume_delete_url(base: &Url, id: &str) -> Url {
     let mut url = base.clone();
     url.set_path(&format!("/o3k/v1/volume/volumes/{id}"));
     url
+}
+
+async fn delete_readiness_resource(
+    client: &Client,
+    token: &str,
+    delete_url: Url,
+    idempotency_key: String,
+) -> bool {
+    let generation = match client
+        .get(delete_url.clone())
+        .bearer_auth(token)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => response
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|body| {
+                body.pointer("/metadata/generation")
+                    .and_then(|v| v.as_i64())
+            }),
+        _ => None,
+    };
+    let Some(generation) = generation else {
+        return false;
+    };
+    client
+        .delete(delete_url)
+        .bearer_auth(token)
+        .header("Idempotency-Key", idempotency_key)
+        .header("If-Match", format!("generation-{generation}"))
+        .send()
+        .await
+        .is_ok_and(|response| response.status().is_success())
 }
 
 fn bind_external_network(
