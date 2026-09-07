@@ -18,32 +18,7 @@ jobs:
           ref: docs/cloud-kernel-positioning
       - name: Update O3K public positioning
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('README.md')
-          text = p.read_text()
-          old = '''<p align="center">
-  <strong>Rust-native Cloud Operating System with an OpenStack-compatible northbound surface.</strong><br />
-  OpenStack compatibility northbound. O3K Cloud Kernel in the middle. Typed infrastructure execution southbound.
-</p>
-'''
-          new = '''<p align="center">
-  <strong>A cloud kernel — literally born in the cloud.</strong><br />
-  Rust-native Cloud Operating System designed from first principles for cloud infrastructure.<br />
-  OpenStack-compatible northbound. O3K-native cloud authority in the middle. Provider-neutral typed execution southbound.
-</p>
-'''
-          if old not in text:
-              raise SystemExit('expected O3K positioning block not found')
-          text = text.replace(old, new, 1)
-          marker = '''![O3K Cloud Operating System architecture](docs/architecture/o3k-cloud-os.svg)\n\n'''
-          addition = '''O3K is a **cloud kernel — literally born in the cloud**. It is built from scratch in Rust around a shared cloud authority rather than inherited service boundaries. The Cloud Kernel owns identity and authorization, resource ownership, desired state, operations, scheduling, reconciliation, quotas, audit/event identity, and failure semantics; compatibility APIs stay northbound and infrastructure execution stays southbound.\n\n'''
-          if addition not in text:
-              if marker not in text:
-                  raise SystemExit('architecture marker not found')
-              text = text.replace(marker, marker + addition, 1)
-          p.write_text(text)
-          PY
+          python3 -c "from pathlib import Path; p=Path('README.md'); t=p.read_text(); old='<p align=\"center\">\\n  <strong>Rust-native Cloud Operating System with an OpenStack-compatible northbound surface.</strong><br />\\n  OpenStack compatibility northbound. O3K Cloud Kernel in the middle. Typed infrastructure execution southbound.\\n</p>\\n'; new='<p align=\"center\">\\n  <strong>A cloud kernel — literally born in the cloud.</strong><br />\\n  Rust-native Cloud Operating System designed from first principles for cloud infrastructure.<br />\\n  OpenStack-compatible northbound. O3K-native cloud authority in the middle. Provider-neutral typed execution southbound.\\n</p>\\n'; assert old in t; t=t.replace(old,new,1); marker='![O3K Cloud Operating System architecture](docs/architecture/o3k-cloud-os.svg)\\n\\n'; addition='O3K is a **cloud kernel — literally born in the cloud**. It is built from scratch in Rust around a shared cloud authority rather than inherited service boundaries. The Cloud Kernel owns identity and authorization, resource ownership, desired state, operations, scheduling, reconciliation, quotas, audit/event identity, and failure semantics; compatibility APIs stay northbound and infrastructure execution stays southbound.\\n\\n'; assert marker in t; t=t if addition in t else t.replace(marker,marker+addition,1); p.write_text(t)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add README.md
