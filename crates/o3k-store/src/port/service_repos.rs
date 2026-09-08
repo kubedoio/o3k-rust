@@ -198,6 +198,12 @@ pub trait VolumeAttachmentRepository: Send + Sync {
 pub trait ImageRepository: Send + Sync + QuotaRepository {
     async fn insert_image(&self, image: &ImageMetadataRecord) -> Result<(), StoreError>;
     async fn list_images(&self, project_id: &str) -> Result<Vec<ImageMetadataRecord>, StoreError>;
+    async fn list_images_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ImageMetadataRecord>, StoreError>;
     async fn get_image(
         &self,
         project_id: &str,

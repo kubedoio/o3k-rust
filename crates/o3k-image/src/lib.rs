@@ -1173,6 +1173,22 @@ impl ImageService {
             .collect()
     }
 
+    pub async fn list_page_for_project(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ImageRecord>, ImageError> {
+        self.inner
+            .repository
+            .list_images_page(project_id, after_id, limit)
+            .await
+            .map_err(Self::map_store_error)?
+            .into_iter()
+            .map(image_from_store)
+            .collect()
+    }
+
     pub async fn get(&self, auth: &AuthContext, id: Uuid) -> Result<ImageRecord, ImageError> {
         let ns = ServiceNamespace::new("image")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("image".to_owned()));
