@@ -60,16 +60,6 @@ impl ComputeService {
         {
             return Err(ComputeError::NotFound);
         }
-        let current = server_state_from_storage(&resource.observed_state)
-            .map_err(|_| ComputeError::Conflict)?;
-        let target_state = match (action, current) {
-            (InstanceAction::Start, ServerState::Stopped) => ServerState::Active,
-            (InstanceAction::Stop, ServerState::Active) => ServerState::Stopped,
-            (InstanceAction::Reboot, ServerState::Active | ServerState::Stopped) => {
-                ServerState::Active
-            }
-            _ => return Err(ComputeError::Conflict),
-        };
         let lifecycle_action = match action {
             InstanceAction::Start => LifecycleAction::Start,
             InstanceAction::Stop => LifecycleAction::Stop,
@@ -78,12 +68,8 @@ impl ComputeService {
         let operation_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!(
-                "o3k:canonical-action:{}:{}:{}:{}:{}",
-                resource.project_id,
-                id,
-                expected,
-                server_state_to_storage(target_state),
-                context.idempotency_key
+                "o3k:canonical-action:{}:{}:{}:{}",
+                resource.project_id, id, expected, context.idempotency_key
             )
             .as_bytes(),
         );
@@ -111,6 +97,14 @@ impl ComputeService {
             }
             o3k_store::CanonicalAcceptanceOutcome::Created { .. } => false,
         };
+        let current = server_state_from_storage(&resource.observed_state)
+            .map_err(|_| ComputeError::Conflict)?;
+        match (action, current) {
+            (InstanceAction::Start, ServerState::Stopped)
+            | (InstanceAction::Stop, ServerState::Active)
+            | (InstanceAction::Reboot, ServerState::Active | ServerState::Stopped) => {}
+            _ => return Err(ComputeError::Conflict),
+        }
         let operation_state = self
             .reconcile_lifecycle_until_terminal(operation_id)
             .await?;
