@@ -245,6 +245,43 @@ mod operation_visibility_tests {
         .with_operation_reader(reader);
         let app = o3k_api::router_with_state(o3k_api::AppState::new().with_native_api(native));
 
+        let list_request = |project: &str| {
+            Request::builder()
+                .uri("/o3k/v1/operations?limit=1")
+                .header("authorization", format!("Bearer project-{project}"))
+                .body(Body::empty())
+                .expect("list request")
+        };
+        let listed = app
+            .clone()
+            .oneshot(list_request("a"))
+            .await
+            .expect("list response");
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(listed.into_body(), usize::MAX)
+                .await
+                .expect("list body"),
+        )
+        .expect("list json");
+        assert_eq!(listed_body["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(listed_body["items"][0]["id"], id.to_string());
+        assert_eq!(listed_body["items"][0]["service"], "compute");
+
+        let foreign_list = app
+            .clone()
+            .oneshot(list_request("b"))
+            .await
+            .expect("foreign list response");
+        assert_eq!(foreign_list.status(), StatusCode::OK);
+        let foreign_list_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(foreign_list.into_body(), usize::MAX)
+                .await
+                .expect("foreign list body"),
+        )
+        .expect("foreign list json");
+        assert_eq!(foreign_list_body["items"].as_array().map(Vec::len), Some(0));
+
         let request = |project: &str, operation: Uuid| {
             Request::builder()
                 .uri(format!("/o3k/v1/operations/{operation}"))
