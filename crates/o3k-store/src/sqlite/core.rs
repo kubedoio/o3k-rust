@@ -1516,6 +1516,7 @@ impl DurableStore for SqliteStore {
             Ok(())
         }.await;
         SqliteStore::commit_or_rollback(&mut connection, result).await?;
+        drop(connection);
         self.get_canonical_operation(id).await
     }
 
