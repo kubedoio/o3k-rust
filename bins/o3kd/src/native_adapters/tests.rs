@@ -12,6 +12,7 @@ mod native_compute_tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use axum::routing::post;
     use o3k_kernel::{
         ActionId, AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, UserPrincipal,
     };
@@ -244,6 +245,10 @@ mod native_compute_tests {
                 get(resource::show)
                     .put(resource::update)
                     .delete(resource::delete),
+            )
+            .route(
+                "/{namespace}/{collection}/{id}/actions/{action_name}",
+                post(resource::action),
             )
             .route(
                 "/{namespace}/{collection}/{id}/relationships",
