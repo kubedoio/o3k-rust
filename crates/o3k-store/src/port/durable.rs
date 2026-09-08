@@ -118,6 +118,16 @@ pub trait DurableStore: Send + Sync {
         project_id: &str,
         kind: &str,
     ) -> Result<Vec<ResourceRecord>, StoreError>;
+    /// Bounded, deterministic native collection query. Implementations must
+    /// apply scope, kind, continuation and limit in SQL; callers must not
+    /// emulate this by loading an entire collection.
+    async fn list_resources_page(
+        &self,
+        project_id: &str,
+        kind: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResourceRecord>, StoreError>;
     async fn update_resource(
         &self,
         id: Uuid,

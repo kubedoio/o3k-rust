@@ -328,7 +328,7 @@ impl ResourceApplication for GenericResourceApplication {
         &self,
         descriptor: &ResourceDescriptor,
         auth: &o3k_kernel::AuthContext,
-        _query: &o3k_native_api::resource::ListQuery,
+        query: &o3k_native_api::resource::ListQuery,
     ) -> Result<Vec<serde_json::Value>, ResourceApplicationError> {
         if descriptor.resource_type.to_string() == "image:image" {
             let service = self
@@ -349,9 +349,11 @@ impl ResourceApplication for GenericResourceApplication {
         {
             return self
                 .store
-                .list_resources(
+                .list_resources_page(
                     auth.effective_scope().id().as_str(),
                     &descriptor.resource_type.to_string(),
+                    query.continuation_id.as_deref(),
+                    o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
                 )
                 .await
                 .map(|resources| resources.iter().map(generic_external_json).collect())
@@ -370,9 +372,11 @@ impl ResourceApplication for GenericResourceApplication {
         ) {
             return self
                 .store
-                .list_resources(
+                .list_resources_page(
                     auth.effective_scope().id().as_str(),
                     &descriptor.resource_type.to_string(),
+                    query.continuation_id.as_deref(),
+                    o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
                 )
                 .await
                 .map(|resources| resources.iter().map(generic_external_json).collect())
