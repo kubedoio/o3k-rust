@@ -8,6 +8,7 @@ product rules. Summaries explain these decisions but do not override them.
 | Subject | Normative source | Summary-only documents |
 |---|---|---|
 | Cloud OS identity, Cloud Kernel, OpenStack compatibility, provider/delegated-cloud authority | `docs/adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md` | `README.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md` |
+| End-to-end edge-to-datacenter scale continuity, deployment building blocks, composable service catalog, and OpenStack ecosystem extension boundary | `docs/adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md` and `docs/specs/SPEC-0039-edge-to-datacenter-building-block-cloud.md` | `README.md`, `docs/ROADMAP.md`, `docs/PRODUCT_REQUIREMENTS.md` |
 | O3K IAM and Keystone compatibility | `docs/adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md` and `docs/specs/SPEC-0020-keystone-trust-catalog-and-auth-context.md` | `README.md`, `docs/ARCHITECTURE.md` |
 | Kubernetes-native control-plane deployment and PostgreSQL requirement for HA Kubernetes | `docs/adr/ADR-0167-kubernetes-native-control-plane-deployment.md` | `README.md`, `docs/ROADMAP.md`, `docs/ARCHITECTURE.md` |
 | P9 O3K network intent, Routed Fabric, and node-local network execution | `docs/adr/ADR-0168-o3k-routed-fabric-and-network-execution.md` and `docs/specs/SPEC-0026-o3k-routed-fabric-v1.md` | `docs/ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/PRODUCT_REQUIREMENTS.md` |
@@ -63,12 +64,35 @@ profile and ordered prompts.
 | --- | --- |
 | OpenStack cold migration authority, cutover, and bounded profile | `docs/adr/ADR-0180-openstack-cold-migration-authority-and-cutover.md`, `docs/specs/SPEC-0037-openstack-cold-migration-v1.md`, `docs/prompts/p14/` |
 
+## Accepted end-to-end scale sources — active architecture authority
+
+ADR-0182 and SPEC-0039 define O3K as one Cloud Operating System across the
+edge-to-datacenter continuum. They do not promote any untested datacenter-scale
+support claim; scale evidence remains profile-specific.
+
+| Subject | Authority |
+| --- | --- |
+| Edge-to-datacenter building-block continuity, composable service catalog and upstream OpenStack hosted-service extension model | `docs/adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md`, `docs/specs/SPEC-0039-edge-to-datacenter-building-block-cloud.md` |
+
 ## Core rules
 
 - O3K owns public identity, ownership, desired state, scheduling, operations,
   reconciliation, and provider mappings for O3K-owned resources.
 - OpenStack service names are compatibility concepts, not mandatory internal
   process boundaries.
+- O3K is one Cloud Operating System across supported edge and datacenter scale
+  profiles; growth must preserve the same cloud authority, IAM, resource/API,
+  service-catalog and automation model rather than require replatforming.
+- Scale continuity does not require identical internal process topology. Cells,
+  sharding, hierarchical scheduling, database topologies and scale-specific
+  provider designs are permitted behind stable O3K contracts when evidence
+  requires them.
+- The service catalog is composable and must identify native O3K versus
+  external-hosted ownership. Catalog registration is never proof that O3K
+  implements an external service.
+- OpenStack compatibility may be used as a bounded ecosystem extension surface
+  for upstream services only after exact dependency-contract discovery and
+  profile-specific conformance evidence.
 - O3K IAM is canonical; Keystone is a compatibility projection.
 - ADR-0168/SPEC-0026 establish that O3K Network owns technology-independent
   connectivity intent, with Neutron objects as compatibility projections and
@@ -116,9 +140,10 @@ profile and ordered prompts.
 
 Architecture is not release evidence. PostgreSQL/Kubernetes HA, routed
 networking, native storage, P11 multi-host networking, P12 native API/service
-framework, P13 IaC compatibility, broad federation, complete parity, and fixed
-footprint/scale claims remain limited to the exact implementation and evidence
-profiles that passed their gates.
+framework, P13 IaC compatibility, broad federation, complete parity, fixed
+footprint/scale claims, larger datacenter scale, and fast-bootstrap timing
+claims remain limited to the exact implementation and evidence profiles that
+passed their gates.
 
 The current compatibility manifest remains authoritative for which OpenStack
 operations are actually advertised. Accepted P12 native contracts do not expand

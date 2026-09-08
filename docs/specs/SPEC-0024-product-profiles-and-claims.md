@@ -7,9 +7,11 @@ Related decisions and specifications:
 - [ADR-0163](../adr/ADR-0163-product-profiles-and-deployment-posture.md)
 - [ADR-0165](../adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md)
 - [ADR-0166](../adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md)
+- [ADR-0182](../adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md)
 - [SPEC-0020](SPEC-0020-keystone-trust-catalog-and-auth-context.md)
 - [SPEC-0022](SPEC-0022-service-api-baseline-and-evidence-gates.md)
 - [SPEC-0023](SPEC-0023-external-cinder-service-under-test.md)
+- [SPEC-0039](SPEC-0039-edge-to-datacenter-building-block-cloud.md)
 - [Machine-readable product profiles](../../compatibility/product-profiles.yaml)
 
 ## Purpose
@@ -24,23 +26,28 @@ A feature or measurement from one profile must not be silently promoted to
 another.
 
 The profiles do **not** define separate internal cloud architectures. O3K's
-canonical architecture is the Cloud Kernel in ADR-0165.
+canonical architecture is the Cloud Kernel in ADR-0165. ADR-0182/SPEC-0039 add
+the scale-continuity rule: edge, cage, private-cloud and future datacenter-scale
+profiles are evidence rungs of the same Cloud Operating System rather than
+separate products that require replatforming.
 
 ## Product identity versus profile identity
 
 The product identity is:
 
 > O3K — a lightweight, open, Rust-native Cloud Operating System with OpenStack
-> compatibility and pluggable infrastructure execution.
+> compatibility and pluggable infrastructure execution, intended to use the
+> same cloud authority and product contracts from edge to datacenter.
 
 Current release wording must still identify actual maturity, for example:
 
 > O3K v0.2.0-alpha.1 is a Rust-native OpenStack-compatible libvirt TestLab
 > alpha.
 
-"Cloud Operating System" describes architecture/direction. It is not evidence
-for production readiness, HA, full OpenStack parity, database support, or
-service breadth.
+"Cloud Operating System" and "edge to datacenter" describe architecture/
+direction. They are not evidence for production readiness, HA, full OpenStack
+parity, database support, service breadth, arbitrary host counts, or datacenter
+scale.
 
 ## Profile A — OpenStack service testbed
 
@@ -162,6 +169,10 @@ status.
 An operator can run O3K as a lightweight multi-host Cloud OS for approximately
 10–20 hypervisors in the initial edge profile.
 
+This profile is the first bounded real multi-host scale rung in the end-to-end
+model from ADR-0182/SPEC-0039. It is **not** the product's architectural maximum
+and does not prove larger private-cloud or datacenter-scale operation.
+
 Target host-execution topology:
 
 ```text
@@ -172,6 +183,9 @@ o3kd
 ```
 
 Logical execution-provider contracts are required before process extraction.
+Future larger profiles may use different internal controller/database/fabric or
+scheduler topology while preserving the same O3K cloud authority, IAM, resource,
+API, operation, service-catalog and automation model.
 
 ### Required edge capabilities
 
@@ -188,6 +202,42 @@ An edge release claim requires evidence for:
 - resource/latency budgets;
 - failure/cleanup behavior across supported host count;
 - database profile appropriate to claimed concurrency/availability.
+
+## Future larger private/datacenter scale profiles
+
+Larger O3K profiles are governed by ADR-0182/SPEC-0039.
+
+They are not new product identities. They SHALL preserve the same canonical
+cloud model while publishing their own exact evidence for:
+
+- real host count and failure-domain topology;
+- control-plane/controller topology;
+- database topology;
+- scheduler/cell/partition behavior where used;
+- fabric/network topology;
+- storage topology;
+- supported service catalog;
+- performance and reconciliation budgets;
+- host/block churn and capacity exhaustion;
+- rolling upgrade/rollback and failure recovery;
+- independent cleanup and foreign-state verification.
+
+Simulation may supplement but does not replace real-host scale evidence.
+
+## Service catalog composition across profiles
+
+Physical scale and service breadth are orthogonal.
+
+A small edge profile may intentionally expose only a minimal native O3K IaaS
+catalog, while a cage or datacenter profile may add more capabilities. Conversely,
+a specialized edge site may add a service that a larger general-purpose cloud
+does not need.
+
+The service catalog SHALL distinguish O3K-native from external-hosted ownership.
+Upstream OpenStack services such as Octavia, Designate or Barbican may be added
+only through exact versioned dependency-contract discovery and real conformance
+evidence as specified by SPEC-0038. OpenStack API presence alone is not proof
+that an upstream service is supported.
 
 ## Future delegated/federated cloud profiles
 
@@ -294,8 +344,9 @@ release-claimed
 ```
 
 OpenStack compatibility, Cloud Kernel primitives, database, footprint,
-metadata, edge scale, external service integration, Kubernetes control-plane
-deployment, and future native services are tracked independently.
+metadata, edge scale, larger private/datacenter scale, external service
+integration, Kubernetes control-plane deployment, and future native services are
+tracked independently.
 
 ## Kubernetes control-plane deployment claims
 
@@ -319,7 +370,8 @@ Valid architectural/product wording:
 
 > O3K is a lightweight, open, Rust-native Cloud Operating System. It preserves
 > selected OpenStack compatibility while using its own Cloud Kernel and typed
-> infrastructure execution providers.
+> infrastructure execution providers, with one product model intended to scale
+> from edge to datacenter through capability-bearing building blocks.
 
 Valid current-release wording:
 
@@ -334,6 +386,9 @@ Invalid standalone claims without qualifying evidence include:
 - "O3K runs in 50 MB."
 - "PostgreSQL is supported for production."
 - "O3K connects to any OpenStack cloud."
+- "O3K supports thousands of hosts."
+- "O3K creates a production cloud in seconds."
+- "Any OpenStack service works automatically with O3K."
 - "O3K supports AWS-like databases/AI/Kubernetes" merely because the Cloud
   Kernel is designed to enable future services.
 
@@ -348,4 +403,5 @@ Every release identifies:
 - exact OpenStack compatibility operations/microversions;
 - component/full-profile evidence;
 - footprint measurement or explicit absence;
+- exact tested scale where a scale claim is made;
 - known limitations and unsupported integrations.
