@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://o3k.io/contracts/native-resource-list-response-v1.schema.json","type":"object","additionalProperties":false,"required":["items"],"properties":{"items":{"type":"array","items":{"$ref":"https://o3k.io/contracts/native-resource-envelope-v1.schema.json"}},"next_cursor":{"type":["string","null"]}}}

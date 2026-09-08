@@ -339,18 +339,19 @@ fn schema_id(namespace: &str, collection: &str, version: &str) -> String {
 }
 
 fn action_metadata(descriptor: &ResourceDescriptor) -> Vec<ActionSchemaMetadata> {
-    let mut actions: Vec<_> = descriptor
-        .lifecycle_actions
-        .iter()
-        .map(|(operation, action)| {
-            let name = format!("{operation:?}").to_lowercase();
-            let target = match operation {
-                LifecycleOperation::List | LifecycleOperation::Create => "collection",
-                LifecycleOperation::Show
-                | LifecycleOperation::Update
-                | LifecycleOperation::Delete => "instance",
-            };
-            ActionSchemaMetadata {
+    let mut actions: Vec<_> =
+        descriptor
+            .lifecycle_actions
+            .iter()
+            .map(|(operation, action)| {
+                let name = format!("{operation:?}").to_lowercase();
+                let target = match operation {
+                    LifecycleOperation::List | LifecycleOperation::Create => "collection",
+                    LifecycleOperation::Show
+                    | LifecycleOperation::Update
+                    | LifecycleOperation::Delete => "instance",
+                };
+                ActionSchemaMetadata {
                 name,
                 action_id: action.to_string(),
                 target: target.to_owned(),
@@ -360,9 +361,16 @@ fn action_metadata(descriptor: &ResourceDescriptor) -> Vec<ActionSchemaMetadata>
                     ),
                     _ => None,
                 },
-                output: Some(
-                    "https://o3k.io/contracts/native-resource-envelope-v1.schema.json".to_owned(),
-                ),
+                output: Some(match operation {
+                    LifecycleOperation::List =>
+                        "https://o3k.io/contracts/native-resource-list-response-v1.schema.json",
+                    LifecycleOperation::Show =>
+                        "https://o3k.io/contracts/native-resource-envelope-v1.schema.json",
+                    LifecycleOperation::Create
+                    | LifecycleOperation::Update
+                    | LifecycleOperation::Delete =>
+                        "https://o3k.io/contracts/native-mutation-result-v1.schema.json",
+                }.to_owned()),
                 // Lifecycle mutations return a canonical operation_id. Reads
                 // do not create operations, but are still represented here.
                 asynchronous: matches!(
@@ -372,8 +380,8 @@ fn action_metadata(descriptor: &ResourceDescriptor) -> Vec<ActionSchemaMetadata>
                         | LifecycleOperation::Delete
                 ),
             }
-        })
-        .collect();
+            })
+            .collect();
     actions.sort_by(|a, b| a.name.cmp(&b.name));
     actions
 }
