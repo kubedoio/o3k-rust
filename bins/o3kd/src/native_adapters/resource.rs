@@ -328,6 +328,7 @@ impl ResourceApplication for GenericResourceApplication {
         &self,
         descriptor: &ResourceDescriptor,
         auth: &o3k_kernel::AuthContext,
+        _query: &o3k_native_api::resource::ListQuery,
     ) -> Result<Vec<serde_json::Value>, ResourceApplicationError> {
         if descriptor.resource_type.to_string() == "image:image" {
             let service = self
