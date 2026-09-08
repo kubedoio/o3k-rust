@@ -1,20 +1,21 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: 44146c99a5cee3f274e0275c904f3958d682e655
-updated_at: 2026-09-06T00:00:00Z
+source_commit: 46e050a36d15edde5b769b545d315d2875fbf923
+updated_at: 2026-09-08T00:00:00Z
 milestones:
   p14:
-    status: architecture-defined
-    source_commit: 44146c99a5cee3f274e0275c904f3958d682e655
+    status: real-two-cloud-acceptance-passed
+    source_commit: 46e050a36d15edde5b769b545d315d2875fbf923
     evidence: >-
-      P14.0 architecture/contracts are defined by ADR-0180 and SPEC-0037;
-      runtime migration is not implemented and no cross-cloud support claim is
-      made. Ordered prompts and the independent review procedure are committed
-      under docs/prompts/p14/.
+      P14.9 real two-cloud acceptance passed against protected main
+      46e050a: G01-G20 all passed, owned_leaks=0, inconsistencies=0,
+      foreign_state_changes=0, final OpenTofu plan NO-OP. ADR-0180 and
+      SPEC-0037 define the profile; ordered prompts live under
+      docs/prompts/p14/.
     claim_scope: >-
-      Architecture-only bounded p14-openstack-cold-migration-v1 profile. It is
-      not evidence of runtime migration, generic OpenStack compatibility, HA,
-      multi-region support, or production readiness.
+      Bounded p14-openstack-cold-migration-v1 profile. It is not evidence of
+      generic OpenStack compatibility, HA, multi-region support, or production
+      readiness.
   p12-iam:
     status: completed
     source_commit: e47a81861f1f2c5dac125d017366a959dca39d1b
@@ -75,29 +76,45 @@ release_context: >-
 profiles:
   p14-openstack-cold-migration-v1:
     implementation_state: >-
-      Architecture-defined only. ADR-0180, SPEC-0037, and the ordered P14
-      prompt/review set are present. Runtime implementation and real two-cloud
-      evidence are intentionally not started by P14.0.
-    source_commit: 44146c99a5cee3f274e0275c904f3958d682e655
+      P14.9 real two-cloud acceptance passed against protected main
+      46e050a (merge of #894) on the bounded disposable destination:
+      G01-G20 all passed, owned_leaks=0, inconsistencies=0,
+      foreign_state_changes=0, and the final OpenTofu plan is NO-OP.
+      ADR-0180, SPEC-0037, and the ordered P14 prompt/review set remain
+      the profile authority. The profile remains scoped to bounded
+      cold migration; it is not a generic OpenStack, HA, multi-region, or
+      production support claim.
+    source_commit: 46e050a36d15edde5b769b545d315d2875fbf923
     portable_evidence:
       - name: p14-architecture-contracts
         state: passed
-        note: ADR/spec/prompt/profile governance validation passed; runtime evidence is owned by later slices.
+        note: ADR/spec/prompt/profile governance validation passed.
     protected_component_evidence:
       - name: p14-real-two-cloud
-        state: not-executed
-        note: Owned by P14.9.
+        state: passed
+        note: >-
+          Real source (DevStack stable/2025.1) to native O3K destination
+          migration journey passed on main 46e050a. Evidence run:
+          /var/lib/o3k/p14-9c-destination/execution-w.json (protected run
+          dir). p14-acceptance validate reported PASSED.
     full_profile_evidence:
       - name: p14-profile-gate
-        state: not-executed
-        note: No P14 runtime support claim exists at architecture stage.
+        state: passed
+        note: >-
+          G01-G20 all passed with owned_leaks=0, inconsistencies=0,
+          foreign_state_changes=0 and a NO-OP final OpenTofu plan on the
+          bounded p14-openstack-cold-migration-v1 profile.
     release_relevance: >-
-      Not release-blocking for the current alpha and not a runtime support claim.
+      Not release-blocking for the current alpha and not a production
+      readiness claim.
     blockers:
-      - P14.1-P14.9 implementation and evidence are outstanding.
-    next_evidence_action: Execute P14.1 only after P14.0 exact-head review and merge.
+      - None for the bounded p14-openstack-cold-migration-v1 real two-cloud acceptance.
+    next_evidence_action: Preserve the passing protected evidence and profile closure PR (reconciles #865/#855).
     explicitly_unproven_claims:
-      - runtime cold migration
+      - generic OpenStack compatibility
+      - HA / multi-region support
+      - production readiness
+      - migration of arbitrary external OpenStack topologies
       - generic cross-cloud support
       - live migration
       - active-active or multi-region support
