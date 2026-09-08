@@ -44,6 +44,7 @@ pub struct ResourceDescriptor {
     pub scope: o3k_kernel::ResourceScope,
     pub lifecycle_actions: HashMap<LifecycleOperation, ActionId>,
     pub owning_service: String,
+    pub ownership: o3k_kernel::ServiceOwnership,
     pub ready: bool,
 }
 
@@ -112,6 +113,7 @@ impl ResourceDispatcher {
                         })
                         .collect::<Result<_, _>>()?,
                     owning_service: manifest.service_id.clone(),
+                    ownership: manifest.ownership,
                     ready,
                 })?;
             }
@@ -381,6 +383,7 @@ mod tests {
             scope: o3k_kernel::ResourceScope::Tenant,
             lifecycle_actions,
             owning_service: namespace.into(),
+            ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
             ready: true,
         }
     }
@@ -601,10 +604,19 @@ async fn create_for(
                 .into_response();
             }
         },
-        // External hosted controllers own their request contracts and validate
-        // at their controller boundary; native built-in resources never take
+        // External controllers own their request contracts and validate at
+        // their controller boundary; native built-in resources never take
         // this branch.
-        None => crate::resource_contract::ValidatedSpec::from_external_contract(request.spec),
+        None if descriptor.ownership == o3k_kernel::ServiceOwnership::ExternalController => {
+            crate::resource_contract::ValidatedSpec::from_external_contract(request.spec)
+        }
+        None => {
+            return ProblemDetails::with_detail(
+                ErrorCode::NotAvailable,
+                "resource create contract is not available",
+            )
+            .into_response();
+        }
     };
     let validated = ValidatedCreateRequest {
         api_version: request.api_version,

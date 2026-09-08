@@ -339,6 +339,13 @@ fn schema_id(namespace: &str, collection: &str, version: &str) -> String {
     format!("https://o3k.io/schemas/{namespace}/{collection}/{version}/resource")
 }
 
+fn create_input_schema_id(namespace: &str, collection: &str, version: &str) -> String {
+    format!(
+        "{}#/allOf/1/properties/spec",
+        schema_id(namespace, collection, version)
+    )
+}
+
 fn action_metadata(descriptor: &ResourceDescriptor) -> Vec<ActionSchemaMetadata> {
     let mut actions: Vec<_> =
         descriptor
@@ -360,7 +367,7 @@ fn action_metadata(descriptor: &ResourceDescriptor) -> Vec<ActionSchemaMetadata>
                     LifecycleOperation::Create => resource_contract::ContractKind::for_resource(
                         &descriptor.resource_type.to_string(),
                         &descriptor.schema_version,
-                    ).map(|_| schema_id(
+                    ).map(|_| create_input_schema_id(
                         descriptor.resource_type.namespace(),
                         &descriptor.collection,
                         &descriptor.schema_version,
@@ -743,6 +750,14 @@ mod tests {
         };
         let _ = reg.register(m);
         reg
+    }
+
+    #[test]
+    fn create_action_input_reference_targets_the_typed_spec_fragment() {
+        assert_eq!(
+            create_input_schema_id("compute", "servers", "v1"),
+            "https://o3k.io/schemas/compute/servers/v1/resource#/allOf/1/properties/spec"
+        );
     }
 
     #[tokio::test]

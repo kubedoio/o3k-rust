@@ -52,8 +52,9 @@ pub enum ContractKind {
     Network,
 }
 
-/// A contract-checked public spec. The value is retained for the generic
-/// application extension point, but can only be constructed by `validate`.
+/// A public spec accepted by the generic application extension point.
+/// Native resources construct it through `validate`; external-controller
+/// adapters may construct it only after applying their authoritative contract.
 #[derive(Debug, Clone)]
 pub struct ValidatedSpec {
     value: Value,

@@ -309,21 +309,26 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
                 o3k_native_api::resource::ValidatedCreateRequest {
                     api_version: Some("o3k.io/v1".into()),
                     kind: Some(request.resource_type.to_string()),
-                    spec: o3k_native_api::resource_contract::ContractKind::for_resource(
+                    spec: match o3k_native_api::resource_contract::ContractKind::for_resource(
                         &request.resource_type.to_string(),
                         &descriptor.schema_version,
-                    )
-                    .ok_or_else(|| {
-                        o3k_service_sdk::composition::CompositionError::Failed(
-                            "child create contract unavailable".into(),
-                        )
-                    })?
-                    .validate(request.desired_spec)
-                    .map_err(|_| {
-                        o3k_service_sdk::composition::CompositionError::Failed(
-                            "child create spec invalid".into(),
-                        )
-                    })?,
+                    ) {
+                        Some(contract) => contract.validate(request.desired_spec).map_err(|_| {
+                            o3k_service_sdk::composition::CompositionError::Failed(
+                                "child create spec invalid".into(),
+                            )
+                        })?,
+                        None if descriptor.ownership
+                            == o3k_kernel::ServiceOwnership::ExternalController =>
+                            o3k_native_api::resource_contract::ValidatedSpec::from_external_contract(
+                                request.desired_spec,
+                            ),
+                        None => {
+                            return Err(o3k_service_sdk::composition::CompositionError::Failed(
+                                "child create contract unavailable".into(),
+                            ));
+                        }
+                    },
                 },
                 Some(&request.idempotency_key),
             )
