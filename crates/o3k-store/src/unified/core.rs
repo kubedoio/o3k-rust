@@ -279,6 +279,24 @@ impl DurableStore for O3kStore {
         }
     }
 
+    async fn list_canonical_operations_page(
+        &self,
+        owner_scope: &str,
+        after_id: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<CanonicalOperationRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.list_canonical_operations_page(owner_scope, after_id, limit)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.list_canonical_operations_page(owner_scope, after_id, limit)
+                    .await
+            }
+        }
+    }
+
     async fn attach_provider_reference(
         &self,
         reference: &ProviderReference,
