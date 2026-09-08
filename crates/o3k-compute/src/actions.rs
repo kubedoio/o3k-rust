@@ -6,9 +6,122 @@ use super::{
 };
 
 use o3k_kernel::{ActionId, AuditEvent, AuditOutcome, AuthorizationRequest, ServiceNamespace};
+use o3k_reconciler::CanonicalMutationContext;
 use o3k_store::{server_state_from_storage, server_state_to_storage};
 
 impl ComputeService {
+    /// Executes a declared server domain action through the same canonical
+    /// lifecycle journal used by native and compatibility callers.
+    pub async fn action_for_auth_canonical(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+        action: InstanceAction,
+        context: CanonicalMutationContext,
+    ) -> Result<MutationReceipt<ServerId>, ComputeError> {
+        let action_name = match action {
+            InstanceAction::Start => "StartServer",
+            InstanceAction::Stop => "StopServer",
+            InstanceAction::Reboot => "RebootServer",
+        };
+        let expected = ActionId::new_unchecked("compute", action_name);
+        if context.action != expected
+            || context.actor != auth.principal().id().as_str()
+            || context.owner_scope.id().as_str() != auth.effective_scope().id().as_str()
+        {
+            return Err(ComputeError::InvalidRequest);
+        }
+        let target = ResourceTarget::instance(
+            ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+            ResourceId::new(id.as_uuid().to_string()).map_err(|_| ComputeError::InvalidRequest)?,
+            Some(auth.effective_scope().id().clone()),
+        );
+        if !self
+            .authorizer
+            .authorize(&AuthorizationRequest {
+                auth_context: auth,
+                action: expected.clone(),
+                resource_target: target,
+            })
+            .is_allowed()
+        {
+            return Err(ComputeError::NotFound);
+        }
+        let resource = self
+            .store
+            .get_resource(id.as_uuid())
+            .await
+            .map_err(|error| match error {
+                StoreError::ResourceNotFound => ComputeError::NotFound,
+                other => ComputeError::Store(other),
+            })?;
+        if resource.project_id != auth.effective_scope().id().as_str()
+            || resource.provider_id.is_none()
+        {
+            return Err(ComputeError::NotFound);
+        }
+        let current = server_state_from_storage(&resource.observed_state)
+            .map_err(|_| ComputeError::Conflict)?;
+        let target_state = match (action, current) {
+            (InstanceAction::Start, ServerState::Stopped) => ServerState::Active,
+            (InstanceAction::Stop, ServerState::Active) => ServerState::Stopped,
+            (InstanceAction::Reboot, ServerState::Active | ServerState::Stopped) => {
+                ServerState::Active
+            }
+            _ => return Err(ComputeError::Conflict),
+        };
+        let lifecycle_action = match action {
+            InstanceAction::Start => LifecycleAction::Start,
+            InstanceAction::Stop => LifecycleAction::Stop,
+            InstanceAction::Reboot => LifecycleAction::Reboot,
+        };
+        let operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:canonical-action:{}:{}:{}:{}:{}",
+                resource.project_id,
+                id,
+                expected,
+                server_state_to_storage(target_state),
+                context.idempotency_key
+            )
+            .as_bytes(),
+        );
+        let acceptance = self
+            .journal
+            .begin_canonical_lifecycle(id.as_uuid(), operation_id, lifecycle_action, &context)
+            .await
+            .map_err(|error| match error {
+                ReconcileError::Store(StoreError::ResourceAlreadyExists) => {
+                    ComputeError::Conflict
+                }
+                other => ComputeError::Reconcile(other),
+            })?;
+        let replayed = match acceptance {
+            o3k_store::CanonicalAcceptanceOutcome::Conflict => return Err(ComputeError::Conflict),
+            o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent {
+                operation_id: existing,
+                resource_id,
+            } => {
+                let operation = self.store.get_operation(existing).await?;
+                return Ok(MutationReceipt {
+                    resource: ServerId::from_uuid(resource_id),
+                    operation_id: existing,
+                    operation_state: operation.state,
+                    replayed: true,
+                });
+            }
+            o3k_store::CanonicalAcceptanceOutcome::Created { .. } => false,
+        };
+        let operation_state = self.reconcile_lifecycle_until_terminal(operation_id).await?;
+        Ok(MutationReceipt {
+            resource: id,
+            operation_id,
+            operation_state,
+            replayed,
+        })
+    }
+
     pub async fn placement_provider_id(
         &self,
         project_id: &str,
