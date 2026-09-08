@@ -203,6 +203,15 @@ pub struct CreateRequest {
     pub spec: serde_json::Value,
 }
 
+/// A create request after the resource-specific public contract has been
+/// checked.  Applications never receive an unvalidated wire `Value`.
+#[derive(Debug, Clone)]
+pub struct ValidatedCreateRequest {
+    pub api_version: Option<String>,
+    pub kind: Option<String>,
+    pub spec: crate::resource_contract::ValidatedSpec,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceApplicationError {
     Unauthorized,
@@ -234,7 +243,7 @@ pub trait ResourceApplication: Send + Sync {
         &self,
         descriptor: &ResourceDescriptor,
         auth: &AuthContext,
-        request: CreateRequest,
+        request: ValidatedCreateRequest,
         idempotency_key: Option<&str>,
     ) -> Result<MutationResult, ResourceApplicationError>;
     async fn delete(
@@ -573,28 +582,39 @@ async fn create_for(
         .into_response();
     };
     let resource_type = descriptor.resource_type.to_string();
-    let Some(contract) = crate::resource_contract::ContractKind::for_resource(
+    let contract = crate::resource_contract::ContractKind::for_resource(
         &resource_type,
         &descriptor.schema_version,
-    ) else {
-        return ProblemDetails::with_detail(
-            ErrorCode::NotAvailable,
-            "resource create contract is not available",
-        )
-        .into_response();
-    };
-    if contract.validate(request.spec.clone()).is_err() {
-        return ProblemDetails::with_detail(
-            ErrorCode::BadRequest,
-            "resource spec violates its published contract",
-        )
-        .into_response();
-    }
+    );
     let key = match idempotency_key(&headers) {
         Ok(key) => key,
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
-    match application.create(descriptor, &auth.0, request, key).await {
+    let spec = match contract {
+        Some(contract) => match contract.validate(request.spec) {
+            Ok(spec) => spec,
+            Err(_) => {
+                return ProblemDetails::with_detail(
+                    ErrorCode::BadRequest,
+                    "resource spec violates its published contract",
+                )
+                .into_response();
+            }
+        },
+        // External hosted controllers own their request contracts and validate
+        // at their controller boundary; native built-in resources never take
+        // this branch.
+        None => crate::resource_contract::ValidatedSpec::from_external_contract(request.spec),
+    };
+    let validated = ValidatedCreateRequest {
+        api_version: request.api_version,
+        kind: request.kind,
+        spec,
+    };
+    match application
+        .create(descriptor, &auth.0, validated, key)
+        .await
+    {
         Ok(result) if result.complete => (StatusCode::CREATED, Json(result)).into_response(),
         Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
         Err(error) => application_problem(error),

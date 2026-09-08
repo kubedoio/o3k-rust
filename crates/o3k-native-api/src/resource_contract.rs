@@ -4,7 +4,7 @@
 //! do not belong here.
 
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -52,6 +52,42 @@ pub enum ContractKind {
     Network,
 }
 
+/// A contract-checked public spec. The value is retained for the generic
+/// application extension point, but can only be constructed by `validate`.
+#[derive(Debug, Clone)]
+pub struct ValidatedSpec {
+    value: Value,
+}
+
+impl std::ops::Deref for ValidatedSpec {
+    type Target = Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl Serialize for ValidatedSpec {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.value.serialize(serializer)
+    }
+}
+
+impl ValidatedSpec {
+    /// Construct a spec supplied by an already-authoritative external
+    /// controller contract. Native built-in callers must use `ContractKind`.
+    pub fn from_external_contract(value: Value) -> Self {
+        Self { value }
+    }
+
+    pub fn into_value(self) -> Value {
+        self.value
+    }
+}
+
 impl ContractKind {
     pub fn for_resource(resource: &str, version: &str) -> Option<Self> {
         if version != "v1" {
@@ -79,11 +115,10 @@ impl ContractKind {
         serde_json::to_value(schema).unwrap_or_else(|_| serde_json::json!({}))
     }
 
-    pub fn validate(&self, spec: Value) -> Result<Value, serde_json::Error> {
+    pub fn validate(&self, spec: Value) -> Result<ValidatedSpec, serde_json::Error> {
         match self {
-            Self::ComputeServer => {
-                serde_json::from_value::<ComputeServerCreateSpec>(spec.clone()).map(|_| spec)
-            }
+            Self::ComputeServer => serde_json::from_value::<ComputeServerCreateSpec>(spec.clone())
+                .map(|_| ValidatedSpec { value: spec }),
             Self::Volume => {
                 serde_json::from_value::<VolumeCreateSpec>(spec.clone()).and_then(|parsed| {
                     if parsed.size_bytes == 0 || parsed.volume_type.trim().is_empty() {
@@ -91,12 +126,11 @@ impl ContractKind {
                             "size_bytes and volume_type must be non-empty",
                         ));
                     }
-                    Ok(spec)
+                    Ok(ValidatedSpec { value: spec })
                 })
             }
-            Self::Network => {
-                serde_json::from_value::<NetworkCreateSpec>(spec.clone()).map(|_| spec)
-            }
+            Self::Network => serde_json::from_value::<NetworkCreateSpec>(spec.clone())
+                .map(|_| ValidatedSpec { value: spec }),
         }
     }
 }
