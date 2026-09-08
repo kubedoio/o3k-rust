@@ -235,6 +235,10 @@ mod native_compute_tests {
                 "/{namespace}/{collection}/{id}",
                 get(resource::show).delete(resource::delete),
             )
+            .route(
+                "/{namespace}/{collection}/{id}/relationships",
+                get(resource::relationships),
+            )
             .route("/operations/{id}", get(operation::show_operation))
             .layer(DefaultBodyLimit::max(1_048_576))
             .with_state(native);
