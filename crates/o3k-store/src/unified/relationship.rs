@@ -29,6 +29,16 @@ impl RelationshipRepository for O3kStore {
         self.list_relationships(parent_resource_id).await
     }
 
+    async fn list_relationships_page(
+        &self,
+        parent_resource_id: Uuid,
+        after_slot: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
+        self.list_relationships_page(parent_resource_id, after_slot, limit)
+            .await
+    }
+
     async fn bind_relationship(
         &self,
         parent_resource_id: Uuid,
