@@ -13,7 +13,7 @@ use o3k_native_api::{
         ValidatedCreateRequest, VolumeAttachmentWorkflow,
     },
 };
-use o3k_store::{DurableStore, storage::StorageRepository};
+use o3k_store::{DurableStore, RelationshipRepository, storage::StorageRepository};
 use uuid::Uuid;
 
 #[async_trait::async_trait]
@@ -1913,6 +1913,51 @@ impl ResourceApplication for GenericResourceApplication {
                 Some(&resource),
             )),
         })
+    }
+
+    async fn relationships(
+        &self,
+        _descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+        id: &str,
+        limit: usize,
+    ) -> Result<Vec<o3k_native_api::resource::RelationshipView>, ResourceApplicationError> {
+        let parent = Uuid::parse_str(id).map_err(|_| ResourceApplicationError::NotFound)?;
+        let record = self
+            .store
+            .get_resource(parent)
+            .await
+            .map_err(|error| match error {
+                o3k_store::StoreError::ResourceNotFound => ResourceApplicationError::NotFound,
+                _ => ResourceApplicationError::Internal,
+            })?;
+        if record.project_id != auth.effective_scope().id().as_str() {
+            return Err(ResourceApplicationError::NotFound);
+        }
+        let bounded = u32::try_from(limit.saturating_add(1))
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        let records = self
+            .store
+            .list_relationships_page(parent, None, bounded)
+            .await
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        if records.len() > limit {
+            return Err(ResourceApplicationError::Conflict);
+        }
+        records
+            .into_iter()
+            .map(|record| {
+                Ok(o3k_native_api::resource::RelationshipView {
+                    slot: record.slot,
+                    resource_type: record.expected_child_resource_type,
+                    resource_id: record.child_resource_id.map(|id| id.to_string()),
+                    ownership: record.ownership,
+                    state: record.state,
+                    parent_operation_id: record.parent_operation_id.to_string(),
+                    child_operation_id: record.child_operation_id.map(|id| id.to_string()),
+                })
+            })
+            .collect()
     }
 
     async fn delete(

@@ -242,6 +242,19 @@ pub struct MutationResult {
     pub resource: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RelationshipView {
+    pub slot: String,
+    pub resource_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    pub ownership: String,
+    pub state: String,
+    pub parent_operation_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_operation_id: Option<String>,
+}
+
 #[async_trait]
 pub trait ResourceApplication: Send + Sync {
     /// Runtime capability authority used by discovery.  A manifest declaration
@@ -278,6 +291,16 @@ pub trait ResourceApplication: Send + Sync {
         auth: &AuthContext,
         id: &str,
     ) -> Result<serde_json::Value, ResourceApplicationError>;
+    async fn relationships(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &AuthContext,
+        id: &str,
+        limit: usize,
+    ) -> Result<Vec<RelationshipView>, ResourceApplicationError> {
+        let _ = (descriptor, auth, id, limit);
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
 }
 
 /// Canonical native attachment orchestration supplied by the composition
@@ -859,6 +882,39 @@ pub async fn show(
     };
     match application.show(descriptor, &auth.0, &id).await {
         Ok(resource) => (StatusCode::OK, Json(resource)).into_response(),
+        Err(error) => application_problem(error),
+    }
+}
+
+pub async fn relationships(
+    auth: BearerAuth,
+    Path((namespace, collection, id)): Path<(String, String, String)>,
+    Query(query): Query<ListQuery>,
+    State(state): State<NativeApiState>,
+) -> Response {
+    let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
+        return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
+    };
+    let action = match declared_action(descriptor, LifecycleOperation::Show) {
+        Ok(action) => action,
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    if let Err(response) = authorize(&state, descriptor, action, &auth.0, Some(&id)) {
+        return ProblemDetails::new(response).into_response();
+    }
+    let Some(application) = state.resource_application else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
+    match application
+        .relationships(
+            descriptor,
+            &auth.0,
+            &id,
+            parse_page_size(query.limit.as_deref()),
+        )
+        .await
+    {
+        Ok(items) => (StatusCode::OK, Json(serde_json::json!({"items": items}))).into_response(),
         Err(error) => application_problem(error),
     }
 }
