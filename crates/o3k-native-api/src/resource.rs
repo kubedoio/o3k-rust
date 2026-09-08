@@ -182,6 +182,24 @@ impl ResourceDispatcher {
             .is_some_and(|state| state == o3k_kernel::controller::ControllerState::Ready)
     }
 
+    pub(crate) fn declared_action(
+        &self,
+        descriptor: &ResourceDescriptor,
+        name: &str,
+    ) -> Option<ActionId> {
+        let registry = self.lifecycle_registry.as_ref()?.read().ok()?;
+        let manifest = registry
+            .all()
+            .into_iter()
+            .find(|manifest| manifest.service_id == descriptor.owning_service)?;
+        let wire = format!("{}:{name}", descriptor.resource_type.namespace());
+        manifest
+            .actions
+            .iter()
+            .find(|declared| *declared == &wire)?;
+        ActionId::new(descriptor.resource_type.namespace(), name).ok()
+    }
+
     /// Resolve an authoritative lifecycle action from the manifest-derived
     /// descriptor. Callers must not construct action names from resource
     /// names; an undeclared lifecycle operation is unsupported.
@@ -206,10 +224,26 @@ pub struct CreateRequest {
     pub spec: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRequest {
+    pub api_version: Option<String>,
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub spec: serde_json::Value,
+}
+
 /// A create request after the resource-specific public contract has been
 /// checked.  Applications never receive an unvalidated wire `Value`.
 #[derive(Debug, Clone)]
 pub struct ValidatedCreateRequest {
+    pub api_version: Option<String>,
+    pub kind: Option<String>,
+    pub spec: crate::resource_contract::ValidatedSpec,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidatedUpdateRequest {
     pub api_version: Option<String>,
     pub kind: Option<String>,
     pub spec: crate::resource_contract::ValidatedSpec,
@@ -532,6 +566,118 @@ pub async fn create(
         Json(request),
     )
     .await
+}
+
+pub async fn update(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path((namespace, collection, id)): Path<(String, String, String)>,
+    State(state): State<NativeApiState>,
+    Json(request): Json<UpdateRequest>,
+) -> Response {
+    let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
+        return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
+    };
+    let action = match declared_action(descriptor, LifecycleOperation::Update) {
+        Ok(action) => action,
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    if let Err(response) = authorize(&state, descriptor, action, &auth.0, Some(&id)) {
+        return ProblemDetails::new(response).into_response();
+    }
+    if let Err(response) = ready_for_mutation(&state.resource_index, descriptor) {
+        return ProblemDetails::new(response).into_response();
+    }
+    let Some(application) = state.resource_application else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
+    let key = match idempotency_key(&headers) {
+        Ok(Some(key)) => Some(key),
+        Ok(None) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    let expected_generation = match headers
+        .get("if-match")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(value) => match value
+            .strip_prefix("generation-")
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            Some(generation) if generation > 0 => generation,
+            _ => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        },
+        None => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+    };
+    let spec = match crate::resource_contract::ContractKind::for_resource(
+        &descriptor.resource_type.to_string(),
+        &descriptor.schema_version,
+    ) {
+        Some(kind) => match kind.validate_update(request.spec) {
+            Ok(spec) => spec,
+            Err(_) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        },
+        None => return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response(),
+    };
+    match application
+        .update(
+            descriptor,
+            &auth.0,
+            &id,
+            ValidatedUpdateRequest {
+                api_version: request.api_version,
+                kind: request.kind,
+                spec,
+            },
+            key,
+            expected_generation,
+        )
+        .await
+    {
+        Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
+        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Err(error) => application_problem(error),
+    }
+}
+
+pub async fn action(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path((namespace, collection, id, action_name)): Path<(String, String, String, String)>,
+    State(state): State<NativeApiState>,
+    Json(request): Json<ActionRequest>,
+) -> Response {
+    let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
+        return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
+    };
+    let Some(action) = state
+        .resource_index
+        .declared_action(descriptor, &action_name)
+    else {
+        return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response();
+    };
+    if let Err(response) = authorize(&state, descriptor, &action, &auth.0, Some(&id)) {
+        return ProblemDetails::new(response).into_response();
+    }
+    if let Err(response) = ready_for_mutation(&state.resource_index, descriptor) {
+        return ProblemDetails::new(response).into_response();
+    }
+    let Some(application) = state.resource_application else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
+    let key = match idempotency_key(&headers) {
+        Ok(Some(key)) => key,
+        Ok(None) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    match application
+        .action(descriptor, &auth.0, &id, action, request, &key)
+        .await
+    {
+        Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
+        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Err(error) => application_problem(error),
+    }
 }
 
 /// Concrete routes must bind their canonical descriptor explicitly. They do

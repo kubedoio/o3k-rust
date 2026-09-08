@@ -559,7 +559,9 @@ pub fn router_with_state(state: AppState) -> Router {
             )
             .route(
                 "/o3k/v1/{namespace}/{collection}/{id}",
-                get(o3k_native_api::resource::show).delete(o3k_native_api::resource::delete),
+                get(o3k_native_api::resource::show)
+                    .put(o3k_native_api::resource::update)
+                    .delete(o3k_native_api::resource::delete),
             );
         router = router.route(
             "/o3k/v1/{namespace}/{collection}/{id}/relationships",

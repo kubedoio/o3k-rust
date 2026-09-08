@@ -164,7 +164,9 @@ pub fn router(state: NativeApiState) -> Router {
         )
         .route(
             "/{namespace}/{collection}/{id}",
-            get(resource::show).delete(resource::delete),
+            get(resource::show)
+                .put(resource::update)
+                .delete(resource::delete),
         )
         .route("/operations", get(operation::list_operations))
         .route("/operations/{id}", get(operation::show_operation))

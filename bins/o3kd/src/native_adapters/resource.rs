@@ -9,8 +9,8 @@ use o3k_native_api::{
     compute::ServerItem,
     network::AddressRealmItem,
     resource::{
-        MutationResult, ResourceApplication, ResourceApplicationError, ResourceDescriptor,
-        ValidatedCreateRequest, VolumeAttachmentWorkflow,
+        ActionRequest, MutationResult, ResourceApplication, ResourceApplicationError,
+        ResourceDescriptor, ValidatedCreateRequest, VolumeAttachmentWorkflow,
     },
 };
 use o3k_store::{DurableStore, RelationshipRepository, storage::StorageRepository};
