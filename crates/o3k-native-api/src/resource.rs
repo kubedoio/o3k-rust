@@ -206,10 +206,26 @@ pub struct CreateRequest {
     pub spec: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRequest {
+    pub api_version: Option<String>,
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub spec: serde_json::Value,
+}
+
 /// A create request after the resource-specific public contract has been
 /// checked.  Applications never receive an unvalidated wire `Value`.
 #[derive(Debug, Clone)]
 pub struct ValidatedCreateRequest {
+    pub api_version: Option<String>,
+    pub kind: Option<String>,
+    pub spec: crate::resource_contract::ValidatedSpec,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidatedUpdateRequest {
     pub api_version: Option<String>,
     pub kind: Option<String>,
     pub spec: crate::resource_contract::ValidatedSpec,
@@ -290,6 +306,25 @@ pub trait ResourceApplication: Send + Sync {
         limit: usize,
     ) -> Result<Vec<RelationshipView>, ResourceApplicationError> {
         let _ = (descriptor, auth, id, limit);
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
+    async fn update(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &AuthContext,
+        id: &str,
+        request: ValidatedUpdateRequest,
+        idempotency_key: Option<&str>,
+        expected_generation: i64,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        let _ = (
+            descriptor,
+            auth,
+            id,
+            request,
+            idempotency_key,
+            expected_generation,
+        );
         Err(ResourceApplicationError::UnsupportedOperation)
     }
 }
