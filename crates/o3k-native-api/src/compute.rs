@@ -26,6 +26,12 @@ use crate::{
 /// Lightweight read port for compute:server resources.
 #[async_trait::async_trait]
 pub trait ServerReader: Send + Sync {
+    async fn list_servers_page(
+        &self,
+        auth: &AuthContext,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ServerItem>, NativeReadError>;
     /// List servers visible to the given auth context.
     async fn list_servers(&self, auth: &AuthContext) -> Result<Vec<ServerItem>, NativeReadError>;
     /// Show a single server by ID within the auth scope.
@@ -138,44 +144,22 @@ pub async fn list_servers(
         .into_response();
     }
 
-    match reader.list_servers(&ctx).await {
+    let after_id = query.cursor.as_deref().and_then(|cursor| {
+        cursor_cfg
+            .decode_cursor(cursor, &scope_id, RESOURCE_TYPE, "")
+            .ok()
+            .map(|payload| payload.last_id)
+    });
+
+    match reader
+        .list_servers_page(&ctx, after_id.as_deref(), page_size + 1)
+        .await
+    {
         Ok(mut servers) => {
             servers.sort_by(|a, b| a.id.cmp(&b.id));
             let total = servers.len();
             let last_item_id_full = servers.last().map(|s| s.id.clone());
-            let paged: Vec<ServerItem> = if let Some(ref cursor) = query.cursor {
-                if let Ok(payload) = cursor_cfg.decode_cursor(cursor, &scope_id, RESOURCE_TYPE, "")
-                {
-                    let start_idx = match crate::pagination::continuation_index(
-                        &servers.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
-                        &payload.last_id,
-                    ) {
-                        Ok(index) => index,
-                        Err(_) => {
-                            return ProblemDetails::with_detail(
-                                ErrorCode::InvalidCursor,
-                                "cursor anchor is stale",
-                            )
-                            .with_request_id(request_id.0.clone())
-                            .into_response();
-                        }
-                    };
-                    servers
-                        .into_iter()
-                        .skip(start_idx)
-                        .take(page_size)
-                        .collect()
-                } else {
-                    return ProblemDetails::with_detail(
-                        ErrorCode::InvalidCursor,
-                        "cursor is malformed",
-                    )
-                    .with_request_id(request_id.0.clone())
-                    .into_response();
-                }
-            } else {
-                servers.into_iter().take(page_size).collect()
-            };
+            let paged: Vec<ServerItem> = servers.into_iter().take(page_size).collect();
 
             let items: Vec<serde_json::Value> = paged.iter().map(server_to_native_v1).collect();
 

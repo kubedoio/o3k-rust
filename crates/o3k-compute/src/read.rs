@@ -121,6 +121,41 @@ impl ComputeService {
         Ok(servers)
     }
 
+    /// Bounded native projection. The continuation and limit are pushed into
+    /// the canonical durable resource query before projection.
+    pub async fn list_servers_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Server>, ComputeError> {
+        let flavors = self.flavors_for_project(project_id).await?;
+        let resources = self
+            .store
+            .list_resources_page(project_id, "compute_instance", after_id, limit)
+            .await?;
+        let mut servers = Vec::new();
+        for resource in resources {
+            let resource_id = resource.id;
+            let mut server = match server_from_resource(resource, &flavors) {
+                Ok(server) => server,
+                Err(ServerProjectionError::CorruptState(corrupt)) => {
+                    tracing::warn!(%resource_id, %corrupt, "server lifecycle state is corrupt; row skipped");
+                    continue;
+                }
+                Err(ServerProjectionError::Unresolvable) => continue,
+            };
+            if server.state != ServerState::Deleted {
+                server.key_name = self
+                    .store
+                    .get_server_keypair_name(server.id.as_uuid())
+                    .await?;
+                servers.push(server);
+            }
+        }
+        Ok(servers)
+    }
+
     pub async fn show_server_for_auth(
         &self,
         auth: &AuthContext,
