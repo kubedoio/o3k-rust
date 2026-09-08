@@ -61,6 +61,41 @@ fn federated_oidc_validator_from_env()
     }
 }
 
+/// Reads the canonical O3K location topology from deployment configuration.
+///
+/// Regions and availability domains are provided via the `O3K_LOCATIONS`
+/// environment variable as a JSON array of `RegionDeclaration`:
+///
+/// ```json
+/// [{"id":"region-a","availability_domains":[{"id":"az-1"},{"id":"az-2"}]}]
+/// ```
+///
+/// When unset or empty, an empty registry is returned (no regions configured —
+/// the endpoint reports no location truth rather than fabricating any). The
+/// registry is validated deterministically and is the single authority for
+/// region/AZ identity; it is never derived from providers/hosts/backends.
+fn locations_from_env() -> Result<o3k_kernel::LocationRegistry, Box<dyn std::error::Error>> {
+    let raw = std::env::var("O3K_LOCATIONS").ok();
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return Ok(o3k_kernel::LocationRegistry::default());
+    };
+    locations_from_declarations(raw)
+}
+
+/// Parses and validates canonical location declarations from configuration.
+///
+/// `raw` is a JSON array of `RegionDeclaration`. Deterministic validation is
+/// applied by [`o3k_kernel::LocationRegistry::from_declarations`]; any
+/// malformed or invalid topology fails closed.
+fn locations_from_declarations(
+    raw: String,
+) -> Result<o3k_kernel::LocationRegistry, Box<dyn std::error::Error>> {
+    let declarations: Vec<o3k_kernel::RegionDeclaration> = serde_json::from_str(&raw)?;
+    Ok(o3k_kernel::LocationRegistry::from_declarations(
+        declarations,
+    )?)
+}
+
 use self::compute::{
     DaemonCreateResolver, agent_inspect_probe_from_env, parse_extra_project_seeds,
 };
@@ -547,6 +582,21 @@ pub async fn build_composition(
         info!(directory = %path.display(), "external service manifests loaded");
     }
 
+    // Canonical O3K location topology is the single source of region and
+    // availability-domain truth (ADR-0181/SPEC-0038). It is read from
+    // deployment configuration and never derived from hosts/providers/backends.
+    let native_locations =
+        locations_from_env().map_err(|e| format!("native location configuration failed: {e}"))?;
+    native_locations
+        .validate_manifest_registry(&native_manifest_registry)
+        .map_err(|e| format!("service manifest references unknown location: {e}"))?;
+    if !native_locations.is_empty() {
+        info!(
+            regions = native_locations.len(),
+            "canonical native location topology configured"
+        );
+    }
+
     // Wire native API service adapters.
     let server_reader: Option<std::sync::Arc<dyn o3k_native_api::compute::ServerReader>> = Some(
         std::sync::Arc::new(crate::native_adapters::ServerReaderAdapter {
@@ -849,6 +899,7 @@ pub async fn build_composition(
         volume_reader,
         network_reader,
     )?
+    .with_locations(native_locations)
     .with_operation_reader(operation_reader)
     .with_resource_application(generic_application)
     .with_authorizer(std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard()));
@@ -1007,8 +1058,8 @@ pub async fn shutdown_signal(state: o3k_api::AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
-        DaemonCreateResolver, NetworkBindingProjector, placement_consumer_ids,
-        resolve_native_lvm_config,
+        DaemonCreateResolver, NetworkBindingProjector, locations_from_declarations,
+        placement_consumer_ids, resolve_native_lvm_config,
     };
     use crate::composition::compute::validate_inspect_probe_paths;
     use o3k_compute::PortBindingProjector;
@@ -1068,6 +1119,47 @@ mod tests {
         assert_eq!(config.thin_pool, "pool-o3k");
         assert_eq!(config.provider_namespace, "o3k");
         Ok(())
+    }
+
+    #[test]
+    fn location_config_parses_region_topology_deterministically() -> Result<(), String> {
+        let raw = r#"[{"id":"region-b","availability_domains":[{"id":"az-2"},{"id":"az-1"}]},
+                          {"id":"region-a","availability_domains":[{"id":"az-3"}]}]"#
+            .to_owned();
+        let locations = locations_from_declarations(raw).map_err(|e| e.to_string())?;
+        let ids: Vec<&str> = locations
+            .regions()
+            .iter()
+            .map(|region| region.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["region-a", "region-b"]);
+        let azs: Vec<&str> = locations
+            .availability_domains_of("region-b")
+            .iter()
+            .map(|az| az.id.as_str())
+            .collect();
+        assert_eq!(azs, vec!["az-1", "az-2"]);
+        Ok(())
+    }
+
+    #[test]
+    fn location_config_rejects_duplicate_region() {
+        let raw = r#"[{"id":"region-a"},{"id":"region-a"}]"#.to_owned();
+        let text = locations_from_declarations(raw)
+            .map(|_| "ok".to_owned())
+            .unwrap_or_else(|error| error.to_string());
+        assert!(text.contains("duplicate region"), "unexpected: {text}");
+    }
+
+    #[test]
+    fn location_config_rejects_ambiguous_availability_domain() {
+        let raw = r#"[{"id":"region-a","availability_domains":[{"id":"az-1"}]},
+                       {"id":"region-b","availability_domains":[{"id":"az-1"}]}]"#
+            .to_owned();
+        let text = locations_from_declarations(raw)
+            .map(|_| "ok".to_owned())
+            .unwrap_or_else(|error| error.to_string());
+        assert!(text.contains("ambiguous"), "unexpected: {text}");
     }
 
     #[test]

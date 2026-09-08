@@ -11,7 +11,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use o3k_kernel::{ManifestRegistry, ServiceLifecycleState};
+use o3k_kernel::{LocationRegistry, ManifestRegistry, ServiceLifecycleState, ServiceManifest};
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 
@@ -41,6 +41,10 @@ pub struct NativeApiState {
     resource_index: resource::ResourceDispatcher,
     pub resource_application: Option<resource::SharedResourceApplication>,
     pub authorizer: Option<std::sync::Arc<dyn o3k_kernel::Authorizer>>,
+    /// Canonical O3K location topology (regions and availability domains).
+    /// This is the single authoritative location source; service manifests
+    /// reference canonical IDs only. See ADR-0181 / SPEC-0038.
+    pub locations: Option<LocationRegistry>,
 }
 
 impl NativeApiState {
@@ -77,7 +81,15 @@ impl NativeApiState {
             resource_index,
             resource_application: None,
             authorizer: None,
+            locations: None,
         })
+    }
+
+    /// Sets the canonical location registry served by the native API.
+    #[must_use]
+    pub fn with_locations(mut self, locations: LocationRegistry) -> Self {
+        self.locations = Some(locations);
+        self
     }
 
     #[must_use]
@@ -122,6 +134,7 @@ pub fn router(state: NativeApiState) -> Router {
         .route("/", get(api_root))
         .route("/services", get(discover_services))
         .route("/resource-types", get(discover_resource_types))
+        .route("/regions", get(discover_regions))
         .route("/identity/tokens", post(identity::issue_token))
         .route(
             "/identity/scopes",
@@ -165,6 +178,20 @@ pub(crate) fn assert_resource_envelope_schema(value: &serde_json::Value) {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+pub(crate) fn assert_location_discovery_schema(value: &serde_json::Value) {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/native-location-discovery-v1.schema.json"
+    )))
+    .expect("valid native location discovery schema");
+    let validator = jsonschema::validator_for(&schema).expect("compiled native location schema");
+    if let Err(errors) = validator.validate(value) {
+        panic!("native location discovery schema violation: {errors}");
+    }
+}
+
 // ── API root ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -179,6 +206,7 @@ pub async fn api_root() -> Json<ApiRootResponse> {
         endpoints: vec![
             "/o3k/v1/services",
             "/o3k/v1/resource-types",
+            "/o3k/v1/regions",
             "/o3k/v1/identity/tokens",
             "/o3k/v1/identity/scopes",
             "/o3k/v1/identity/me",
@@ -265,12 +293,76 @@ pub struct DiscoveredResourceType {
     scope: String,
     ready: bool,
     lifecycle_actions: std::collections::HashMap<String, String>,
+    /// Placement scope derived from the owning service's canonical region
+    /// declaration: `"global"` (no regional restriction) or `"regional"`.
+    placement: String,
+    /// Canonical region IDs the resource is available in (`regional` only).
+    /// Empty for global resources so global placement is never falsely
+    /// advertised as regional.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    regions: Vec<String>,
+    /// Availability-domain selection capability: `"unsupported"`, `"optional"`
+    /// or `"required"`, derived from the owning service's canonical presence of
+    /// a region/AZ declaration. Provider/host/backend identity is never
+    /// exposed here.
+    availability_domain_selection: String,
 }
 
 #[derive(Serialize)]
 pub struct ResourceTypesResponse {
     resource_types: Vec<DiscoveredResourceType>,
     count: usize,
+}
+
+/// Derives the generic placement semantics for an owning service manifest.
+///
+/// Placement is *derived* from the single canonical manifest region/AZ
+/// declaration — there is no separate placement authority that could drift.
+/// This makes a contradictory global/regional declaration impossible by
+/// construction: scope and AZ semantics are functions of the same fields.
+///
+/// Returns `(scope, canonical_regions, availability_domain_selection)`.
+fn placement_for_service(
+    manifest: &ServiceManifest,
+    locations: &Option<LocationRegistry>,
+) -> (String, Vec<String>, String) {
+    let location_ids = locations
+        .as_ref()
+        .map(|locations| {
+            locations
+                .regions()
+                .iter()
+                .map(|region| region.id.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+
+    // Only disclose region IDs that are canonical O3K location identity.
+    // Declared-but-unknown regions are filtered out (fail closed).
+    let mut regions: Vec<String> = manifest
+        .regions
+        .iter()
+        .filter(|region| location_ids.contains(region.as_str()))
+        .cloned()
+        .collect();
+    regions.sort();
+    regions.dedup();
+
+    let scope = if manifest.regions.is_empty() {
+        "global".to_owned()
+    } else {
+        "regional".to_owned()
+    };
+
+    let availability_domain_selection = if manifest.availability_domains.is_empty() {
+        "unsupported".to_owned()
+    } else if manifest.regions.is_empty() {
+        "required".to_owned()
+    } else {
+        "optional".to_owned()
+    };
+
+    (scope, regions, availability_domain_selection)
 }
 
 pub async fn discover_resource_types(State(state): State<NativeApiState>) -> impl IntoResponse {
@@ -288,6 +380,29 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
         for (op, action) in &descriptor.lifecycle_actions {
             actions.insert(format!("{op:?}").to_lowercase(), action.to_string());
         }
+        let owning_service = state
+            .lifecycle_registry
+            .as_ref()
+            .and_then(|registry| registry.read().ok())
+            .and_then(|registry| registry.get(&descriptor.owning_service).cloned())
+            .unwrap_or_else(|| ServiceManifest {
+                manifest_version: 1,
+                service_id: descriptor.owning_service.clone(),
+                namespace: descriptor.resource_type.namespace().to_owned(),
+                service_version: String::new(),
+                ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
+                resource_types: vec![],
+                actions: vec![],
+                capabilities: vec![],
+                dependencies: vec![],
+                quota_dimensions: vec![],
+                regions: vec![],
+                availability_domains: vec![],
+                controller: None,
+                health: None,
+            });
+        let (placement, regions, availability_domain_selection) =
+            placement_for_service(&owning_service, &state.locations);
         resource_types.push(DiscoveredResourceType {
             namespace: descriptor.resource_type.namespace().to_owned(),
             name: descriptor.resource_type.name().to_owned(),
@@ -297,8 +412,12 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
             scope: descriptor.scope.to_string(),
             ready: state.resource_index.is_ready(descriptor),
             lifecycle_actions: actions,
+            placement,
+            regions,
+            availability_domain_selection,
         });
     }
+    resource_types.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
 
     let count = resource_types.len();
     (
@@ -310,6 +429,60 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
             })
             .unwrap_or_default(),
         ),
+    )
+        .into_response()
+}
+
+// ── Region location discovery ──────────────────────────────────────────────
+//
+// Exposes the canonical O3K location topology. O3K is the single authority for
+// region and availability-domain identity; this endpoint never derives or
+// invents locations from hosts, providers, or backends. See ADR-0181/SPEC-0038.
+
+#[derive(Serialize)]
+pub struct DiscoveredAvailabilityDomain {
+    id: String,
+}
+
+#[derive(Serialize)]
+pub struct DiscoveredRegion {
+    id: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    availability_domains: Vec<DiscoveredAvailabilityDomain>,
+}
+
+#[derive(Serialize)]
+pub struct RegionsResponse {
+    regions: Vec<DiscoveredRegion>,
+    count: usize,
+}
+
+pub async fn discover_regions(State(state): State<NativeApiState>) -> impl IntoResponse {
+    let Some(ref locations) = state.locations else {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"regions": [], "count": 0})),
+        )
+            .into_response();
+    };
+
+    let regions: Vec<DiscoveredRegion> = locations
+        .regions()
+        .iter()
+        .map(|region| DiscoveredRegion {
+            id: region.id.clone(),
+            availability_domains: region
+                .availability_domains
+                .iter()
+                .map(|az| DiscoveredAvailabilityDomain { id: az.id.clone() })
+                .collect(),
+        })
+        .collect();
+
+    let count = regions.len();
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(RegionsResponse { regions, count }).unwrap_or_default()),
     )
         .into_response()
 }
@@ -740,5 +913,308 @@ mod tests {
                 .unwrap(),
             "application/problem+json"
         );
+    }
+
+    // ── Location & placement discovery (issue #887) ────────────────────
+
+    fn test_locations() -> o3k_kernel::LocationRegistry {
+        use o3k_kernel::{AvailabilityDomain, RegionDeclaration};
+        o3k_kernel::LocationRegistry::from_declarations(vec![
+            RegionDeclaration {
+                id: "region-a".to_owned(),
+                availability_domains: vec![
+                    AvailabilityDomain {
+                        id: "az-1".to_owned(),
+                    },
+                    AvailabilityDomain {
+                        id: "az-2".to_owned(),
+                    },
+                ],
+            },
+            RegionDeclaration {
+                id: "region-b".to_owned(),
+                availability_domains: vec![AvailabilityDomain {
+                    id: "az-3".to_owned(),
+                }],
+            },
+        ])
+        .unwrap()
+    }
+
+    /// Builds a manifest declaring the given canonical region/AZ scope.
+    fn scoped_manifest(
+        service_id: &str,
+        namespace: &str,
+        regions: Vec<&str>,
+        availability_domains: Vec<&str>,
+    ) -> ServiceManifest {
+        ServiceManifest {
+            manifest_version: 1,
+            service_id: service_id.to_owned(),
+            namespace: namespace.to_owned(),
+            service_version: "0.4.0".to_owned(),
+            ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
+            resource_types: vec![RegisteredResourceType {
+                resource_type: ResourceType::new_unchecked(namespace, "primary"),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: ResourceScope::Tenant,
+                operations: std::collections::HashMap::new(),
+            }],
+            actions: vec![format!("{namespace}:ListPrimary")],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: regions.into_iter().map(ToOwned::to_owned).collect(),
+            availability_domains: availability_domains
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect(),
+            controller: Some(ManifestController {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            }),
+            health: None,
+        }
+    }
+
+    fn state_with_locations(
+        registry: Option<ManifestRegistry>,
+        locations: Option<o3k_kernel::LocationRegistry>,
+    ) -> NativeApiState {
+        NativeApiState::new(
+            registry,
+            pagination::CursorConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_locations(locations.unwrap_or_default())
+    }
+
+    async fn get_json(state: NativeApiState, uri: &str) -> (StatusCode, serde_json::Value) {
+        let resp = axum::response::Response::from(
+            tower::ServiceExt::oneshot(
+                router(state),
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        );
+        let status = resp.status();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn discover_regions_exposes_multiple_configured_regions() {
+        let (status, body) = get_json(
+            state_with_locations(None, Some(test_locations())),
+            "/regions",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["count"].as_u64().unwrap_or(0), 2);
+        let ids: Vec<&str> = body["regions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|region| region["id"].as_str())
+            .collect();
+        assert!(ids.contains(&"region-a"));
+        assert!(ids.contains(&"region-b"));
+        assert_location_discovery_schema(&body);
+    }
+
+    #[tokio::test]
+    async fn discover_regions_region_has_multiple_availability_domains() {
+        let (_, body) = get_json(
+            state_with_locations(None, Some(test_locations())),
+            "/regions",
+        )
+        .await;
+        let region_a = body["regions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|region| region["id"] == "region-a")
+            .unwrap();
+        let azs: Vec<&str> = region_a["availability_domains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|az| az["id"].as_str())
+            .collect();
+        assert!(azs.contains(&"az-1"));
+        assert!(azs.contains(&"az-2"));
+    }
+
+    #[tokio::test]
+    async fn discover_regions_order_is_deterministic() {
+        let (_, body) = get_json(
+            state_with_locations(None, Some(test_locations())),
+            "/regions",
+        )
+        .await;
+        let ids: Vec<String> = body["regions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|region| region["id"].as_str().map(ToOwned::to_owned))
+            .collect();
+        assert_eq!(ids, vec!["region-a".to_owned(), "region-b".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn discover_regions_empty_when_none_configured() {
+        let (status, body) = get_json(state_with_locations(None, None), "/regions").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["count"].as_u64().unwrap_or(1), 0);
+        assert_eq!(body["regions"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn resource_type_global_does_not_advertise_regional_placement() {
+        let mut registry = ManifestRegistry::new();
+        registry
+            .register(scoped_manifest("identity", "identity", vec![], vec![]))
+            .unwrap();
+        let (_, body) = get_json(
+            state_with_locations(Some(registry), Some(test_locations())),
+            "/resource-types",
+        )
+        .await;
+        let resource = &body["resource_types"][0];
+        assert_eq!(resource["placement"], "global");
+        assert!(
+            resource["regions"]
+                .as_array()
+                .map(|r| r.is_empty())
+                .unwrap_or(true),
+            "global resource must not advertise regional placement"
+        );
+        assert_eq!(resource["availability_domain_selection"], "unsupported");
+    }
+
+    #[tokio::test]
+    async fn resource_type_regional_exposes_only_authoritative_regions() {
+        let mut registry = ManifestRegistry::new();
+        // Declares one canonical region and one unknown region; only the
+        // canonical region may be disclosed (fail closed on unknown).
+        registry
+            .register(scoped_manifest(
+                "network",
+                "network",
+                vec!["region-a", "region-b", "ghost-region"],
+                vec![],
+            ))
+            .unwrap();
+        let (_, body) = get_json(
+            state_with_locations(Some(registry), Some(test_locations())),
+            "/resource-types",
+        )
+        .await;
+        let resource = &body["resource_types"][0];
+        assert_eq!(resource["placement"], "regional");
+        let regions: Vec<String> = resource["regions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|region| region.as_str().map(ToOwned::to_owned))
+            .collect();
+        assert_eq!(regions, vec!["region-a".to_owned(), "region-b".to_owned()]);
+        assert!(!regions.contains(&"ghost-region".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn resource_type_az_aware_exposes_capability_without_provider_leakage() {
+        let mut registry = ManifestRegistry::new();
+        registry
+            .register(scoped_manifest(
+                "volume",
+                "volume",
+                vec!["region-a"],
+                vec!["az-1"],
+            ))
+            .unwrap();
+        let (_, body) = get_json(
+            state_with_locations(Some(registry), Some(test_locations())),
+            "/resource-types",
+        )
+        .await;
+        let resource = &body["resource_types"][0];
+        assert_eq!(resource["placement"], "regional");
+        assert_eq!(resource["availability_domain_selection"], "optional");
+        // No provider/host/backend identity is ever disclosed: the placement
+        // payload contains only canonical region/AZ IDs and capability verbs.
+        let serialized = serde_json::to_string(resource).unwrap();
+        for leaked in [
+            "provider",
+            "hypervisor",
+            "ceph",
+            "node-id",
+            "pool-name",
+            "backend",
+        ] {
+            assert!(
+                !serialized.contains(leaked),
+                "provider/host/backend token {leaked} leaked into placement"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_type_az_required_when_only_az_declared() {
+        let mut registry = ManifestRegistry::new();
+        registry
+            .register(scoped_manifest(
+                "volume",
+                "volume",
+                vec![],
+                vec!["az-1", "az-2"],
+            ))
+            .unwrap();
+        let (_, body) = get_json(
+            state_with_locations(Some(registry), Some(test_locations())),
+            "/resource-types",
+        )
+        .await;
+        assert_eq!(
+            body["resource_types"][0]["availability_domain_selection"],
+            "required"
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_types_order_is_deterministic() {
+        let mut registry = ManifestRegistry::new();
+        registry.seed_core().unwrap();
+        let state = state_with_locations(Some(registry), Some(test_locations()));
+        for _ in 0..3 {
+            let (_, body) = get_json(state.clone(), "/resource-types").await;
+            let keys: Vec<String> = body["resource_types"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| format!("{}:{}", r["namespace"], r["name"]))
+                .collect();
+            assert_eq!(keys, {
+                let mut sorted = keys.clone();
+                sorted.sort();
+                sorted
+            });
+        }
     }
 }

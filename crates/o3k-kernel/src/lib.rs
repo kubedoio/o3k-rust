@@ -19,6 +19,7 @@ pub mod authorization;
 pub mod controller;
 pub mod envelope;
 pub mod error;
+pub mod location;
 pub mod manifest;
 pub mod operation;
 pub mod principal;
@@ -45,6 +46,7 @@ pub use controller::{
 };
 pub use envelope::{ResourceEnvelope, ResourceMeta};
 pub use error::KernelError;
+pub use location::{AvailabilityDomain, LocationError, LocationRegistry, RegionDeclaration};
 pub use manifest::{
     ControllerBinding, ControllerDescriptor, DependencyDescriptor, ManifestController,
     ManifestError, ManifestRegistry, NativeResourceMetaV1, NativeResourceV1, OpenStackApiSurface,
