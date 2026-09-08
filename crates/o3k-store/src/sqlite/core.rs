@@ -1233,6 +1233,44 @@ impl DurableStore for SqliteStore {
         }
     }
 
+    async fn list_canonical_operations_page(
+        &self,
+        owner_scope: &str,
+        after_id: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<CanonicalOperationRecord>, StoreError> {
+        let limit = i64::from(limit);
+        let rows = if let Some(after_id) = after_id {
+            sqlx::query("SELECT m.*, o.state FROM canonical_operation_metadata m JOIN operations o ON o.id=m.operation_id WHERE m.owner_scope=? AND m.operation_id>? ORDER BY m.operation_id LIMIT ?")
+                .bind(owner_scope).bind(after_id.to_string()).bind(limit).fetch_all(&self.pool).await
+        } else {
+            sqlx::query("SELECT m.*, o.state FROM canonical_operation_metadata m JOIN operations o ON o.id=m.operation_id WHERE m.owner_scope=? ORDER BY m.operation_id LIMIT ?")
+                .bind(owner_scope).bind(limit).fetch_all(&self.pool).await
+        }.map_err(StoreError::Database)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(CanonicalOperationRecord {
+                    id: Uuid::parse_str(&row.get::<String, _>("operation_id"))
+                        .map_err(StoreError::InvalidUuid)?,
+                    service: row.get("service"),
+                    action: row.get("action"),
+                    actor: row.get("actor"),
+                    owner_scope: row.get("owner_scope"),
+                    resource_type: row.get("resource_type"),
+                    resource_id: row.get("resource_id"),
+                    state: OperationState::parse(&row.get::<String, _>("state"))?,
+                    attempt: u32::try_from(row.get::<i64, _>("attempt"))
+                        .map_err(|_| StoreError::Corrupt("invalid operation attempt".into()))?,
+                    created_at: row.get("created_at"),
+                    started_at: row.get("started_at"),
+                    finished_at: row.get("finished_at"),
+                    error: row.get("error"),
+                    request_id: row.get("request_id"),
+                })
+            })
+            .collect()
+    }
+
     async fn create_or_replay_idempotent_operation(
         &self,
         operation: &OperationRecord,
