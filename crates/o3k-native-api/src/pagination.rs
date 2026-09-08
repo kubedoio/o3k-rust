@@ -26,6 +26,9 @@ pub struct CursorPayload {
     pub last_id: String,
     pub scope_id: String,
     pub resource_type: String,
+    /// Digest of the effective query (order and filters).  A cursor is never
+    /// valid for a different query, even when the caller has the same scope.
+    pub query_hash: String,
     pub version: u8,
 }
 
@@ -85,6 +88,7 @@ impl CursorConfig {
         cursor: &str,
         expected_scope_id: &str,
         expected_type: &str,
+        expected_query_hash: &str,
     ) -> Result<CursorPayload, &'static str> {
         let (payload_b64, hmac_b64) = cursor.split_once('.').ok_or("invalid cursor format")?;
 
@@ -116,6 +120,9 @@ impl CursorConfig {
         }
         if payload.resource_type != expected_type {
             return Err("cursor resource type mismatch");
+        }
+        if payload.query_hash != expected_query_hash {
+            return Err("cursor query mismatch");
         }
         Ok(payload)
     }
@@ -154,6 +161,7 @@ mod tests {
             last_id: "srv-abc-123".to_owned(),
             scope_id: "proj-1".to_owned(),
             resource_type: "compute:server".to_owned(),
+            query_hash: "".to_owned(),
             version: 1,
         }
     }
@@ -167,7 +175,7 @@ mod tests {
         assert!(encoded.contains('.'));
 
         let decoded = cfg
-            .decode_cursor(&encoded, "proj-1", "compute:server")
+            .decode_cursor(&encoded, "proj-1", "compute:server", "")
             .unwrap();
         assert_eq!(decoded.last_id, "srv-abc-123");
         assert_eq!(decoded.scope_id, "proj-1");
@@ -179,7 +187,17 @@ mod tests {
     fn decode_rejects_wrong_scope() {
         let cfg = test_config();
         let encoded = cfg.encode_cursor(&test_payload());
-        let result = cfg.decode_cursor(&encoded, "proj-2", "compute:server");
+        let result = cfg.decode_cursor(&encoded, "proj-2", "compute:server", "");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_rejects_query_reuse() {
+        let cfg = test_config();
+        let mut payload = test_payload();
+        payload.query_hash = "order:id.asc".to_owned();
+        let encoded = cfg.encode_cursor(&payload);
+        let result = cfg.decode_cursor(&encoded, "proj-1", "compute:server", "order:name.asc");
         assert!(result.is_err());
     }
 
@@ -187,7 +205,7 @@ mod tests {
     fn decode_rejects_wrong_resource_type() {
         let cfg = test_config();
         let encoded = cfg.encode_cursor(&test_payload());
-        let result = cfg.decode_cursor(&encoded, "proj-1", "volume:volume");
+        let result = cfg.decode_cursor(&encoded, "proj-1", "volume:volume", "");
         assert!(result.is_err());
     }
 
@@ -213,14 +231,14 @@ mod tests {
         let wrong_hmac = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("fakehmac");
         let tampered = format!("{}.{}", tampered_b64, wrong_hmac);
 
-        let result = cfg.decode_cursor(&tampered, "proj-1", "compute:server");
+        let result = cfg.decode_cursor(&tampered, "proj-1", "compute:server", "");
         assert!(result.is_err(), "tampered cursor must be rejected");
     }
 
     #[test]
     fn decode_rejects_malformed_cursor() {
         let cfg = test_config();
-        let result = cfg.decode_cursor("not-valid!!", "proj-1", "compute:server");
+        let result = cfg.decode_cursor("not-valid!!", "proj-1", "compute:server", "");
         assert!(result.is_err());
     }
 
@@ -229,7 +247,7 @@ mod tests {
         let cfg1 = test_config();
         let cfg2 = CursorConfig::new(b"different-key-here!!".to_vec());
         let encoded = cfg1.encode_cursor(&test_payload());
-        let result = cfg2.decode_cursor(&encoded, "proj-1", "compute:server");
+        let result = cfg2.decode_cursor(&encoded, "proj-1", "compute:server", "");
         assert!(result.is_err(), "different key must reject");
     }
 
