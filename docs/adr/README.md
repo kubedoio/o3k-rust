@@ -190,6 +190,7 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0178](ADR-0178-canonical-l3-gateway-and-realm-connectivity.md) (accepted)
 - [ADR-0179](ADR-0179-o3k-federated-identity-ingress.md) (accepted)
 - [ADR-0180](ADR-0180-openstack-cold-migration-authority-and-cutover.md) (accepted)
+- [ADR-0181](ADR-0181-edge-to-datacenter-building-block-cloud-os.md) (accepted)
 
 ## Required audit
 
