@@ -583,6 +583,78 @@ pub async fn create(
     .await
 }
 
+pub async fn update(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path((namespace, collection, id)): Path<(String, String, String)>,
+    State(state): State<NativeApiState>,
+    Json(request): Json<UpdateRequest>,
+) -> Response {
+    let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
+        return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
+    };
+    let action = match declared_action(descriptor, LifecycleOperation::Update) {
+        Ok(action) => action,
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    if let Err(response) = authorize(&state, descriptor, action, &auth.0, Some(&id)) {
+        return ProblemDetails::new(response).into_response();
+    }
+    if let Err(response) = ready_for_mutation(&state.resource_index, descriptor) {
+        return ProblemDetails::new(response).into_response();
+    }
+    let Some(application) = state.resource_application else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
+    let key = match idempotency_key(&headers) {
+        Ok(Some(key)) => Some(key),
+        Ok(None) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    let expected_generation = match headers
+        .get("if-match")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(value) => match value
+            .strip_prefix("generation-")
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            Some(generation) if generation > 0 => generation,
+            _ => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        },
+        None => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+    };
+    let spec = match crate::resource_contract::ContractKind::for_resource(
+        &descriptor.resource_type.to_string(),
+        &descriptor.schema_version,
+    ) {
+        Some(kind) => match kind.validate_update(request.spec) {
+            Ok(spec) => spec,
+            Err(_) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        },
+        None => return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response(),
+    };
+    match application
+        .update(
+            descriptor,
+            &auth.0,
+            &id,
+            ValidatedUpdateRequest {
+                api_version: request.api_version,
+                kind: request.kind,
+                spec,
+            },
+            key,
+            expected_generation,
+        )
+        .await
+    {
+        Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
+        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Err(error) => application_problem(error),
+    }
+}
+
 /// Concrete routes must bind their canonical descriptor explicitly. They do
 /// not derive namespace/collection from the request URI.
 pub async fn create_compute(
