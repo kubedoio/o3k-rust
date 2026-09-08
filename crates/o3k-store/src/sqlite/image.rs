@@ -5,6 +5,21 @@ use uuid::Uuid;
 use crate::{ImageMetadataRecord, ImageRepository, StoreError};
 
 impl SqliteStore {
+    pub async fn list_images_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ImageMetadataRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("image page limit overflow".to_owned()))?;
+        let rows = if let Some(after_id) = after_id {
+            sqlx::query("SELECT id, name, project_id, status, visibility, container_format, disk_format, size, checksum FROM image_metadata WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?").bind(project_id).bind(after_id).bind(limit).fetch_all(&self.pool).await
+        } else {
+            sqlx::query("SELECT id, name, project_id, status, visibility, container_format, disk_format, size, checksum FROM image_metadata WHERE project_id = ? ORDER BY id LIMIT ?").bind(project_id).bind(limit).fetch_all(&self.pool).await
+        }.map_err(StoreError::Database)?;
+        rows.iter().map(image_metadata_from_row).collect()
+    }
     pub async fn insert_image(&self, image: &ImageMetadataRecord) -> Result<(), StoreError> {
         let result = sqlx::query(
             "INSERT INTO image_metadata (id, name, project_id, status, visibility, container_format, disk_format, size, checksum) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -112,6 +127,14 @@ impl ImageRepository for SqliteStore {
 
     async fn list_images(&self, project_id: &str) -> Result<Vec<ImageMetadataRecord>, StoreError> {
         self.list_images(project_id).await
+    }
+    async fn list_images_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ImageMetadataRecord>, StoreError> {
+        self.list_images_page(project_id, after_id, limit).await
     }
 
     async fn get_image(

@@ -335,7 +335,14 @@ impl ResourceApplication for GenericResourceApplication {
                 .image
                 .as_ref()
                 .ok_or(ResourceApplicationError::NotReady)?;
-            let items = service.list(auth).await.map_err(image_error)?;
+            let items = service
+                .list_page_for_project(
+                    auth.effective_scope().id().as_str(),
+                    query.continuation_id.as_deref(),
+                    o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
+                )
+                .await
+                .map_err(image_error)?;
             let mut result = Vec::with_capacity(items.len());
             for item in items {
                 let resource = self.store.get_resource(item.id).await.ok();
