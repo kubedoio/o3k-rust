@@ -1,6 +1,14 @@
 # O3K
 
 <p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/logo/o3k-horizontal-reversed.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="brand/logo/o3k-horizontal.svg" />
+    <img alt="O3K" src="brand/logo/o3k-horizontal.svg" width="340" />
+  </picture>
+</p>
+
+<p align="center">
   <strong>One Cloud Operating System from edge to datacenter.</strong><br />
   Start with a few prepared hosts. Scale by adding capability-bearing building blocks without replatforming.<br />
   OpenStack-compatible northbound. O3K-native cloud authority in the middle. Provider-neutral typed execution southbound.
@@ -576,6 +584,7 @@ For real libvirt execution use [docs/TESTLAB.md](docs/TESTLAB.md).
 
 ## Read the design
 
+- [Brand and visual identity](brand/README.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Visual summary](docs/architecture/O3K_CLOUD_OS_SUMMARY.md)
 - [ADR-0165 — Cloud OS / Cloud Kernel](docs/adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md)
