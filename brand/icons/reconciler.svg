@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" role="img" aria-labelledby="t">
+  <title id="t">reconciler</title>
+  <path d="M19.6 9.2 a8.4 8.4 0 1 0 .7 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M19.8 5.8 v3.4 h-3.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <rect x="9.6" y="9.6" width="4.8" height="4.8" rx="1.2" fill="currentColor" stroke="none"/>
+</svg>

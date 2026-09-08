@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-labelledby="o3k-title">
+  <title id="o3k-title">O3K mark (for dark backgrounds)</title>
+  <g>
+      <rect x="8" y="24" width="19" height="19" rx="4" fill="none" stroke="#33517A" stroke-width="2.1"/>
+      <rect x="8" y="50" width="19" height="19" rx="4" fill="none" stroke="#33517A" stroke-width="2.1"/>
+      <rect x="34" y="24" width="19" height="19" rx="4" fill="none" stroke="#33517A" stroke-width="2.1"/>
+      <rect x="34" y="76" width="19" height="19" rx="4" fill="none" stroke="#33517A" stroke-width="2.1"/>
+      <rect x="60" y="50" width="19" height="19" rx="4" fill="none" stroke="#33517A" stroke-width="2.1"/>
+      <rect x="60" y="76" width="19" height="19" rx="4" fill="none" stroke="#33517A" stroke-width="2.1"/>
+      <rect x="60" y="24" width="19" height="19" rx="4" fill="none" stroke="#33517A" stroke-width="2.1" stroke-dasharray="4.2 3.4"/>
+      <rect x="8" y="76" width="19" height="19" rx="4" fill="#3B82F6"/>
+      <rect x="34" y="50" width="19" height="19" rx="4" fill="#3B82F6"/>
+      <rect x="73" y="5" width="19" height="19" rx="4" fill="#22D3EE"/>
+    </g>
+</svg>

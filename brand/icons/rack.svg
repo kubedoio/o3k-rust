@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" role="img" aria-labelledby="t">
+  <title id="t">rack</title>
+  <rect x="6" y="3" width="12" height="18" rx="2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="6" y1="8" x2="18" y2="8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="6" y1="13" x2="18" y2="13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="6" y1="18" x2="18" y2="18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle cx="9" cy="5.5" r="1.2" fill="currentColor" stroke="none"/>
+  <circle cx="9" cy="10.5" r="1.2" fill="currentColor" stroke="none"/>
+  <circle cx="9" cy="15.5" r="1.2" fill="currentColor" stroke="none"/>
+  <circle cx="9" cy="20.5" r="1.2" fill="currentColor" stroke="none"/>
+</svg>
