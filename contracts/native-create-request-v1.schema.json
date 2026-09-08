@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-create-request-v1.schema.json",
+  "title": "O3K Native Create Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "api_version": { "type": ["string", "null"] },
+    "kind": { "type": ["string", "null"] },
+    "spec": { "type": "object" }
+  },
+  "required": ["spec"]
+}

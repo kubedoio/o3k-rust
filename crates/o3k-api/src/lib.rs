@@ -495,6 +495,10 @@ pub fn router_with_state(state: AppState) -> Router {
                 "/o3k/v1/resource-types",
                 get(o3k_native_api::discover_resource_types),
             )
+            .route(
+                "/o3k/v1/resource-schemas/{namespace}/{collection}/{version}",
+                get(o3k_native_api::discover_resource_schema),
+            )
             .route("/o3k/v1/regions", get(o3k_native_api::discover_regions))
             .route(
                 "/o3k/v1/identity/tokens",
