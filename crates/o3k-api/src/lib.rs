@@ -541,6 +541,10 @@ pub fn router_with_state(state: AppState) -> Router {
                 get(o3k_native_api::network::show_address_realm),
             )
             .route(
+                "/o3k/v1/operations",
+                get(o3k_native_api::operation::list_operations),
+            )
+            .route(
                 "/o3k/v1/operations/{id}",
                 get(o3k_native_api::operation::show_operation),
             );
