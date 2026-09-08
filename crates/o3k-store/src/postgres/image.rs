@@ -45,6 +45,22 @@ impl ImageRepository for PostgresStore {
         rows.iter().map(parse_pg_image).collect()
     }
 
+    async fn list_images_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ImageMetadataRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("image page limit overflow".to_owned()))?;
+        let rows = if let Some(after_id) = after_id {
+            sqlx::query("SELECT * FROM image_metadata WHERE (project_id = $1 OR visibility = 'public') AND status != 'deleted' AND id > $2 ORDER BY id LIMIT $3").bind(project_id).bind(after_id).bind(limit).fetch_all(&self.pool).await
+        } else {
+            sqlx::query("SELECT * FROM image_metadata WHERE (project_id = $1 OR visibility = 'public') AND status != 'deleted' ORDER BY id LIMIT $2").bind(project_id).bind(limit).fetch_all(&self.pool).await
+        }.map_err(StoreError::Database)?;
+        rows.iter().map(parse_pg_image).collect()
+    }
+
     async fn get_image(
         &self,
         project_id: &str,
