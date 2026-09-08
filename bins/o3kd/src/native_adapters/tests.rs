@@ -1074,7 +1074,7 @@ mod native_compute_tests {
     }
 
     #[test]
-    fn native_compute_manifest_exposes_no_generation_precondition_mutation() {
+    fn native_compute_manifest_exposes_declared_mutation_actions_only() {
         let registry = compute_manifest_registry();
         let manifest = registry.get("compute").expect("compute manifest");
         let actions = manifest
@@ -1092,7 +1092,11 @@ mod native_compute_tests {
                 .iter()
                 .any(|action| action.ends_with(":DeleteServer"))
         );
-        assert!(!actions.iter().any(|action| action.contains("Update")));
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.ends_with(":UpdateServer"))
+        );
         assert!(
             !actions
                 .iter()
