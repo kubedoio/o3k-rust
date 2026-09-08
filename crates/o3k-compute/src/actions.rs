@@ -47,14 +47,14 @@ impl ComputeService {
         {
             return Err(ComputeError::NotFound);
         }
-        let resource = self
-            .store
-            .get_resource(id.as_uuid())
-            .await
-            .map_err(|error| match error {
-                StoreError::ResourceNotFound => ComputeError::NotFound,
-                other => ComputeError::Store(other),
-            })?;
+        let resource =
+            self.store
+                .get_resource(id.as_uuid())
+                .await
+                .map_err(|error| match error {
+                    StoreError::ResourceNotFound => ComputeError::NotFound,
+                    other => ComputeError::Store(other),
+                })?;
         if resource.project_id != auth.effective_scope().id().as_str()
             || resource.provider_id.is_none()
         {
@@ -92,9 +92,7 @@ impl ComputeService {
             .begin_canonical_lifecycle(id.as_uuid(), operation_id, lifecycle_action, &context)
             .await
             .map_err(|error| match error {
-                ReconcileError::Store(StoreError::ResourceAlreadyExists) => {
-                    ComputeError::Conflict
-                }
+                ReconcileError::Store(StoreError::ResourceAlreadyExists) => ComputeError::Conflict,
                 other => ComputeError::Reconcile(other),
             })?;
         let replayed = match acceptance {
@@ -113,7 +111,9 @@ impl ComputeService {
             }
             o3k_store::CanonicalAcceptanceOutcome::Created { .. } => false,
         };
-        let operation_state = self.reconcile_lifecycle_until_terminal(operation_id).await?;
+        let operation_state = self
+            .reconcile_lifecycle_until_terminal(operation_id)
+            .await?;
         Ok(MutationReceipt {
             resource: id,
             operation_id,

@@ -182,6 +182,24 @@ impl ResourceDispatcher {
             .is_some_and(|state| state == o3k_kernel::controller::ControllerState::Ready)
     }
 
+    pub(crate) fn declared_action(
+        &self,
+        descriptor: &ResourceDescriptor,
+        name: &str,
+    ) -> Option<ActionId> {
+        let registry = self.lifecycle_registry.as_ref()?.read().ok()?;
+        let manifest = registry
+            .all()
+            .into_iter()
+            .find(|manifest| manifest.service_id == descriptor.owning_service)?;
+        let wire = format!("{}:{name}", descriptor.resource_type.namespace());
+        manifest
+            .actions
+            .iter()
+            .find(|declared| *declared == &wire)?;
+        ActionId::new(descriptor.resource_type.namespace(), name).ok()
+    }
+
     /// Resolve an authoritative lifecycle action from the manifest-derived
     /// descriptor. Callers must not construct action names from resource
     /// names; an undeclared lifecycle operation is unsupported.
@@ -256,6 +274,16 @@ pub struct MutationResult {
     pub resource: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionRequest {
+    #[serde(default = "empty_action_input")]
+    pub input: serde_json::Value,
+}
+
+fn empty_action_input() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RelationshipView {
     pub slot: String,
@@ -325,6 +353,19 @@ pub trait ResourceApplication: Send + Sync {
             idempotency_key,
             expected_generation,
         );
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
+
+    async fn action(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &AuthContext,
+        id: &str,
+        action: ActionId,
+        request: ActionRequest,
+        idempotency_key: &str,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        let _ = (descriptor, auth, id, action, request, idempotency_key);
         Err(ResourceApplicationError::UnsupportedOperation)
     }
 }
@@ -634,6 +675,46 @@ pub async fn update(
             key,
             expected_generation,
         )
+        .await
+    {
+        Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
+        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Err(error) => application_problem(error),
+    }
+}
+
+pub async fn action(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path((namespace, collection, id, action_name)): Path<(String, String, String, String)>,
+    State(state): State<NativeApiState>,
+    Json(request): Json<ActionRequest>,
+) -> Response {
+    let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
+        return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
+    };
+    let Some(action) = state
+        .resource_index
+        .declared_action(descriptor, &action_name)
+    else {
+        return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response();
+    };
+    if let Err(response) = authorize(&state, descriptor, &action, &auth.0, Some(&id)) {
+        return ProblemDetails::new(response).into_response();
+    }
+    if let Err(response) = ready_for_mutation(&state.resource_index, descriptor) {
+        return ProblemDetails::new(response).into_response();
+    }
+    let Some(application) = state.resource_application else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
+    let key = match idempotency_key(&headers) {
+        Ok(Some(key)) => key,
+        Ok(None) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    match application
+        .action(descriptor, &auth.0, &id, action, request, &key)
         .await
     {
         Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
