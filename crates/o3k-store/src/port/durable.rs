@@ -51,6 +51,12 @@ pub trait RelationshipRepository: Send + Sync {
         &self,
         parent_resource_id: Uuid,
     ) -> Result<Vec<ResourceRelationshipRecord>, StoreError>;
+    async fn list_relationships_page(
+        &self,
+        parent_resource_id: Uuid,
+        after_slot: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError>;
     async fn bind_relationship(
         &self,
         parent_resource_id: Uuid,

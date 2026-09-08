@@ -54,6 +54,17 @@ impl PostgresStore {
         rows.iter().map(relationship_from_pg_row).collect()
     }
 
+    pub async fn list_relationships_page(
+        &self,
+        parent_resource_id: Uuid,
+        after_slot: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
+        let rows = sqlx::query("SELECT parent_resource_id,parent_resource_type,slot,expected_child_resource_type,child_resource_id,ownership,parent_operation_id,child_operation_id,owner_scope,state,fingerprint FROM resource_relationships WHERE parent_resource_id=$1 AND ($2::text IS NULL OR slot>$2) ORDER BY slot LIMIT $3")
+            .bind(parent_resource_id.to_string()).bind(after_slot).bind(i64::from(limit)).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(relationship_from_pg_row).collect()
+    }
+
     pub async fn bind_relationship(
         &self,
         parent: Uuid,
@@ -113,6 +124,15 @@ impl crate::RelationshipRepository for PostgresStore {
         parent_resource_id: Uuid,
     ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
         Self::list_relationships(self, parent_resource_id).await
+    }
+
+    async fn list_relationships_page(
+        &self,
+        parent_resource_id: Uuid,
+        after_slot: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
+        Self::list_relationships_page(self, parent_resource_id, after_slot, limit).await
     }
 
     async fn bind_relationship(
