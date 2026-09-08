@@ -144,7 +144,8 @@ pub async fn list_servers(
             let total = servers.len();
             let last_item_id_full = servers.last().map(|s| s.id.clone());
             let paged: Vec<ServerItem> = if let Some(ref cursor) = query.cursor {
-                if let Ok(payload) = cursor_cfg.decode_cursor(cursor, &scope_id, RESOURCE_TYPE, "") {
+                if let Ok(payload) = cursor_cfg.decode_cursor(cursor, &scope_id, RESOURCE_TYPE, "")
+                {
                     let start_idx = match crate::pagination::continuation_index(
                         &servers.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
                         &payload.last_id,

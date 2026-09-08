@@ -6,8 +6,8 @@
 //! idempotency.
 #![allow(clippy::items_after_test_module)]
 
-use std::{collections::HashMap, sync::Arc};
 use base64::Engine as _;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::pagination::{CursorPayload, continuation_index, parse_page_size};
 use crate::{
@@ -751,9 +751,13 @@ pub struct ListQuery {
     /// arbitrary spec/provider fields are intentionally not queryable.
     #[serde(default)]
     pub filter: Vec<String>,
+    #[serde(skip)]
+    pub continuation_id: Option<String>,
 }
 
-fn default_order() -> String { "id.asc".to_owned() }
+fn default_order() -> String {
+    "id.asc".to_owned()
+}
 
 fn query_hash(query: &ListQuery) -> String {
     use sha2::{Digest, Sha256};
@@ -765,7 +769,7 @@ pub async fn list(
     auth: BearerAuth,
     Path((namespace, collection)): Path<(String, String)>,
     State(state): State<NativeApiState>,
-    Query(query): Query<ListQuery>,
+    Query(mut query): Query<ListQuery>,
 ) -> Response {
     let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
         return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
@@ -787,30 +791,35 @@ pub async fn list(
         return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response();
     }
     let effective_query_hash = query_hash(&query);
+    let scope = auth.0.effective_scope().id().to_string();
+    let resource_type = descriptor.resource_type.to_string();
+    if let Some(cursor) = query.cursor.as_deref() {
+        let Ok(payload) = state.cursor_config.decode_cursor(
+            cursor,
+            &scope,
+            &resource_type,
+            &effective_query_hash,
+        ) else {
+            return ProblemDetails::new(ErrorCode::InvalidCursor).into_response();
+        };
+        query.continuation_id = Some(payload.last_id);
+    }
     let items = match application.list(descriptor, &auth.0, &query).await {
         Ok(items) => items,
         Err(error) => return application_problem(error),
     };
-    let scope = auth.0.effective_scope().id().to_string();
-    let resource_type = descriptor.resource_type.to_string();
     let mut items = items;
     items.sort_by(|a, b| {
         a["metadata"]["id"]
             .as_str()
             .cmp(&b["metadata"]["id"].as_str())
     });
-    let start = if let Some(cursor) = query.cursor.as_deref() {
-        let Ok(payload) = state
-            .cursor_config
-            .decode_cursor(cursor, &scope, &resource_type, &effective_query_hash)
-        else {
-            return ProblemDetails::new(ErrorCode::InvalidCursor).into_response();
-        };
+    let start = if query.cursor.is_some() {
         let ids = items
             .iter()
             .filter_map(|item| item["metadata"]["id"].as_str().map(str::to_owned))
             .collect::<Vec<_>>();
-        match continuation_index(&ids, &payload.last_id) {
+        match continuation_index(&ids, query.continuation_id.as_deref().unwrap_or_default()) {
             Ok(index) => index,
             Err(_) => return ProblemDetails::new(ErrorCode::InvalidCursor).into_response(),
         }

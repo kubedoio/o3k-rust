@@ -145,7 +145,9 @@ pub async fn list_volumes(
             let total = volumes.len();
             let last_item_id_full = volumes.last().map(|v| v.id.clone());
             let paged: Vec<VolumeItem> = if let Some(ref cursor) = query.cursor {
-                if let Ok(payload) = cursor_cfg.decode_cursor(cursor, &project_id, RESOURCE_TYPE, "") {
+                if let Ok(payload) =
+                    cursor_cfg.decode_cursor(cursor, &project_id, RESOURCE_TYPE, "")
+                {
                     let start_idx = match crate::pagination::continuation_index(
                         &volumes.iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
                         &payload.last_id,
