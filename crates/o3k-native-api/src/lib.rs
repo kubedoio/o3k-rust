@@ -166,6 +166,7 @@ pub fn router(state: NativeApiState) -> Router {
             "/{namespace}/{collection}/{id}",
             get(resource::show).delete(resource::delete),
         )
+        .route("/operations", get(operation::list_operations))
         .route("/operations/{id}", get(operation::show_operation))
         .layer(DefaultBodyLimit::max(1_048_576))
         .with_state(state)
