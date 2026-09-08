@@ -23,6 +23,12 @@ pub struct ComputeServerCreateSpec {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ComputeServerUpdateSpec {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VolumeCreateSpec {
     #[schemars(range(min = 1))]
     pub size_bytes: u64,
@@ -132,6 +138,29 @@ impl ContractKind {
             }
             Self::Network => serde_json::from_value::<NetworkCreateSpec>(spec.clone())
                 .map(|_| ValidatedSpec { value: spec }),
+        }
+    }
+
+    pub fn update_schema(&self) -> Value {
+        let settings = schemars::generate::SchemaSettings::draft2020_12();
+        let generator = settings.into_generator();
+        let schema = match self {
+            Self::ComputeServer => generator.into_root_schema_for::<ComputeServerUpdateSpec>(),
+            _ => return serde_json::json!({}),
+        };
+        serde_json::to_value(schema).unwrap_or_else(|_| serde_json::json!({}))
+    }
+
+    pub fn validate_update(&self, spec: Value) -> Result<ValidatedSpec, serde_json::Error> {
+        match self {
+            Self::ComputeServer => serde_json::from_value::<ComputeServerUpdateSpec>(spec.clone())
+                .and_then(|parsed| {
+                    if parsed.name.trim().is_empty() {
+                        return Err(serde::de::Error::custom("name must be non-empty"));
+                    }
+                    Ok(ValidatedSpec { value: spec })
+                }),
+            _ => Err(serde::de::Error::custom("update contract is not declared")),
         }
     }
 }
