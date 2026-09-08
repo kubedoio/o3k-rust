@@ -69,7 +69,7 @@ impl ContractKind {
         // schemars 0.8 emits the repository's 2019-09-compatible vocabulary;
         // the composed public document is consumed as Draft 2020-12 (the
         // generated subset uses no draft-specific extensions).
-        let settings = schemars::r#gen::SchemaSettings::draft2019_09();
+        let settings = schemars::generate::SchemaSettings::draft2020_12();
         let generator = settings.into_generator();
         let schema = match self {
             Self::ComputeServer => generator.into_root_schema_for::<ComputeServerCreateSpec>(),
@@ -128,6 +128,10 @@ mod tests {
             .collect();
         for (schema, (_, value)) in schemas.iter().zip(cases.iter()) {
             assert!(jsonschema::validator_for(schema).is_ok());
+            assert_eq!(
+                schema.get("$schema").and_then(Value::as_str),
+                Some("https://json-schema.org/draft/2020-12/schema")
+            );
             assert!(schema.get("properties").is_some());
             assert!(value.is_object());
         }
