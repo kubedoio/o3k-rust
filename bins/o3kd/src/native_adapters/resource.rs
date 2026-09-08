@@ -9,8 +9,8 @@ use o3k_native_api::{
     compute::ServerItem,
     network::AddressRealmItem,
     resource::{
-        CreateRequest, MutationResult, ResourceApplication, ResourceApplicationError,
-        ResourceDescriptor, VolumeAttachmentWorkflow,
+        MutationResult, ResourceApplication, ResourceApplicationError, ResourceDescriptor,
+        ValidatedCreateRequest, VolumeAttachmentWorkflow,
     },
 };
 use o3k_store::{DurableStore, storage::StorageRepository};
@@ -643,7 +643,7 @@ impl ResourceApplication for GenericResourceApplication {
         &self,
         descriptor: &ResourceDescriptor,
         auth: &o3k_kernel::AuthContext,
-        request: CreateRequest,
+        request: ValidatedCreateRequest,
         idempotency_key: Option<&str>,
     ) -> Result<MutationResult, ResourceApplicationError> {
         if descriptor.resource_type.to_string() == "image:image" {
@@ -961,7 +961,7 @@ impl ResourceApplication for GenericResourceApplication {
                     context,
                     resource: o3k_kernel::ResourceSnapshot {
                         reference: parent_reference,
-                        desired_spec: request.spec,
+                        desired_spec: request.spec.into_value(),
                         known_status: None,
                         owner_scope: auth.effective_scope().clone(),
                     },
@@ -1156,7 +1156,7 @@ impl ResourceApplication for GenericResourceApplication {
                 #[serde(default)]
                 source_key: Option<String>,
             }
-            let spec: VolumeSpec = serde_json::from_value(request.spec.clone())
+            let spec: VolumeSpec = serde_json::from_value(request.spec.clone().into_value())
                 .map_err(|_| ResourceApplicationError::Validation)?;
             if spec.size_bytes == 0 || spec.volume_type.trim().is_empty() {
                 return Err(ResourceApplicationError::Validation);

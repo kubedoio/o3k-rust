@@ -360,10 +360,12 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         .create(
             descriptor,
             &api_auth,
-            o3k_native_api::resource::CreateRequest {
+            o3k_native_api::resource::ValidatedCreateRequest {
                 api_version: Some("o3k.io/v1".into()),
                 kind: Some("database:instance".into()),
-                spec: serde_json::json!({"engine":"test-engine","version":"1","storage_gb":1}),
+                spec: o3k_native_api::resource_contract::ValidatedSpec::from_external_contract(
+                    serde_json::json!({"engine":"test-engine","version":"1","storage_gb":1}),
+                ),
             },
             Some("api-create-1"),
         )
@@ -377,10 +379,12 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         .create(
             descriptor,
             &api_auth,
-            o3k_native_api::resource::CreateRequest {
+            o3k_native_api::resource::ValidatedCreateRequest {
                 api_version: Some("o3k.io/v1".into()),
                 kind: Some("database:instance".into()),
-                spec: serde_json::json!({"engine":"test-engine","version":"1","storage_gb":1}),
+                spec: o3k_native_api::resource_contract::ValidatedSpec::from_external_contract(
+                    serde_json::json!({"engine":"test-engine","version":"1","storage_gb":1}),
+                ),
             },
             Some("api-create-1"),
         )
@@ -391,10 +395,12 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         .create(
             descriptor,
             &api_auth,
-            o3k_native_api::resource::CreateRequest {
+            o3k_native_api::resource::ValidatedCreateRequest {
                 api_version: Some("o3k.io/v1".into()),
                 kind: Some("database:instance".into()),
-                spec: serde_json::json!({"engine":"test-engine","version":"2","storage_gb":1}),
+                spec: o3k_native_api::resource_contract::ValidatedSpec::from_external_contract(
+                    serde_json::json!({"engine":"test-engine","version":"2","storage_gb":1}),
+                ),
             },
             Some("api-create-1"),
         )
@@ -444,10 +450,12 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
         .create(
             descriptor,
             &quota_auth,
-            o3k_native_api::resource::CreateRequest {
+            o3k_native_api::resource::ValidatedCreateRequest {
                 api_version: Some("o3k.io/v1".into()),
                 kind: Some("database:instance".into()),
-                spec: serde_json::json!({"engine":"test-engine","version":"1","storage_gb":1}),
+                spec: o3k_native_api::resource_contract::ValidatedSpec::from_external_contract(
+                    serde_json::json!({"engine":"test-engine","version":"1","storage_gb":1}),
+                ),
             },
             Some("quota-create-1"),
         )
@@ -1326,10 +1334,10 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
                 .create(
                     child_descriptor,
                     &runtime_auth,
-                    o3k_native_api::resource::CreateRequest {
+                    o3k_native_api::resource::ValidatedCreateRequest {
                         api_version: Some("o3k.io/v1".into()),
                         kind: Some(kind.into()),
-                        spec,
+                        spec: o3k_native_api::resource_contract::ValidatedSpec::from_external_contract(spec),
                     },
                     Some(&format!("runtime-recovery:{slot}")),
                 )
@@ -1377,16 +1385,18 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
             .create(
                 compute_descriptor,
                 &runtime_auth,
-                o3k_native_api::resource::CreateRequest {
+                o3k_native_api::resource::ValidatedCreateRequest {
                     api_version: Some("o3k.io/v1".into()),
                     kind: Some("compute:server".into()),
-                    spec: serde_json::json!({
-                        "name": "runtime-recovery-compute",
-                        "image_id": "image-1",
-                        "flavor_id": uuid::Uuid::from_u128(1).to_string(),
-                        "network_ids": [network_id.to_string()],
-                        "key_name": null
-                    }),
+                    spec: o3k_native_api::resource_contract::ValidatedSpec::from_external_contract(
+                        serde_json::json!({
+                            "name": "runtime-recovery-compute",
+                            "image_id": "image-1",
+                            "flavor_id": uuid::Uuid::from_u128(1).to_string(),
+                            "network_ids": [network_id.to_string()],
+                            "key_name": null
+                        }),
+                    ),
                 },
                 Some("runtime-recovery:compute-primary"),
             )
@@ -1837,10 +1847,10 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
                     .create(
                         &descriptor,
                         &process_auth_context("project-independent-race"),
-                        o3k_native_api::resource::CreateRequest {
+                        o3k_native_api::resource::ValidatedCreateRequest {
                             api_version: Some("o3k.io/v1".into()),
                             kind: Some(candidate.expected_child_resource_type.clone()),
-                            spec,
+                            spec: o3k_native_api::resource_contract::ValidatedSpec::from_external_contract(spec),
                         },
                         Some(&format!("independent-race:{}", candidate.slot)),
                     )
@@ -1941,10 +1951,10 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
                     .create(
                         &descriptor,
                         &process_auth_context("project-independent-race"),
-                        o3k_native_api::resource::CreateRequest {
+                        o3k_native_api::resource::ValidatedCreateRequest {
                             api_version: Some("o3k.io/v1".into()),
                             kind: Some(candidate.expected_child_resource_type.clone()),
-                            spec,
+                            spec: o3k_native_api::resource_contract::ValidatedSpec::from_external_contract(spec),
                         },
                         Some(&format!("independent-race:{}", candidate.slot)),
                     )

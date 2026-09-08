@@ -23,7 +23,10 @@ pub mod network;
 pub mod operation;
 pub mod pagination;
 pub mod resource;
+pub mod resource_contract;
 pub mod volume;
+
+use resource::{LifecycleOperation, ResourceDescriptor};
 
 /// Shared application state for the native API router.
 #[derive(Clone, Default)]
@@ -134,6 +137,10 @@ pub fn router(state: NativeApiState) -> Router {
         .route("/", get(api_root))
         .route("/services", get(discover_services))
         .route("/resource-types", get(discover_resource_types))
+        .route(
+            "/resource-schemas/{namespace}/{collection}/{version}",
+            get(discover_resource_schema),
+        )
         .route("/regions", get(discover_regions))
         .route("/identity/tokens", post(identity::issue_token))
         .route(
@@ -206,6 +213,7 @@ pub async fn api_root() -> Json<ApiRootResponse> {
         endpoints: vec![
             "/o3k/v1/services",
             "/o3k/v1/resource-types",
+            "/o3k/v1/resource-schemas/{namespace}/{collection}/{version}",
             "/o3k/v1/regions",
             "/o3k/v1/identity/tokens",
             "/o3k/v1/identity/scopes",
@@ -306,6 +314,89 @@ pub struct DiscoveredResourceType {
     /// a region/AZ declaration. Provider/host/backend identity is never
     /// exposed here.
     availability_domain_selection: String,
+    schema: SchemaReference,
+    actions: Vec<ActionSchemaMetadata>,
+}
+
+#[derive(Serialize, Clone)]
+struct SchemaReference {
+    id: String,
+    version: String,
+    representation: String,
+}
+
+#[derive(Serialize, Clone)]
+struct ActionSchemaMetadata {
+    name: String,
+    action_id: String,
+    target: String,
+    input: Option<String>,
+    output: Option<String>,
+    asynchronous: bool,
+}
+
+fn schema_id(namespace: &str, collection: &str, version: &str) -> String {
+    format!("https://o3k.io/schemas/{namespace}/{collection}/{version}/resource")
+}
+
+fn create_input_schema_id(namespace: &str, collection: &str, version: &str) -> String {
+    format!(
+        "{}#/allOf/1/properties/spec",
+        schema_id(namespace, collection, version)
+    )
+}
+
+fn action_metadata(descriptor: &ResourceDescriptor) -> Vec<ActionSchemaMetadata> {
+    let mut actions: Vec<_> =
+        descriptor
+            .lifecycle_actions
+            .iter()
+            .map(|(operation, action)| {
+                let name = format!("{operation:?}").to_lowercase();
+                let target = match operation {
+                    LifecycleOperation::List | LifecycleOperation::Create => "collection",
+                    LifecycleOperation::Show
+                    | LifecycleOperation::Update
+                    | LifecycleOperation::Delete => "instance",
+                };
+                ActionSchemaMetadata {
+                name,
+                action_id: action.to_string(),
+                target: target.to_owned(),
+                    input: match operation {
+                    LifecycleOperation::Create => resource_contract::ContractKind::for_resource(
+                        &descriptor.resource_type.to_string(),
+                        &descriptor.schema_version,
+                    ).map(|_| create_input_schema_id(
+                        descriptor.resource_type.namespace(),
+                        &descriptor.collection,
+                        &descriptor.schema_version,
+                    )),
+                    _ => None,
+                },
+                output: Some(match operation {
+                    LifecycleOperation::List =>
+                        "https://o3k.io/contracts/native-resource-list-response-v1.schema.json",
+                    LifecycleOperation::Show =>
+                        "https://o3k.io/contracts/native-resource-envelope-v1.schema.json",
+                    LifecycleOperation::Create
+                    | LifecycleOperation::Update
+                    | LifecycleOperation::Delete =>
+                        "https://o3k.io/contracts/native-mutation-result-v1.schema.json",
+                }.to_owned()),
+                // Lifecycle mutations return a canonical operation_id. Reads
+                // do not create operations, but are still represented here.
+                asynchronous: matches!(
+                    operation,
+                    LifecycleOperation::Create
+                        | LifecycleOperation::Update
+                        | LifecycleOperation::Delete
+                ),
+            }
+            })
+            .collect();
+    actions.sort_by(|a, b| a.name.cmp(&b.name));
+    actions
 }
 
 #[derive(Serialize)]
@@ -416,6 +507,16 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
             placement,
             regions,
             availability_domain_selection,
+            schema: SchemaReference {
+                id: schema_id(
+                    descriptor.resource_type.namespace(),
+                    &descriptor.collection,
+                    &descriptor.schema_version,
+                ),
+                version: descriptor.schema_version.clone(),
+                representation: "native-resource-envelope".to_owned(),
+            },
+            actions: action_metadata(descriptor),
         });
     }
     resource_types.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
@@ -432,6 +533,67 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
         ),
     )
         .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct ResourceSchemaPath {
+    namespace: String,
+    collection: String,
+    version: String,
+}
+
+/// Returns the common envelope schema reference for a manifest-derived
+/// resource descriptor. The version is resolved against the descriptor, so a
+/// schema cannot be requested for an undeclared resource/version pair.
+pub async fn discover_resource_schema(
+    State(state): State<NativeApiState>,
+    axum::extract::Path(path): axum::extract::Path<ResourceSchemaPath>,
+) -> impl IntoResponse {
+    let Some(descriptor) = state
+        .resource_index
+        .resolve(&path.namespace, &path.collection)
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "resource schema not found"})),
+        )
+            .into_response();
+    };
+    if descriptor.schema_version != path.version {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "resource schema not found"})),
+        )
+            .into_response();
+    }
+    let resource_type = descriptor.resource_type.to_string();
+    let Some(contract) =
+        resource_contract::ContractKind::for_resource(&resource_type, &path.version)
+    else {
+        // A declared resource without a registered public contract must not
+        // be advertised as the misleading `spec: object` contract.
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "resource schema not available"})),
+        )
+            .into_response();
+    };
+    let spec_schema = contract.schema();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": schema_id(&path.namespace, &path.collection, &path.version),
+            "title": format!("O3K {}:{} resource {}", path.namespace, path.collection, path.version),
+            "description": "Canonical native resource representation: the common envelope with a resource-specific, typed spec. Status remains represented only when returned by the owning service.",
+            "allOf": [
+                {"$ref": "https://o3k.io/contracts/native-resource-envelope-v1.schema.json"},
+                {"type": "object", "properties": {"spec": spec_schema}, "required": ["spec"]}
+            ],
+            "x-o3k-resource-type": resource_type,
+            "x-o3k-schema-version": descriptor.schema_version,
+        })),
+    ).into_response()
 }
 
 // ── Region location discovery ──────────────────────────────────────────────
@@ -588,6 +750,14 @@ mod tests {
         };
         let _ = reg.register(m);
         reg
+    }
+
+    #[test]
+    fn create_action_input_reference_targets_the_typed_spec_fragment() {
+        assert_eq!(
+            create_input_schema_id("compute", "servers", "v1"),
+            "https://o3k.io/schemas/compute/servers/v1/resource#/allOf/1/properties/spec"
+        );
     }
 
     #[tokio::test]

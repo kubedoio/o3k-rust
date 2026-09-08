@@ -306,10 +306,29 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
             .create(
                 &descriptor,
                 &auth,
-                o3k_native_api::resource::CreateRequest {
+                o3k_native_api::resource::ValidatedCreateRequest {
                     api_version: Some("o3k.io/v1".into()),
                     kind: Some(request.resource_type.to_string()),
-                    spec: request.desired_spec,
+                    spec: match o3k_native_api::resource_contract::ContractKind::for_resource(
+                        &request.resource_type.to_string(),
+                        &descriptor.schema_version,
+                    ) {
+                        Some(contract) => contract.validate(request.desired_spec).map_err(|_| {
+                            o3k_service_sdk::composition::CompositionError::Failed(
+                                "child create spec invalid".into(),
+                            )
+                        })?,
+                        None if descriptor.ownership
+                            == o3k_kernel::ServiceOwnership::ExternalController =>
+                            o3k_native_api::resource_contract::ValidatedSpec::from_external_contract(
+                                request.desired_spec,
+                            ),
+                        None => {
+                            return Err(o3k_service_sdk::composition::CompositionError::Failed(
+                                "child create contract unavailable".into(),
+                            ));
+                        }
+                    },
                 },
                 Some(&request.idempotency_key),
             )
