@@ -73,7 +73,7 @@ Resource/service placement scope is **derived from the single manifest region/AZ
 | non-empty | non-empty | `regional` | `optional` |
 | empty | non-empty | `global` | `required` |
 
-Derivation makes a contradictory global/regional declaration **impossible by construction** — scope and AZ semantics are functions of the same two manifest fields.
+Derivation makes a mutually-contradictory **scope** declaration impossible by construction: `global` and `regional` are mutually exclusive functions of the same manifest `regions` field, so a manifest cannot simultaneously be global and regional. Availability-domain selection is orthogonal placement metadata, not scope: the combination of a `global`-scoped resource with `required` availability-domain selection is legal and means "place in any canonical region, but a concrete availability domain must be selected".
 
 Only canonical region IDs are disclosed to clients; declared-but-unknown regions are filtered out (fail closed). Provider/host/backend identity is never exposed.
 

@@ -88,7 +88,7 @@ Each resource type exposes derived placement fields:
 | non-empty | non-empty | regional | optional |
 | empty | non-empty | global | required |
 
-Placement is derived from the single manifest declaration, so no second placement authority exists and contradictory global/regional declarations are impossible by construction.
+Placement is derived from the single manifest declaration, so no second placement authority exists and a mutually-contradictory global/regional **scope** declaration is impossible by construction. Availability-domain selection is orthogonal placement metadata: `global`-scoped with `required` selection is legal and means "place in any canonical region, but a concrete availability domain must be selected".
 
 A global resource type never advertises regional placement; `regions` is absent/empty for globals.
 

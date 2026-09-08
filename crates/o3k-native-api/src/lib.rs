@@ -318,8 +318,9 @@ pub struct ResourceTypesResponse {
 ///
 /// Placement is *derived* from the single canonical manifest region/AZ
 /// declaration — there is no separate placement authority that could drift.
-/// This makes a contradictory global/regional declaration impossible by
-/// construction: scope and AZ semantics are functions of the same fields.
+/// Global/regional scope is mutually exclusive by construction (both are
+/// functions of the same `regions` field); availability-domain selection is
+/// orthogonal placement metadata (see ADR-0181/SPEC-0038).
 ///
 /// Returns `(scope, canonical_regions, availability_domain_selection)`.
 fn placement_for_service(
@@ -942,9 +943,13 @@ mod tests {
     }
 
     /// Builds a manifest declaring the given canonical region/AZ scope.
+    ///
+    /// Uses real O3K resource types (`image:image`, `network:address_realm`,
+    /// `volume:volume`) rather than fictional test concepts.
     fn scoped_manifest(
         service_id: &str,
         namespace: &str,
+        resource_type_name: &str,
         regions: Vec<&str>,
         availability_domains: Vec<&str>,
     ) -> ServiceManifest {
@@ -955,7 +960,7 @@ mod tests {
             service_version: "0.4.0".to_owned(),
             ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
             resource_types: vec![RegisteredResourceType {
-                resource_type: ResourceType::new_unchecked(namespace, "primary"),
+                resource_type: ResourceType::new_unchecked(namespace, resource_type_name),
                 schema_version: "v1".to_owned(),
                 collection: None,
                 scope: ResourceScope::Tenant,
@@ -1089,7 +1094,7 @@ mod tests {
     async fn resource_type_global_does_not_advertise_regional_placement() {
         let mut registry = ManifestRegistry::new();
         registry
-            .register(scoped_manifest("identity", "identity", vec![], vec![]))
+            .register(scoped_manifest("image", "image", "image", vec![], vec![]))
             .unwrap();
         let (_, body) = get_json(
             state_with_locations(Some(registry), Some(test_locations())),
@@ -1098,11 +1103,10 @@ mod tests {
         .await;
         let resource = &body["resource_types"][0];
         assert_eq!(resource["placement"], "global");
+        // `regions` must be entirely absent for a global resource (never an
+        // empty or populated regional advertisement).
         assert!(
-            resource["regions"]
-                .as_array()
-                .map(|r| r.is_empty())
-                .unwrap_or(true),
+            resource.get("regions").is_none(),
             "global resource must not advertise regional placement"
         );
         assert_eq!(resource["availability_domain_selection"], "unsupported");
@@ -1117,6 +1121,7 @@ mod tests {
             .register(scoped_manifest(
                 "network",
                 "network",
+                "address_realm",
                 vec!["region-a", "region-b", "ghost-region"],
                 vec![],
             ))
@@ -1139,10 +1144,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resource_type_regional_exposes_only_declared_canonical_subset() {
+        let mut registry = ManifestRegistry::new();
+        // region-b is canonical but the service only declares region-a: the
+        // disclosed regions must be exactly the declared subset, never all
+        // canonical regions.
+        registry
+            .register(scoped_manifest(
+                "network",
+                "network",
+                "address_realm",
+                vec!["region-a"],
+                vec![],
+            ))
+            .unwrap();
+        let (_, body) = get_json(
+            state_with_locations(Some(registry), Some(test_locations())),
+            "/resource-types",
+        )
+        .await;
+        let resource = &body["resource_types"][0];
+        assert_eq!(resource["placement"], "regional");
+        let regions: Vec<String> = resource["regions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|region| region.as_str().map(ToOwned::to_owned))
+            .collect();
+        assert_eq!(regions, vec!["region-a".to_owned()]);
+    }
+
+    #[tokio::test]
     async fn resource_type_az_aware_exposes_capability_without_provider_leakage() {
         let mut registry = ManifestRegistry::new();
         registry
             .register(scoped_manifest(
+                "volume",
                 "volume",
                 "volume",
                 vec!["region-a"],
@@ -1180,6 +1217,7 @@ mod tests {
         let mut registry = ManifestRegistry::new();
         registry
             .register(scoped_manifest(
+                "volume",
                 "volume",
                 "volume",
                 vec![],

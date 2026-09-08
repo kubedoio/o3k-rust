@@ -27,8 +27,19 @@ fn is_location_id_char(c: char) -> bool {
 }
 
 /// Returns true when `id` is a valid canonical location identifier.
+///
+/// The accepted alphabet matches the public contract pattern
+/// `^[a-z0-9][a-z0-9_-]*$` (1..=128): the first character must be a lower-case
+/// letter or digit; the remainder may add `_` and `-`.
 fn valid_location_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 128 && id.chars().all(is_location_id_char)
+    let mut chars = id.chars();
+    match chars.next() {
+        None => false,
+        Some(first) => {
+            let first_ok = first.is_ascii_lowercase() || first.is_ascii_digit();
+            first_ok && id.len() <= 128 && chars.all(is_location_id_char)
+        }
+    }
 }
 
 /// A canonical availability domain within a region.
@@ -73,6 +84,14 @@ pub enum LocationError {
         service: String,
         availability_domain: String,
     },
+    #[error(
+        "service '{service}' references availability domain '{availability_domain}' of region '{region}' it does not declare"
+    )]
+    AvailabilityDomainOutsideDeclaredRegions {
+        service: String,
+        availability_domain: String,
+        region: String,
+    },
 }
 
 /// The single canonical authority for O3K location topology.
@@ -84,7 +103,11 @@ pub enum LocationError {
 /// This is the one authority for "which regions and availability domains
 /// exist". Service manifests reference (filter) canonical IDs; they never
 /// invent location identity.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Note: `LocationRegistry` intentionally does not implement `Deserialize` so
+/// its sorted/validated invariants cannot be bypassed by deserializing an
+/// arbitrary value. Use [`LocationRegistry::from_declarations`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct LocationRegistry {
     regions: Vec<RegionDeclaration>,
 }
@@ -97,6 +120,7 @@ impl LocationRegistry {
     /// domain appearing in more than one region (an ambiguous mapping).
     pub fn from_declarations(declarations: Vec<RegionDeclaration>) -> Result<Self, LocationError> {
         let mut seen_regions = HashMap::new();
+        // Tracks availability-domain -> region for cross-region duplicates.
         let mut az_to_region: HashMap<&str, &str> = HashMap::new();
 
         for region in &declarations {
@@ -104,8 +128,15 @@ impl LocationRegistry {
             if seen_regions.insert(&region.id, ()).is_some() {
                 return Err(LocationError::DuplicateRegion(region.id.clone()));
             }
+            let mut seen_az_in_region = HashMap::new();
             for az in &region.availability_domains {
                 validate_az_id(az)?;
+                if seen_az_in_region.insert(az.id.as_str(), ()).is_some() {
+                    return Err(LocationError::DuplicateAvailabilityDomainInRegion(
+                        az.id.clone(),
+                        region.id.clone(),
+                    ));
+                }
                 if az_to_region
                     .insert(az.id.as_str(), region.id.as_str())
                     .is_some()
@@ -170,8 +201,11 @@ impl LocationRegistry {
     ///
     /// A manifest's `regions` and `availability_domains` are *filters* over the
     /// canonical registry: every referenced id must already exist as canonical
-    /// O3K location identity. This fails closed so a manifest can never invent
-    /// location truth or drift from the registry.
+    /// O3K location identity, and (when the manifest declares regional scope)
+    /// every declared availability domain must belong to one of the regions the
+    /// manifest itself advertises. This fails closed so a manifest can never
+    /// invent location truth, drift from the registry, or silently depend on an
+    /// availability domain whose region it does not advertise.
     pub fn validate_manifest_locations(
         &self,
         manifest: &ServiceManifest,
@@ -187,6 +221,12 @@ impl LocationRegistry {
             })
             .collect();
 
+        // The set of canonical regions this manifest explicitly advertises.
+        // Empty means the manifest places globally (no regional restriction),
+        // in which case any canonical AZ is acceptable.
+        let declared_regions: std::collections::BTreeSet<&str> =
+            manifest.regions.iter().map(String::as_str).collect();
+
         for region in &manifest.regions {
             if !self.contains_region(region) {
                 return Err(LocationError::UnknownRegion {
@@ -196,11 +236,24 @@ impl LocationRegistry {
             }
         }
         for az in &manifest.availability_domains {
-            if !az_index.contains_key(az.as_str()) {
-                return Err(LocationError::UnknownAvailabilityDomain {
-                    service: manifest.service_id.clone(),
-                    availability_domain: az.clone(),
-                });
+            match az_index.get(az.as_str()) {
+                None => {
+                    return Err(LocationError::UnknownAvailabilityDomain {
+                        service: manifest.service_id.clone(),
+                        availability_domain: az.clone(),
+                    });
+                }
+                Some(owning_region)
+                    if !declared_regions.is_empty()
+                        && !declared_regions.contains(owning_region) =>
+                {
+                    return Err(LocationError::AvailabilityDomainOutsideDeclaredRegions {
+                        service: manifest.service_id.clone(),
+                        availability_domain: az.clone(),
+                        region: owning_region.to_string(),
+                    });
+                }
+                Some(_) => {}
             }
         }
         Ok(())
@@ -290,7 +343,10 @@ mod tests {
                 .unwrap_err();
         assert_eq!(
             err,
-            LocationError::AmbiguousAvailabilityDomain("az-1".to_owned())
+            LocationError::DuplicateAvailabilityDomainInRegion(
+                "az-1".to_owned(),
+                "region-a".to_owned()
+            )
         );
     }
 
@@ -315,6 +371,16 @@ mod tests {
             err,
             LocationError::MalformedRegionId("Two Regions!".to_owned())
         );
+    }
+
+    #[test]
+    fn rejects_region_id_with_leading_punctuation() {
+        // Matches the public contract pattern ^[a-z0-9]... : a leading `-` or
+        // `_` is invalid even though those characters are legal in the rest.
+        for id in ["-east", "_east"] {
+            let err = LocationRegistry::from_declarations(vec![declaration(id, &[])]).unwrap_err();
+            assert_eq!(err, LocationError::MalformedRegionId(id.to_owned()));
+        }
     }
 
     #[test]
@@ -410,6 +476,60 @@ mod tests {
                 availability_domain: "missing-az".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn validate_manifest_rejects_az_outside_declared_regions() {
+        let registry = LocationRegistry::from_declarations(vec![
+            declaration("region-a", &["az-a"]),
+            declaration("region-b", &["az-b"]),
+        ])
+        .unwrap();
+        // AZ `az-b` is canonical but belongs to region-b; a manifest that only
+        // declares region-a must not silently depend on it.
+        let manifest = crate::ServiceManifest {
+            manifest_version: 1,
+            service_id: "compute".to_owned(),
+            namespace: "compute".to_owned(),
+            service_version: "1".to_owned(),
+            ownership: crate::ServiceOwnership::O3kImplemented,
+            resource_types: vec![],
+            actions: vec!["compute:ListServers".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec!["region-a".to_owned()],
+            availability_domains: vec!["az-b".to_owned()],
+            controller: None,
+            health: None,
+        };
+        let err = registry.validate_manifest_locations(&manifest).unwrap_err();
+        assert_eq!(
+            err,
+            LocationError::AvailabilityDomainOutsideDeclaredRegions {
+                service: "compute".to_owned(),
+                availability_domain: "az-b".to_owned(),
+                region: "region-b".to_owned()
+            }
+        );
+        // The same AZ inside the declared region is valid.
+        let ok_manifest = crate::ServiceManifest {
+            manifest_version: 1,
+            service_id: "compute".to_owned(),
+            namespace: "compute".to_owned(),
+            service_version: "1".to_owned(),
+            ownership: crate::ServiceOwnership::O3kImplemented,
+            resource_types: vec![],
+            actions: vec!["compute:ListServers".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec!["region-a".to_owned()],
+            availability_domains: vec!["az-a".to_owned()],
+            controller: None,
+            health: None,
+        };
+        assert!(registry.validate_manifest_locations(&ok_manifest).is_ok());
     }
 
     #[test]
