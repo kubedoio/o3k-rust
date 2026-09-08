@@ -131,7 +131,12 @@ fn string_list(value: &Value, key: &str) -> Result<Vec<String>, String> {
         .map(|items| {
             items
                 .iter()
-                .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
+                .map(|item| {
+                    item.as_str()
+                        .map(str::to_owned)
+                        .or_else(|| item.get("id").and_then(Value::as_str).map(str::to_owned))
+                        .unwrap_or_default()
+                })
                 .collect()
         })
         .ok_or_else(|| format!("missing array '{key}'"))
