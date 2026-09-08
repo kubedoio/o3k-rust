@@ -491,6 +491,22 @@ impl SqliteStore {
         rows.iter().map(canonical_realm_from_row).collect()
     }
 
+    pub async fn list_canonical_realms_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("realm page limit overflow".to_owned()))?;
+        let rows = if let Some(after_id) = after_id {
+            sqlx::query("SELECT id, network_id, project_id, prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?").bind(project_id).bind(after_id).bind(limit).fetch_all(&self.pool).await
+        } else {
+            sqlx::query("SELECT id, network_id, project_id, prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE project_id = ? ORDER BY id LIMIT ?").bind(project_id).bind(limit).fetch_all(&self.pool).await
+        }.map_err(StoreError::Database)?;
+        rows.iter().map(canonical_realm_from_row).collect()
+    }
+
     pub async fn insert_canonical_pool(
         &self,
         pool: &CanonicalAddressPoolRecord,
@@ -2401,6 +2417,15 @@ impl NetworkRepository for SqliteStore {
         id: &Uuid,
     ) -> Result<Option<CanonicalAddressRealmRecord>, StoreError> {
         self.get_canonical_realm(project_id, id).await
+    }
+    async fn list_canonical_realms_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        self.list_canonical_realms_page(project_id, after_id, limit)
+            .await
     }
     async fn list_canonical_realms(
         &self,

@@ -473,6 +473,22 @@ impl PostgresStore {
         rows.iter().map(canonical_realm_from_pg_row).collect()
     }
 
+    pub async fn list_canonical_realms_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("realm page limit overflow".to_owned()))?;
+        let rows = if let Some(after_id) = after_id {
+            sqlx::query("SELECT id, network_id, project_id, prefix::text AS prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE project_id = $1 AND id > $2 ORDER BY id LIMIT $3").bind(project_id).bind(after_id).bind(limit).fetch_all(&self.pool).await
+        } else {
+            sqlx::query("SELECT id, network_id, project_id, prefix::text AS prefix, overlapping_prefixes, generation, state FROM canonical_address_realms WHERE project_id = $1 ORDER BY id LIMIT $2").bind(project_id).bind(limit).fetch_all(&self.pool).await
+        }.map_err(StoreError::Database)?;
+        rows.iter().map(canonical_realm_from_pg_row).collect()
+    }
+
     pub async fn get_canonical_realm(
         &self,
         project_id: &str,
@@ -1394,6 +1410,15 @@ impl NetworkRepository for PostgresStore {
         id: &Uuid,
     ) -> Result<Option<CanonicalAddressRealmRecord>, StoreError> {
         self.get_canonical_realm(project_id, id).await
+    }
+    async fn list_canonical_realms_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError> {
+        self.list_canonical_realms_page(project_id, after_id, limit)
+            .await
     }
     async fn list_canonical_realms(
         &self,

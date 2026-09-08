@@ -77,6 +77,44 @@ mod network_reader_tests {
 
 #[async_trait::async_trait]
 impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
+    async fn list_address_realms_page(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AddressRealmItem>, NativeReadError> {
+        let project_id = auth.effective_scope().id().as_str();
+        if !authorize_collection(
+            auth,
+            "network:ListAddressRealms",
+            "network",
+            "address_realm",
+            self.authorizer.as_ref(),
+        ) {
+            return Err(NativeReadError::Forbidden);
+        }
+        self.store
+            .list_canonical_realms_page(project_id, after_id, limit)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "native bounded address realm list failed");
+                NativeReadError::Internal
+            })?
+            .into_iter()
+            .map(|realm| {
+                Ok(AddressRealmItem {
+                    id: realm.id.to_string(),
+                    project_id: realm.project_id,
+                    prefix: realm.prefix,
+                    overlapping_prefixes: realm.overlapping_prefixes,
+                    created_at: None,
+                    generation: i64::try_from(realm.generation)
+                        .map_err(|_| NativeReadError::Internal)?,
+                    state: realm.state,
+                })
+            })
+            .collect()
+    }
     async fn list_address_realms(
         &self,
         auth: &o3k_kernel::AuthContext,
