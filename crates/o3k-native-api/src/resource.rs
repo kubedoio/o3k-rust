@@ -7,6 +7,7 @@
 #![allow(clippy::items_after_test_module)]
 
 use std::{collections::HashMap, sync::Arc};
+use base64::Engine as _;
 
 use crate::pagination::{CursorPayload, continuation_index, parse_page_size};
 use crate::{
@@ -260,6 +261,7 @@ pub trait ResourceApplication: Send + Sync {
         &self,
         descriptor: &ResourceDescriptor,
         auth: &AuthContext,
+        query: &ListQuery,
     ) -> Result<Vec<serde_json::Value>, ResourceApplicationError>;
     async fn show(
         &self,
@@ -737,10 +739,26 @@ async fn delete_for(
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListQuery {
     pub limit: Option<String>,
     pub cursor: Option<String>,
+    /// Only the stable, indexed ordering vocabulary is accepted.
+    #[serde(default = "default_order")]
+    pub order: String,
+    /// Resource-specific filters must be declared by the resource contract;
+    /// arbitrary spec/provider fields are intentionally not queryable.
+    #[serde(default)]
+    pub filter: Vec<String>,
+}
+
+fn default_order() -> String { "id.asc".to_owned() }
+
+fn query_hash(query: &ListQuery) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = serde_json::to_vec(&(query.order.as_str(), &query.filter)).unwrap_or_default();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(canonical))
 }
 
 pub async fn list(
@@ -765,7 +783,11 @@ pub async fn list(
     let Some(application) = state.resource_application else {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     };
-    let items = match application.list(descriptor, &auth.0).await {
+    if query.order != "id.asc" || !query.filter.is_empty() {
+        return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response();
+    }
+    let effective_query_hash = query_hash(&query);
+    let items = match application.list(descriptor, &auth.0, &query).await {
         Ok(items) => items,
         Err(error) => return application_problem(error),
     };
@@ -780,7 +802,7 @@ pub async fn list(
     let start = if let Some(cursor) = query.cursor.as_deref() {
         let Ok(payload) = state
             .cursor_config
-            .decode_cursor(cursor, &scope, &resource_type)
+            .decode_cursor(cursor, &scope, &resource_type, &effective_query_hash)
         else {
             return ProblemDetails::new(ErrorCode::InvalidCursor).into_response();
         };
@@ -806,6 +828,7 @@ pub async fn list(
                     last_id: last_id.to_owned(),
                     scope_id: scope,
                     resource_type,
+                    query_hash: effective_query_hash,
                     version: 1,
                 })
             })

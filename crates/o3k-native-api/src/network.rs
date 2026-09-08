@@ -117,7 +117,7 @@ pub async fn list_address_realms(
 
     let cursor_invalid = query.cursor.as_deref().is_some_and(|c| {
         cursor_cfg
-            .decode_cursor(c, &project_id, RESOURCE_TYPE)
+            .decode_cursor(c, &project_id, RESOURCE_TYPE, "")
             .is_err()
     });
     if cursor_invalid {
@@ -135,7 +135,7 @@ pub async fn list_address_realms(
             let total = realms.len();
             let last_item_id_full = realms.last().map(|r| r.id.clone());
             let paged: Vec<AddressRealmItem> = if let Some(ref cursor) = query.cursor {
-                if let Ok(payload) = cursor_cfg.decode_cursor(cursor, &project_id, RESOURCE_TYPE) {
+                if let Ok(payload) = cursor_cfg.decode_cursor(cursor, &project_id, RESOURCE_TYPE, "") {
                     let start_idx = match crate::pagination::continuation_index(
                         &realms.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
                         &payload.last_id,
@@ -173,6 +173,7 @@ pub async fn list_address_realms(
                             last_id: last.id.clone(),
                             scope_id: project_id,
                             resource_type: RESOURCE_TYPE.to_owned(),
+                            query_hash: String::new(),
                             version: 1,
                         })
                     })
