@@ -23,6 +23,7 @@ pub mod network;
 pub mod operation;
 pub mod pagination;
 pub mod resource;
+pub mod resource_contract;
 pub mod volume;
 
 use resource::{LifecycleOperation, ResourceDescriptor};
@@ -355,10 +356,15 @@ fn action_metadata(descriptor: &ResourceDescriptor) -> Vec<ActionSchemaMetadata>
                 name,
                 action_id: action.to_string(),
                 target: target.to_owned(),
-                input: match operation {
-                    LifecycleOperation::Create => Some(
-                        "https://o3k.io/contracts/native-create-request-v1.schema.json".to_owned(),
-                    ),
+                    input: match operation {
+                    LifecycleOperation::Create => resource_contract::ContractKind::for_resource(
+                        &descriptor.resource_type.to_string(),
+                        &descriptor.schema_version,
+                    ).map(|_| schema_id(
+                        descriptor.resource_type.namespace(),
+                        &descriptor.collection,
+                        &descriptor.schema_version,
+                    )),
                     _ => None,
                 },
                 output: Some(match operation {
@@ -553,15 +559,31 @@ pub async fn discover_resource_schema(
         )
             .into_response();
     }
+    let resource_type = descriptor.resource_type.to_string();
+    let Some(contract) =
+        resource_contract::ContractKind::for_resource(&resource_type, &path.version)
+    else {
+        // A declared resource without a registered public contract must not
+        // be advertised as the misleading `spec: object` contract.
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "resource schema not available"})),
+        )
+            .into_response();
+    };
+    let spec_schema = contract.schema();
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "$id": schema_id(&path.namespace, &path.collection, &path.version),
             "title": format!("O3K {}:{} resource {}", path.namespace, path.collection, path.version),
-            "description": "Canonical native resource envelope; service-owned spec and status fields are intentionally opaque at this generic boundary.",
-            "$ref": "https://o3k.io/contracts/native-resource-envelope-v1.schema.json",
-            "x-o3k-resource-type": format!("{}:{}", path.namespace, descriptor.resource_type.name()),
+            "description": "Canonical native resource representation: the common envelope with a resource-specific, typed spec. Status remains represented only when returned by the owning service.",
+            "allOf": [
+                {"$ref": "https://o3k.io/contracts/native-resource-envelope-v1.schema.json"},
+                {"type": "object", "properties": {"spec": spec_schema}, "required": ["spec"]}
+            ],
+            "x-o3k-resource-type": resource_type,
             "x-o3k-schema-version": descriptor.schema_version,
         })),
     ).into_response()

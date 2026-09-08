@@ -572,6 +572,24 @@ async fn create_for(
         )
         .into_response();
     };
+    let resource_type = descriptor.resource_type.to_string();
+    let Some(contract) = crate::resource_contract::ContractKind::for_resource(
+        &resource_type,
+        &descriptor.schema_version,
+    ) else {
+        return ProblemDetails::with_detail(
+            ErrorCode::NotAvailable,
+            "resource create contract is not available",
+        )
+        .into_response();
+    };
+    if contract.validate(request.spec.clone()).is_err() {
+        return ProblemDetails::with_detail(
+            ErrorCode::BadRequest,
+            "resource spec violates its published contract",
+        )
+        .into_response();
+    }
     let key = match idempotency_key(&headers) {
         Ok(key) => key,
         Err(error) => return ProblemDetails::new(error).into_response(),
