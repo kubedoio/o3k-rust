@@ -14,8 +14,52 @@ pub struct VolumeReaderAdapter {
     pub authorizer: Arc<dyn Authorizer>,
 }
 
+fn volume_item(r: o3k_store::storage::VolumeRecord) -> VolumeItem {
+    VolumeItem {
+        id: r.volume.id.to_string(),
+        project_id: r.volume.project_id.clone(),
+        name: r.volume.name.clone(),
+        description: r.volume.description.clone(),
+        metadata: serde_json::to_value(&r.volume.metadata)
+            .unwrap_or_else(|_| serde_json::json!({})),
+        availability_zone: r.volume.availability_zone.clone(),
+        size_bytes: r.volume.size_bytes,
+        volume_type: r.volume.volume_type.clone(),
+        state: serde_json::to_value(r.volume.state)
+            .map(|v| v.as_str().unwrap_or("unknown").to_owned())
+            .unwrap_or_else(|_| "unknown".to_owned()),
+        created_at: Some(r.created_at.clone()),
+        generation: r.volume.generation as i64,
+    }
+}
+
 #[async_trait::async_trait]
 impl o3k_native_api::volume::VolumeReader for VolumeReaderAdapter {
+    async fn list_volumes_page(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<VolumeItem>, NativeReadError> {
+        let project_id = auth.effective_scope().id().as_str();
+        if !authorize_collection(
+            auth,
+            "volume:ListVolumes",
+            "volume",
+            "volume",
+            self.authorizer.as_ref(),
+        ) {
+            return Err(NativeReadError::Forbidden);
+        }
+        self.store
+            .list_volumes_page(project_id, after_id, limit)
+            .await
+            .map(|records| records.into_iter().map(volume_item).collect())
+            .map_err(|error| {
+                tracing::error!(%error, "native bounded volume list failed");
+                NativeReadError::Internal
+            })
+    }
     async fn list_volumes(
         &self,
         auth: &o3k_kernel::AuthContext,
@@ -31,25 +75,7 @@ impl o3k_native_api::volume::VolumeReader for VolumeReaderAdapter {
             return Err(NativeReadError::Forbidden);
         }
         match self.store.list_volumes(project_id).await {
-            Ok(records) => Ok(records
-                .into_iter()
-                .map(|r| VolumeItem {
-                    id: r.volume.id.to_string(),
-                    project_id: r.volume.project_id.clone(),
-                    name: r.volume.name.clone(),
-                    description: r.volume.description.clone(),
-                    metadata: serde_json::to_value(&r.volume.metadata)
-                        .unwrap_or_else(|_| serde_json::json!({})),
-                    availability_zone: r.volume.availability_zone.clone(),
-                    size_bytes: r.volume.size_bytes,
-                    volume_type: r.volume.volume_type.clone(),
-                    state: serde_json::to_value(r.volume.state)
-                        .map(|v| v.as_str().unwrap_or("unknown").to_owned())
-                        .unwrap_or_else(|_| "unknown".to_owned()),
-                    created_at: Some(r.created_at.clone()),
-                    generation: r.volume.generation as i64,
-                })
-                .collect()),
+            Ok(records) => Ok(records.into_iter().map(volume_item).collect()),
             Err(e) => {
                 tracing::error!(error = %e, project_id = %project_id, "native volume list failed");
                 Err(NativeReadError::Internal)

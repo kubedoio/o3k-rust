@@ -58,6 +58,18 @@ impl StorageRepository for O3kStore {
         }
     }
 
+    async fn list_volumes_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<VolumeRecord>, StoreError> {
+        match self {
+            Self::Sqlite(store) => store.list_volumes_page(project_id, after_id, limit).await,
+            Self::Postgres(store) => store.list_volumes_page(project_id, after_id, limit).await,
+        }
+    }
+
     async fn list_all_volumes(&self) -> Result<Vec<VolumeRecord>, StoreError> {
         match self {
             Self::Sqlite(store) => store.list_all_volumes().await,
