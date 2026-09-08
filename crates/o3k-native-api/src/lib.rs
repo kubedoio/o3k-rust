@@ -502,6 +502,32 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
             });
         let (placement, regions, availability_domain_selection) =
             placement_for_service(&owning_service, &state.locations);
+        let mut action_metadata = action_metadata(descriptor);
+        for action_id in owning_service.actions.iter().filter(|action| {
+            action.starts_with(&format!("{}:", descriptor.resource_type.namespace()))
+                && ((descriptor.resource_type.name() == "server"
+                    && ["StartServer", "StopServer", "RebootServer"]
+                        .iter()
+                        .any(|name| action.ends_with(name)))
+                    || (descriptor.resource_type.name() == "volume"
+                        && ["AttachVolume", "DetachVolume"]
+                            .iter()
+                            .any(|name| action.ends_with(name))))
+        }) {
+            let Some((_, name)) = action_id.split_once(':') else {
+                continue;
+            };
+            action_metadata.push(ActionSchemaMetadata {
+                name: name.to_lowercase(),
+                action_id: action_id.clone(),
+                target: "instance".to_owned(),
+                input: None,
+                output: None,
+                asynchronous: true,
+            });
+        }
+        action_metadata.sort_by(|a, b| a.action_id.cmp(&b.action_id));
+        action_metadata.dedup_by(|a, b| a.action_id == b.action_id);
         resource_types.push(DiscoveredResourceType {
             namespace: descriptor.resource_type.namespace().to_owned(),
             name: descriptor.resource_type.name().to_owned(),
@@ -523,7 +549,7 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
                 version: descriptor.schema_version.clone(),
                 representation: "native-resource-envelope".to_owned(),
             },
-            actions: action_metadata(descriptor),
+            actions: action_metadata,
         });
     }
     resource_types.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
