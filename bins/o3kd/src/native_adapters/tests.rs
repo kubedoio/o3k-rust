@@ -303,6 +303,22 @@ mod native_compute_tests {
             .expect("request")
     }
 
+    fn authed_action(
+        path: &str,
+        project: &str,
+        idempotency_key: &str,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .method("POST")
+            .header("authorization", format!("Bearer project-{project}"))
+            .header("content-type", "application/json")
+            .header("idempotency-key", idempotency_key)
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .expect("request")
+    }
+
     fn authed_delete(path: &str, project: &str, idempotency_key: &str) -> Request<Body> {
         Request::builder()
             .uri(path)
@@ -451,6 +467,58 @@ mod native_compute_tests {
         assert_eq!(replay["operation_id"], first["operation_id"]);
         assert_eq!(replay["resource_id"], first["resource_id"]);
         assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_compute_declared_action_is_canonical_and_scoped() {
+        let (router, _, _, _) = setup().await;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "action-test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+        let (_, created) = exec(
+            &router,
+            authed_post("/compute/servers", "a", "action-create", body),
+        )
+        .await;
+        let id = created["resource_id"].as_str().unwrap();
+        let path = format!("/compute/servers/{id}/actions/StopServer");
+        let request = serde_json::json!({"input": {}});
+        let (status, first) = exec(
+            &router,
+            authed_action(&path, "a", "action-stop", request.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "action response: {first}");
+        let operation_id = first["operation_id"].as_str().unwrap();
+        assert_eq!(first["resource_id"], id);
+
+        let (status, replay) = exec(
+            &router,
+            authed_action(&path, "a", "action-stop", request.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "action replay response: {replay}");
+        assert_eq!(replay["operation_id"], operation_id);
+
+        let (status, _) = exec(
+            &router,
+            authed_action(
+                &path,
+                "a",
+                "action-stop",
+                serde_json::json!({"input": {"x": 1}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        let (status, _) = exec(&router, authed_action(&path, "b", "foreign", request)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
