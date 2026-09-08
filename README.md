@@ -106,8 +106,8 @@ authority. The implementation must extend or aggregate Placement/resource-
 provider and execution-agent truth so capacity, topology and lifecycle remain
 consistent.
 
-See [ADR-0181 — edge-to-datacenter building-block Cloud OS](docs/adr/ADR-0181-edge-to-datacenter-building-block-cloud-os.md)
-and [SPEC-0038 — edge-to-datacenter building-block cloud](docs/specs/SPEC-0038-edge-to-datacenter-building-block-cloud.md).
+See [ADR-0182 — edge-to-datacenter building-block Cloud OS](docs/adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md)
+and [SPEC-0039 — edge-to-datacenter building-block cloud](docs/specs/SPEC-0039-edge-to-datacenter-building-block-cloud.md).
 
 ## Architecture reality check
 
@@ -581,8 +581,8 @@ For real libvirt execution use [docs/TESTLAB.md](docs/TESTLAB.md).
 - [ADR-0165 — Cloud OS / Cloud Kernel](docs/adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md)
 - [ADR-0166 — O3K IAM / Keystone compatibility](docs/adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md)
 - [ADR-0167 — Kubernetes-native control plane](docs/adr/ADR-0167-kubernetes-native-control-plane-deployment.md)
-- [ADR-0181 — edge-to-datacenter building-block Cloud OS](docs/adr/ADR-0181-edge-to-datacenter-building-block-cloud-os.md)
-- [SPEC-0038 — edge-to-datacenter building-block cloud](docs/specs/SPEC-0038-edge-to-datacenter-building-block-cloud.md)
+- [ADR-0182 — edge-to-datacenter building-block Cloud OS](docs/adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md)
+- [SPEC-0039 — edge-to-datacenter building-block cloud](docs/specs/SPEC-0039-edge-to-datacenter-building-block-cloud.md)
 - [Product requirements](docs/PRODUCT_REQUIREMENTS.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Normative source map](docs/NORMATIVE_SOURCES.md)

@@ -1,8 +1,8 @@
-# SPEC-0038 — Edge-to-datacenter building-block cloud
+# SPEC-0039 — Edge-to-datacenter building-block cloud
 
 Status: Normative
 Version: 1.0.0
-Related ADR: [ADR-0181](../adr/ADR-0181-edge-to-datacenter-building-block-cloud-os.md)
+Related ADR: [ADR-0182](../adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md)
 
 ## Purpose
 

@@ -1,4 +1,4 @@
-# ADR-0181 — End-to-end edge-to-datacenter building-block Cloud OS
+# ADR-0182 — End-to-end edge-to-datacenter building-block Cloud OS
 
 Status: Accepted
 Date: 2026-09-08
@@ -7,7 +7,7 @@ Supersedes: none
 Superseded-by: none
 Affected-services: governance, cloud-kernel, identity, compute, network, image, placement, volume, service-registry, deployment, compatibility, future-services
 
-Normative specification: [SPEC-0038](../specs/SPEC-0038-edge-to-datacenter-building-block-cloud.md)
+Normative specification: [SPEC-0039](../specs/SPEC-0039-edge-to-datacenter-building-block-cloud.md)
 
 ## Context
 

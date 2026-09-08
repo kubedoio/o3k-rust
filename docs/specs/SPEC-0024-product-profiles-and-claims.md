@@ -7,11 +7,11 @@ Related decisions and specifications:
 - [ADR-0163](../adr/ADR-0163-product-profiles-and-deployment-posture.md)
 - [ADR-0165](../adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md)
 - [ADR-0166](../adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md)
-- [ADR-0181](../adr/ADR-0181-edge-to-datacenter-building-block-cloud-os.md)
+- [ADR-0182](../adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md)
 - [SPEC-0020](SPEC-0020-keystone-trust-catalog-and-auth-context.md)
 - [SPEC-0022](SPEC-0022-service-api-baseline-and-evidence-gates.md)
 - [SPEC-0023](SPEC-0023-external-cinder-service-under-test.md)
-- [SPEC-0038](SPEC-0038-edge-to-datacenter-building-block-cloud.md)
+- [SPEC-0039](SPEC-0039-edge-to-datacenter-building-block-cloud.md)
 - [Machine-readable product profiles](../../compatibility/product-profiles.yaml)
 
 ## Purpose
@@ -26,7 +26,7 @@ A feature or measurement from one profile must not be silently promoted to
 another.
 
 The profiles do **not** define separate internal cloud architectures. O3K's
-canonical architecture is the Cloud Kernel in ADR-0165. ADR-0181/SPEC-0038 add
+canonical architecture is the Cloud Kernel in ADR-0165. ADR-0182/SPEC-0039 add
 the scale-continuity rule: edge, cage, private-cloud and future datacenter-scale
 profiles are evidence rungs of the same Cloud Operating System rather than
 separate products that require replatforming.
@@ -170,7 +170,7 @@ An operator can run O3K as a lightweight multi-host Cloud OS for approximately
 10–20 hypervisors in the initial edge profile.
 
 This profile is the first bounded real multi-host scale rung in the end-to-end
-model from ADR-0181/SPEC-0038. It is **not** the product's architectural maximum
+model from ADR-0182/SPEC-0039. It is **not** the product's architectural maximum
 and does not prove larger private-cloud or datacenter-scale operation.
 
 Target host-execution topology:
@@ -205,7 +205,7 @@ An edge release claim requires evidence for:
 
 ## Future larger private/datacenter scale profiles
 
-Larger O3K profiles are governed by ADR-0181/SPEC-0038.
+Larger O3K profiles are governed by ADR-0182/SPEC-0039.
 
 They are not new product identities. They SHALL preserve the same canonical
 cloud model while publishing their own exact evidence for:

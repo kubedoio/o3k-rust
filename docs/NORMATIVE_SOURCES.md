@@ -8,7 +8,7 @@ product rules. Summaries explain these decisions but do not override them.
 | Subject | Normative source | Summary-only documents |
 |---|---|---|
 | Cloud OS identity, Cloud Kernel, OpenStack compatibility, provider/delegated-cloud authority | `docs/adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md` | `README.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md` |
-| End-to-end edge-to-datacenter scale continuity, deployment building blocks, composable service catalog, and OpenStack ecosystem extension boundary | `docs/adr/ADR-0181-edge-to-datacenter-building-block-cloud-os.md` and `docs/specs/SPEC-0038-edge-to-datacenter-building-block-cloud.md` | `README.md`, `docs/ROADMAP.md`, `docs/PRODUCT_REQUIREMENTS.md` |
+| End-to-end edge-to-datacenter scale continuity, deployment building blocks, composable service catalog, and OpenStack ecosystem extension boundary | `docs/adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md` and `docs/specs/SPEC-0039-edge-to-datacenter-building-block-cloud.md` | `README.md`, `docs/ROADMAP.md`, `docs/PRODUCT_REQUIREMENTS.md` |
 | O3K IAM and Keystone compatibility | `docs/adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md` and `docs/specs/SPEC-0020-keystone-trust-catalog-and-auth-context.md` | `README.md`, `docs/ARCHITECTURE.md` |
 | Kubernetes-native control-plane deployment and PostgreSQL requirement for HA Kubernetes | `docs/adr/ADR-0167-kubernetes-native-control-plane-deployment.md` | `README.md`, `docs/ROADMAP.md`, `docs/ARCHITECTURE.md` |
 | P9 O3K network intent, Routed Fabric, and node-local network execution | `docs/adr/ADR-0168-o3k-routed-fabric-and-network-execution.md` and `docs/specs/SPEC-0026-o3k-routed-fabric-v1.md` | `docs/ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/PRODUCT_REQUIREMENTS.md` |
@@ -38,6 +38,7 @@ defined in each source.
 | Native O3K resource API, resource envelope, identity/versioning/operations/error/pagination/CLI semantics | `docs/adr/ADR-0173-native-o3k-resource-api-and-resource-model.md`, `docs/specs/SPEC-0030-native-o3k-resource-api-v1.md`, `contracts/native-resource-envelope-v1.schema.json` |
 | Service Manifest, registry evolution, namespace ownership, external controller/service-principal/delegation/composition model | `docs/adr/ADR-0174-service-manifest-and-resource-provider-controller.md`, `docs/specs/SPEC-0031-service-extension-controller-v1.md`, `contracts/service-manifest-v1.schema.json`, `contracts/controller-protocol-v1.md` |
 | Separation of native service identity from OpenStack service/catalog/API compatibility metadata | `contracts/openstack-compatibility-projection-v1.schema.json` under ADR-0174/SPEC-0031; actual advertisement remains gated by SPEC-0022 and compatibility manifests |
+| Canonical region and availability-domain location identity/discovery | `docs/adr/ADR-0181-canonical-location-identity.md`, `docs/specs/SPEC-0038-canonical-location-discovery-v1.md`, `contracts/native-location-discovery-v1.schema.json` |
 
 ## Accepted P13 sources — active architecture authority
 
@@ -65,13 +66,13 @@ profile and ordered prompts.
 
 ## Accepted end-to-end scale sources — active architecture authority
 
-ADR-0181 and SPEC-0038 define O3K as one Cloud Operating System across the
+ADR-0182 and SPEC-0039 define O3K as one Cloud Operating System across the
 edge-to-datacenter continuum. They do not promote any untested datacenter-scale
 support claim; scale evidence remains profile-specific.
 
 | Subject | Authority |
 | --- | --- |
-| Edge-to-datacenter building-block continuity, composable service catalog and upstream OpenStack hosted-service extension model | `docs/adr/ADR-0181-edge-to-datacenter-building-block-cloud-os.md`, `docs/specs/SPEC-0038-edge-to-datacenter-building-block-cloud.md` |
+| Edge-to-datacenter building-block continuity, composable service catalog and upstream OpenStack hosted-service extension model | `docs/adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md`, `docs/specs/SPEC-0039-edge-to-datacenter-building-block-cloud.md` |
 
 ## Core rules
 

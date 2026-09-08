@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-location-discovery-v1.schema.json",
+  "title": "O3K Native Location Discovery v1",
+  "description": "Response contract for `GET /o3k/v1/regions` — canonical O3K region and availability-domain topology. O3K is the single authority for location identity; this contract never exposes provider, host, hypervisor, cluster, Ceph pool, storage backend, or network-controller identity. When no regions are configured the response MUST be `{\"regions\": [], \"count\": 0}` — absent, never fabricated.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["regions", "count"],
+  "properties": {
+    "regions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/region"
+      }
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "$defs": {
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]*$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Stable, provider-neutral O3K region identifier."
+        },
+        "availability_domains": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/availabilityDomain"
+          }
+        }
+      }
+    },
+    "availabilityDomain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]*$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Stable, provider-neutral O3K availability-domain identifier scoped to its parent region."
+        }
+      }
+    }
+  },
+  "x-o3k-status": "accepted",
+  "x-o3k-related-adr": "ADR-0181",
+  "x-o3k-related-spec": "SPEC-0038"
+}
