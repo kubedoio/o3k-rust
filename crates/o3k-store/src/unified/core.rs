@@ -36,6 +36,25 @@ impl DurableStore for O3kStore {
         }
     }
 
+    async fn list_resources_page(
+        &self,
+        project_id: &str,
+        kind: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResourceRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.list_resources_page(project_id, kind, after_id, limit)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.list_resources_page(project_id, kind, after_id, limit)
+                    .await
+            }
+        }
+    }
+
     async fn update_resource(
         &self,
         id: Uuid,

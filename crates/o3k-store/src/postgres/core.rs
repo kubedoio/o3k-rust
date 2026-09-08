@@ -74,6 +74,25 @@ impl DurableStore for PostgresStore {
         rows.iter().map(row_to_resource).collect()
     }
 
+    async fn list_resources_page(
+        &self,
+        project_id: &str,
+        kind: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResourceRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("native page limit overflow".to_owned()))?;
+        let rows = if let Some(after_id) = after_id {
+            sqlx::query("SELECT * FROM resources WHERE project_id = $1 AND kind = $2 AND id > $3 ORDER BY id LIMIT $4")
+                .bind(project_id).bind(kind).bind(after_id).bind(limit).fetch_all(&self.pool).await
+        } else {
+            sqlx::query("SELECT * FROM resources WHERE project_id = $1 AND kind = $2 ORDER BY id LIMIT $3")
+                .bind(project_id).bind(kind).bind(limit).fetch_all(&self.pool).await
+        }.map_err(StoreError::Database)?;
+        rows.iter().map(row_to_resource).collect()
+    }
+
     async fn update_resource(
         &self,
         id: Uuid,
