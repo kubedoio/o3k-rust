@@ -533,11 +533,12 @@ mod tests {
     }
 
     #[test]
-    fn provider_data_does_not_affect_region_identity() {
-        // Region identity is purely the declared canonical id. Two registries
-        // that share region ids expose identical public topology even when any
-        // other (hypothetical provider) metadata would differ. Providers do
-        // not participate in location identity at all.
+    fn region_identity_is_provider_independent_and_structurally_closed() {
+        // Public region identity is purely the declared canonical id: providers
+        // do not participate in location identity at all. Two configurations
+        // that share region/AZ ids expose identical public topology regardless
+        // of declaration order (which is how a hypothetical provider change
+        // would otherwise surface).
         let a = registry(vec![
             declaration("region-a", &["az-1"]),
             declaration("region-b", &[]),
@@ -546,9 +547,111 @@ mod tests {
             declaration("region-b", &[]),
             declaration("region-a", &["az-1"]),
         ]);
-        let ids_a: Vec<&str> = a.regions().iter().map(|r| r.id.as_str()).collect();
-        let ids_b: Vec<&str> = b.regions().iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids_a, ids_b);
         assert_eq!(a.regions(), b.regions());
+        let serialized_a: serde_json::Value = serde_json::to_value(&a).unwrap();
+        let serialized_b: serde_json::Value = serde_json::to_value(&b).unwrap();
+        assert_eq!(serialized_a, serialized_b);
+
+        // Structural closure: the serialized public topology carries exactly the
+        // location-identity keys and nothing else, so provider/host/backend
+        // identity cannot leak into tenant-facing location data.
+        for region in serialized_a
+            .get("regions")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
+        {
+            let mut keys: Vec<&str> = region
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort();
+            assert_eq!(keys, vec!["availability_domains", "id"]);
+            for az in region
+                .get("availability_domains")
+                .and_then(serde_json::Value::as_array)
+                .unwrap()
+            {
+                let mut az_keys: Vec<&str> =
+                    az.as_object().unwrap().keys().map(String::as_str).collect();
+                az_keys.sort();
+                assert_eq!(az_keys, vec!["id"]);
+            }
+        }
+    }
+
+    #[test]
+    fn validate_manifest_registry_rejects_unknown_region_across_manifests() {
+        use crate::manifest::{ManifestController, RegisteredResourceType, ResourceScope};
+        use crate::resource::ResourceType;
+        use crate::{ManifestRegistry, ServiceOwnership};
+        // Two manifests: one references only canonical locations, the other
+        // references an unknown region. The registry-level validator must fail
+        // closed on the bad one.
+        let registry = registry(vec![declaration("region-a", &["az-1"])]);
+        let mut manifest_registry = ManifestRegistry::new();
+        let controller = Some(ManifestController {
+            mode: "in-process".to_owned(),
+            protocol: "in-process".to_owned(),
+            protocol_version: "1.0".to_owned(),
+            service_principal: None,
+        });
+        let good = crate::ServiceManifest {
+            manifest_version: 1,
+            service_id: "compute".to_owned(),
+            namespace: "compute".to_owned(),
+            service_version: "1".to_owned(),
+            ownership: ServiceOwnership::O3kImplemented,
+            resource_types: vec![RegisteredResourceType {
+                resource_type: ResourceType::new_unchecked("compute", "server"),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: ResourceScope::Tenant,
+                operations: std::collections::HashMap::new(),
+            }],
+            actions: vec!["compute:ListServers".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec!["region-a".to_owned()],
+            availability_domains: vec!["az-1".to_owned()],
+            controller: controller.clone(),
+            health: None,
+        };
+        let bad = crate::ServiceManifest {
+            manifest_version: 1,
+            service_id: "network".to_owned(),
+            namespace: "network".to_owned(),
+            service_version: "1".to_owned(),
+            ownership: ServiceOwnership::O3kImplemented,
+            resource_types: vec![RegisteredResourceType {
+                resource_type: ResourceType::new_unchecked("network", "address_realm"),
+                schema_version: "v1".to_owned(),
+                collection: Some("address-realms".to_owned()),
+                scope: ResourceScope::Tenant,
+                operations: std::collections::HashMap::new(),
+            }],
+            actions: vec!["network:ListAddressRealms".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec!["region-b".to_owned()],
+            availability_domains: vec![],
+            controller,
+            health: None,
+        };
+        manifest_registry.register(good).unwrap();
+        manifest_registry.register(bad).unwrap();
+        let err = registry
+            .validate_manifest_registry(&manifest_registry)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            LocationError::UnknownRegion {
+                service: "network".to_owned(),
+                region: "region-b".to_owned()
+            }
+        );
     }
 }

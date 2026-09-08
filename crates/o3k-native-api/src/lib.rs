@@ -1068,11 +1068,24 @@ mod tests {
 
     #[tokio::test]
     async fn discover_regions_order_is_deterministic() {
-        let (_, body) = get_json(
-            state_with_locations(None, Some(test_locations())),
-            "/regions",
-        )
-        .await;
+        // Declare regions in non-sorted order so the test genuinely exercises
+        // the endpoint's deterministic ordering (would fail if sorting dropped).
+        use o3k_kernel::{AvailabilityDomain, RegionDeclaration};
+        let unsorted_input = o3k_kernel::LocationRegistry::from_declarations(vec![
+            RegionDeclaration {
+                id: "region-b".to_owned(),
+                availability_domains: Vec::new(),
+            },
+            RegionDeclaration {
+                id: "region-a".to_owned(),
+                availability_domains: vec![AvailabilityDomain {
+                    id: "az-1".to_owned(),
+                }],
+            },
+        ])
+        .unwrap();
+        let (_, body) =
+            get_json(state_with_locations(None, Some(unsorted_input)), "/regions").await;
         let ids: Vec<String> = body["regions"]
             .as_array()
             .unwrap()

@@ -79,7 +79,7 @@ fn locations_from_env() -> Result<o3k_kernel::LocationRegistry, Box<dyn std::err
     let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
         return Ok(o3k_kernel::LocationRegistry::default());
     };
-    locations_from_declarations(raw)
+    locations_from_declarations(&raw)
 }
 
 /// Parses and validates canonical location declarations from configuration.
@@ -88,9 +88,9 @@ fn locations_from_env() -> Result<o3k_kernel::LocationRegistry, Box<dyn std::err
 /// applied by [`o3k_kernel::LocationRegistry::from_declarations`]; any
 /// malformed or invalid topology fails closed.
 fn locations_from_declarations(
-    raw: String,
+    raw: &str,
 ) -> Result<o3k_kernel::LocationRegistry, Box<dyn std::error::Error>> {
-    let declarations: Vec<o3k_kernel::RegionDeclaration> = serde_json::from_str(&raw)?;
+    let declarations: Vec<o3k_kernel::RegionDeclaration> = serde_json::from_str(raw)?;
     Ok(o3k_kernel::LocationRegistry::from_declarations(
         declarations,
     )?)
@@ -1126,7 +1126,7 @@ mod tests {
         let raw = r#"[{"id":"region-b","availability_domains":[{"id":"az-2"},{"id":"az-1"}]},
                           {"id":"region-a","availability_domains":[{"id":"az-3"}]}]"#
             .to_owned();
-        let locations = locations_from_declarations(raw).map_err(|e| e.to_string())?;
+        let locations = locations_from_declarations(&raw).map_err(|e| e.to_string())?;
         let ids: Vec<&str> = locations
             .regions()
             .iter()
@@ -1145,7 +1145,7 @@ mod tests {
     #[test]
     fn location_config_rejects_duplicate_region() {
         let raw = r#"[{"id":"region-a"},{"id":"region-a"}]"#.to_owned();
-        let text = locations_from_declarations(raw)
+        let text = locations_from_declarations(&raw)
             .map(|_| "ok".to_owned())
             .unwrap_or_else(|error| error.to_string());
         assert!(text.contains("duplicate region"), "unexpected: {text}");
@@ -1156,7 +1156,7 @@ mod tests {
         let raw = r#"[{"id":"region-a","availability_domains":[{"id":"az-1"}]},
                        {"id":"region-b","availability_domains":[{"id":"az-1"}]}]"#
             .to_owned();
-        let text = locations_from_declarations(raw)
+        let text = locations_from_declarations(&raw)
             .map(|_| "ok".to_owned())
             .unwrap_or_else(|error| error.to_string());
         assert!(text.contains("ambiguous"), "unexpected: {text}");
