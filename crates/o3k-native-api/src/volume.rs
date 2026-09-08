@@ -24,6 +24,12 @@ use crate::{
 /// Lightweight read port for volume:volume resources.
 #[async_trait::async_trait]
 pub trait VolumeReader: Send + Sync {
+    async fn list_volumes_page(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<VolumeItem>, NativeReadError>;
     /// List volumes in the given project scope.
     async fn list_volumes(
         &self,
@@ -139,45 +145,22 @@ pub async fn list_volumes(
         .into_response();
     }
 
-    match reader.list_volumes(&ctx).await {
+    let after_id = query.cursor.as_deref().and_then(|cursor| {
+        cursor_cfg
+            .decode_cursor(cursor, &project_id, RESOURCE_TYPE, "")
+            .ok()
+            .map(|payload| payload.last_id)
+    });
+
+    match reader
+        .list_volumes_page(&ctx, after_id.as_deref(), page_size + 1)
+        .await
+    {
         Ok(mut volumes) => {
             volumes.sort_by(|a, b| a.id.cmp(&b.id));
             let total = volumes.len();
             let last_item_id_full = volumes.last().map(|v| v.id.clone());
-            let paged: Vec<VolumeItem> = if let Some(ref cursor) = query.cursor {
-                if let Ok(payload) =
-                    cursor_cfg.decode_cursor(cursor, &project_id, RESOURCE_TYPE, "")
-                {
-                    let start_idx = match crate::pagination::continuation_index(
-                        &volumes.iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
-                        &payload.last_id,
-                    ) {
-                        Ok(index) => index,
-                        Err(_) => {
-                            return ProblemDetails::with_detail(
-                                ErrorCode::InvalidCursor,
-                                "cursor anchor is stale",
-                            )
-                            .with_request_id(request_id.0.clone())
-                            .into_response();
-                        }
-                    };
-                    volumes
-                        .into_iter()
-                        .skip(start_idx)
-                        .take(page_size)
-                        .collect()
-                } else {
-                    return ProblemDetails::with_detail(
-                        ErrorCode::InvalidCursor,
-                        "cursor is malformed",
-                    )
-                    .with_request_id(request_id.0.clone())
-                    .into_response();
-                }
-            } else {
-                volumes.into_iter().take(page_size).collect()
-            };
+            let paged: Vec<VolumeItem> = volumes.into_iter().take(page_size).collect();
 
             let items: Vec<serde_json::Value> = paged.iter().map(volume_to_native_v1).collect();
 

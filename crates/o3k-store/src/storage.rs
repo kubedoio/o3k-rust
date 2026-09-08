@@ -46,6 +46,12 @@ pub trait StorageRepository: super::DurableStore + Send + Sync {
     async fn insert_volume(&self, record: &VolumeRecord) -> Result<(), StoreError>;
     async fn get_volume(&self, id: Uuid) -> Result<Option<VolumeRecord>, StoreError>;
     async fn list_volumes(&self, project_id: &str) -> Result<Vec<VolumeRecord>, StoreError>;
+    async fn list_volumes_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<VolumeRecord>, StoreError>;
     async fn list_all_volumes(&self) -> Result<Vec<VolumeRecord>, StoreError>;
     async fn update_volume(
         &self,
@@ -421,6 +427,22 @@ impl StorageRepository for SqliteStore {
         rows.iter().map(volume_from_row).collect()
     }
 
+    async fn list_volumes_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<VolumeRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("volume page limit overflow".to_owned()))?;
+        let rows = if let Some(after_id) = after_id {
+            sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volumes WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?").bind(project_id).bind(after_id).bind(limit).fetch_all(&self.pool).await
+        } else {
+            sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volumes WHERE project_id = ? ORDER BY id LIMIT ?").bind(project_id).bind(limit).fetch_all(&self.pool).await
+        }.map_err(StoreError::Database)?;
+        rows.iter().map(volume_from_row).collect()
+    }
+
     async fn list_all_volumes(&self) -> Result<Vec<VolumeRecord>, StoreError> {
         let rows = sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volumes ORDER BY project_id, id")
             .fetch_all(&self.pool)
@@ -728,6 +750,22 @@ impl StorageRepository for crate::PostgresStore {
     async fn list_volumes(&self, project_id: &str) -> Result<Vec<VolumeRecord>, StoreError> {
         sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volumes WHERE project_id = $1 ORDER BY id")
             .bind(project_id).fetch_all(&self.pool).await.map_err(StoreError::Database)?.iter().map(volume_from_pg_row).collect()
+    }
+
+    async fn list_volumes_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<VolumeRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("volume page limit overflow".to_owned()))?;
+        let rows = if let Some(after_id) = after_id {
+            sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volumes WHERE project_id = $1 AND id > $2 ORDER BY id LIMIT $3").bind(project_id).bind(after_id).bind(limit).fetch_all(&self.pool).await
+        } else {
+            sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volumes WHERE project_id = $1 ORDER BY id LIMIT $2").bind(project_id).bind(limit).fetch_all(&self.pool).await
+        }.map_err(StoreError::Database)?;
+        rows.iter().map(volume_from_pg_row).collect()
     }
 
     async fn list_all_volumes(&self) -> Result<Vec<VolumeRecord>, StoreError> {
