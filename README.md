@@ -1,8 +1,8 @@
 # O3K
 
 <p align="center">
-  <strong>A cloud kernel — literally born in the cloud.</strong><br />
-  Rust-native Cloud Operating System designed from first principles for cloud infrastructure.<br />
+  <strong>One Cloud Operating System from edge to datacenter.</strong><br />
+  Start with a few prepared hosts. Scale by adding capability-bearing building blocks without replatforming.<br />
   OpenStack-compatible northbound. O3K-native cloud authority in the middle. Provider-neutral typed execution southbound.
 </p>
 
@@ -17,19 +17,36 @@
 
 O3K is a **cloud kernel — literally born in the cloud**. It is built from scratch in Rust around a shared cloud authority rather than inherited service boundaries. The Cloud Kernel owns identity and authorization, resource ownership, desired state, operations, scheduling, reconciliation, quotas, audit/event identity, and failure semantics; compatibility APIs stay northbound and infrastructure execution stays southbound.
 
+The product goal is **one operating system end to end**: from a small office or
+factory server room, through a customer-owned datacenter cage, to a larger
+private or datacenter cloud. The same O3K resource model, IAM, APIs, service
+catalog, automation and execution contracts remain in place as the deployment
+grows. Larger profiles may introduce cells, sharding, hierarchical scheduling,
+or different provider topologies internally; customers should not have to move
+from an "edge product" to a different "datacenter product" simply because they
+added capacity.
+
 O3K is **not** a service-for-service Rust rewrite of Nova, Neutron, Keystone,
 Glance, Placement, and Cinder. OpenStack service names define compatibility
 surfaces; O3K owns its internal cloud model.
 
 Core principles:
 
+- **One Cloud OS from edge to datacenter.** Edge and datacenter are scale/evidence
+  profiles of the same product architecture, not different O3K products.
+- **Scale by building blocks, not by replatforming.** Capacity, capabilities and
+  failure domains are added behind the same cloud contracts.
 - **OpenStack compatibility is northbound.** Existing CLI/SDK/Terraform
-  workflows remain valuable contracts.
+  workflows remain valuable contracts and a path into the wider OpenStack
+  service ecosystem.
 - **O3K owns cloud authority.** Public IDs, ownership, desired state,
   scheduling, operations, and reconciliation are O3K concerns.
 - **The Cloud Kernel is shared.** IAM, authorization, resource ownership,
   operations, quotas, audit/event identity, and failure semantics are reused by
   first-class O3K domains.
+- **The service catalog is composable.** A deployment can expose only the cloud
+  capabilities it needs and may combine native O3K services with explicitly
+  supported external-hosted services.
 - **Execution is southbound.** Host agents/providers perform bounded mutations
   and report observations.
 - **Kubernetes is a first-class deployment target.** Kubernetes may operate the
@@ -40,8 +57,51 @@ Core principles:
 > storage — LVM + Ceph RBD), and P11 (multi-hypervisor edge cloud with
 > overlapping tenant CIDRs, Geneve+WireGuard, three-host real evidence)
 > are completed. The small-edge-cloud profile (10–20 hypervisors target)
-> has real-host evidence. Production HA, full OpenStack parity, and broad
+> has real-host evidence. It is the first proven scale rung, not evidence for
+> arbitrary datacenter scale. Production HA, full OpenStack parity, and broad
 > maximum-scale are not current support claims.
+
+## One Cloud OS from edge to datacenter
+
+The intended scale continuum is:
+
+```text
+office / branch / factory
+        -> customer server room
+        -> dedicated datacenter cage
+        -> multi-rack private cloud
+        -> datacenter-scale cloud
+```
+
+The invariant across that continuum is the product contract, not a frozen
+internal process topology:
+
+```text
+same IAM / AuthContext
+same resource ownership model
+same O3K native API family
+same selected OpenStack compatibility contracts
+same Operation / reconciliation semantics
+same service catalog model
+same Terraform / OpenTofu approach
+same Araf product model
+same typed execution-provider contracts
+```
+
+A small deployment may be operationally simple. A larger deployment may need
+HA controllers, PostgreSQL topologies, cells, sharding, hierarchical capacity,
+multiple fabric/storage domains, or other scale mechanisms. Those mechanisms
+must remain behind the same O3K cloud semantics so growth does not become a
+customer replatforming event.
+
+O3K calls the capacity/capability unit in this model a **deployment building
+block**. A block may contribute compute, network, storage, control-plane
+participation, or other capabilities and carries explicit failure-domain
+identity. It is not a fixed hardware SKU or a requirement that every service
+runs on every node.
+
+See [ADR-0181 — edge-to-datacenter building-block Cloud OS](docs/adr/ADR-0181-edge-to-datacenter-building-block-cloud-os.md)
+and [SPEC-0038 — edge-to-datacenter building-block cloud](docs/specs/SPEC-0038-edge-to-datacenter-building-block-cloud.md).
 
 ## One-line TestLab install (alpha)
 
@@ -76,6 +136,11 @@ troubleshooting: [docs/INSTALLER.md](docs/INSTALLER.md).
 
 **Not claimed:** production, HA, Kubernetes HA, PostgreSQL, full OpenStack,
 native Cinder, ARM/RHEL/etc.
+
+Fast bootstrap on prepared infrastructure is a product target. Claims such as
+"in seconds" or "in minutes" remain profile-specific measurement claims and
+must not include pre-existing physical, storage, network or external-service
+provisioning as if O3K performed it.
 
 ## What runs today
 
@@ -177,6 +242,35 @@ retrying an operation whose side effect may already have happened.
 | Placement | O3K Capacity / Placement |
 | Cinder | O3K Volume compatibility / hosted integration today |
 
+## Composable service catalog
+
+OpenStack compatibility is also an ecosystem extension boundary. O3K does not
+need to reimplement every specialized OpenStack project in Rust to make that
+capability available to an O3K deployment.
+
+An operator-selected catalog may conceptually look like:
+
+```text
+Identity        native O3K
+Image           native O3K
+Compute         native O3K
+Network         native O3K
+Volume          native O3K
+Load Balancing  external-hosted Octavia   (when profile-proven)
+DNS             external-hosted Designate (when profile-proven)
+Secrets         external-hosted Barbican  (when profile-proven)
+```
+
+Other deployments may expose only the minimal core or select different
+capabilities for AI/GPU edge, sovereign cloud, storage-heavy, or datacenter
+profiles.
+
+External OpenStack services are **not** assumed to work automatically. Each
+hosted-service profile must freeze the exact upstream version and discover/prove
+the exact O3K/OpenStack dependency behavior it consumes before the catalog can
+advertise support. Catalog registration never converts an external-hosted
+service into an O3K-native implementation claim.
+
 ## Persistence
 
 - **SQLite**: supported default for TestLab and single-controller profiles.
@@ -187,11 +281,21 @@ use shared-SQLite or distributed-filesystem workarounds as a shortcut to Kuberne
 
 ## Product profiles
 
-O3K has one product architecture and three primary deployment/evidence profiles:
+O3K has one product architecture. Deployment/evidence profiles prove bounded
+parts of the same edge-to-datacenter continuum and must not be mistaken for
+separate O3K products:
 
-- **OpenStack service testbed** — host external OpenStack services against O3K IAM/compute/network;
-- **native O3K TestLab/cloud** — single-host, P9/P10 complete (routed fabric, LVM + Ceph RBD persistent storage);
-- **small edge cloud** — P11 complete: multi-host with overlapping CIDRs, Geneve+WireGuard fabric, LVM locality, serial RBD, drain/restart/failure recovery, 3-host evidence with 15 simulated scale hosts (targets ~10–20 hypervisors).
+- **OpenStack service testbed** — host selected external OpenStack services
+  against declared O3K compatibility surfaces;
+- **native O3K TestLab/cloud** — minimal/single-host evidence for the native
+  Cloud Kernel and IaaS path;
+- **small edge cloud** — the first real multi-host scale rung: P11 proves
+  overlapping CIDRs, Geneve+WireGuard fabric, LVM locality, serial RBD,
+  drain/restart/failure recovery, three real hosts and 15 simulated scale hosts,
+  with an initial target around 10–20 hypervisors;
+- **future larger private/datacenter profiles** — must use the same O3K cloud
+  contracts while publishing their own exact host counts, HA/database/provider
+  topology, performance budgets and failure evidence.
 
 Kubernetes is a deployment substrate target across applicable control-plane
 profiles, not a separate cloud-authority model.
@@ -212,6 +316,8 @@ For real libvirt execution use [docs/TESTLAB.md](docs/TESTLAB.md).
 - [ADR-0165 — Cloud OS / Cloud Kernel](docs/adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md)
 - [ADR-0166 — O3K IAM / Keystone compatibility](docs/adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md)
 - [ADR-0167 — Kubernetes-native control plane](docs/adr/ADR-0167-kubernetes-native-control-plane-deployment.md)
+- [ADR-0181 — edge-to-datacenter building-block Cloud OS](docs/adr/ADR-0181-edge-to-datacenter-building-block-cloud-os.md)
+- [SPEC-0038 — edge-to-datacenter building-block cloud](docs/specs/SPEC-0038-edge-to-datacenter-building-block-cloud.md)
 - [Product requirements](docs/PRODUCT_REQUIREMENTS.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Normative source map](docs/NORMATIVE_SOURCES.md)
