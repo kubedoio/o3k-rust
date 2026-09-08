@@ -519,6 +519,26 @@ mod native_compute_tests {
 
         let (status, _) = exec(&router, authed_action(&path, "b", "foreign", request)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let undeclared = format!("/compute/servers/{id}/actions/FlyServer");
+        let (status, _) = exec(
+            &router,
+            authed_action(
+                &undeclared,
+                "a",
+                "undeclared",
+                serde_json::json!({"input": {}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+
+        let (status, _) = exec(
+            &router,
+            authed_action(&path, "a", "malformed", serde_json::json!({"input": []})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
