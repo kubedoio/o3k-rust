@@ -105,7 +105,7 @@ Example:
 
 Production ships no hard-coded demo/Araf regions; region topology is deployment configuration.
 
-## 7. Regencies and readiness
+## 7. Regions and readiness
 
 Publication reflects configured topology, not liveness. A region is not declared healthy merely because one controller/provider process is alive. No aggregate regional health is invented here.
 
