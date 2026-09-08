@@ -2075,9 +2075,6 @@ impl ResourceApplication for GenericResourceApplication {
         {
             return Err(ResourceApplicationError::NotFound);
         }
-        if existing.generation != expected_generation {
-            return Err(ResourceApplicationError::PreconditionConflict);
-        }
         let name = request
             .spec
             .get("name")
@@ -2146,6 +2143,22 @@ impl ResourceApplication for GenericResourceApplication {
                 });
             }
             o3k_store::CanonicalAcceptanceOutcome::Created { .. } => {}
+        }
+        if existing.generation != expected_generation {
+            let now = chrono::Utc::now().to_rfc3339();
+            let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                o3k_kernel::OperationState::Failed,
+                0,
+                None,
+                Some(now),
+                Some("stale_generation".to_owned()),
+            )
+            .map_err(|_| ResourceApplicationError::Internal)?;
+            self.store
+                .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                .await
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return Err(ResourceApplicationError::PreconditionConflict);
         }
         let desired =
             serde_json::to_string(&desired).map_err(|_| ResourceApplicationError::Internal)?;
