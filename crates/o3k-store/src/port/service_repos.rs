@@ -348,6 +348,12 @@ pub trait NetworkRepository:
         project_id: &str,
         network_id: &Uuid,
     ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError>;
+    async fn list_canonical_realms_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CanonicalAddressRealmRecord>, StoreError>;
     async fn insert_canonical_pool(
         &self,
         pool: &CanonicalAddressPoolRecord,

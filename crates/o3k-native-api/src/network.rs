@@ -28,6 +28,12 @@ use crate::{
 /// Lightweight read port for canonical O3K network resources.
 #[async_trait::async_trait]
 pub trait NetworkReader: Send + Sync {
+    async fn list_address_realms_page(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AddressRealmItem>, NativeReadError>;
     /// List address realms visible to the given project.
     async fn list_address_realms(
         &self,
@@ -129,41 +135,22 @@ pub async fn list_address_realms(
         .into_response();
     }
 
-    match reader.list_address_realms(&ctx).await {
+    let after_id = query.cursor.as_deref().and_then(|cursor| {
+        cursor_cfg
+            .decode_cursor(cursor, &project_id, RESOURCE_TYPE, "")
+            .ok()
+            .map(|p| p.last_id)
+    });
+
+    match reader
+        .list_address_realms_page(&ctx, after_id.as_deref(), page_size + 1)
+        .await
+    {
         Ok(mut realms) => {
             realms.sort_by(|a, b| a.id.cmp(&b.id));
             let total = realms.len();
             let last_item_id_full = realms.last().map(|r| r.id.clone());
-            let paged: Vec<AddressRealmItem> = if let Some(ref cursor) = query.cursor {
-                if let Ok(payload) =
-                    cursor_cfg.decode_cursor(cursor, &project_id, RESOURCE_TYPE, "")
-                {
-                    let start_idx = match crate::pagination::continuation_index(
-                        &realms.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
-                        &payload.last_id,
-                    ) {
-                        Ok(index) => index,
-                        Err(_) => {
-                            return ProblemDetails::with_detail(
-                                ErrorCode::InvalidCursor,
-                                "cursor anchor is stale",
-                            )
-                            .with_request_id(request_id.0.clone())
-                            .into_response();
-                        }
-                    };
-                    realms.into_iter().skip(start_idx).take(page_size).collect()
-                } else {
-                    return ProblemDetails::with_detail(
-                        ErrorCode::InvalidCursor,
-                        "cursor is malformed",
-                    )
-                    .with_request_id(request_id.0.clone())
-                    .into_response();
-                }
-            } else {
-                realms.into_iter().take(page_size).collect()
-            };
+            let paged: Vec<AddressRealmItem> = realms.into_iter().take(page_size).collect();
 
             let items: Vec<serde_json::Value> = paged.iter().map(realm_to_native_v1).collect();
 
