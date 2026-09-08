@@ -6,6 +6,7 @@
 //! idempotency.
 #![allow(clippy::items_after_test_module)]
 
+use base64::Engine as _;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::pagination::{CursorPayload, continuation_index, parse_page_size};
@@ -181,6 +182,24 @@ impl ResourceDispatcher {
             .is_some_and(|state| state == o3k_kernel::controller::ControllerState::Ready)
     }
 
+    pub(crate) fn declared_action(
+        &self,
+        descriptor: &ResourceDescriptor,
+        name: &str,
+    ) -> Option<ActionId> {
+        let registry = self.lifecycle_registry.as_ref()?.read().ok()?;
+        let manifest = registry
+            .all()
+            .into_iter()
+            .find(|manifest| manifest.service_id == descriptor.owning_service)?;
+        let wire = format!("{}:{name}", descriptor.resource_type.namespace());
+        manifest
+            .actions
+            .iter()
+            .find(|declared| *declared == &wire)?;
+        ActionId::new(descriptor.resource_type.namespace(), name).ok()
+    }
+
     /// Resolve an authoritative lifecycle action from the manifest-derived
     /// descriptor. Callers must not construct action names from resource
     /// names; an undeclared lifecycle operation is unsupported.
@@ -205,10 +224,26 @@ pub struct CreateRequest {
     pub spec: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRequest {
+    pub api_version: Option<String>,
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub spec: serde_json::Value,
+}
+
 /// A create request after the resource-specific public contract has been
 /// checked.  Applications never receive an unvalidated wire `Value`.
 #[derive(Debug, Clone)]
 pub struct ValidatedCreateRequest {
+    pub api_version: Option<String>,
+    pub kind: Option<String>,
+    pub spec: crate::resource_contract::ValidatedSpec,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidatedUpdateRequest {
     pub api_version: Option<String>,
     pub kind: Option<String>,
     pub spec: crate::resource_contract::ValidatedSpec,
@@ -239,6 +274,29 @@ pub struct MutationResult {
     pub resource: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionRequest {
+    #[serde(default = "empty_action_input")]
+    pub input: serde_json::Value,
+}
+
+fn empty_action_input() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RelationshipView {
+    pub slot: String,
+    pub resource_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    pub ownership: String,
+    pub state: String,
+    pub parent_operation_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_operation_id: Option<String>,
+}
+
 #[async_trait]
 pub trait ResourceApplication: Send + Sync {
     async fn create(
@@ -260,6 +318,7 @@ pub trait ResourceApplication: Send + Sync {
         &self,
         descriptor: &ResourceDescriptor,
         auth: &AuthContext,
+        query: &ListQuery,
     ) -> Result<Vec<serde_json::Value>, ResourceApplicationError>;
     async fn show(
         &self,
@@ -267,6 +326,48 @@ pub trait ResourceApplication: Send + Sync {
         auth: &AuthContext,
         id: &str,
     ) -> Result<serde_json::Value, ResourceApplicationError>;
+    async fn relationships(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &AuthContext,
+        id: &str,
+        limit: usize,
+    ) -> Result<Vec<RelationshipView>, ResourceApplicationError> {
+        let _ = (descriptor, auth, id, limit);
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
+    async fn update(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &AuthContext,
+        id: &str,
+        request: ValidatedUpdateRequest,
+        idempotency_key: Option<&str>,
+        expected_generation: i64,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        let _ = (
+            descriptor,
+            auth,
+            id,
+            request,
+            idempotency_key,
+            expected_generation,
+        );
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
+
+    async fn action(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &AuthContext,
+        id: &str,
+        action: ActionId,
+        request: ActionRequest,
+        idempotency_key: &str,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        let _ = (descriptor, auth, id, action, request, idempotency_key);
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
 }
 
 /// Canonical native attachment orchestration supplied by the composition
@@ -510,6 +611,118 @@ pub async fn create(
     .await
 }
 
+pub async fn update(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path((namespace, collection, id)): Path<(String, String, String)>,
+    State(state): State<NativeApiState>,
+    Json(request): Json<UpdateRequest>,
+) -> Response {
+    let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
+        return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
+    };
+    let action = match declared_action(descriptor, LifecycleOperation::Update) {
+        Ok(action) => action,
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    if let Err(response) = authorize(&state, descriptor, action, &auth.0, Some(&id)) {
+        return ProblemDetails::new(response).into_response();
+    }
+    if let Err(response) = ready_for_mutation(&state.resource_index, descriptor) {
+        return ProblemDetails::new(response).into_response();
+    }
+    let Some(application) = state.resource_application else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
+    let key = match idempotency_key(&headers) {
+        Ok(Some(key)) => Some(key),
+        Ok(None) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    let expected_generation = match headers
+        .get("if-match")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(value) => match value
+            .strip_prefix("generation-")
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            Some(generation) if generation > 0 => generation,
+            _ => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        },
+        None => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+    };
+    let spec = match crate::resource_contract::ContractKind::for_resource(
+        &descriptor.resource_type.to_string(),
+        &descriptor.schema_version,
+    ) {
+        Some(kind) => match kind.validate_update(request.spec) {
+            Ok(spec) => spec,
+            Err(_) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        },
+        None => return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response(),
+    };
+    match application
+        .update(
+            descriptor,
+            &auth.0,
+            &id,
+            ValidatedUpdateRequest {
+                api_version: request.api_version,
+                kind: request.kind,
+                spec,
+            },
+            key,
+            expected_generation,
+        )
+        .await
+    {
+        Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
+        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Err(error) => application_problem(error),
+    }
+}
+
+pub async fn action(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path((namespace, collection, id, action_name)): Path<(String, String, String, String)>,
+    State(state): State<NativeApiState>,
+    Json(request): Json<ActionRequest>,
+) -> Response {
+    let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
+        return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
+    };
+    let Some(action) = state
+        .resource_index
+        .declared_action(descriptor, &action_name)
+    else {
+        return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response();
+    };
+    if let Err(response) = authorize(&state, descriptor, &action, &auth.0, Some(&id)) {
+        return ProblemDetails::new(response).into_response();
+    }
+    if let Err(response) = ready_for_mutation(&state.resource_index, descriptor) {
+        return ProblemDetails::new(response).into_response();
+    }
+    let Some(application) = state.resource_application else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
+    let key = match idempotency_key(&headers) {
+        Ok(Some(key)) => key,
+        Ok(None) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    match application
+        .action(descriptor, &auth.0, &id, action, request, &key)
+        .await
+    {
+        Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
+        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Err(error) => application_problem(error),
+    }
+}
+
 /// Concrete routes must bind their canonical descriptor explicitly. They do
 /// not derive namespace/collection from the request URI.
 pub async fn create_compute(
@@ -737,17 +950,37 @@ async fn delete_for(
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListQuery {
     pub limit: Option<String>,
     pub cursor: Option<String>,
+    /// Only the stable, indexed ordering vocabulary is accepted.
+    #[serde(default = "default_order")]
+    pub order: String,
+    /// Resource-specific filters must be declared by the resource contract;
+    /// arbitrary spec/provider fields are intentionally not queryable.
+    #[serde(default)]
+    pub filter: Vec<String>,
+    #[serde(skip)]
+    pub continuation_id: Option<String>,
+}
+
+fn default_order() -> String {
+    "id.asc".to_owned()
+}
+
+fn query_hash(query: &ListQuery) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = serde_json::to_vec(&(query.order.as_str(), &query.filter)).unwrap_or_default();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(canonical))
 }
 
 pub async fn list(
     auth: BearerAuth,
     Path((namespace, collection)): Path<(String, String)>,
     State(state): State<NativeApiState>,
-    Query(query): Query<ListQuery>,
+    Query(mut query): Query<ListQuery>,
 ) -> Response {
     let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
         return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
@@ -765,30 +998,39 @@ pub async fn list(
     let Some(application) = state.resource_application else {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     };
-    let items = match application.list(descriptor, &auth.0).await {
+    if query.order != "id.asc" || !query.filter.is_empty() {
+        return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response();
+    }
+    let effective_query_hash = query_hash(&query);
+    let scope = auth.0.effective_scope().id().to_string();
+    let resource_type = descriptor.resource_type.to_string();
+    if let Some(cursor) = query.cursor.as_deref() {
+        let Ok(payload) = state.cursor_config.decode_cursor(
+            cursor,
+            &scope,
+            &resource_type,
+            &effective_query_hash,
+        ) else {
+            return ProblemDetails::new(ErrorCode::InvalidCursor).into_response();
+        };
+        query.continuation_id = Some(payload.last_id);
+    }
+    let items = match application.list(descriptor, &auth.0, &query).await {
         Ok(items) => items,
         Err(error) => return application_problem(error),
     };
-    let scope = auth.0.effective_scope().id().to_string();
-    let resource_type = descriptor.resource_type.to_string();
     let mut items = items;
     items.sort_by(|a, b| {
         a["metadata"]["id"]
             .as_str()
             .cmp(&b["metadata"]["id"].as_str())
     });
-    let start = if let Some(cursor) = query.cursor.as_deref() {
-        let Ok(payload) = state
-            .cursor_config
-            .decode_cursor(cursor, &scope, &resource_type)
-        else {
-            return ProblemDetails::new(ErrorCode::InvalidCursor).into_response();
-        };
+    let start = if query.cursor.is_some() {
         let ids = items
             .iter()
             .filter_map(|item| item["metadata"]["id"].as_str().map(str::to_owned))
             .collect::<Vec<_>>();
-        match continuation_index(&ids, &payload.last_id) {
+        match continuation_index(&ids, query.continuation_id.as_deref().unwrap_or_default()) {
             Ok(index) => index,
             Err(_) => return ProblemDetails::new(ErrorCode::InvalidCursor).into_response(),
         }
@@ -806,6 +1048,7 @@ pub async fn list(
                     last_id: last_id.to_owned(),
                     scope_id: scope,
                     resource_type,
+                    query_hash: effective_query_hash,
                     version: 1,
                 })
             })
@@ -842,6 +1085,39 @@ pub async fn show(
     };
     match application.show(descriptor, &auth.0, &id).await {
         Ok(resource) => (StatusCode::OK, Json(resource)).into_response(),
+        Err(error) => application_problem(error),
+    }
+}
+
+pub async fn relationships(
+    auth: BearerAuth,
+    Path((namespace, collection, id)): Path<(String, String, String)>,
+    Query(query): Query<ListQuery>,
+    State(state): State<NativeApiState>,
+) -> Response {
+    let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
+        return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
+    };
+    let action = match declared_action(descriptor, LifecycleOperation::Show) {
+        Ok(action) => action,
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    if let Err(response) = authorize(&state, descriptor, action, &auth.0, Some(&id)) {
+        return ProblemDetails::new(response).into_response();
+    }
+    let Some(application) = state.resource_application else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
+    match application
+        .relationships(
+            descriptor,
+            &auth.0,
+            &id,
+            parse_page_size(query.limit.as_deref()),
+        )
+        .await
+    {
+        Ok(items) => (StatusCode::OK, Json(serde_json::json!({"items": items}))).into_response(),
         Err(error) => application_problem(error),
     }
 }
