@@ -129,7 +129,7 @@ impl CursorConfig {
 }
 
 /// Helper to extract page size from query parameters with bounds enforcement.
-pub(crate) fn parse_page_size(limit_param: Option<&str>) -> usize {
+pub fn parse_page_size(limit_param: Option<&str>) -> usize {
     match limit_param.and_then(|s| s.parse::<usize>().ok()) {
         Some(n) if n > 0 => n.min(MAX_PAGE_SIZE),
         _ => DEFAULT_PAGE_SIZE,
