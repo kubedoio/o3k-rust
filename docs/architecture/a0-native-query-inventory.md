@@ -26,3 +26,9 @@ returns a bounded repository page. Suppressed rows never advertise List.
 The native handler delegates query validation and page construction to the
 application boundary. Compatibility routes are separate protocol adapters and
 are not native collection authorities.
+
+A0 intentionally supports no client filters and only the canonical `id.asc`
+ordering. Unknown query parameters and future filter/order values are rejected;
+the opaque cursor is bound to this fixed query identity (`filters:none`,
+`order:id.asc`) in addition to scope and resource type. Extending the query
+vocabulary requires a versioned contract change.

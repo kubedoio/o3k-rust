@@ -496,6 +496,7 @@ mod native_compute_tests {
             assert_eq!(status, StatusCode::CREATED);
         }
         let (_, page_a) = exec(&router, authed("/compute/servers?limit=1", "a")).await;
+        assert_eq!(page_a["items"][0]["kind"], "compute:server");
         let cursor_a = page_a["next_cursor"].as_str().expect("tenant A cursor");
         let (second_status, second_page) = exec(
             &router,

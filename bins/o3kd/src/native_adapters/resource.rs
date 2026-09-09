@@ -309,9 +309,18 @@ fn generic_external_json(resource: &o3k_store::ResourceRecord) -> serde_json::Va
         "owner_scope": resource.project_id,
         "generation": resource.generation
     });
+    // Storage kinds are deliberately decoupled from the versioned native
+    // resource type (for example compute_instance is persisted for the
+    // compute:server resource).  Never leak the storage discriminator across
+    // the native contract boundary.
+    let public_kind = match resource.kind.as_str() {
+        "compute_instance" => "compute:server",
+        "volume" => "volume:volume",
+        other => other,
+    };
     serde_json::json!({
         "api_version": "o3k.io/v1",
-        "kind": resource.kind,
+        "kind": public_kind,
         "metadata": metadata,
         "spec": {},
         "status": {"state": resource.observed_state}
