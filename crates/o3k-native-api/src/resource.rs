@@ -905,13 +905,12 @@ pub async fn relationships(
     let Some(application) = state.resource_application else {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     };
+    let limit = match crate::pagination::parse_page_size_strict(query.limit.as_deref()) {
+        Ok(limit) => limit,
+        Err(_) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+    };
     match application
-        .relationships(
-            descriptor,
-            &auth.0,
-            &id,
-            parse_page_size(query.limit.as_deref()),
-        )
+        .relationships(descriptor, &auth.0, &id, limit)
         .await
     {
         Ok(items) => (StatusCode::OK, Json(serde_json::json!({"items": items}))).into_response(),

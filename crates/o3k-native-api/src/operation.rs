@@ -43,6 +43,7 @@ pub struct OperationListResponse {
     pub items: Vec<Operation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 /// GET /o3k/v1/operations
@@ -60,58 +61,53 @@ pub async fn list_operations(
         .with_request_id(request_id.0)
         .into_response();
     };
-    let limit = crate::pagination::parse_page_size(query.limit.as_deref());
     let scope_id = auth.0.effective_scope().id().as_str().to_owned();
-    let cursor = match query.cursor {
-        Some(value) => match state
-            .cursor_config
-            .decode_cursor(&value, &scope_id, "operation", "")
-        {
-            Ok(payload) => match Uuid::parse_str(&payload.last_id) {
-                Ok(id) => Some(id),
-                Err(_) => {
-                    return ProblemDetails::bad_request("invalid operation cursor")
-                        .with_request_id(request_id.0)
-                        .into_response();
-                }
-            },
-            Err(_) => {
-                return ProblemDetails::bad_request("invalid operation cursor")
-                    .with_request_id(request_id.0)
-                    .into_response();
-            }
-        },
-        None => None,
+    let resource_query = match state.cursor_config.validate_query(
+        query.limit.as_deref(),
+        query.cursor.as_deref(),
+        &scope_id,
+        "operation",
+    ) {
+        Ok(query) => query,
+        Err(_) => {
+            return ProblemDetails::bad_request("invalid operation query")
+                .with_request_id(request_id.0)
+                .into_response();
+        }
     };
+    let cursor = resource_query
+        .continuation_key()
+        .and_then(|id| Uuid::parse_str(id).ok());
+    let limit = resource_query.limit();
     match reader
         .list_operations_page(&auth.0, cursor, limit + 1)
         .await
     {
         Ok(mut operations) => {
-            let next_cursor = if operations.len() > limit {
+            let has_more = operations.len() > limit;
+            let next_cursor = if has_more {
                 operations.truncate(limit);
-                operations.last().map(|op| {
-                    state
-                        .cursor_config
-                        .encode_cursor(&crate::pagination::CursorPayload {
-                            last_id: op.id.to_string(),
-                            scope_id: scope_id.clone(),
-                            resource_type: "operation".into(),
-                            query_hash: String::new(),
-                            version: 1,
-                        })
-                })
+                operations.last().map(|op| op.id.to_string())
             } else {
                 None
             };
-            (
-                axum::http::StatusCode::OK,
-                Json(OperationListResponse {
-                    items: operations,
-                    next_cursor,
-                }),
-            )
-                .into_response()
+            let repository =
+                crate::pagination::RepositoryPage::new(operations, has_more, next_cursor, limit)
+                    .map_err(|_| NativeReadError::Internal);
+            let page = match repository.and_then(|page| {
+                state
+                    .cursor_config
+                    .complete_page(&resource_query, page)
+                    .map_err(|_| NativeReadError::Internal)
+            }) {
+                Ok(page) => page,
+                Err(_) => {
+                    return ProblemDetails::internal()
+                        .with_request_id(request_id.0)
+                        .into_response();
+                }
+            };
+            (axum::http::StatusCode::OK, Json(page)).into_response()
         }
         Err(NativeReadError::Internal) => ProblemDetails::internal()
             .with_request_id(request_id.0)
