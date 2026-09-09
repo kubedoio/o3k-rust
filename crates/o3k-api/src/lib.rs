@@ -563,6 +563,10 @@ pub fn router_with_state(state: AppState) -> Router {
             "/o3k/v1/{namespace}/{collection}/{id}/relationships",
             get(o3k_native_api::resource::relationships),
         );
+        router = router.route(
+            "/o3k/v1/{namespace}/{collection}/{id}/actions/{action_name}",
+            post(o3k_native_api::resource::action),
+        );
     }
     router
         .layer(axum::middleware::from_fn(compatibility_trace_middleware))

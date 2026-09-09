@@ -235,6 +235,17 @@ pub struct ValidatedUpdateRequest {
     pub spec: crate::resource_contract::ValidatedSpec,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionRequest {
+    #[serde(default = "empty_action_input")]
+    pub input: serde_json::Value,
+}
+
+fn empty_action_input() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceApplicationError {
     Unauthorized,
@@ -315,6 +326,18 @@ pub trait ResourceApplication: Send + Sync {
         );
         Err(ResourceApplicationError::UnsupportedOperation)
     }
+    async fn action(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &AuthContext,
+        id: &str,
+        action: ActionId,
+        request: ActionRequest,
+        idempotency_key: &str,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        let _ = (descriptor, auth, id, action, request, idempotency_key);
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
     async fn list_page(
         &self,
         descriptor: &ResourceDescriptor,
@@ -378,6 +401,18 @@ fn declared_action(
     descriptor
         .lifecycle_actions
         .get(&operation)
+        .ok_or(ErrorCode::UnsupportedOperation)
+}
+
+fn declared_named_action(
+    descriptor: &ResourceDescriptor,
+    name: &str,
+) -> Result<ActionId, ErrorCode> {
+    descriptor
+        .lifecycle_actions
+        .values()
+        .find(|action| action.action() == name)
+        .cloned()
         .ok_or(ErrorCode::UnsupportedOperation)
 }
 
@@ -562,6 +597,41 @@ mod tests {
             ready_for_mutation(&dispatcher, descriptor),
             Err(ErrorCode::NotAvailable)
         );
+    }
+}
+
+pub async fn action(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path((namespace, collection, id, action_name)): Path<(String, String, String, String)>,
+    State(state): State<NativeApiState>,
+    Json(request): Json<ActionRequest>,
+) -> Response {
+    let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
+        return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
+    };
+    let action = match declared_named_action(descriptor, &action_name) {
+        Ok(action) => action,
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    if let Err(error) = authorize(&state, descriptor, &action, &auth.0, Some(&id)) {
+        return ProblemDetails::new(error).into_response();
+    }
+    if let Err(error) = ready_for_mutation(&state.resource_index, descriptor) {
+        return ProblemDetails::new(error).into_response();
+    }
+    let Some(application) = state.resource_application else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
+    let key = match idempotency_key(&headers) {
+        Ok(Some(key)) => key,
+        Ok(None) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    match application.action(descriptor, &auth.0, &id, action, request, key).await {
+        Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
+        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Err(error) => application_problem(error),
     }
 }
 
