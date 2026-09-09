@@ -98,9 +98,15 @@ impl O3kStore {
         limit: u32,
     ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
         match self {
-            Self::Sqlite(store) => store.list_relationships_page(parent, after_slot, limit).await,
+            Self::Sqlite(store) => {
+                store
+                    .list_relationships_page(parent, after_slot, limit)
+                    .await
+            }
             Self::Postgres(store) => {
-                store.list_relationships_page(parent, after_slot, limit).await
+                store
+                    .list_relationships_page(parent, after_slot, limit)
+                    .await
             }
         }
     }
