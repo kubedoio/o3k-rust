@@ -13,7 +13,7 @@ use o3k_native_api::{
         ValidatedCreateRequest, VolumeAttachmentWorkflow,
     },
 };
-use o3k_store::{DurableStore, RelationshipRepository, storage::StorageRepository};
+use o3k_store::{DurableStore, storage::StorageRepository};
 use uuid::Uuid;
 
 #[async_trait::async_trait]

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use o3k_native_api::resource::{ResourceApplication, ResourceApplicationError};
-use o3k_store::{DurableStore, RelationshipRepository};
+use o3k_store::DurableStore;
 use uuid::Uuid;
 
 /// Adapter for composition-resource operations exposed through the native API.
