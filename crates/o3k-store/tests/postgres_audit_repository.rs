@@ -1,9 +1,13 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    borrow::Cow,
+    sync::{Arc, OnceLock},
+};
 
 use o3k_kernel::{AuditQuery, DurableAuditRepository, OwnershipScope, ScopeId};
 use o3k_store::{AuditEventRecord, AuditRepository, PostgresStore, StoreError};
+use sqlx::postgres::PgPoolOptions;
 
 fn event(id: &str, scope: &str) -> AuditEventRecord {
     AuditEventRecord {
@@ -64,6 +68,62 @@ async fn postgres_unified_audit_query_pushes_all_supported_filters() {
     let page = unified.page(&query).await.unwrap();
     assert_eq!(page.events.len(), 1);
     assert_eq!(page.events[0].event_id.as_str(), "0001");
+}
+
+#[tokio::test]
+async fn postgres_pre_audit_schema_upgrades_without_losing_existing_state() {
+    let _guard = test_lock().await;
+    let Some(url) = std::env::var("O3K_DATABASE_URL").ok() else {
+        eprintln!("skipping PostgreSQL migration upgrade: O3K_DATABASE_URL unavailable");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .unwrap();
+    sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE SCHEMA public")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let all = sqlx::migrate!("./migrations_postgres");
+    let legacy = sqlx::migrate::Migrator {
+        migrations: Cow::Owned(
+            all.migrations
+                .iter()
+                .take(all.migrations.len() - 2)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+    legacy.run(&pool).await.unwrap();
+    sqlx::query("INSERT INTO resources (id,kind,project_id,generation,observed_generation,desired_state,observed_state) VALUES ('migration-resource','compute:server','project-a',1,0,'ACTIVE','UNKNOWN')")
+        .execute(&pool).await.unwrap();
+    pool.close().await;
+    let store = PostgresStore::connect(&url).await.unwrap();
+    let event = event("migration-event", "project-a");
+    store.insert_audit_event(&event).await.unwrap();
+    assert!(
+        store
+            .get_audit_event("project-a", "migration-event")
+            .await
+            .is_ok()
+    );
+    sqlx::query("DELETE FROM audit_events WHERE event_id = 'migration-event'")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM resources WHERE id = 'migration-resource'")
+        .execute(store.pool())
+        .await
+        .unwrap();
 }
 
 // The conformance binary runs tests concurrently against one disposable database.

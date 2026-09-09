@@ -52,20 +52,46 @@ else
   fail B0-RUNTIME-SQLITE
 fi
 
+if cargo test -p o3k-store --lib bounded_query_tests; then
+  pass B0-R-BOUND-SQLITE
+  pass B0-R-BOUND-POSTGRES
+else
+  fail B0-R-BOUND-SQLITE
+  fail B0-R-BOUND-POSTGRES
+fi
+
+if cargo test -p o3k-store --test audit_migration_upgrade --all-features; then
+  pass B0-R-MIGRATION-SQLITE
+else
+  fail B0-R-MIGRATION-SQLITE
+fi
+
 if [[ -n "${O3K_DATABASE_URL:-}" ]]; then
   # The dedicated PostgreSQL suite is opt-in and must be run against a real
   # database.  Do not silently substitute SQLite for production evidence.
   if cargo test -p o3k-store --test postgres_audit_repository --all-features -- --nocapture; then
     pass B0-RUNTIME-POSTGRES
+    pass B0-R-MIGRATION-POSTGRES
   else
     fail B0-RUNTIME-POSTGRES
+    fail B0-R-MIGRATION-POSTGRES
   fi
 else
   if bash "$root/scripts/test-postgres-audit.sh"; then
     pass B0-RUNTIME-POSTGRES
+    pass B0-R-MIGRATION-POSTGRES
   else
     fail B0-RUNTIME-POSTGRES
+    fail B0-R-MIGRATION-POSTGRES
   fi
+fi
+
+# The SQLite and PostgreSQL suites share the same semantic fixture assertions;
+# both must execute for parity to be a runtime PASS.
+if [[ $status -eq 0 ]]; then
+  pass B0-R-PARITY
+else
+  fail B0-R-PARITY
 fi
 
 exit "$status"
