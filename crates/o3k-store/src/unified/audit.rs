@@ -6,6 +6,8 @@ use o3k_kernel::{
 };
 
 use super::O3kStore;
+use crate::AuditEventRecord;
+use crate::port::service_repos::AuditRepository;
 
 fn err<E: std::fmt::Display>(e: E) -> o3k_kernel::KernelError {
     o3k_kernel::KernelError::AuditUnavailable(e.to_string())
@@ -76,47 +78,106 @@ fn row_event(r: AuditRow) -> Result<AuditEvent, o3k_kernel::KernelError> {
 #[async_trait]
 impl DurableAuditRepository for O3kStore {
     async fn append(&self, event: &AuditEvent) -> Result<(), o3k_kernel::KernelError> {
-        let scope = event.effective_scope.id().as_str();
-        let values = (
-            event.event_id.as_str(),
-            event.timestamp.as_str(),
-            event.request_id.as_str(),
-            event.audit_id.as_str(),
-            event.principal_id.to_string(),
-            format!("{:?}", event.principal_kind),
-            scope,
-            event.service_namespace.to_string(),
-            event.action.to_string(),
-            event.resource_type.as_ref().map(ToString::to_string),
-            event.resource_id.as_ref().map(ToString::to_string),
-            event
-                .owner_scope
-                .as_ref()
-                .map(|s| s.id().as_str().to_owned()),
-            event.operation_id.map(|v| v.to_string()),
-            event.outcome.to_string(),
-            event.reason_category.clone(),
-        );
+        let record = AuditEventRecord::from_kernel_event(event);
         match self {
-            Self::Sqlite(s) => sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING")
-                .bind(values.0).bind(values.1).bind(values.2).bind(values.3).bind(values.4).bind(values.5).bind(values.6).bind(values.7).bind(values.8).bind(values.9).bind(values.10).bind(values.11).bind(values.12).bind(values.13).bind(values.14).execute(&s.pool).await.map_err(err).map(|_| ()),
-            Self::Postgres(s) => sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(event_id) DO NOTHING")
-                .bind(values.0).bind(values.1).bind(values.2).bind(values.3).bind(values.4).bind(values.5).bind(values.6).bind(values.7).bind(values.8).bind(values.9).bind(values.10).bind(values.11).bind(values.12).bind(values.13).bind(values.14).execute(&s.pool).await.map_err(err).map(|_| ()),
+            Self::Sqlite(s) => s.insert_audit_event(&record).await,
+            Self::Postgres(s) => s.insert_audit_event(&record).await,
         }
+        .map_err(err)
     }
 
     async fn page(&self, query: &AuditQuery) -> Result<DurableAuditPage, o3k_kernel::KernelError> {
         query.validate()?;
-        // Query execution is intentionally kept in the store and uses LIMIT+1.
-        // Rich filter projection is added by the native adapter; scope and the
-        // continuation are always enforced at this boundary.
         let scope = query.scope.id().as_str();
         let n = (query.limit + 1) as i64;
         let rows: Vec<AuditRow> = match self {
-            Self::Sqlite(s) => sqlx::query_as("SELECT event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category FROM audit_events WHERE effective_scope = ? AND (? IS NULL OR event_id > ?) ORDER BY event_id LIMIT ?")
-                .bind(scope).bind(&query.after_event_id).bind(&query.after_event_id).bind(n).fetch_all(&s.pool).await.map_err(err)?,
-            Self::Postgres(s) => sqlx::query_as("SELECT event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category FROM audit_events WHERE effective_scope = $1 AND ($2 IS NULL OR event_id > $2) ORDER BY event_id LIMIT $3")
-                .bind(scope).bind(&query.after_event_id).bind(n).fetch_all(&s.pool).await.map_err(err)?,
+            Self::Sqlite(s) => {
+                let mut sql = String::from(
+                    "SELECT event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category FROM audit_events WHERE effective_scope = ?",
+                );
+                let mut binds: Vec<&str> = vec![scope];
+                macro_rules! f {
+                    ($v:expr, $c:literal) => {
+                        if let Some(v) = $v.as_deref() {
+                            sql.push_str(concat!(" AND ", $c, " = ?"));
+                            binds.push(v);
+                        }
+                    };
+                }
+                if let Some(v) = query.after_event_id.as_deref() {
+                    sql.push_str(" AND event_id > ?");
+                    binds.push(v);
+                }
+                f!(query.service, "service");
+                f!(query.action, "action");
+                f!(query.outcome, "outcome");
+                f!(query.resource_type, "resource_type");
+                f!(query.resource_id, "resource_id");
+                f!(query.operation_id, "operation_id");
+                f!(query.principal_id, "principal_id");
+                f!(query.request_id, "request_id");
+                f!(query.audit_id, "audit_id");
+                if let Some(v) = query.from_timestamp.as_deref() {
+                    sql.push_str(" AND timestamp >= ?");
+                    binds.push(v);
+                }
+                if let Some(v) = query.until_timestamp.as_deref() {
+                    sql.push_str(" AND timestamp <= ?");
+                    binds.push(v);
+                }
+                sql.push_str(" ORDER BY event_id LIMIT ?");
+                let mut q = sqlx::query_as::<_, AuditRow>(&sql);
+                for v in binds {
+                    q = q.bind(v);
+                }
+                q.bind(n).fetch_all(&s.pool).await.map_err(err)?
+            }
+            Self::Postgres(s) => {
+                let mut sql = String::from(
+                    "SELECT event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category FROM audit_events WHERE effective_scope = $1",
+                );
+                let mut binds: Vec<&str> = vec![scope];
+                let mut i = 2;
+                macro_rules! f {
+                    ($v:expr, $c:literal) => {
+                        if let Some(v) = $v.as_deref() {
+                            sql.push_str(&format!(" AND {} = ${i}", $c));
+                            binds.push(v);
+                            i += 1;
+                        }
+                    };
+                }
+                if let Some(v) = query.after_event_id.as_deref() {
+                    sql.push_str(&format!(" AND event_id > ${i}"));
+                    binds.push(v);
+                    i += 1;
+                }
+                f!(query.service, "service");
+                f!(query.action, "action");
+                f!(query.outcome, "outcome");
+                f!(query.resource_type, "resource_type");
+                f!(query.resource_id, "resource_id");
+                f!(query.operation_id, "operation_id");
+                f!(query.principal_id, "principal_id");
+                f!(query.request_id, "request_id");
+                f!(query.audit_id, "audit_id");
+                if let Some(v) = query.from_timestamp.as_deref() {
+                    sql.push_str(&format!(" AND timestamp >= ${i}"));
+                    binds.push(v);
+                    i += 1;
+                }
+                if let Some(v) = query.until_timestamp.as_deref() {
+                    sql.push_str(&format!(" AND timestamp <= ${i}"));
+                    binds.push(v);
+                    i += 1;
+                }
+                sql.push_str(&format!(" ORDER BY event_id LIMIT ${i}"));
+                let mut q = sqlx::query_as::<_, AuditRow>(&sql);
+                for v in binds {
+                    q = q.bind(v);
+                }
+                q.bind(n).fetch_all(&s.pool).await.map_err(err)?
+            }
         };
         let has_more = rows.len() > query.limit;
         let continuation_key = has_more.then(|| rows[query.limit - 1].0.clone());

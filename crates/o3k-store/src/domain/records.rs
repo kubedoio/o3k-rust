@@ -40,12 +40,18 @@ impl AuditEventRecord {
                 o3k_kernel::PrincipalKind::User => "user".to_owned(),
                 o3k_kernel::PrincipalKind::Service => "service".to_owned(),
             },
-            effective_scope: event.effective_scope.to_string(),
+            // Durable scope predicates use the canonical scope identifier;
+            // the scope kind is supplied by the surrounding AuthContext and
+            // is not encoded into this project-scoped storage key.
+            effective_scope: event.effective_scope.id().as_str().to_owned(),
             service: event.service_namespace.to_string(),
             action: event.action.to_string(),
             resource_type: event.resource_type.as_ref().map(|v| v.to_string()),
             resource_id: event.resource_id.as_ref().map(|v| v.to_string()),
-            owner_scope: event.owner_scope.as_ref().map(|v| v.to_string()),
+            owner_scope: event
+                .owner_scope
+                .as_ref()
+                .map(|v| v.id().as_str().to_owned()),
             operation_id: event.operation_id.map(|v| v.to_string()),
             outcome: event.outcome.to_string(),
             reason_category: event.reason_category.as_deref().map(normalize_audit_reason),
