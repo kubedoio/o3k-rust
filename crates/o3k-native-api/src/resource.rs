@@ -807,6 +807,7 @@ pub async fn list(
                     scope_id: scope,
                     resource_type,
                     version: 1,
+                    query_identity: String::new(),
                 })
             })
     } else {

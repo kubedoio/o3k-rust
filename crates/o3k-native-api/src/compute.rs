@@ -187,6 +187,7 @@ pub async fn list_servers(
                             scope_id,
                             resource_type: RESOURCE_TYPE.to_owned(),
                             version: 1,
+                            query_identity: String::new(),
                         })
                     })
                 } else {

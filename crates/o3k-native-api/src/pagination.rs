@@ -19,14 +19,60 @@ pub const DEFAULT_PAGE_SIZE: usize = 50;
 
 /// Maximum page size that the server will accept.
 pub const MAX_PAGE_SIZE: usize = 200;
+pub const MAX_CURSOR_LENGTH: usize = 4096;
+
+/// Validated, canonical collection query.  Raw HTTP parameters must not cross
+/// the application boundary; callers construct this value only after strict
+/// validation and authorization has established `scope_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceQuery {
+    pub scope_id: String,
+    pub resource_type: String,
+    pub limit: usize,
+    pub cursor: Option<CursorPayload>,
+    pub filter_identity: String,
+    pub ordering: String,
+}
+
+impl ResourceQuery {
+    pub fn new(scope_id: String, resource_type: String, limit: usize) -> Result<Self, &'static str> {
+        if scope_id.is_empty() || scope_id.len() > 256 || resource_type.is_empty() || resource_type.len() > 256 {
+            return Err("invalid collection scope or resource type");
+        }
+        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
+            return Err("page limit out of range");
+        }
+        Ok(Self { scope_id, resource_type, limit, cursor: None, filter_identity: String::new(), ordering: "id.asc".to_owned() })
+    }
+}
+
+/// Store-owned bounded page. `continuation_key` never crosses the native API
+/// boundary and is converted to an authenticated opaque cursor by the query
+/// service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryPage<T> {
+    pub items: Vec<T>,
+    pub has_more: bool,
+    pub continuation_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResourcePage<T> {
+    pub items: Vec<T>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
 
 /// Internal cursor payload — never exposed directly to clients.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CursorPayload {
     pub last_id: String,
     pub scope_id: String,
     pub resource_type: String,
     pub version: u8,
+    #[serde(default)]
+    pub query_identity: String,
 }
 
 /// Cursor configuration held by the native API state.
@@ -86,6 +132,7 @@ impl CursorConfig {
         expected_scope_id: &str,
         expected_type: &str,
     ) -> Result<CursorPayload, &'static str> {
+        if cursor.len() > MAX_CURSOR_LENGTH { return Err("cursor too long"); }
         let (payload_b64, hmac_b64) = cursor.split_once('.').ok_or("invalid cursor format")?;
 
         let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -122,11 +169,20 @@ impl CursorConfig {
 }
 
 /// Helper to extract page size from query parameters with bounds enforcement.
-pub(crate) fn parse_page_size(limit_param: Option<&str>) -> usize {
-    match limit_param.and_then(|s| s.parse::<usize>().ok()) {
-        Some(n) if n > 0 => n.min(MAX_PAGE_SIZE),
-        _ => DEFAULT_PAGE_SIZE,
+pub(crate) fn parse_page_size_strict(limit_param: Option<&str>) -> Result<usize, &'static str> {
+    match limit_param {
+        None => Ok(DEFAULT_PAGE_SIZE),
+        Some(value) => match value.parse::<usize>() {
+            Ok(n) if (1..=MAX_PAGE_SIZE).contains(&n) => Ok(n),
+            _ => Err("invalid page limit"),
+        },
     }
+}
+
+/// Compatibility shim for legacy adapters. Native HTTP code must use the
+/// fallible strict parser above; this function is intentionally not public.
+pub(crate) fn parse_page_size(limit_param: Option<&str>) -> usize {
+    parse_page_size_strict(limit_param).unwrap_or(DEFAULT_PAGE_SIZE)
 }
 
 /// Resolve a continuation against a deterministic, already-authorized ID
@@ -155,11 +211,12 @@ mod tests {
             scope_id: "proj-1".to_owned(),
             resource_type: "compute:server".to_owned(),
             version: 1,
+            query_identity: String::new(),
         }
     }
 
     #[test]
-    fn encode_decode_round_trip() {
+    fn a0_cursor_encode_decode_round_trip() {
         let cfg = test_config();
         let payload = test_payload();
         let encoded = cfg.encode_cursor(&payload);
@@ -176,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_wrong_scope() {
+    fn a0_cursor_rejects_wrong_scope() {
         let cfg = test_config();
         let encoded = cfg.encode_cursor(&test_payload());
         let result = cfg.decode_cursor(&encoded, "proj-2", "compute:server");
@@ -184,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_wrong_resource_type() {
+    fn a0_cursor_rejects_wrong_resource_type() {
         let cfg = test_config();
         let encoded = cfg.encode_cursor(&test_payload());
         let result = cfg.decode_cursor(&encoded, "proj-1", "volume:volume");
@@ -192,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_tampered_last_id() {
+    fn a0_cursor_rejects_tampered_last_id() {
         let cfg = test_config();
         let encoded = cfg.encode_cursor(&test_payload());
 
@@ -218,14 +275,14 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_malformed_cursor() {
+    fn a0_cursor_rejects_malformed_cursor() {
         let cfg = test_config();
         let result = cfg.decode_cursor("not-valid!!", "proj-1", "compute:server");
         assert!(result.is_err());
     }
 
     #[test]
-    fn decode_rejects_different_key() {
+    fn a0_cursor_rejects_different_key() {
         let cfg1 = test_config();
         let cfg2 = CursorConfig::new(b"different-key-here!!".to_vec());
         let encoded = cfg1.encode_cursor(&test_payload());
@@ -234,14 +291,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_page_size_default() {
-        assert_eq!(parse_page_size(None), DEFAULT_PAGE_SIZE);
+    fn a0_strict_page_size_default() {
+        assert_eq!(parse_page_size_strict(None), Ok(DEFAULT_PAGE_SIZE));
     }
 
     #[test]
-    fn parse_page_size_clamps() {
-        assert_eq!(parse_page_size(Some("9999")), MAX_PAGE_SIZE);
-        assert_eq!(parse_page_size(Some("0")), DEFAULT_PAGE_SIZE);
-        assert_eq!(parse_page_size(Some("abc")), DEFAULT_PAGE_SIZE);
+    fn a0_strict_page_size_rejects_invalid() {
+        assert!(parse_page_size_strict(Some("9999")).is_err());
+        assert!(parse_page_size_strict(Some("0")).is_err());
+        assert!(parse_page_size_strict(Some("abc")).is_err());
     }
 }
