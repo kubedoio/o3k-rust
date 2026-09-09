@@ -492,6 +492,15 @@ impl ResourceApplication for GenericResourceApplication {
             .get(&o3k_native_api::resource::LifecycleOperation::Update)
             .cloned()
             .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+        let update_action =
+            o3k_kernel::ActionId::new_unchecked("compute".to_owned(), "UpdateServer".to_owned());
+        if !self.compute.authorize_resource_action(
+            auth,
+            o3k_compute::ServerId::from_uuid(resource_id),
+            update_action,
+        ) {
+            return Err(ResourceApplicationError::NotFound);
+        }
         let key = idempotency_key.ok_or(ResourceApplicationError::Validation)?;
         let operation_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,

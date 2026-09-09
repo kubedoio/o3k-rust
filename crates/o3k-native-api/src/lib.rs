@@ -411,7 +411,9 @@ fn action_metadata(
             action_id: action.to_string(),
             target: "instance".to_owned(),
             input: Some("https://o3k.io/schemas/native-action-input/v1".to_owned()),
-            output: None,
+            output: Some(
+                "https://o3k.io/contracts/native-mutation-result-v1.schema.json".to_owned(),
+            ),
             asynchronous: true,
         });
     }

@@ -10,6 +10,34 @@ use o3k_reconciler::CanonicalMutationContext;
 use o3k_store::{server_state_from_storage, server_state_to_storage};
 
 impl ComputeService {
+    /// Authorize a canonical resource mutation at the application boundary.
+    /// Compatibility and native handlers may both call this guard, so policy
+    /// cannot be bypassed by invoking the application port directly.
+    pub fn authorize_resource_action(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+        action: ActionId,
+    ) -> bool {
+        let Ok(resource_type) = ResourceType::new("compute", "server") else {
+            return false;
+        };
+        let Ok(resource_id) = ResourceId::new(id.as_uuid().to_string()) else {
+            return false;
+        };
+        self.authorizer
+            .authorize(&AuthorizationRequest {
+                auth_context: auth,
+                action,
+                resource_target: ResourceTarget::instance(
+                    resource_type,
+                    resource_id,
+                    Some(auth.effective_scope().id().clone()),
+                ),
+            })
+            .is_allowed()
+    }
+
     /// Executes a declared server domain action through the same canonical
     /// lifecycle journal used by native and compatibility callers.
     pub async fn action_for_auth_canonical(
