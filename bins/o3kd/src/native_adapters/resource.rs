@@ -10,7 +10,8 @@ use o3k_native_api::{
     network::AddressRealmItem,
     resource::{
         ActionRequest, MutationResult, ResourceApplication, ResourceApplicationError,
-        ResourceDescriptor, ValidatedCreateRequest, VolumeAttachmentWorkflow,
+        ResourceDescriptor, ValidatedCreateRequest, ValidatedUpdateRequest,
+        VolumeAttachmentWorkflow,
     },
 };
 use o3k_store::{DurableStore, RelationshipRepository, storage::StorageRepository};
@@ -2046,6 +2047,85 @@ impl ResourceApplication for GenericResourceApplication {
                 })
             })
             .collect()
+    }
+
+    async fn update(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+        id: &str,
+        request: ValidatedUpdateRequest,
+        _idempotency_key: Option<&str>,
+        expected_generation: i64,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        if descriptor.resource_type.to_string() != "compute:server" {
+            return Err(ResourceApplicationError::UnsupportedOperation);
+        }
+        let server_id = id.parse::<Uuid>().map_err(|_| ResourceApplicationError::NotFound)?;
+        let name = request
+            .spec
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ResourceApplicationError::Validation)?
+            .to_owned();
+        let current = self
+            .store
+            .get_resource(server_id)
+            .await
+            .map_err(|_| ResourceApplicationError::NotFound)?;
+        if current.project_id != auth.effective_scope().id().as_str() {
+            return Err(ResourceApplicationError::NotFound);
+        }
+        if current.generation != expected_generation {
+            return Err(ResourceApplicationError::PreconditionConflict);
+        }
+        let server = self
+            .compute
+            .update_server_name_for_auth(auth, o3k_compute::ServerId::from_uuid(server_id), name)
+            .await
+            .map_err(compute_error)?;
+        let updated = self
+            .store
+            .get_resource(server_id)
+            .await
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        Ok(MutationResult {
+            operation_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("native:update:{server_id}:{expected_generation}").as_bytes()).to_string(),
+            resource_id: Some(server_id.to_string()),
+            complete: true,
+            resource: Some(server_json(ServerItem { id: server_id.to_string(), project_id: auth.effective_scope().id().as_str().to_owned(), name: server.name, flavor_id: server.flavor_id.to_string(), image_id: server.image_id, state: format!("{:?}", server.state), generation: updated.generation, created_at: None, migration_id: None, source_key: None })),
+        })
+    }
+
+    async fn action(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+        id: &str,
+        action: o3k_kernel::ActionId,
+        request: ActionRequest,
+        idempotency_key: &str,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        if descriptor.resource_type.to_string() != "compute:server" || !request.input.is_object() {
+            return Err(ResourceApplicationError::UnsupportedOperation);
+        }
+        let operation = match action.to_string().split(':').next_back().unwrap_or_default() {
+            "StartServer" => o3k_provider::InstanceAction::Start,
+            "StopServer" => o3k_provider::InstanceAction::Stop,
+            "RebootServer" => o3k_provider::InstanceAction::Reboot,
+            _ => return Err(ResourceApplicationError::UnsupportedOperation),
+        };
+        let server_id = id.parse::<Uuid>().map_err(|_| ResourceApplicationError::NotFound)?;
+        let context = o3k_reconciler::CanonicalMutationContext::new(
+            action,
+            auth.principal().id().to_string(),
+            auth.effective_scope().clone(),
+            Some(server_id.to_string()),
+            idempotency_key.to_owned(),
+            request.input,
+        ).map_err(|_| ResourceApplicationError::Validation)?;
+        let receipt = self.compute.action_for_auth_canonical(auth, o3k_compute::ServerId::from_uuid(server_id), operation, context).await.map_err(compute_error)?;
+        Ok(MutationResult { operation_id: receipt.operation_id.to_string(), resource_id: Some(server_id.to_string()), complete: receipt.operation_state == o3k_store::OperationState::Succeeded, resource: None })
     }
 
     async fn delete(
