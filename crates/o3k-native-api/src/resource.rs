@@ -9,7 +9,7 @@
 use base64::Engine as _;
 use std::{collections::HashMap, sync::Arc};
 
-use crate::pagination::{CursorPayload, continuation_index, parse_page_size};
+use crate::pagination::{CursorPayload, parse_page_size};
 use crate::{
     NativeApiState,
     auth::BearerAuth,
@@ -257,6 +257,8 @@ pub trait ResourceApplication: Send + Sync {
         idempotency_key: Option<&str>,
         expected_generation: Option<i64>,
     ) -> Result<MutationResult, ResourceApplicationError>;
+    /// Returns at most `limit + 1` items, already ordered by the repository.
+    /// The extra item is the bounded continuation probe.
     async fn list(
         &self,
         descriptor: &ResourceDescriptor,
@@ -808,28 +810,10 @@ pub async fn list(
         Ok(items) => items,
         Err(error) => return application_problem(error),
     };
-    let mut items = items;
-    items.sort_by(|a, b| {
-        a["metadata"]["id"]
-            .as_str()
-            .cmp(&b["metadata"]["id"].as_str())
-    });
-    let start = if query.cursor.is_some() {
-        let ids = items
-            .iter()
-            .filter_map(|item| item["metadata"]["id"].as_str().map(str::to_owned))
-            .collect::<Vec<_>>();
-        match continuation_index(&ids, query.continuation_id.as_deref().unwrap_or_default()) {
-            Ok(index) => index,
-            Err(_) => return ProblemDetails::new(ErrorCode::InvalidCursor).into_response(),
-        }
-    } else {
-        0
-    };
     let page_size = parse_page_size(query.limit.as_deref());
-    let end = (start + page_size).min(items.len());
-    let page = items[start..end].to_vec();
-    let next_cursor = if end < items.len() {
+    let has_more = items.len() > page_size;
+    let page: Vec<_> = items.into_iter().take(page_size).collect();
+    let next_cursor = if has_more {
         page.last()
             .and_then(|item| item["metadata"]["id"].as_str())
             .map(|last_id| {

@@ -403,13 +403,21 @@ impl ResourceApplication for GenericResourceApplication {
                 .map_err(compute_error),
             "compute:server" => self
                 .server
-                .list_servers(auth)
+                .list_servers_page(
+                    auth,
+                    query.continuation_id.as_deref(),
+                    o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
+                )
                 .await
                 .map(|items| items.into_iter().map(server_json).collect())
                 .map_err(generic_read_error),
             "network:address_realm" => self
                 .network
-                .list_address_realms(auth)
+                .list_address_realms_page(
+                    auth,
+                    query.continuation_id.as_deref(),
+                    o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
+                )
                 .await
                 .map(|items| items.into_iter().map(realm_json).collect())
                 .map_err(generic_read_error),
@@ -452,7 +460,11 @@ impl ResourceApplication for GenericResourceApplication {
             }
             "volume:volume" => self
                 .store
-                .list_volumes(auth.effective_scope().id().as_str())
+                .list_volumes_page(
+                    auth.effective_scope().id().as_str(),
+                    query.continuation_id.as_deref(),
+                    o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
+                )
                 .await
                 .map(|items| items.iter().map(native_volume_json).collect())
                 .map_err(|_| ResourceApplicationError::Internal),
