@@ -2709,6 +2709,11 @@ pub(crate) fn network_error(error: NetworkError) -> axum::response::Response {
             "Internal Server Error",
             "network storage is unavailable",
         ),
+        NetworkError::AuditUnavailable => keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "audit service is unavailable",
+        ),
     }
 }
 
