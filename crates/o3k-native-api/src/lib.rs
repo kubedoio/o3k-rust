@@ -161,7 +161,13 @@ pub fn router(state: NativeApiState) -> Router {
         )
         .route(
             "/{namespace}/{collection}/{id}",
-            get(resource::show).delete(resource::delete),
+            get(resource::show)
+                .put(resource::update)
+                .delete(resource::delete),
+        )
+        .route(
+            "/{namespace}/{collection}/{id}/actions/{action_name}",
+            post(resource::action),
         )
         .route("/operations", get(operation::list_operations))
         .route("/operations/{id}", get(operation::show_operation))
@@ -399,6 +405,18 @@ fn action_metadata(
             }
             })
             .collect();
+    for (name, action) in &descriptor.actions {
+        actions.push(ActionSchemaMetadata {
+            name: name.clone(),
+            action_id: action.to_string(),
+            target: "instance".to_owned(),
+            input: Some("https://o3k.io/schemas/native-action-input/v1".to_owned()),
+            output: Some(
+                "https://o3k.io/contracts/native-mutation-result-v1.schema.json".to_owned(),
+            ),
+            asynchronous: true,
+        });
+    }
     actions.sort_by(|a, b| a.name.cmp(&b.name));
     actions
 }
@@ -530,7 +548,11 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
                 version: descriptor.schema_version.clone(),
                 representation: "native-resource-envelope".to_owned(),
             },
-            actions: action_metadata(descriptor, live_ready && collection_supported),
+            actions: if live_ready {
+                action_metadata(descriptor, collection_supported)
+            } else {
+                Vec::new()
+            },
         });
     }
     resource_types.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));

@@ -1617,6 +1617,7 @@ name = "o3k-compute"
 version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
+ "chrono",
  "o3k-cinder",
  "o3k-compute-agent",
  "o3k-config-drive",
@@ -2042,6 +2043,7 @@ dependencies = [
  "axum",
  "chrono",
  "ed25519-dalek",
+ "jsonschema",
  "jsonwebtoken",
  "o3k-api",
  "o3k-cellhv",

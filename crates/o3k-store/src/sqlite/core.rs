@@ -1058,6 +1058,58 @@ impl DurableStore for SqliteStore {
         self.get_resource(id).await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn update_resource_and_complete_operation(
+        &self,
+        resource_id: Uuid,
+        expected_generation: i64,
+        desired_state: &str,
+        observed_state: &str,
+        observed_generation: i64,
+        provider_id: Option<&str>,
+        operation_id: Uuid,
+        lifecycle: &CanonicalOperationLifecycleUpdate,
+    ) -> Result<ResourceRecord, StoreError> {
+        validate_canonical_lifecycle_update(lifecycle)?;
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<(), StoreError> = async {
+            let updated = sqlx::query("UPDATE resources SET generation = generation + 1, desired_state = ?, observed_state = ?, observed_generation = ?, provider_id = ? WHERE id = ? AND generation = ?")
+                .bind(desired_state).bind(observed_state).bind(observed_generation)
+                .bind(provider_id).bind(resource_id.to_string()).bind(expected_generation)
+                .execute(&mut *connection).await.map_err(StoreError::Database)?;
+            if updated.rows_affected() == 0 {
+                return match sqlx::query("SELECT id FROM resources WHERE id = ?")
+                    .bind(resource_id.to_string()).fetch_optional(&mut *connection).await
+                    .map_err(StoreError::Database)? {
+                    Some(_) => Err(StoreError::StaleGeneration),
+                    None => Err(StoreError::ResourceNotFound),
+                };
+            }
+            let operation = sqlx::query("SELECT state FROM operations WHERE id = ?")
+                .bind(operation_id.to_string()).fetch_optional(&mut *connection).await
+                .map_err(StoreError::Database)?.ok_or(StoreError::OperationNotFound)?;
+            let state: String = operation.try_get("state").map_err(StoreError::Database)?;
+            if state == OperationState::Succeeded.as_str() || state == OperationState::Failed.as_str() {
+                return Err(StoreError::Corrupt("operation already terminal".into()));
+            }
+            sqlx::query("UPDATE operations SET state = ? WHERE id = ?")
+                .bind(lifecycle.state.as_str()).bind(operation_id.to_string())
+                .execute(&mut *connection).await.map_err(StoreError::Database)?;
+            sqlx::query("UPDATE canonical_operation_metadata SET attempt = ?, started_at = ?, finished_at = ?, error = ? WHERE operation_id = ?")
+                .bind(lifecycle.attempt as i64).bind(&lifecycle.started_at).bind(&lifecycle.finished_at)
+                .bind(&lifecycle.public_error).bind(operation_id.to_string())
+                .execute(&mut *connection).await.map_err(StoreError::Database)?;
+            Ok(())
+        }.await;
+        SqliteStore::commit_or_rollback(&mut connection, outcome).await?;
+        drop(connection);
+        self.get_resource(resource_id).await
+    }
+
     async fn update_resource_from_observation(
         &self,
         id: Uuid,
@@ -1526,6 +1578,7 @@ impl DurableStore for SqliteStore {
             Ok(())
         }.await;
         SqliteStore::commit_or_rollback(&mut connection, result).await?;
+        drop(connection);
         self.get_canonical_operation(id).await
     }
 

@@ -43,6 +43,8 @@ pub struct ResourceDescriptor {
     pub schema_version: String,
     pub scope: o3k_kernel::ResourceScope,
     pub lifecycle_actions: HashMap<LifecycleOperation, ActionId>,
+    /// Non-CRUD actions explicitly declared by the resource manifest.
+    pub actions: HashMap<String, ActionId>,
     pub owning_service: String,
     pub ownership: o3k_kernel::ServiceOwnership,
     pub ready: bool,
@@ -89,6 +91,31 @@ impl ResourceDispatcher {
                 .controller(&manifest.service_id)
                 .is_some_and(|c| c.state == o3k_kernel::controller::ControllerState::Ready);
             for resource in &manifest.resource_types {
+                let mut lifecycle_actions = HashMap::new();
+                let mut actions = HashMap::new();
+                for (operation, action) in &resource.operations {
+                    match operation.as_str() {
+                        "list" => {
+                            lifecycle_actions.insert(LifecycleOperation::List, action.clone());
+                        }
+                        "show" => {
+                            lifecycle_actions.insert(LifecycleOperation::Show, action.clone());
+                        }
+                        "create" => {
+                            lifecycle_actions.insert(LifecycleOperation::Create, action.clone());
+                        }
+                        "delete" => {
+                            lifecycle_actions.insert(LifecycleOperation::Delete, action.clone());
+                        }
+                        "update" => {
+                            lifecycle_actions.insert(LifecycleOperation::Update, action.clone());
+                        }
+                        name if !name.trim().is_empty() => {
+                            actions.insert(name.to_owned(), action.clone());
+                        }
+                        _ => return Err(DescriptorError::InvalidOperation),
+                    }
+                }
                 index.register(ResourceDescriptor {
                     resource_type: resource.resource_type.clone(),
                     collection: resource
@@ -97,21 +124,8 @@ impl ResourceDispatcher {
                         .unwrap_or_else(|| resource.resource_type.name().to_owned()),
                     schema_version: resource.schema_version.clone(),
                     scope: resource.scope,
-                    lifecycle_actions: resource
-                        .operations
-                        .iter()
-                        .map(|(operation, action)| {
-                            let operation = match operation.as_str() {
-                                "list" => LifecycleOperation::List,
-                                "show" => LifecycleOperation::Show,
-                                "create" => LifecycleOperation::Create,
-                                "delete" => LifecycleOperation::Delete,
-                                "update" => LifecycleOperation::Update,
-                                _ => return Err(DescriptorError::InvalidOperation),
-                            };
-                            Ok((operation, action.clone()))
-                        })
-                        .collect::<Result<_, _>>()?,
+                    lifecycle_actions,
+                    actions,
                     owning_service: manifest.service_id.clone(),
                     ownership: manifest.ownership,
                     ready,
@@ -133,6 +147,11 @@ impl ResourceDispatcher {
             return Err(DescriptorError::ReservedCollection);
         }
         for action in descriptor.lifecycle_actions.values() {
+            if action.namespace() != descriptor.resource_type.namespace() {
+                return Err(DescriptorError::InvalidAction);
+            }
+        }
+        for action in descriptor.actions.values() {
             if action.namespace() != descriptor.resource_type.namespace() {
                 return Err(DescriptorError::InvalidAction);
             }
@@ -197,11 +216,26 @@ impl ResourceDispatcher {
         self.resolve(namespace, collection)
             .and_then(|descriptor| descriptor.lifecycle_actions.get(&operation))
     }
+
+    #[must_use]
+    pub fn action(&self, namespace: &str, collection: &str, name: &str) -> Option<&ActionId> {
+        self.resolve(namespace, collection)
+            .and_then(|d| d.actions.get(name))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateRequest {
+    pub api_version: Option<String>,
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub spec: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRequest {
     pub api_version: Option<String>,
     pub kind: Option<String>,
     #[serde(default)]
@@ -215,6 +249,26 @@ pub struct ValidatedCreateRequest {
     pub api_version: Option<String>,
     pub kind: Option<String>,
     pub spec: crate::resource_contract::ValidatedSpec,
+}
+
+/// An update request after resource-contract validation. Applications never
+/// receive an unvalidated wire value.
+#[derive(Debug, Clone)]
+pub struct ValidatedUpdateRequest {
+    pub api_version: Option<String>,
+    pub kind: Option<String>,
+    pub spec: crate::resource_contract::ValidatedSpec,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionRequest {
+    #[serde(default = "empty_action_input")]
+    pub input: serde_json::Value,
+}
+
+fn empty_action_input() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +332,37 @@ pub trait ResourceApplication: Send + Sync {
         idempotency_key: Option<&str>,
         expected_generation: Option<i64>,
     ) -> Result<MutationResult, ResourceApplicationError>;
+    async fn update(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &AuthContext,
+        id: &str,
+        request: ValidatedUpdateRequest,
+        idempotency_key: Option<&str>,
+        expected_generation: i64,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        let _ = (
+            descriptor,
+            auth,
+            id,
+            request,
+            idempotency_key,
+            expected_generation,
+        );
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
+    async fn action(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &AuthContext,
+        id: &str,
+        action: ActionId,
+        request: ActionRequest,
+        idempotency_key: &str,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        let _ = (descriptor, auth, id, action, request, idempotency_key);
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
     async fn list_page(
         &self,
         descriptor: &ResourceDescriptor,
@@ -341,6 +426,18 @@ fn declared_action(
     descriptor
         .lifecycle_actions
         .get(&operation)
+        .ok_or(ErrorCode::UnsupportedOperation)
+}
+
+fn declared_named_action(
+    descriptor: &ResourceDescriptor,
+    name: &str,
+) -> Result<ActionId, ErrorCode> {
+    descriptor
+        .actions
+        .iter()
+        .find(|(declared, action)| declared.as_str() == name || action.action() == name)
+        .map(|(_, action)| action.clone())
         .ok_or(ErrorCode::UnsupportedOperation)
 }
 
@@ -418,6 +515,7 @@ mod tests {
             schema_version: "v1".into(),
             scope: o3k_kernel::ResourceScope::Tenant,
             lifecycle_actions,
+            actions: HashMap::new(),
             owning_service: namespace.into(),
             ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
             ready: true,
@@ -528,6 +626,44 @@ mod tests {
     }
 }
 
+pub async fn action(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path((namespace, collection, id, action_name)): Path<(String, String, String, String)>,
+    State(state): State<NativeApiState>,
+    Json(request): Json<ActionRequest>,
+) -> Response {
+    let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
+        return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
+    };
+    let action = match declared_named_action(descriptor, &action_name) {
+        Ok(action) => action,
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    if let Err(error) = authorize(&state, descriptor, &action, &auth.0, Some(&id)) {
+        return ProblemDetails::new(error).into_response();
+    }
+    if let Err(error) = ready_for_mutation(&state.resource_index, descriptor) {
+        return ProblemDetails::new(error).into_response();
+    }
+    let Some(application) = state.resource_application else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
+    let key = match idempotency_key(&headers) {
+        Ok(Some(key)) => key,
+        Ok(None) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    match application
+        .action(descriptor, &auth.0, &id, action, request, key)
+        .await
+    {
+        Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
+        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Err(error) => application_problem(error),
+    }
+}
+
 pub async fn create(
     auth: BearerAuth,
     headers: HeaderMap,
@@ -544,6 +680,78 @@ pub async fn create(
         Json(request),
     )
     .await
+}
+
+pub async fn update(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path((namespace, collection, id)): Path<(String, String, String)>,
+    State(state): State<NativeApiState>,
+    Json(request): Json<UpdateRequest>,
+) -> Response {
+    let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
+        return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
+    };
+    let action = match declared_action(descriptor, LifecycleOperation::Update) {
+        Ok(action) => action,
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    if let Err(response) = authorize(&state, descriptor, action, &auth.0, Some(&id)) {
+        return ProblemDetails::new(response).into_response();
+    }
+    if let Err(response) = ready_for_mutation(&state.resource_index, descriptor) {
+        return ProblemDetails::new(response).into_response();
+    }
+    let Some(application) = state.resource_application else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
+    let key = match idempotency_key(&headers) {
+        Ok(Some(key)) => Some(key),
+        Ok(None) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        Err(error) => return ProblemDetails::new(error).into_response(),
+    };
+    let expected_generation = match headers
+        .get("if-match")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(value) => match value
+            .strip_prefix("generation-")
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            Some(generation) if generation > 0 => generation,
+            _ => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        },
+        None => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+    };
+    let spec = match crate::resource_contract::ContractKind::for_resource(
+        &descriptor.resource_type.to_string(),
+        &descriptor.schema_version,
+    ) {
+        Some(kind) => match kind.validate_update(request.spec) {
+            Ok(spec) => spec,
+            Err(_) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        },
+        None => return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response(),
+    };
+    match application
+        .update(
+            descriptor,
+            &auth.0,
+            &id,
+            ValidatedUpdateRequest {
+                api_version: request.api_version,
+                kind: request.kind,
+                spec,
+            },
+            key,
+            expected_generation,
+        )
+        .await
+    {
+        Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
+        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Err(error) => application_problem(error),
+    }
 }
 
 /// Concrete routes must bind their canonical descriptor explicitly. They do

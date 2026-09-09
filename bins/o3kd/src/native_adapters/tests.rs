@@ -12,6 +12,7 @@ mod native_compute_tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use axum::routing::post;
     use o3k_kernel::{
         ActionId, AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, UserPrincipal,
     };
@@ -80,6 +81,22 @@ mod native_compute_tests {
             "show".to_owned(),
             ActionId::new_unchecked("compute", "ShowServer"),
         );
+        ops.insert(
+            "update".to_owned(),
+            ActionId::new_unchecked("compute", "UpdateServer"),
+        );
+        ops.insert(
+            "start".to_owned(),
+            ActionId::new_unchecked("compute", "StartServer"),
+        );
+        ops.insert(
+            "stop".to_owned(),
+            ActionId::new_unchecked("compute", "StopServer"),
+        );
+        ops.insert(
+            "reboot".to_owned(),
+            ActionId::new_unchecked("compute", "RebootServer"),
+        );
         let m = o3k_kernel::ServiceManifest {
             manifest_version: 1,
             service_id: "compute".to_owned(),
@@ -98,6 +115,10 @@ mod native_compute_tests {
                 "compute:CreateServer".to_owned(),
                 "compute:DeleteServer".to_owned(),
                 "compute:ShowServer".to_owned(),
+                "compute:UpdateServer".to_owned(),
+                "compute:StartServer".to_owned(),
+                "compute:StopServer".to_owned(),
+                "compute:RebootServer".to_owned(),
             ],
             capabilities: vec![],
             dependencies: vec![],
@@ -236,7 +257,17 @@ mod native_compute_tests {
             )
             .route(
                 "/{namespace}/{collection}/{id}",
-                get(resource::show).delete(resource::delete),
+                get(resource::show)
+                    .put(resource::update)
+                    .delete(resource::delete),
+            )
+            .route(
+                "/{namespace}/{collection}/{id}/actions/{action_name}",
+                post(resource::action),
+            )
+            .route(
+                "/{namespace}/{collection}/{id}/relationships",
+                get(resource::relationships),
             )
             .route("/operations/{id}", get(operation::show_operation))
             .layer(DefaultBodyLimit::max(1_048_576))
@@ -254,6 +285,40 @@ mod native_compute_tests {
     }
 
     fn authed_post(
+        path: &str,
+        project: &str,
+        idempotency_key: &str,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .method("POST")
+            .header("authorization", format!("Bearer project-{project}"))
+            .header("content-type", "application/json")
+            .header("idempotency-key", idempotency_key)
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .expect("request")
+    }
+
+    fn authed_put(
+        path: &str,
+        project: &str,
+        idempotency_key: &str,
+        generation: i64,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .method("PUT")
+            .header("authorization", format!("Bearer project-{project}"))
+            .header("content-type", "application/json")
+            .header("idempotency-key", idempotency_key)
+            .header("if-match", format!("generation-{generation}"))
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .expect("request")
+    }
+
+    fn authed_action(
         path: &str,
         project: &str,
         idempotency_key: &str,
@@ -327,6 +392,62 @@ mod native_compute_tests {
         assert_eq!(op["resource_type"]["name"], "server");
         assert_eq!(op["resource_id"], resource_id);
         assert_eq!(op["owner_scope"]["id"], "project-a");
+
+        let update_body = serde_json::json!({"spec": {"name": "renamed"}});
+        let (update_status, update) = exec(
+            router,
+            authed_put(
+                &format!("/compute/servers/{resource_id}"),
+                "a",
+                "update-A",
+                2,
+                update_body.clone(),
+            ),
+        )
+        .await;
+        assert_eq!(update_status, StatusCode::OK);
+        assert_eq!(update["resource_id"], resource_id);
+        let operation_id = update["operation_id"].as_str().unwrap();
+
+        let (replay_status, replay) = exec(
+            router,
+            authed_put(
+                &format!("/compute/servers/{resource_id}"),
+                "a",
+                "update-A",
+                2,
+                update_body,
+            ),
+        )
+        .await;
+        assert_eq!(replay_status, StatusCode::OK);
+        assert_eq!(replay["operation_id"], operation_id);
+
+        let (conflict_status, _) = exec(
+            router,
+            authed_put(
+                &format!("/compute/servers/{resource_id}"),
+                "a",
+                "update-A",
+                2,
+                serde_json::json!({"spec": {"name": "different"}}),
+            ),
+        )
+        .await;
+        assert_eq!(conflict_status, StatusCode::CONFLICT);
+
+        let (stale_status, _) = exec(
+            router,
+            authed_put(
+                &format!("/compute/servers/{resource_id}"),
+                "a",
+                "update-B",
+                1,
+                serde_json::json!({"spec": {"name": "stale"}}),
+            ),
+        )
+        .await;
+        assert_eq!(stale_status, StatusCode::CONFLICT);
     }
 
     #[tokio::test]
@@ -361,6 +482,91 @@ mod native_compute_tests {
         assert_eq!(replay["operation_id"], first["operation_id"]);
         assert_eq!(replay["resource_id"], first["resource_id"]);
         assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_compute_declared_action_is_canonical_and_scoped() {
+        let (router, _, _, _) = setup().await;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "action-test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+        let (_, created) = exec(
+            &router,
+            authed_post("/compute/servers", "a", "action-create", body),
+        )
+        .await;
+        let id = created["resource_id"].as_str().unwrap();
+        let path = format!("/compute/servers/{id}/actions/StopServer");
+        let request = serde_json::json!({"input": {}});
+        let (status, first) = exec(
+            &router,
+            authed_action(&path, "a", "action-stop", request.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "action response: {first}");
+        let operation_id = first["operation_id"].as_str().unwrap();
+        assert_eq!(first["resource_id"], id);
+
+        let (status, replay) = exec(
+            &router,
+            authed_action(&path, "a", "action-stop", request.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "action replay response: {replay}");
+        assert_eq!(replay["operation_id"], operation_id);
+
+        let (status, _) = exec(
+            &router,
+            authed_action(
+                &path,
+                "a",
+                "action-stop",
+                serde_json::json!({"input": {"reason": "different"}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        let (status, _) = exec(&router, authed_action(&path, "b", "foreign", request)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let undeclared = format!("/compute/servers/{id}/actions/FlyServer");
+        let (status, _) = exec(
+            &router,
+            authed_action(
+                &undeclared,
+                "a",
+                "undeclared",
+                serde_json::json!({"input": {}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+
+        let (status, _) = exec(
+            &router,
+            authed_action(&path, "a", "malformed", serde_json::json!({"input": []})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let oversized = format!("{}{}", "x".repeat(257), "");
+        let (status, _) = exec(
+            &router,
+            authed_action(
+                &path,
+                "a",
+                "oversized",
+                serde_json::json!({"input": {"reason": oversized}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -938,7 +1144,11 @@ mod native_compute_tests {
                 .iter()
                 .any(|action| action.ends_with(":DeleteServer"))
         );
-        assert!(!actions.iter().any(|action| action.contains("Update")));
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.ends_with(":UpdateServer"))
+        );
         assert!(
             !actions
                 .iter()
