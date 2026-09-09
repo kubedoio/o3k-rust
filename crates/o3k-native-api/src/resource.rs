@@ -9,7 +9,7 @@
 use base64::Engine as _;
 use std::{collections::HashMap, sync::Arc};
 
-use crate::pagination::{CursorPayload, parse_page_size};
+use crate::pagination::CursorPayload;
 use crate::{
     NativeApiState,
     auth::BearerAuth,
@@ -240,6 +240,15 @@ pub struct MutationResult {
     pub resource: Option<serde_json::Value>,
 }
 
+/// A repository-bounded native collection page. Implementations must return
+/// no more than the requested limit and set `has_more` from the bounded
+/// look-ahead query.
+#[derive(Debug, Clone)]
+pub struct ResourcePage {
+    pub items: Vec<serde_json::Value>,
+    pub has_more: bool,
+}
+
 #[async_trait]
 pub trait ResourceApplication: Send + Sync {
     async fn create(
@@ -264,7 +273,7 @@ pub trait ResourceApplication: Send + Sync {
         descriptor: &ResourceDescriptor,
         auth: &AuthContext,
         query: &ListQuery,
-    ) -> Result<Vec<serde_json::Value>, ResourceApplicationError>;
+    ) -> Result<ResourcePage, ResourceApplicationError>;
     async fn show(
         &self,
         descriptor: &ResourceDescriptor,
@@ -810,11 +819,10 @@ pub async fn list(
         Ok(items) => items,
         Err(error) => return application_problem(error),
     };
-    let page_size = parse_page_size(query.limit.as_deref());
-    let has_more = items.len() > page_size;
-    let page: Vec<_> = items.into_iter().take(page_size).collect();
-    let next_cursor = if has_more {
-        page.last()
+    let next_cursor = if items.has_more {
+        items
+            .items
+            .last()
             .and_then(|item| item["metadata"]["id"].as_str())
             .map(|last_id| {
                 state.cursor_config.encode_cursor(&CursorPayload {
@@ -830,7 +838,7 @@ pub async fn list(
     };
     (
         StatusCode::OK,
-        Json(serde_json::json!({"items": page, "next_cursor": next_cursor})),
+        Json(serde_json::json!({"items": items.items, "next_cursor": next_cursor})),
     )
         .into_response()
 }

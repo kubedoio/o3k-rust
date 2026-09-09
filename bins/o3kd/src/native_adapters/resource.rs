@@ -107,6 +107,16 @@ impl GenericResourceApplication {
     }
 }
 
+fn bounded_page(
+    mut items: Vec<serde_json::Value>,
+    query: &o3k_native_api::resource::ListQuery,
+) -> o3k_native_api::resource::ResourcePage {
+    let limit = o3k_native_api::pagination::parse_page_size(query.limit.as_deref());
+    let has_more = items.len() > limit;
+    items.truncate(limit);
+    o3k_native_api::resource::ResourcePage { items, has_more }
+}
+
 fn compute_error(error: o3k_compute::ComputeError) -> ResourceApplicationError {
     match error {
         o3k_compute::ComputeError::Unauthorized => ResourceApplicationError::Forbidden,
@@ -329,7 +339,7 @@ impl ResourceApplication for GenericResourceApplication {
         descriptor: &ResourceDescriptor,
         auth: &o3k_kernel::AuthContext,
         query: &o3k_native_api::resource::ListQuery,
-    ) -> Result<Vec<serde_json::Value>, ResourceApplicationError> {
+    ) -> Result<o3k_native_api::resource::ResourcePage, ResourceApplicationError> {
         if descriptor.resource_type.to_string() == "image:image" {
             let service = self
                 .image
@@ -348,7 +358,7 @@ impl ResourceApplication for GenericResourceApplication {
                 let resource = self.store.get_resource(item.id).await.ok();
                 result.push(image_json_with_resource(&item, resource.as_ref()));
             }
-            return Ok(result);
+            return Ok(bounded_page(result, query));
         }
         if self
             .external_controllers
@@ -363,7 +373,9 @@ impl ResourceApplication for GenericResourceApplication {
                     o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
                 )
                 .await
-                .map(|resources| resources.iter().map(generic_external_json).collect())
+                .map(|resources| {
+                    bounded_page(resources.iter().map(generic_external_json).collect(), query)
+                })
                 .map_err(|_| ResourceApplicationError::Internal);
         }
         if matches!(
@@ -386,7 +398,9 @@ impl ResourceApplication for GenericResourceApplication {
                     o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
                 )
                 .await
-                .map(|resources| resources.iter().map(generic_external_json).collect())
+                .map(|resources| {
+                    bounded_page(resources.iter().map(generic_external_json).collect(), query)
+                })
                 .map_err(|_| ResourceApplicationError::Internal);
         }
         match descriptor.resource_type.to_string().as_str() {
@@ -403,7 +417,7 @@ impl ResourceApplication for GenericResourceApplication {
                     o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
                 )
                 .await
-                .map(|items| items.into_iter().map(server_json).collect())
+                .map(|items| bounded_page(items.into_iter().map(server_json).collect(), query))
                 .map_err(generic_read_error),
             "network:address_realm" => self
                 .network
@@ -413,7 +427,7 @@ impl ResourceApplication for GenericResourceApplication {
                     o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
                 )
                 .await
-                .map(|items| items.into_iter().map(realm_json).collect())
+                .map(|items| bounded_page(items.into_iter().map(realm_json).collect(), query))
                 .map_err(generic_read_error),
             "network:network" => Err(ResourceApplicationError::UnsupportedOperation),
             "network:floating_ip" => Err(ResourceApplicationError::UnsupportedOperation),
@@ -425,7 +439,7 @@ impl ResourceApplication for GenericResourceApplication {
                     o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
                 )
                 .await
-                .map(|items| items.iter().map(native_volume_json).collect())
+                .map(|items| bounded_page(items.iter().map(native_volume_json).collect(), query))
                 .map_err(|_| ResourceApplicationError::Internal),
             "volume:volume_attachment" => {
                 return Err(ResourceApplicationError::UnsupportedOperation);
@@ -447,7 +461,7 @@ impl ResourceApplication for GenericResourceApplication {
                             result.push(native_attachment_json(&item, resource.as_ref()));
                         }
                     }
-                    Ok(result)
+                    Ok(bounded_page(result, query))
                 }
             }
             _ => Err(ResourceApplicationError::NotFound),
