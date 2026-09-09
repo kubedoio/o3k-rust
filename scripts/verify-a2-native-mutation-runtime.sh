@@ -38,6 +38,7 @@ check A2-21 rg -q 'provider\.instance_count\(\)' "$tests"
 check A2-SCHEMA test -s "$root/contracts/native-action-input-v1.schema.json"
 check A2-SCHEMA-REF rg -q 'native-action-input/v1' "$root/crates/o3k-native-api/src/lib.rs"
 check A2-OUTPUT-SCHEMA rg -q 'native-mutation-result-v1.schema.json' "$root/crates/o3k-native-api/src/lib.rs"
+check A2-NETWORK-UPDATE-NOT-ADVERTISED ! rg -q '"update".*UpdateNetwork|network:UpdateNetwork"' "$root/crates/o3k-kernel/src/manifest.rs"
 
 if cargo test -p o3kd native_adapters::tests::native_compute --all-features >/dev/null; then
   printf 'A2-TESTS PASS\n'

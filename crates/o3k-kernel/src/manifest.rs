@@ -1816,10 +1816,6 @@ impl ManifestRegistry {
                                 ActionId::new_unchecked("network", "ReadNetwork"),
                             ),
                             (
-                                "update".to_owned(),
-                                ActionId::new_unchecked("network", "UpdateNetwork"),
-                            ),
-                            (
                                 "create".to_owned(),
                                 ActionId::new_unchecked("network", "CreateNetwork"),
                             ),
@@ -2007,7 +2003,6 @@ impl ManifestRegistry {
                     "network:ListNetworks".to_owned(),
                     "network:CreateNetwork".to_owned(),
                     "network:ReadNetwork".to_owned(),
-                    "network:UpdateNetwork".to_owned(),
                     "network:DeleteNetwork".to_owned(),
                     "network:ListSubnets".to_owned(),
                     "network:CreateSubnet".to_owned(),
