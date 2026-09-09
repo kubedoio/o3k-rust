@@ -69,6 +69,8 @@ pub enum NetworkError {
     Store(#[source] o3k_store::StoreError),
     #[error("network metadata is corrupt")]
     CorruptMetadata(#[source] serde_json::Error),
+    #[error("durable audit unavailable")]
+    AuditUnavailable,
 }
 
 fn map_store_error(error: o3k_store::StoreError) -> NetworkError {
@@ -126,6 +128,16 @@ pub(crate) use helpers::{
 };
 
 impl NetworkService {
+    /// Publish a mandatory audit event through the durable asynchronous boundary.
+    pub(crate) async fn record_required_audit(
+        &self,
+        event: &o3k_kernel::AuditEvent,
+    ) -> Result<(), NetworkError> {
+        self.audit_sink
+            .record_required_async(event)
+            .await
+            .map_err(|_| NetworkError::AuditUnavailable)
+    }
     pub(super) async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.lock.lock().await
     }

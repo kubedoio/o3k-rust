@@ -726,7 +726,7 @@ impl NetworkService {
             resource_target: target,
         });
         if !decision.is_allowed() {
-            self.audit_sink.record(
+            self.record_required_audit(
                 &AuditEvent::from_auth(
                     auth,
                     namespace.clone(),
@@ -740,7 +740,8 @@ impl NetworkService {
                 )
                 .with_decision(decision.clone())
                 .with_reason("unauthorized"),
-            );
+            )
+            .await?;
             return Err(match decision.reason() {
                 DecisionReason::ScopeMismatch | DecisionReason::MissingOwnership => {
                     NetworkError::NotFound
@@ -751,7 +752,7 @@ impl NetworkService {
         Ok((namespace, action, resource_type))
     }
 
-    pub(super) fn audit_canonical_result(
+    pub(super) async fn audit_canonical_result(
         &self,
         auth: &AuthContext,
         namespace: ServiceNamespace,
@@ -759,7 +760,7 @@ impl NetworkService {
         resource_type: ResourceType,
         resource_id: Option<Uuid>,
         result: Result<(), &NetworkError>,
-    ) {
+    ) -> Result<(), NetworkError> {
         let outcome = if result.is_ok() {
             AuditOutcome::Succeeded
         } else {
@@ -773,7 +774,8 @@ impl NetworkService {
         if let Err(error) = result {
             event = event.with_reason(error.to_string());
         }
-        self.audit_sink.record(&event);
+        self.record_required_audit(&event).await?;
+        Ok(())
     }
 
     async fn recover_realm_deletion_operations(&self) -> Result<(), NetworkError> {
@@ -948,7 +950,8 @@ impl NetworkService {
             .create_canonical_network_for_project(auth.effective_scope().id().as_str(), name)
             .await;
         let audit_result = result.as_ref().map(|_| ());
-        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
+        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result)
+            .await?;
         result
     }
 
@@ -983,7 +986,8 @@ impl NetworkService {
             resource_type,
             Some(id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1015,7 +1019,8 @@ impl NetworkService {
             resource_type,
             None,
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1062,7 +1067,8 @@ impl NetworkService {
             resource_type,
             Some(id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1149,7 +1155,8 @@ impl NetworkService {
             )
             .await;
         let audit_result = result.as_ref().map(|_| ());
-        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
+        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result)
+            .await?;
         result
     }
 
@@ -1190,7 +1197,8 @@ impl NetworkService {
             .list_canonical_realms_for_project(auth.effective_scope().id().as_str(), network_id)
             .await;
         let audit_result = result.as_ref().map(|_| ());
-        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
+        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result)
+            .await?;
         result
     }
 
@@ -1222,7 +1230,8 @@ impl NetworkService {
             resource_type,
             Some(realm_id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1301,7 +1310,8 @@ impl NetworkService {
             resource_type,
             Some(realm_id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1658,7 +1668,8 @@ impl NetworkService {
             resource_type,
             None,
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1689,7 +1700,8 @@ impl NetworkService {
             resource_type,
             None,
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1720,7 +1732,8 @@ impl NetworkService {
             resource_type,
             Some(pool_id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1793,7 +1806,8 @@ impl NetworkService {
             resource_type,
             None,
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1824,7 +1838,8 @@ impl NetworkService {
             resource_type,
             None,
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1850,7 +1865,8 @@ impl NetworkService {
             resource_type,
             Some(endpoint_id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1875,7 +1891,8 @@ impl NetworkService {
             resource_type,
             Some(endpoint_id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
