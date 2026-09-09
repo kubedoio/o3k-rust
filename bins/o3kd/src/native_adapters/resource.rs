@@ -1917,7 +1917,7 @@ impl ResourceApplication for GenericResourceApplication {
 
     async fn relationships(
         &self,
-        _descriptor: &ResourceDescriptor,
+        descriptor: &ResourceDescriptor,
         auth: &o3k_kernel::AuthContext,
         id: &str,
         query: &o3k_native_api::pagination::ResourceQuery,
@@ -1927,6 +1927,12 @@ impl ResourceApplication for GenericResourceApplication {
         ResourceApplicationError,
     > {
         let parent = Uuid::parse_str(id).map_err(|_| ResourceApplicationError::NotFound)?;
+        let expected_query_resource = format!("relationship:{}:{}", descriptor.resource_type, id);
+        if query.resource_type() != expected_query_resource
+            || query.scope_id() != auth.effective_scope().id().as_str()
+        {
+            return Err(ResourceApplicationError::NotFound);
+        }
         let record = self
             .store
             .get_resource(parent)
@@ -1950,7 +1956,9 @@ impl ResourceApplication for GenericResourceApplication {
         if has_more {
             records.truncate(query.limit());
         }
-        let continuation = records.last().map(|record| record.slot.clone());
+        let continuation = has_more
+            .then(|| records.last().map(|record| record.slot.clone()))
+            .flatten();
         let items = records
             .into_iter()
             .map(|record| {

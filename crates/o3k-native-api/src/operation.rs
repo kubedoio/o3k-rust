@@ -13,6 +13,7 @@ use crate::{
     NativeApiState,
     auth::{BearerAuth, RequestId},
     error::{ErrorCode, NativeReadError, ProblemDetails},
+    pagination::RepositoryPage,
 };
 
 /// Application boundary for operation visibility. Implementations must apply
@@ -29,7 +30,7 @@ pub trait OperationReader: Send + Sync {
         auth: &AuthContext,
         after_id: Option<Uuid>,
         limit: usize,
-    ) -> Result<Vec<Operation>, NativeReadError>;
+    ) -> Result<RepositoryPage<Operation>, NativeReadError>;
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,27 +89,13 @@ pub async fn list_operations(
         .continuation_key()
         .and_then(|id| Uuid::parse_str(id).ok());
     let limit = resource_query.limit();
-    match reader
-        .list_operations_page(&auth.0, cursor, limit + 1)
-        .await
-    {
-        Ok(mut operations) => {
-            let has_more = operations.len() > limit;
-            let next_cursor = if has_more {
-                operations.truncate(limit);
-                operations.last().map(|op| op.id.to_string())
-            } else {
-                None
-            };
-            let repository =
-                crate::pagination::RepositoryPage::new(operations, has_more, next_cursor, limit)
-                    .map_err(|_| NativeReadError::Internal);
-            let page = match repository.and_then(|page| {
-                state
-                    .cursor_config
-                    .complete_page(&resource_query, page)
-                    .map_err(|_| NativeReadError::Internal)
-            }) {
+    match reader.list_operations_page(&auth.0, cursor, limit).await {
+        Ok(repository) => {
+            let page = match state
+                .cursor_config
+                .complete_page(&resource_query, repository)
+                .map_err(|_| NativeReadError::Internal)
+            {
                 Ok(page) => page,
                 Err(_) => {
                     return ProblemDetails::internal()

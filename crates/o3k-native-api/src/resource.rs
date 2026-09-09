@@ -911,7 +911,9 @@ pub async fn relationships(
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     }
     let scope = auth.0.effective_scope().id().to_string();
-    let cursor_resource = format!("relationship:{namespace}:{collection}:{id}");
+    // Relationship cursors are bound to the canonical parent resource type
+    // and id, rather than route spelling, so aliases cannot cross-contaminate.
+    let cursor_resource = format!("relationship:{}:{}", descriptor.resource_type, id);
     let resource_query = match state.cursor_config.validate_query(
         query.limit.as_deref(),
         query.cursor.as_deref(),

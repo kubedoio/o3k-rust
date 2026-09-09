@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use o3k_native_api::error::NativeReadError;
+use o3k_native_api::pagination::RepositoryPage;
 use o3k_store::DurableStore;
 use uuid::Uuid;
 
@@ -72,20 +73,33 @@ impl o3k_native_api::operation::OperationReader for OperationReaderAdapter {
         auth: &o3k_kernel::AuthContext,
         after_id: Option<Uuid>,
         limit: usize,
-    ) -> Result<Vec<o3k_kernel::Operation>, NativeReadError> {
+    ) -> Result<RepositoryPage<o3k_kernel::Operation>, NativeReadError> {
         if auth.effective_scope().kind() != o3k_kernel::ScopeKind::Project {
             return Err(NativeReadError::Forbidden);
         }
-        let limit = u32::try_from(limit).map_err(|_| NativeReadError::Internal)?;
+        let fetch_limit =
+            u32::try_from(limit.saturating_add(1)).map_err(|_| NativeReadError::Internal)?;
         let records = self
             .store
-            .list_canonical_operations_page(auth.effective_scope().id().as_str(), after_id, limit)
+            .list_canonical_operations_page(
+                auth.effective_scope().id().as_str(),
+                after_id,
+                fetch_limit,
+            )
             .await
             .map_err(|error| {
                 tracing::error!(%error, "native operation collection failed");
                 NativeReadError::Internal
             })?;
-        records
+        let has_more = records.len() > limit;
+        let mut records = records;
+        if has_more {
+            records.truncate(limit);
+        }
+        let continuation = has_more
+            .then(|| records.last().map(|record| record.id.to_string()))
+            .flatten();
+        let operations = records
             .into_iter()
             .map(|record| {
                 o3k_kernel::Operation::try_from(record).map_err(|error| {
@@ -93,7 +107,9 @@ impl o3k_native_api::operation::OperationReader for OperationReaderAdapter {
                     NativeReadError::Internal
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        RepositoryPage::new(operations, has_more, continuation, limit)
+            .map_err(|_| NativeReadError::Internal)
     }
 }
 
