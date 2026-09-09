@@ -27,6 +27,12 @@ The native handler delegates query validation and page construction to the
 application boundary. Compatibility routes are separate protocol adapters and
 are not native collection authorities.
 
+The fixed `/compute/servers` and `/volume/volumes` routes are strict aliases
+that adapt Axum's path-less extractor to the same shared list handler; they do
+not implement collection logic. Their query validation, capability checks,
+cursor handling, and response projection are therefore identical to the
+generic route.
+
 A0 intentionally supports no client filters and only the canonical `id.asc`
 ordering. Unknown query parameters and future filter/order values are rejected;
 the opaque cursor is bound to this fixed query identity (`filters:none`,
