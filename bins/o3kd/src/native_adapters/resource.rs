@@ -1941,7 +1941,12 @@ impl ResourceApplication for GenericResourceApplication {
                 o3k_store::StoreError::ResourceNotFound => ResourceApplicationError::NotFound,
                 _ => ResourceApplicationError::Internal,
             })?;
-        if record.project_id != auth.effective_scope().id().as_str() {
+        let descriptor_type = descriptor.resource_type.to_string();
+        let Some(expected_kind) = bounded_store_kind(&descriptor_type) else {
+            return Err(ResourceApplicationError::NotFound);
+        };
+        if record.project_id != auth.effective_scope().id().as_str() || record.kind != expected_kind
+        {
             return Err(ResourceApplicationError::NotFound);
         }
         let bounded = u32::try_from(query.limit().saturating_add(1))

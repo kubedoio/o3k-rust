@@ -261,7 +261,8 @@ mod operation_visibility_tests {
             None,
         )
         .expect("test manifest registry is valid")
-        .with_operation_reader(reader);
+        .with_operation_reader(reader)
+        .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
         let app = o3k_api::router_with_state(o3k_api::AppState::new().with_native_api(native));
 
         let list_request = |project: &str| {

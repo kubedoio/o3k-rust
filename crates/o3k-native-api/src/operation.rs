@@ -5,7 +5,10 @@ use axum::{
     extract::{Path, Query, State},
     response::{IntoResponse, Response},
 };
-use o3k_kernel::{AuthContext, Operation};
+use o3k_kernel::{
+    ActionId, AuthContext, AuthorizationDecision, AuthorizationRequest, Operation, ResourceTarget,
+    ResourceType,
+};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -63,6 +66,30 @@ pub async fn list_operations(
         .with_request_id(request_id.0)
         .into_response();
     };
+    let Some(authorizer) = state.authorizer.as_ref() else {
+        return ProblemDetails::with_detail(
+            ErrorCode::Forbidden,
+            "operation authorization is not configured",
+        )
+        .with_request_id(request_id.0)
+        .into_response();
+    };
+    let operation_target = ResourceTarget::collection(
+        ResourceType::new_unchecked("operation", "operation"),
+        Some(auth.0.effective_scope().id().clone()),
+    );
+    if !matches!(
+        authorizer.authorize(&AuthorizationRequest {
+            auth_context: &auth.0,
+            action: ActionId::new_unchecked("operation", "ReadOperation"),
+            resource_target: operation_target,
+        }),
+        AuthorizationDecision::Allow
+    ) {
+        return ProblemDetails::with_detail(ErrorCode::Forbidden, "operation authorization denied")
+            .with_request_id(request_id.0)
+            .into_response();
+    }
     if !state.cursor_config.is_available() {
         return ProblemDetails::with_detail(
             ErrorCode::NotAvailable,
@@ -85,9 +112,17 @@ pub async fn list_operations(
                 .into_response();
         }
     };
-    let cursor = resource_query
-        .continuation_key()
-        .and_then(|id| Uuid::parse_str(id).ok());
+    let cursor = match resource_query.continuation_key() {
+        Some(id) => match Uuid::parse_str(id) {
+            Ok(id) => Some(id),
+            Err(_) => {
+                return ProblemDetails::bad_request("invalid operation cursor")
+                    .with_request_id(request_id.0)
+                    .into_response();
+            }
+        },
+        None => None,
+    };
     let limit = resource_query.limit();
     match reader.list_operations_page(&auth.0, cursor, limit).await {
         Ok(repository) => {
@@ -131,6 +166,31 @@ pub async fn show_operation(
         .with_request_id(request_id.0)
         .into_response();
     };
+    let Some(authorizer) = state.authorizer.as_ref() else {
+        return ProblemDetails::with_detail(
+            ErrorCode::Forbidden,
+            "operation authorization is not configured",
+        )
+        .with_request_id(request_id.0)
+        .into_response();
+    };
+    let operation_target = ResourceTarget::instance(
+        ResourceType::new_unchecked("operation", "operation"),
+        o3k_kernel::ResourceId::new_unchecked(id.to_string()),
+        Some(auth.0.effective_scope().id().clone()),
+    );
+    if !matches!(
+        authorizer.authorize(&AuthorizationRequest {
+            auth_context: &auth.0,
+            action: ActionId::new_unchecked("operation", "ReadOperation"),
+            resource_target: operation_target,
+        }),
+        AuthorizationDecision::Allow
+    ) {
+        return ProblemDetails::with_detail(ErrorCode::Forbidden, "operation authorization denied")
+            .with_request_id(request_id.0)
+            .into_response();
+    }
 
     match reader.show_operation(&auth.0, id).await {
         Ok(operation) => (axum::http::StatusCode::OK, Json(operation)).into_response(),
