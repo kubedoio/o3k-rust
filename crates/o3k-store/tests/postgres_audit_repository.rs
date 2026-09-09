@@ -27,7 +27,7 @@ fn event(id: &str, scope: &str) -> AuditEventRecord {
 async fn store() -> Option<PostgresStore> {
     let url = std::env::var("O3K_DATABASE_URL").ok()?;
     let store = PostgresStore::connect(&url).await.ok()?;
-    sqlx::query("DELETE FROM audit_events")
+    sqlx::query("DELETE FROM audit_events WHERE event_id IN ('0001','0002','0003','0004','0005','0006','concurrent')")
         .execute(store.pool())
         .await
         .ok()?;
