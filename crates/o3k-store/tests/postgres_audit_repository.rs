@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
+use o3k_kernel::{AuditQuery, DurableAuditRepository, OwnershipScope, ScopeId};
 use o3k_store::{AuditEventRecord, AuditRepository, PostgresStore, StoreError};
 
 fn event(id: &str, scope: &str) -> AuditEventRecord {
@@ -32,6 +33,37 @@ async fn store() -> Option<PostgresStore> {
         .await
         .ok()?;
     Some(store)
+}
+
+#[tokio::test]
+async fn postgres_unified_audit_query_pushes_all_supported_filters() {
+    let _guard = test_lock().await;
+    let Some(store) = store().await else {
+        eprintln!("skipping PostgreSQL unified Audit query: O3K_DATABASE_URL unavailable");
+        return;
+    };
+    let first = event("0001", "project-a");
+    store.insert_audit_event(&first).await.unwrap();
+    let unified = o3k_store::O3kStore::Postgres(store);
+    let query = AuditQuery {
+        scope: OwnershipScope::project(ScopeId::new_unchecked("project-a"), None, None),
+        after_event_id: None,
+        limit: 10,
+        service: Some("compute".into()),
+        action: Some("compute:read".into()),
+        outcome: Some("succeeded".into()),
+        resource_type: Some("compute:server".into()),
+        resource_id: Some("resource-0001".into()),
+        operation_id: None,
+        principal_id: Some("principal-a".into()),
+        request_id: Some("request-0001".into()),
+        audit_id: Some("audit-0001".into()),
+        from_timestamp: Some("2025-01-01".into()),
+        until_timestamp: Some("2027-01-01".into()),
+    };
+    let page = unified.page(&query).await.unwrap();
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].event_id.as_str(), "0001");
 }
 
 // The conformance binary runs tests concurrently against one disposable database.

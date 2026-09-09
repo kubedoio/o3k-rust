@@ -61,8 +61,11 @@ if [[ -n "${O3K_DATABASE_URL:-}" ]]; then
     fail B0-RUNTIME-POSTGRES
   fi
 else
-  printf 'B0-RUNTIME-POSTGRES NOT PROVEN (set O3K_DATABASE_URL)\n'
-  status=1
+  if bash "$root/scripts/test-postgres-audit.sh"; then
+    pass B0-RUNTIME-POSTGRES
+  else
+    fail B0-RUNTIME-POSTGRES
+  fi
 fi
 
 exit "$status"
