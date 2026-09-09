@@ -119,6 +119,32 @@ pub struct RepositoryPage<T> {
     pub continuation_key: Option<String>,
 }
 
+impl<T> RepositoryPage<T> {
+    pub(crate) fn new(
+        items: Vec<T>,
+        has_more: bool,
+        continuation_key: Option<String>,
+        requested_limit: usize,
+    ) -> Result<Self, StoreError> {
+        if items.len() > requested_limit
+            || has_more != continuation_key.is_some()
+            || (has_more && items.is_empty())
+            || continuation_key
+                .as_deref()
+                .is_some_and(|key| key.is_empty() || key.len() > 512)
+        {
+            return Err(StoreError::Corrupt(
+                "invalid bounded repository page".to_owned(),
+            ));
+        }
+        Ok(Self {
+            items,
+            has_more,
+            continuation_key,
+        })
+    }
+}
+
 /// Compute the bounded look-ahead requested from a backing store.  The extra
 /// row is the only authority used to determine `has_more`; callers must never
 /// materialize an unbounded collection and truncate it afterwards.

@@ -325,28 +325,46 @@ fn generic_external_json(resource: &o3k_store::ResourceRecord) -> serde_json::Va
 #[async_trait::async_trait]
 impl ResourceApplication for GenericResourceApplication {
     fn supports_collection(&self, descriptor: &ResourceDescriptor) -> bool {
-        !matches!(
+        matches!(
             descriptor.resource_type.to_string().as_str(),
-            "compute:flavor"
-                | "network:address_realm"
-                | "network:floating_ip"
-                | "volume:volume_attachment"
+            "image:image"
+                | "compute:server"
+                | "network:network"
+                | "network:subnet"
+                | "network:port"
+                | "network:security_group"
+                | "network:security_group_rule"
+                | "network:router"
+                | "network:router_interface"
+                | "volume:volume"
         )
     }
 
     async fn list_page(
         &self,
-        _descriptor: &ResourceDescriptor,
-        _auth: &o3k_kernel::AuthContext,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
         query: &o3k_native_api::pagination::ResourceQuery,
         cursors: &o3k_native_api::pagination::CursorConfig,
     ) -> Result<o3k_native_api::pagination::ResourcePage<serde_json::Value>, ResourceApplicationError>
     {
+        if query.scope_id() != auth.effective_scope().id().as_str()
+            || query.resource_type() != descriptor.resource_type.to_string()
+        {
+            return Err(ResourceApplicationError::Forbidden);
+        }
+        let store_kind = match query.resource_type() {
+            // Volumes predate the generic resource envelope and use this
+            // canonical durable kind; all other supported resources use their
+            // fully-qualified resource type.
+            "volume:volume" => "volume",
+            kind => kind,
+        };
         let page = self
             .store
             .list_resources_page(
                 query.scope_id(),
-                query.resource_type(),
+                store_kind,
                 query.continuation_key(),
                 query.limit(),
             )

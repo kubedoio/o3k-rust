@@ -1026,11 +1026,7 @@ impl DurableStore for SqliteStore {
         } else {
             None
         };
-        Ok(RepositoryPage {
-            items,
-            has_more,
-            continuation_key,
-        })
+        RepositoryPage::new(items, has_more, continuation_key, limit)
     }
 
     async fn update_resource(
