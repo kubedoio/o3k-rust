@@ -9,7 +9,7 @@
 use base64::Engine as _;
 use std::{collections::HashMap, sync::Arc};
 
-use crate::pagination::CursorPayload;
+use crate::pagination::{CursorPayload, parse_page_size};
 use crate::{
     NativeApiState,
     auth::BearerAuth,
@@ -274,6 +274,29 @@ pub struct MutationResult {
     pub resource: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionRequest {
+    #[serde(default = "empty_action_input")]
+    pub input: serde_json::Value,
+}
+
+fn empty_action_input() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RelationshipView {
+    pub slot: String,
+    pub resource_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    pub ownership: String,
+    pub state: String,
+    pub parent_operation_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_operation_id: Option<String>,
+}
+
 /// A repository-bounded native collection page. Implementations must return
 /// no more than the requested limit and set `has_more` from the bounded
 /// look-ahead query.
@@ -315,6 +338,18 @@ pub trait ResourceApplication: Send + Sync {
         auth: &AuthContext,
         id: &str,
     ) -> Result<serde_json::Value, ResourceApplicationError>;
+    async fn update(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &AuthContext,
+        id: &str,
+        request: ValidatedUpdateRequest,
+        idempotency_key: Option<&str>,
+        expected_generation: i64,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        let _ = (descriptor, auth, id, request, idempotency_key, expected_generation);
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
     async fn relationships(
         &self,
         descriptor: &ResourceDescriptor,
@@ -323,6 +358,19 @@ pub trait ResourceApplication: Send + Sync {
         limit: usize,
     ) -> Result<Vec<RelationshipView>, ResourceApplicationError> {
         let _ = (descriptor, auth, id, limit);
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
+
+    async fn action(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &AuthContext,
+        id: &str,
+        action: ActionId,
+        request: ActionRequest,
+        idempotency_key: &str,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        let _ = (descriptor, auth, id, action, request, idempotency_key);
         Err(ResourceApplicationError::UnsupportedOperation)
     }
 }
