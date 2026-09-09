@@ -195,6 +195,7 @@ pub trait DurableStore: Send + Sync {
     /// Atomically applies a desired-state generation update and completes its
     /// canonical operation. This prevents an acknowledged resource mutation
     /// from being left with a pending operation after a process/DB failure.
+    #[allow(clippy::too_many_arguments)]
     async fn update_resource_and_complete_operation(
         &self,
         resource_id: Uuid,

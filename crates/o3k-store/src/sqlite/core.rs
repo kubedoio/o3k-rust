@@ -1058,6 +1058,7 @@ impl DurableStore for SqliteStore {
         self.get_resource(id).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn update_resource_and_complete_operation(
         &self,
         resource_id: Uuid,
