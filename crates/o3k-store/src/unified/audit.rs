@@ -79,11 +79,17 @@ fn row_event(r: AuditRow) -> Result<AuditEvent, o3k_kernel::KernelError> {
 impl DurableAuditRepository for O3kStore {
     async fn append(&self, event: &AuditEvent) -> Result<(), o3k_kernel::KernelError> {
         let record = AuditEventRecord::from_kernel_event(event);
-        match self {
+        let result = match self {
             Self::Sqlite(s) => s.insert_audit_event(&record).await,
             Self::Postgres(s) => s.insert_audit_event(&record).await,
-        }
-        .map_err(err)
+        };
+        result.map_err(|error| {
+            if matches!(error, crate::StoreError::AuditEventConflict) {
+                o3k_kernel::KernelError::AuditConflict
+            } else {
+                err(error)
+            }
+        })
     }
 
     async fn page(&self, query: &AuditQuery) -> Result<DurableAuditPage, o3k_kernel::KernelError> {

@@ -32,4 +32,7 @@ pub enum KernelError {
 
     #[error("audit persistence unavailable: {0}")]
     AuditUnavailable(String),
+
+    #[error("audit event identity conflicts with existing evidence")]
+    AuditConflict,
 }
