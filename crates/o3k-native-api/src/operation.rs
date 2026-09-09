@@ -33,6 +33,7 @@ pub trait OperationReader: Send + Sync {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListQuery {
     pub limit: Option<String>,
     pub cursor: Option<String>,
@@ -61,6 +62,14 @@ pub async fn list_operations(
         .with_request_id(request_id.0)
         .into_response();
     };
+    if !state.cursor_config.is_available() {
+        return ProblemDetails::with_detail(
+            ErrorCode::NotAvailable,
+            "operation pagination is not configured",
+        )
+        .with_request_id(request_id.0)
+        .into_response();
+    }
     let scope_id = auth.0.effective_scope().id().as_str().to_owned();
     let resource_query = match state.cursor_config.validate_query(
         query.limit.as_deref(),

@@ -296,9 +296,10 @@ pub trait ResourceApplication: Send + Sync {
         descriptor: &ResourceDescriptor,
         auth: &AuthContext,
         id: &str,
-        limit: usize,
-    ) -> Result<Vec<RelationshipView>, ResourceApplicationError> {
-        let _ = (descriptor, auth, id, limit);
+        query: &ResourceQuery,
+        cursors: &crate::pagination::CursorConfig,
+    ) -> Result<crate::pagination::ResourcePage<RelationshipView>, ResourceApplicationError> {
+        let _ = (descriptor, auth, id, query, cursors);
         Err(ResourceApplicationError::UnsupportedOperation)
     }
 }
@@ -905,15 +906,31 @@ pub async fn relationships(
     let Some(application) = state.resource_application else {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     };
-    let limit = match crate::pagination::parse_page_size_strict(query.limit.as_deref()) {
-        Ok(limit) => limit,
+    if !state.cursor_config.is_available() {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    }
+    let scope = auth.0.effective_scope().id().to_string();
+    let cursor_resource = format!("relationship:{namespace}:{collection}:{id}");
+    let resource_query = match state.cursor_config.validate_query(
+        query.limit.as_deref(),
+        query.cursor.as_deref(),
+        &scope,
+        &cursor_resource,
+    ) {
+        Ok(query) => query,
         Err(_) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
     };
     match application
-        .relationships(descriptor, &auth.0, &id, limit)
+        .relationships(
+            descriptor,
+            &auth.0,
+            &id,
+            &resource_query,
+            &state.cursor_config,
+        )
         .await
     {
-        Ok(items) => (StatusCode::OK, Json(serde_json::json!({"items": items}))).into_response(),
+        Ok(page) => (StatusCode::OK, Json(page)).into_response(),
         Err(error) => application_problem(error),
     }
 }
