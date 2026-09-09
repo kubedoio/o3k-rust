@@ -546,7 +546,11 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
                 version: descriptor.schema_version.clone(),
                 representation: "native-resource-envelope".to_owned(),
             },
-            actions: action_metadata(descriptor, live_ready && collection_supported),
+            actions: if live_ready {
+                action_metadata(descriptor, collection_supported)
+            } else {
+                Vec::new()
+            },
         });
     }
     resource_types.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));

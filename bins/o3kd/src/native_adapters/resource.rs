@@ -550,6 +550,18 @@ impl ResourceApplication for GenericResourceApplication {
             o3k_store::CanonicalAcceptanceOutcome::Created { .. } => {}
         }
         if existing.generation != expected_generation {
+            if let Ok(lifecycle) = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                o3k_kernel::OperationState::Failed,
+                1,
+                None,
+                Some(chrono::Utc::now().to_rfc3339()),
+                Some("stale generation".to_owned()),
+            ) {
+                let _ = self
+                    .store
+                    .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                    .await;
+            }
             return Err(ResourceApplicationError::PreconditionConflict);
         }
         let desired =

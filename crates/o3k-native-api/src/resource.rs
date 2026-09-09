@@ -151,6 +151,11 @@ impl ResourceDispatcher {
                 return Err(DescriptorError::InvalidAction);
             }
         }
+        for action in descriptor.actions.values() {
+            if action.namespace() != descriptor.resource_type.namespace() {
+                return Err(DescriptorError::InvalidAction);
+            }
+        }
         let key = (
             descriptor.resource_type.namespace().to_owned(),
             descriptor.collection.clone(),
