@@ -19,6 +19,8 @@ pub const DEFAULT_PAGE_SIZE: usize = 50;
 
 /// Maximum page size that the server will accept.
 pub const MAX_PAGE_SIZE: usize = 200;
+const MAX_CURSOR_LENGTH: usize = 4096;
+const MAX_CURSOR_PAYLOAD_LENGTH: usize = 2048;
 
 /// Internal cursor payload — never exposed directly to clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,11 +92,17 @@ impl CursorConfig {
         expected_type: &str,
         expected_query_hash: &str,
     ) -> Result<CursorPayload, &'static str> {
+        if cursor.len() > MAX_CURSOR_LENGTH {
+            return Err("cursor is too large");
+        }
         let (payload_b64, hmac_b64) = cursor.split_once('.').ok_or("invalid cursor format")?;
 
         let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload_b64)
             .map_err(|_| "invalid cursor encoding")?;
+        if payload_bytes.len() > MAX_CURSOR_PAYLOAD_LENGTH {
+            return Err("cursor payload is too large");
+        }
 
         let payload: CursorPayload =
             serde_json::from_slice(&payload_bytes).map_err(|_| "malformed cursor payload")?;
@@ -124,6 +132,13 @@ impl CursorConfig {
         if payload.query_hash != expected_query_hash {
             return Err("cursor query mismatch");
         }
+        if payload.last_id.len() > 256
+            || payload.scope_id.len() > 256
+            || payload.resource_type.len() > 256
+            || payload.query_hash.len() > 256
+        {
+            return Err("cursor field is too large");
+        }
         Ok(payload)
     }
 }
@@ -134,6 +149,12 @@ pub(crate) fn parse_page_size(limit_param: Option<&str>) -> usize {
         Some(n) if n > 0 => n.min(MAX_PAGE_SIZE),
         _ => DEFAULT_PAGE_SIZE,
     }
+}
+
+/// Produces the canonical opaque digest used to bind a cursor to query
+/// semantics. The input is already canonicalized by the endpoint.
+pub(crate) fn query_hash(value: &str) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(value.as_bytes()))
 }
 
 /// Resolve a continuation against a deterministic, already-authorized ID
@@ -240,6 +261,20 @@ mod tests {
         let cfg = test_config();
         let result = cfg.decode_cursor("not-valid!!", "proj-1", "compute:server", "");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_rejects_oversized_cursor_before_processing() {
+        let cfg = test_config();
+        assert!(matches!(
+            cfg.decode_cursor(
+                &"a".repeat(MAX_CURSOR_LENGTH + 1),
+                "proj-1",
+                "compute:server",
+                ""
+            ),
+            Err("cursor is too large")
+        ));
     }
 
     #[test]

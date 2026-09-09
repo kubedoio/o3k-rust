@@ -88,6 +88,14 @@ impl PublicAddressAllocator {
         Ok(Self { root, pool })
     }
 
+    /// Returns the configured canonical allocation bounds.  The bounds are
+    /// configuration authority only; allocation state belongs to the durable
+    /// store when a production repository is configured.
+    #[must_use]
+    pub fn pool_bounds(&self) -> (Ipv4Addr, Ipv4Addr) {
+        (self.pool.first_usable, self.pool.last_usable)
+    }
+
     pub fn allocate(
         &self,
         project_id: &str,

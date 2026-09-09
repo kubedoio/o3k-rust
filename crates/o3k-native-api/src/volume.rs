@@ -62,6 +62,7 @@ pub struct VolumeItem {
 // ── Query parameters ──────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListQuery {
     pub limit: Option<String>,
     pub cursor: Option<String>,
@@ -77,7 +78,7 @@ pub struct VolumeListResponse {
 }
 
 fn volume_to_native_v1(vol: &VolumeItem) -> serde_json::Value {
-    let mut body = serde_json::json!({
+    let body = serde_json::json!({
         "api_version": "o3k.io/v1",
         "kind": "volume:volume",
         "metadata": {
@@ -89,7 +90,10 @@ fn volume_to_native_v1(vol: &VolumeItem) -> serde_json::Value {
         "spec": {
             "name": vol.name,
             "description": vol.description,
-            "metadata": vol.metadata,
+            // Metadata is controller/provider-backed in some deployments;
+            // apply the same recursive deny-by-name boundary as generic
+            // native resources before returning it to tenants.
+            "metadata": crate::resource::public_value(vol.metadata.clone()),
             "availability_zone": vol.availability_zone,
             "size_bytes": vol.size_bytes,
             "volume_type": vol.volume_type,
@@ -98,11 +102,6 @@ fn volume_to_native_v1(vol: &VolumeItem) -> serde_json::Value {
             "state": vol.state,
         }
     });
-    for key in ["migration_id", "source_key"] {
-        if let Some(metadata_value) = vol.metadata.get(key).and_then(serde_json::Value::as_str) {
-            body["metadata"][key] = metadata_value.into();
-        }
-    }
     body
 }
 
@@ -254,5 +253,25 @@ mod envelope_tests {
             generation: 1,
         });
         crate::assert_resource_envelope_schema(&value);
+    }
+
+    #[test]
+    fn volume_projection_does_not_expose_provider_or_secret_metadata() {
+        let value = volume_to_native_v1(&VolumeItem {
+            id: "volume-a".into(),
+            project_id: "project-a".into(),
+            name: "volume-a".into(),
+            description: String::new(),
+            metadata: serde_json::json!({"chap_secret":"pw", "provider_path":"/dev/x", "safe":"ok"}),
+            availability_zone: None,
+            size_bytes: 1,
+            volume_type: "lvm".into(),
+            state: "available".into(),
+            created_at: None,
+            generation: 1,
+        });
+        assert_eq!(value["spec"]["metadata"]["safe"], "ok");
+        assert!(value["spec"]["metadata"].get("chap_secret").is_none());
+        assert!(value["spec"]["metadata"].get("provider_path").is_none());
     }
 }

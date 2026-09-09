@@ -27,6 +27,7 @@ pub(crate) struct DaemonCreateResolver {
     pub(crate) network_external_realm_id: Option<Uuid>,
     pub(crate) network_agent: Option<o3k_network::NetworkAgentIdentity>,
     pub(crate) public_allocator: Option<Arc<o3k_network::PublicAddressAllocator>>,
+    pub(crate) public_address_store: Option<Arc<dyn o3k_store::PublicAddressRepository>>,
 }
 
 impl DaemonCreateResolver {
@@ -110,21 +111,30 @@ impl DaemonCreateResolver {
                 .network_agent
                 .as_ref()
                 .map_or(agent_id, |agent| agent.agent_id.as_str());
-            let public_address = self
-                .public_allocator
-                .as_ref()
-                .map(|allocator| {
-                    allocator
-                        .list(&request.project_id)
-                        .map_err(|_| ProviderError::InvalidRequest)
-                })
-                .transpose()?
-                .and_then(|bindings| {
-                    bindings
-                        .into_iter()
-                        .find(|binding| binding.endpoint_id == Some(port.id))
-                        .map(|binding| binding.public_address)
-                });
+            let public_address = if let Some(store) = self.public_address_store.as_ref() {
+                store
+                    .list_public_addresses(&request.project_id, 10_000)
+                    .await
+                    .map_err(|_| ProviderError::InvalidRequest)?
+                    .into_iter()
+                    .find(|binding| binding.endpoint_id == Some(port.id))
+                    .map(|binding| binding.public_address)
+            } else {
+                self.public_allocator
+                    .as_ref()
+                    .map(|allocator| {
+                        allocator
+                            .list(&request.project_id)
+                            .map_err(|_| ProviderError::InvalidRequest)
+                    })
+                    .transpose()?
+                    .and_then(|bindings| {
+                        bindings
+                            .into_iter()
+                            .find(|binding| binding.endpoint_id == Some(port.id))
+                            .map(|binding| binding.public_address)
+                    })
+            };
             let (policies, policy_defaults) = if self.network_dispatcher.is_some() {
                 let policies = self
                     .network

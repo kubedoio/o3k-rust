@@ -3,19 +3,163 @@ use uuid::Uuid;
 
 use crate::domain::error::StoreError;
 use crate::domain::records::{
-    CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
-    CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord,
-    CanonicalNetworkRecord, CanonicalRealmBindingRecord, FederatedBindingRecord,
-    ImageMetadataRecord, KeypairRecord, KeystoneDomainRecord, KeystoneEndpointRecord,
-    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
-    KeystoneServiceRecord, KeystoneUserRecord, NetworkAddressAllocationRecord, NetworkIntentRecord,
-    NetworkRecord, OperatorAssignmentRecord, PlacementAllocationRecord, PlacementIntentRecord,
-    PlacementInventoryRecord, PlacementProviderRecord, PlacementReconcileRecord, PortRecord,
-    ResourceRecord, SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord,
-    SubnetRecord, VolumeAttachmentRecord,
+    AuditEventRecord, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
+    CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord,
+    CanonicalNetworkPolicyRecord, CanonicalNetworkRecord, CanonicalRealmBindingRecord,
+    FederatedBindingRecord, ImageMetadataRecord, KeypairRecord, KeystoneDomainRecord,
+    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
+    MeteringAggregate, MeteringEventRecord, NetworkAddressAllocationRecord, NetworkIntentRecord,
+    NetworkRecord, OperatorAssignmentRecord, PlacementAllocationRecord, PlacementCapacityRecord,
+    PlacementIntentRecord, PlacementInventoryRecord, PlacementProviderRecord,
+    PlacementReconcileRecord, PortRecord, PublicAddressBindingRecord, ResourceRecord,
+    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord,
+    VolumeAttachmentRecord,
 };
 use crate::port::durable::DurableStore;
 use crate::quota::QuotaRepository;
+
+/// Durable metering authority. Events are append-only, idempotent by event ID,
+/// and aggregate queries are bounded and scoped in SQL.
+#[async_trait]
+pub trait MeteringRepository: Send + Sync {
+    async fn append_metering_event(&self, event: &MeteringEventRecord) -> Result<(), StoreError>;
+    async fn aggregate_metering_events(
+        &self,
+        project_id: &str,
+        meter_id: &str,
+        effective_from: &str,
+        effective_to: &str,
+        limit: usize,
+    ) -> Result<MeteringAggregate, StoreError>;
+}
+
+/// Durable audit authority. Implementations enforce scope in SQL and return
+/// at most `limit` rows; callers must not use this as an unbounded history API.
+#[async_trait]
+pub trait AuditRepository: Send + Sync {
+    async fn append_audit_event(&self, event: &AuditEventRecord) -> Result<(), StoreError>;
+    /// Deletes at most `limit` events older than the supplied canonical
+    /// timestamp. Retention is deliberately a bounded maintenance primitive;
+    /// callers must repeat it until zero rows are returned.
+    async fn prune_audit_events_before(
+        &self,
+        timestamp: &str,
+        limit: usize,
+    ) -> Result<usize, StoreError>;
+    async fn list_audit_events_page(
+        &self,
+        effective_scope: &str,
+        after_event_id: Option<&str>,
+        limit: usize,
+        filters: &AuditEventFilters,
+    ) -> Result<Vec<AuditEventRecord>, StoreError>;
+    async fn list_audit_events_system_page(
+        &self,
+        scope: Option<&str>,
+        after_event_id: Option<&str>,
+        limit: usize,
+        filters: &AuditEventFilters,
+    ) -> Result<Vec<AuditEventRecord>, StoreError>;
+    async fn get_audit_event(
+        &self,
+        effective_scope: &str,
+        event_id: &str,
+    ) -> Result<Option<AuditEventRecord>, StoreError>;
+    async fn get_audit_event_system(
+        &self,
+        event_id: &str,
+    ) -> Result<Option<AuditEventRecord>, StoreError>;
+}
+
+/// Indexed public predicates for bounded audit investigation. Effective scope
+/// is supplied separately by the authorization boundary and cannot be chosen
+/// by a tenant query.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditEventFilters {
+    pub event_id: Option<String>,
+    pub timestamp_from: Option<String>,
+    pub timestamp_to: Option<String>,
+    pub principal_id: Option<String>,
+    pub service_namespace: Option<String>,
+    pub action: Option<String>,
+    pub outcome: Option<String>,
+    pub resource_type: Option<String>,
+    pub resource_id: Option<String>,
+    pub operation_id: Option<String>,
+    pub request_id: Option<String>,
+    pub audit_id: Option<String>,
+}
+
+/// Bounded governance reads over canonical IAM records. This is separate
+/// from historical identity bootstrap snapshot APIs.
+#[async_trait]
+pub trait GovernanceRepository: Send + Sync {
+    /// Atomically accepts a role assignment, its canonical operation and
+    /// durable audit admission. Existing idempotency keys are replayed only
+    /// when their fingerprint and assignment identity match.
+    async fn mutate_role_assignment(
+        &self,
+        assignment: &KeystoneRoleAssignmentRecord,
+        operation: &crate::OperationRecord,
+        canonical: &crate::CanonicalOperationRecord,
+        request: &crate::IdempotencyReservationRequest,
+        audit: &AuditEventRecord,
+    ) -> Result<crate::IdempotencyReservation, StoreError>;
+    async fn mutate_role_assignment_removal(
+        &self,
+        assignment: &KeystoneRoleAssignmentRecord,
+        operation: &crate::OperationRecord,
+        canonical: &crate::CanonicalOperationRecord,
+        request: &crate::IdempotencyReservationRequest,
+        audit: &AuditEventRecord,
+    ) -> Result<crate::IdempotencyReservation, StoreError>;
+    /// Atomically establishes a project role assignment and returns the
+    /// canonical durable row.  Repeating the same principal/project/role
+    /// tuple converges on the existing row; callers must use the returned ID
+    /// rather than treating the request ID as authority.
+    async fn ensure_role_assignment(
+        &self,
+        assignment: &KeystoneRoleAssignmentRecord,
+    ) -> Result<KeystoneRoleAssignmentRecord, StoreError>;
+    async fn get_role_assignment(
+        &self,
+        id: &str,
+    ) -> Result<Option<KeystoneRoleAssignmentRecord>, StoreError>;
+    /// Removes one canonical assignment. The tuple is required so a caller
+    /// cannot delete an unrelated assignment by guessing an opaque row id.
+    async fn remove_role_assignment(
+        &self,
+        principal_id: &str,
+        project_id: &str,
+        role_id: &str,
+    ) -> Result<bool, StoreError>;
+    async fn get_project(&self, id: &str) -> Result<Option<KeystoneProjectRecord>, StoreError>;
+    async fn get_principal(&self, id: &str) -> Result<Option<KeystoneUserRecord>, StoreError>;
+    async fn list_projects_page(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<KeystoneProjectRecord>, StoreError>;
+    async fn list_principals_page(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<KeystoneUserRecord>, StoreError>;
+    async fn list_role_assignments_page(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<KeystoneRoleAssignmentRecord>, StoreError>;
+    /// Returns the canonical role catalog in stable ID order. This is a
+    /// bounded page so native governance cannot turn IAM cardinality into an
+    /// unbounded in-memory collection.
+    async fn list_roles_page(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<KeystoneRoleRecord>, StoreError>;
+}
 
 /// Durable Keystone-compatible identity records used by the identity
 /// application service: deterministic bootstrap seeding (upserts) and the
@@ -186,6 +330,46 @@ pub trait VolumeAttachmentRepository: Send + Sync {
     ) -> Result<(), StoreError>;
 }
 
+/// Durable canonical public-address authority. Provider realization must use
+/// this repository as its source of tenant-visible allocation state.
+#[async_trait]
+pub trait PublicAddressRepository: Send + Sync {
+    async fn allocate_public_address(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        allocation_id: Uuid,
+        first_usable: std::net::Ipv4Addr,
+        last_usable: std::net::Ipv4Addr,
+    ) -> Result<PublicAddressBindingRecord, StoreError>;
+    async fn associate_public_address(
+        &self,
+        project_id: &str,
+        allocation_id: Uuid,
+        endpoint_id: Uuid,
+    ) -> Result<PublicAddressBindingRecord, StoreError>;
+    async fn disassociate_public_address(
+        &self,
+        project_id: &str,
+        allocation_id: Uuid,
+    ) -> Result<PublicAddressBindingRecord, StoreError>;
+    async fn release_public_address(
+        &self,
+        project_id: &str,
+        allocation_id: Uuid,
+    ) -> Result<(), StoreError>;
+    async fn get_public_address(
+        &self,
+        project_id: &str,
+        allocation_id: Uuid,
+    ) -> Result<Option<PublicAddressBindingRecord>, StoreError>;
+    async fn list_public_addresses(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PublicAddressBindingRecord>, StoreError>;
+}
+
 /// Durable Glance-compatible image metadata owned by the image service:
 /// project ownership, format/visibility, and the size/checksum sealed by the
 /// queued -> active transition. The bounded artifact bytes stay in the
@@ -195,8 +379,26 @@ pub trait VolumeAttachmentRepository: Send + Sync {
 /// persistence surface. Application code depends on this trait instead of on
 /// the concrete `SqliteStore` adapter.
 #[async_trait]
-pub trait ImageRepository: Send + Sync + QuotaRepository {
+pub trait ImageRepository: Send + Sync + DurableStore + QuotaRepository {
+    /// Atomically admits (or replays) an image mutation in the canonical
+    /// operation/idempotency tables.  Image metadata remains authoritative in
+    /// this service-specific repository; callers must perform this admission
+    /// before writing artifact bytes or changing image state.
+    async fn create_or_replay_canonical_image_operation(
+        &self,
+        operation: &crate::OperationRecord,
+        canonical: &crate::CanonicalOperationRecord,
+        request: &crate::IdempotencyReservationRequest,
+    ) -> Result<crate::IdempotencyReservation, StoreError>;
     async fn insert_image(&self, image: &ImageMetadataRecord) -> Result<(), StoreError>;
+    /// Atomically persists image metadata and its secret-safe mutation audit.
+    /// The audit row is part of the same database transaction as the image
+    /// insert, so a successful image mutation cannot become unaudited.
+    async fn insert_image_with_audit(
+        &self,
+        image: &ImageMetadataRecord,
+        audit: &AuditEventRecord,
+    ) -> Result<(), StoreError>;
     async fn list_images(&self, project_id: &str) -> Result<Vec<ImageMetadataRecord>, StoreError>;
     async fn list_images_page(
         &self,
@@ -216,7 +418,23 @@ pub trait ImageRepository: Send + Sync + QuotaRepository {
         size: u64,
         checksum: &str,
     ) -> Result<ImageMetadataRecord, StoreError>;
+    /// Atomically seals an image and records its mutation audit.
+    async fn activate_image_with_audit(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        size: u64,
+        checksum: &str,
+        audit: &AuditEventRecord,
+    ) -> Result<ImageMetadataRecord, StoreError>;
     async fn delete_image(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError>;
+    /// Atomically tombstones an image and records its mutation audit.
+    async fn delete_image_with_audit(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        audit: &AuditEventRecord,
+    ) -> Result<(), StoreError>;
 }
 
 /// Durable Neutron-compatible network/subnet/port metadata owned by the
@@ -243,6 +461,13 @@ pub trait NetworkRepository:
         &self,
         network: &CanonicalNetworkRecord,
     ) -> Result<(), StoreError>;
+    /// Atomically commits canonical network authority and its successful
+    /// mutation audit projection in one database transaction.
+    async fn insert_canonical_network_with_audit(
+        &self,
+        network: &CanonicalNetworkRecord,
+        audit: &AuditEventRecord,
+    ) -> Result<(), StoreError>;
     async fn get_canonical_network(
         &self,
         project_id: &str,
@@ -251,6 +476,12 @@ pub trait NetworkRepository:
     async fn list_canonical_networks(
         &self,
         project_id: &str,
+    ) -> Result<Vec<CanonicalNetworkRecord>, StoreError>;
+    async fn list_canonical_networks_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<CanonicalNetworkRecord>, StoreError>;
     async fn update_canonical_network(
         &self,
@@ -337,6 +568,12 @@ pub trait NetworkRepository:
     async fn insert_canonical_realm(
         &self,
         realm: &CanonicalAddressRealmRecord,
+    ) -> Result<(), StoreError>;
+    /// Atomically commits an address-realm mutation and its successful audit.
+    async fn insert_canonical_realm_with_audit(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+        audit: &AuditEventRecord,
     ) -> Result<(), StoreError>;
     async fn get_canonical_realm(
         &self,
@@ -454,6 +691,15 @@ pub trait NetworkRepository:
         &self,
         project_id: &str,
         network_id: &Uuid,
+    ) -> Result<(), StoreError>;
+    /// Atomically removes canonical network authority, tombstones its generic
+    /// projection, and persists the secret-safe deletion audit.
+    async fn delete_canonical_network_with_audit(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+        operation_id: Uuid,
+        audit: &AuditEventRecord,
     ) -> Result<(), StoreError>;
     async fn backfill_canonical_network_state(&self) -> Result<(), StoreError>;
     async fn allocate_network_address(
@@ -609,6 +855,12 @@ pub trait PlacementRepository: Send + Sync {
         provider_id: &str,
     ) -> Result<Option<PlacementProviderRecord>, StoreError>;
     async fn list_providers(&self) -> Result<Vec<PlacementProviderRecord>, StoreError>;
+    /// Aggregate capacity in SQL. The limit bounds the number of resource
+    /// classes returned and prevents provider/inventory fan-out in callers.
+    async fn capacity_summary(
+        &self,
+        limit: usize,
+    ) -> Result<(Vec<PlacementCapacityRecord>, u64, u64), StoreError>;
     async fn register_provider(
         &self,
         node_id: &str,

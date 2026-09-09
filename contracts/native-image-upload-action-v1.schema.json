@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-image-upload-action-v1.schema.json",
+  "title": "O3K native image upload action v1",
+  "description": "The action request body is raw bounded image bytes, not JSON. The HTTP Content-Type MUST be application/octet-stream. This schema is the machine-readable description of the byte stream; the bytes are validated by the image authority.",
+  "$comment": "POST /o3k/v1/image/images/{id}/actions/UploadImage with Idempotency-Key and application/octet-stream. The native router bounds the body to 1048576 bytes in the portable profile; deployment-specific lower bounds remain valid. No caller-supplied owner, resource ID, provider ID, or operation ID is accepted.",
+  "type": "string",
+  "contentMediaType": "application/octet-stream",
+  "maxLength": 1048576
+}

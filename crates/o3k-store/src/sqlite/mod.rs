@@ -6,12 +6,16 @@
 use sqlx::SqlitePool;
 use std::sync::Arc;
 
+mod audit;
 mod core;
+mod governance;
 mod helpers;
 mod identity;
 mod image;
+mod metering;
 mod network;
 mod placement;
+mod public_address;
 mod relationship;
 mod volume_attachment;
 

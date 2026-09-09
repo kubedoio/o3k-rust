@@ -286,6 +286,16 @@ Cursor rules:
 
 Default/max limits are implementation-profile values declared before advertisement and covered by tests.
 
+The generic repository-backed native collection slice advertises only the
+following query vocabulary in v1: `order=id.asc` (the default), and at most
+one `filter=observed_state=<canonical O3K state>`. The predicate is evaluated
+against the durable resource `observed_state` column, with project scope,
+continuation, and limit applied in the repository query. Provider IDs,
+provider state, arbitrary spec fields, and unregistered filter names are not
+queryable. Resource-specific adapters may advertise additional filters only
+when their versioned resource schema and repository contract define bounded
+index-backed semantics.
+
 ## 12. Errors
 
 Native errors use `application/problem+json` and RFC 9457-compatible fields.

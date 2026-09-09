@@ -72,6 +72,12 @@ pub trait StorageRepository: super::DurableStore + Send + Sync {
         &self,
         project_id: &str,
     ) -> Result<Vec<VolumeAttachmentRecordV1>, StoreError>;
+    async fn list_volume_attachments_v1_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<VolumeAttachmentRecordV1>, StoreError>;
     async fn update_volume_attachment_v1(
         &self,
         expected_generation: u64,
@@ -433,6 +439,11 @@ impl StorageRepository for SqliteStore {
         after_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<VolumeRecord>, StoreError> {
+        if !(1..=1000).contains(&limit) {
+            return Err(StoreError::Corrupt(
+                "volume page limit outside 1..=1000".into(),
+            ));
+        }
         let limit = i64::try_from(limit)
             .map_err(|_| StoreError::Corrupt("volume page limit overflow".to_owned()))?;
         let rows = if let Some(after_id) = after_id {
@@ -534,6 +545,29 @@ impl StorageRepository for SqliteStore {
     ) -> Result<Vec<VolumeAttachmentRecordV1>, StoreError> {
         let rows = sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volume_attachments WHERE project_id = ? ORDER BY id")
             .bind(project_id).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(attachment_from_row).collect()
+    }
+
+    async fn list_volume_attachments_v1_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<VolumeAttachmentRecordV1>, StoreError> {
+        if !(1..=1000).contains(&limit) {
+            return Err(StoreError::Corrupt(
+                "attachment page limit outside 1..=1000".into(),
+            ));
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("attachment page limit overflow".to_owned()))?;
+        let rows = if let Some(after_id) = after_id {
+            sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volume_attachments WHERE project_id = ? AND state = 'attached' AND id > ? ORDER BY id LIMIT ?")
+                .bind(project_id).bind(after_id).bind(limit).fetch_all(&self.pool).await
+        } else {
+            sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volume_attachments WHERE project_id = ? AND state = 'attached' ORDER BY id LIMIT ?")
+                .bind(project_id).bind(limit).fetch_all(&self.pool).await
+        }.map_err(StoreError::Database)?;
         rows.iter().map(attachment_from_row).collect()
     }
 
@@ -758,6 +792,11 @@ impl StorageRepository for crate::PostgresStore {
         after_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<VolumeRecord>, StoreError> {
+        if !(1..=1000).contains(&limit) {
+            return Err(StoreError::Corrupt(
+                "volume page limit outside 1..=1000".into(),
+            ));
+        }
         let limit = i64::try_from(limit)
             .map_err(|_| StoreError::Corrupt("volume page limit overflow".to_owned()))?;
         let rows = if let Some(after_id) = after_id {
@@ -844,6 +883,29 @@ impl StorageRepository for crate::PostgresStore {
         project_id: &str,
     ) -> Result<Vec<VolumeAttachmentRecordV1>, StoreError> {
         sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volume_attachments WHERE project_id = $1 ORDER BY id").bind(project_id).fetch_all(&self.pool).await.map_err(StoreError::Database)?.iter().map(attachment_from_pg_row).collect()
+    }
+
+    async fn list_volume_attachments_v1_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<VolumeAttachmentRecordV1>, StoreError> {
+        if !(1..=1000).contains(&limit) {
+            return Err(StoreError::Corrupt(
+                "attachment page limit outside 1..=1000".into(),
+            ));
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("attachment page limit overflow".to_owned()))?;
+        let rows = if let Some(after_id) = after_id {
+            sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volume_attachments WHERE project_id = $1 AND state = 'attached' AND id > $2 ORDER BY id LIMIT $3")
+                .bind(project_id).bind(after_id).bind(limit).fetch_all(&self.pool).await
+        } else {
+            sqlx::query("SELECT id, project_id, generation, state, payload, created_at FROM native_volume_attachments WHERE project_id = $1 AND state = 'attached' ORDER BY id LIMIT $2")
+                .bind(project_id).bind(limit).fetch_all(&self.pool).await
+        }.map_err(StoreError::Database)?;
+        rows.iter().map(attachment_from_pg_row).collect()
     }
 
     async fn update_volume_attachment_v1(

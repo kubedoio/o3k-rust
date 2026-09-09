@@ -21,6 +21,9 @@ impl NetworkService {
         allocation_start: Option<Ipv4Addr>,
         allocation_end: Option<Ipv4Addr>,
     ) -> Result<SubnetRecord, NetworkError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| NetworkError::AuditUnavailable)?;
         let ns = ServiceNamespace::new("network")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
         let act = ActionId::new("network", "CreateSubnet").unwrap_or_else(|_| {
@@ -42,6 +45,12 @@ impl NetworkService {
             self.audit_sink.record(&event);
             return Err(NetworkError::Unauthorized);
         }
+        self.audit_mutation_admission(
+            auth,
+            ns.clone(),
+            act.clone(),
+            ResourceType::new("network", "subnet").map_err(|_| NetworkError::InvalidRequest)?,
+        )?;
         match self
             .create_subnet_for_project(
                 auth.effective_scope().id().as_str(),
@@ -349,12 +358,15 @@ impl NetworkService {
         cidr: Option<String>,
         ip_version: Option<u8>,
     ) -> Result<SubnetRecord, NetworkError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| NetworkError::AuditUnavailable)?;
         let action = ActionId::new("network", "UpdateSubnet").unwrap_or_else(|_| {
             ActionId::new_unchecked("network".to_owned(), "UpdateSubnet".to_owned())
         });
         let request = AuthorizationRequest {
             auth_context: auth,
-            action,
+            action: action.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("network", "subnet").map_err(|_| NetworkError::InvalidRequest)?,
                 ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
@@ -367,14 +379,31 @@ impl NetworkService {
         if network_id.is_some() || cidr.is_some() || ip_version.is_some_and(|v| v != 4) {
             return Err(NetworkError::InvalidRequest);
         }
-        self.update_subnet_for_project(
-            auth.effective_scope().id().as_str(),
-            id,
-            name,
-            gateway_ip,
-            enable_dhcp,
-        )
-        .await
+        let namespace = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let resource_type =
+            ResourceType::new("network", "subnet").map_err(|_| NetworkError::InvalidRequest)?;
+        self.audit_mutation_admission(auth, namespace.clone(), action, resource_type.clone())?;
+        let result = self
+            .update_subnet_for_project(
+                auth.effective_scope().id().as_str(),
+                id,
+                name,
+                gateway_ip,
+                enable_dhcp,
+            )
+            .await;
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            ActionId::new("network", "UpdateSubnet").unwrap_or_else(|_| {
+                ActionId::new_unchecked("network".to_owned(), "UpdateSubnet".to_owned())
+            }),
+            resource_type,
+            Some(id),
+            result.as_ref().map(|_| ()),
+        );
+        result
     }
 
     async fn update_subnet_for_project(
@@ -475,6 +504,9 @@ impl NetworkService {
     }
 
     pub async fn delete_subnet(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| NetworkError::AuditUnavailable)?;
         let ns = ServiceNamespace::new("network")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
         let act = ActionId::new("network", "DeleteSubnet").unwrap_or_else(|_| {
@@ -497,6 +529,12 @@ impl NetworkService {
             self.audit_sink.record(&event);
             return Err(NetworkError::NotFound);
         }
+        self.audit_mutation_admission(
+            auth,
+            ns.clone(),
+            act.clone(),
+            ResourceType::new("network", "subnet").map_err(|_| NetworkError::InvalidRequest)?,
+        )?;
         match self
             .delete_subnet_for_project(auth.effective_scope().id().as_str(), id)
             .await

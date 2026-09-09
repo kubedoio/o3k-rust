@@ -432,6 +432,18 @@ impl PlacementLedger {
             .map_err(map_store_error)?;
         records.iter().map(provider_from_record).collect()
     }
+
+    /// Return a database-computed capacity projection without materializing
+    /// provider inventories or allocations in the process.
+    pub async fn capacity_summary(
+        &self,
+        limit: usize,
+    ) -> Result<(Vec<o3k_store::PlacementCapacityRecord>, u64, u64), PlacementError> {
+        self.repository
+            .capacity_summary(limit)
+            .await
+            .map_err(map_store_error)
+    }
 }
 
 fn provider_state_as_str(state: ProviderState) -> &'static str {
@@ -1071,6 +1083,13 @@ mod tests {
             &self,
         ) -> Result<Vec<o3k_store::PlacementProviderRecord>, o3k_store::StoreError> {
             self.inner.list_providers().await
+        }
+        async fn capacity_summary(
+            &self,
+            limit: usize,
+        ) -> Result<(Vec<o3k_store::PlacementCapacityRecord>, u64, u64), o3k_store::StoreError>
+        {
+            self.inner.capacity_summary(limit).await
         }
         async fn register_provider(
             &self,

@@ -9,6 +9,7 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM resources WHERE id = NEW.resource_id FOR KEY SHARE)
        AND NOT EXISTS (SELECT 1 FROM canonical_networks WHERE id = NEW.resource_id FOR KEY SHARE)
        AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE id = NEW.resource_id FOR KEY SHARE)
+       AND NOT EXISTS (SELECT 1 FROM keystone_role_assignments WHERE id = NEW.resource_id FOR KEY SHARE)
     THEN
         RAISE EXCEPTION 'operation resource not found';
     END IF;
@@ -32,7 +33,7 @@ BEGIN
       AND NOT EXISTS (
           SELECT 1 FROM canonical_operation_metadata metadata
           WHERE metadata.operation_id = operations.id
-            AND metadata.resource_type IN ('network:network', 'network:address_realm')
+            AND metadata.resource_type IN ('network:network', 'network:address_realm', 'iam:role_assignment')
       );
     RETURN OLD;
 END;

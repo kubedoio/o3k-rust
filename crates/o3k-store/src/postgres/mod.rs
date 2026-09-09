@@ -12,13 +12,17 @@ pub struct PostgresStore {
     pub(crate) pool: PgPool,
 }
 
+mod audit;
 mod compute;
 mod core;
+mod governance;
 mod helpers;
 mod identity;
 mod image;
+mod metering;
 mod network;
 mod placement;
+mod public_address;
 mod quota;
 mod relationship;
 mod volume_attachment;
@@ -88,6 +92,7 @@ impl PostgresStore {
         sqlx::query(
             "TRUNCATE TABLE
                 resources, operations, canonical_operation_metadata, idempotency_reservations,
+                audit_events,
                 provider_refs, observation_watermarks,
                 keypairs, server_keypairs, agent_commands, artifact_transfers,
                 image_overlay_ownership, volume_attachments,

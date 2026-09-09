@@ -65,6 +65,11 @@ pub(crate) fn image_error(error: ImageError) -> axum::response::Response {
             "Unauthorized",
             "The request has not been authenticated.",
         ),
+        ImageError::AuditUnavailable => keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "audit persistence is unavailable",
+        ),
         ImageError::NotFound => {
             keystone_error(StatusCode::NOT_FOUND, "Not Found", "image was not found")
         }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use o3k_native_api::error::NativeReadError;
+use o3k_native_api::{error::NativeReadError, operation::OperationFilters};
 use o3k_store::DurableStore;
 use uuid::Uuid;
 
@@ -18,31 +18,6 @@ impl o3k_native_api::operation::OperationReader for OperationReaderAdapter {
         auth: &o3k_kernel::AuthContext,
         id: Uuid,
     ) -> Result<o3k_kernel::Operation, NativeReadError> {
-        // Establish non-disclosure from the authoritative durable resource
-        // owner before touching canonical metadata.  A corrupt foreign row
-        // must be indistinguishable from a missing operation.
-        let durable = self.store.get_operation(id).await.map_err(|error| {
-            if matches!(error, o3k_store::StoreError::OperationNotFound) {
-                NativeReadError::NotFound
-            } else {
-                tracing::error!(%error, operation_id = %id, "native operation owner lookup failed");
-                NativeReadError::Internal
-            }
-        })?;
-        let resource_id = durable.resource_id;
-        let resource = self.store.get_resource(resource_id).await.map_err(|error| {
-            if matches!(error, o3k_store::StoreError::ResourceNotFound) {
-                NativeReadError::NotFound
-            } else {
-                tracing::error!(%error, operation_id = %id, "native operation resource lookup failed");
-                NativeReadError::Internal
-            }
-        })?;
-        if resource.project_id != auth.effective_scope().id().as_str()
-            || auth.effective_scope().kind() != o3k_kernel::ScopeKind::Project
-        {
-            return Err(NativeReadError::NotFound);
-        }
         let record = self
             .store
             .get_canonical_operation(id)
@@ -59,7 +34,11 @@ impl o3k_native_api::operation::OperationReader for OperationReaderAdapter {
             tracing::error!(%error, operation_id = %id, "invalid canonical operation metadata");
             NativeReadError::Internal
         })?;
-        if operation.owner_scope.kind() != auth.effective_scope().kind()
+        if auth.effective_scope().kind() == o3k_kernel::ScopeKind::System {
+            return Ok(operation);
+        }
+        if auth.effective_scope().kind() != o3k_kernel::ScopeKind::Project
+            || operation.owner_scope.kind() != auth.effective_scope().kind()
             || operation.owner_scope.id() != auth.effective_scope().id()
         {
             return Err(NativeReadError::NotFound);
@@ -72,19 +51,38 @@ impl o3k_native_api::operation::OperationReader for OperationReaderAdapter {
         auth: &o3k_kernel::AuthContext,
         after_id: Option<Uuid>,
         limit: usize,
+        filters: &OperationFilters,
+        scope: Option<&str>,
     ) -> Result<Vec<o3k_kernel::Operation>, NativeReadError> {
-        if auth.effective_scope().kind() != o3k_kernel::ScopeKind::Project {
+        let limit = u32::try_from(limit).map_err(|_| NativeReadError::Internal)?;
+        let canonical_filters = o3k_store::CanonicalOperationFilters {
+            service: filters.service.clone(),
+            action: filters.action.clone(),
+            state: filters.state.clone(),
+        };
+        let records = if auth.effective_scope().kind() == o3k_kernel::ScopeKind::System {
+            self.store
+                .list_canonical_operations_system_page(scope, after_id, limit, &canonical_filters)
+                .await
+        } else if auth.effective_scope().kind() == o3k_kernel::ScopeKind::Project {
+            if scope.is_some() {
+                return Err(NativeReadError::Forbidden);
+            }
+            self.store
+                .list_canonical_operations_filtered_page(
+                    auth.effective_scope().id().as_str(),
+                    after_id,
+                    limit,
+                    &canonical_filters,
+                )
+                .await
+        } else {
             return Err(NativeReadError::Forbidden);
         }
-        let limit = u32::try_from(limit).map_err(|_| NativeReadError::Internal)?;
-        let records = self
-            .store
-            .list_canonical_operations_page(auth.effective_scope().id().as_str(), after_id, limit)
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, "native operation collection failed");
-                NativeReadError::Internal
-            })?;
+        .map_err(|error| {
+            tracing::error!(%error, "native operation collection failed");
+            NativeReadError::Internal
+        })?;
         records
             .into_iter()
             .map(|record| {
@@ -242,7 +240,8 @@ mod operation_visibility_tests {
             None,
         )
         .expect("test manifest registry is valid")
-        .with_operation_reader(reader);
+        .with_operation_reader(reader)
+        .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
         let app = o3k_api::router_with_state(o3k_api::AppState::new().with_native_api(native));
 
         let list_request = |project: &str| {

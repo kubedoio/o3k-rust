@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -380,6 +380,18 @@ pub struct NetworkAddressAllocationRecord {
     pub address: Ipv4Addr,
 }
 
+/// Canonical public address binding owned by O3K; provider realization is not
+/// represented here and cannot become tenant-visible authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicAddressBindingRecord {
+    pub allocation_id: Uuid,
+    pub operation_id: String,
+    pub project_id: String,
+    pub public_address: Ipv4Addr,
+    pub endpoint_id: Option<Uuid>,
+    pub generation: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacementInventoryRecord {
     pub resource_class: String,
@@ -419,6 +431,18 @@ pub struct PlacementProviderRecord {
     pub generation: u64,
     pub inventories: Vec<PlacementInventoryRecord>,
     pub allocations: Vec<PlacementAllocationRecord>,
+}
+
+/// Database-computed placement capacity projection.  This deliberately omits
+/// provider identity and inventory rows so diagnostics can aggregate at the
+/// SQL boundary without materializing every provider.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementCapacityRecord {
+    pub resource_class: String,
+    pub total: u64,
+    pub reserved: u64,
+    pub used: u64,
+    pub available: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -566,6 +590,171 @@ pub struct ResourceRecord {
     pub desired_state: String,
     pub observed_state: String,
     pub provider_id: Option<String>,
+}
+
+/// A durable, canonical metering observation. Events are append-only and
+/// identified by the producer supplied event ID; retries of the same event
+/// are idempotent while a conflicting payload is rejected by the repository.
+/// The record intentionally contains no provider labels or telemetry payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeteringEventRecord {
+    pub event_id: Uuid,
+    pub project_id: String,
+    pub meter_id: String,
+    pub resource_id: Option<Uuid>,
+    pub quantity: u64,
+    pub unit: String,
+    pub effective_at: String,
+    pub recorded_at: String,
+    pub source: String,
+    pub payload_fingerprint: String,
+}
+
+impl MeteringEventRecord {
+    /// Build the only lifecycle observation currently emitted by the store.
+    /// The identity is deterministic, so retries, restart recovery, and
+    /// duplicate reconciliation cannot double-count a transition.
+    pub fn resource_lifecycle(resource: &ResourceRecord, transition: &str) -> Self {
+        // Deletion is a terminal lifecycle transition for a resource ID.  Do
+        // not include the mutable generation in its event identity: repeated
+        // reconciliation/observation after deletion must be an idempotent
+        // replay, rather than manufacturing one usage event per poll.  Other
+        // transitions retain generation so a legitimate revive/import cycle
+        // remains distinguishable.
+        let generation = if transition.eq_ignore_ascii_case("deleted") {
+            "terminal".to_owned()
+        } else {
+            resource.generation.to_string()
+        };
+        let identity = format!(
+            "resource-lifecycle:{}:{}:{}:{}:{}",
+            resource.project_id, resource.kind, resource.id, generation, transition
+        );
+        let event_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, identity.as_bytes());
+        let effective_at = Utc::now().to_rfc3339();
+        Self {
+            event_id,
+            project_id: resource.project_id.clone(),
+            meter_id: format!("{}:lifecycle_{}", resource.kind, transition),
+            resource_id: Some(resource.id),
+            quantity: 1,
+            unit: "event".to_owned(),
+            effective_at: effective_at.clone(),
+            recorded_at: effective_at,
+            source: "o3k-resource-lifecycle".to_owned(),
+            payload_fingerprint: identity,
+        }
+    }
+}
+
+#[cfg(test)]
+mod metering_event_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_terminal_observation_has_stable_identity() {
+        let resource = ResourceRecord {
+            id: Uuid::new_v4(),
+            kind: "compute.server".into(),
+            project_id: "project-a".into(),
+            generation: 4,
+            observed_generation: 4,
+            desired_state: "deleted".into(),
+            observed_state: "deleted".into(),
+            provider_id: None,
+        };
+        let first = MeteringEventRecord::resource_lifecycle(&resource, "deleted");
+        let mut replay = resource.clone();
+        replay.generation = 5;
+        let second = MeteringEventRecord::resource_lifecycle(&replay, "deleted");
+        assert_eq!(first.event_id, second.event_id);
+        assert_eq!(first.payload_fingerprint, second.payload_fingerprint);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeteringAggregate {
+    pub project_id: String,
+    pub meter_id: String,
+    pub unit: String,
+    pub total_quantity: u64,
+    pub event_count: u64,
+    /// False when the repository bounded the event window at the requested
+    /// limit.  Consumers must not treat a bounded partial sum as complete.
+    pub complete: bool,
+    pub effective_from: String,
+    pub effective_to: String,
+}
+
+/// Secret-safe durable audit projection. Indexed fields are the query
+/// authority; the serialized event is retained only as a validated projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditEventRecord {
+    pub event_id: String,
+    pub timestamp: String,
+    pub request_id: String,
+    pub audit_id: String,
+    pub principal_id: String,
+    pub effective_scope: String,
+    pub service_namespace: String,
+    pub action: String,
+    pub resource_type: Option<String>,
+    pub resource_id: Option<String>,
+    pub owner_scope: Option<String>,
+    pub operation_id: Option<Uuid>,
+    pub outcome: String,
+    pub reason_category: Option<String>,
+    pub event_json: String,
+}
+
+impl AuditEventRecord {
+    /// Converts the kernel event into its durable, secret-safe projection.
+    /// The kernel type is intentionally the only accepted input; arbitrary
+    /// request/provider payloads cannot enter the audit repository through
+    /// this conversion.
+    pub fn from_kernel_event(event: &o3k_kernel::AuditEvent) -> Result<Self, StoreError> {
+        if event
+            .reason_category
+            .as_ref()
+            .is_some_and(|v| v.len() > 512)
+        {
+            return Err(StoreError::Corrupt(
+                "audit reason category exceeds 512 bytes".into(),
+            ));
+        }
+        // `AuditEvent::reason_category` is public for compatibility and can
+        // therefore be populated without going through `with_reason`.  Do
+        // not persist that unchecked value: the durable representation must
+        // remain secret-safe even when a buggy caller constructs the kernel
+        // value directly.  `with_reason` applies the canonical bounded
+        // vocabulary (unknown values become `operation_failed`).
+        let sanitized_event = event
+            .reason_category
+            .as_deref()
+            .map_or_else(|| event.clone(), |reason| event.clone().with_reason(reason));
+        let event_json = serde_json::to_string(&sanitized_event)
+            .map_err(|_| StoreError::Corrupt("audit event serialization failed".into()))?;
+        if event_json.len() > 64 * 1024 {
+            return Err(StoreError::Corrupt("audit event exceeds 64 KiB".into()));
+        }
+        Ok(Self {
+            event_id: event.event_id.to_string(),
+            timestamp: event.timestamp.clone(),
+            request_id: event.request_id.clone(),
+            audit_id: event.audit_id.clone(),
+            principal_id: event.principal_id.to_string(),
+            effective_scope: event.effective_scope.to_string(),
+            service_namespace: event.service_namespace.to_string(),
+            action: event.action.to_string(),
+            resource_type: event.resource_type.as_ref().map(ToString::to_string),
+            resource_id: event.resource_id.as_ref().map(ToString::to_string),
+            owner_scope: event.owner_scope.as_ref().map(ToString::to_string),
+            operation_id: event.operation_id,
+            outcome: event.outcome.to_string(),
+            reason_category: sanitized_event.reason_category,
+            event_json,
+        })
+    }
 }
 
 pub struct ObservationUpdate<'a> {

@@ -11,7 +11,10 @@ impl RelationshipRepository for O3kStore {
         &self,
         record: &ResourceRelationshipRecord,
     ) -> Result<ResourceRelationshipRecord, StoreError> {
-        self.reserve_relationship(record).await
+        match self {
+            Self::Sqlite(s) => s.reserve_relationship(record).await,
+            Self::Postgres(s) => s.reserve_relationship(record).await,
+        }
     }
 
     async fn get_relationship(
@@ -19,14 +22,20 @@ impl RelationshipRepository for O3kStore {
         parent_resource_id: Uuid,
         slot: &str,
     ) -> Result<ResourceRelationshipRecord, StoreError> {
-        self.get_relationship(parent_resource_id, slot).await
+        match self {
+            Self::Sqlite(s) => s.get_relationship(parent_resource_id, slot).await,
+            Self::Postgres(s) => s.get_relationship(parent_resource_id, slot).await,
+        }
     }
 
     async fn list_relationships(
         &self,
         parent_resource_id: Uuid,
     ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
-        self.list_relationships(parent_resource_id).await
+        match self {
+            Self::Sqlite(s) => s.list_relationships(parent_resource_id).await,
+            Self::Postgres(s) => s.list_relationships(parent_resource_id).await,
+        }
     }
 
     async fn list_relationships_page(
@@ -35,8 +44,16 @@ impl RelationshipRepository for O3kStore {
         after_slot: Option<&str>,
         limit: u32,
     ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
-        self.list_relationships_page(parent_resource_id, after_slot, limit)
-            .await
+        match self {
+            Self::Sqlite(s) => {
+                s.list_relationships_page(parent_resource_id, after_slot, limit)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.list_relationships_page(parent_resource_id, after_slot, limit)
+                    .await
+            }
+        }
     }
 
     async fn bind_relationship(
@@ -46,13 +63,26 @@ impl RelationshipRepository for O3kStore {
         child_resource_id: Uuid,
         child_operation_id: Uuid,
     ) -> Result<ResourceRelationshipRecord, StoreError> {
-        self.bind_relationship(
-            parent_resource_id,
-            slot,
-            child_resource_id,
-            child_operation_id,
-        )
-        .await
+        match self {
+            Self::Sqlite(s) => {
+                s.bind_relationship(
+                    parent_resource_id,
+                    slot,
+                    child_resource_id,
+                    child_operation_id,
+                )
+                .await
+            }
+            Self::Postgres(s) => {
+                s.bind_relationship(
+                    parent_resource_id,
+                    slot,
+                    child_resource_id,
+                    child_operation_id,
+                )
+                .await
+            }
+        }
     }
 
     async fn set_relationship_state(
@@ -61,7 +91,15 @@ impl RelationshipRepository for O3kStore {
         slot: &str,
         state: &str,
     ) -> Result<ResourceRelationshipRecord, StoreError> {
-        self.set_relationship_state(parent_resource_id, slot, state)
-            .await
+        match self {
+            Self::Sqlite(s) => {
+                s.set_relationship_state(parent_resource_id, slot, state)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.set_relationship_state(parent_resource_id, slot, state)
+                    .await
+            }
+        }
     }
 }

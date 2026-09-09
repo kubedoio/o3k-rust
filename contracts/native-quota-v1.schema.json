@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-quota-v1.schema.json",
+  "title": "O3K Native Quota Dimensions",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["namespace", "resource", "limit", "unlimited", "in_use", "reserved", "total_consumed"],
+    "properties": {
+      "namespace": {"type": "string", "minLength": 1},
+      "resource": {"type": "string", "minLength": 1},
+      "limit": {"type": ["integer", "null"], "minimum": 0},
+      "unlimited": {"type": "boolean"},
+      "in_use": {"type": "integer", "minimum": 0},
+      "reserved": {"type": "integer", "minimum": 0},
+      "total_consumed": {"type": "integer", "minimum": 0}
+    }
+  }
+}

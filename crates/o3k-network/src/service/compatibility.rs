@@ -27,12 +27,93 @@ fn canonical_network_projection(network: o3k_store::CanonicalNetworkRecord) -> N
     }
 }
 
+fn network_error_reason_category(error: &NetworkError) -> &'static str {
+    match error {
+        NetworkError::AuditUnavailable => "audit_unavailable",
+        NetworkError::Unauthorized => "unauthorized",
+        NetworkError::NotFound => "not_found",
+        NetworkError::Conflict => "conflict",
+        NetworkError::InvalidRequest => "invalid_request",
+        NetworkError::QuotaExceeded { .. } => "quota_exceeded",
+        NetworkError::PoolExhausted => "pool_exhausted",
+        NetworkError::Store(_) => "store_error",
+        NetworkError::CorruptMetadata(_) => "corrupt_metadata",
+    }
+}
+
 impl NetworkService {
+    /// Authenticated compatibility mutations use the durable audit admission
+    /// path before changing the policy repository.  The compatibility API
+    /// already derives the effective project from AuthContext; this helper
+    /// deliberately does not accept a caller-selected project.
+    pub fn audit_security_group_mutation_admission(
+        &self,
+        auth: &AuthContext,
+        action_name: &str,
+        resource_name: &str,
+        resource_id: Option<Uuid>,
+    ) -> Result<(), NetworkError> {
+        let namespace =
+            ServiceNamespace::new("network").map_err(|_| NetworkError::InvalidRequest)?;
+        let action =
+            ActionId::new("network", action_name).map_err(|_| NetworkError::InvalidRequest)?;
+        let resource_type = ResourceType::new("network", resource_name)
+            .map_err(|_| NetworkError::InvalidRequest)?;
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| NetworkError::AuditUnavailable)?;
+        let event = AuditEvent::from_auth(auth, namespace, action, AuditOutcome::Allowed)
+            .with_resource(
+                resource_type,
+                resource_id.and_then(|id| ResourceId::new(id.to_string()).ok()),
+                Some(auth.effective_scope().clone()),
+            );
+        self.audit_sink
+            .record_checked(&event)
+            .map_err(|_| NetworkError::AuditUnavailable)
+    }
+
+    pub fn audit_security_group_mutation_result(
+        &self,
+        auth: &AuthContext,
+        action_name: &str,
+        resource_name: &str,
+        resource_id: Option<Uuid>,
+        result: Result<(), &NetworkError>,
+    ) {
+        let Ok(namespace) = ServiceNamespace::new("network") else {
+            return;
+        };
+        let Ok(action) = ActionId::new("network", action_name) else {
+            return;
+        };
+        let Ok(resource_type) = ResourceType::new("network", resource_name) else {
+            return;
+        };
+        let outcome = if result.is_ok() {
+            AuditOutcome::Succeeded
+        } else {
+            AuditOutcome::Failed
+        };
+        let mut event = AuditEvent::from_auth(auth, namespace, action, outcome).with_resource(
+            resource_type,
+            resource_id.and_then(|id| ResourceId::new(id.to_string()).ok()),
+            Some(auth.effective_scope().clone()),
+        );
+        if let Err(error) = result {
+            event = event.with_reason(network_error_reason_category(error));
+        }
+        self.audit_sink.record(&event);
+    }
+
     pub async fn create_network(
         &self,
         auth: &AuthContext,
         name: String,
     ) -> Result<NetworkRecord, NetworkError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| NetworkError::AuditUnavailable)?;
         let ns = ServiceNamespace::new("network")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
         let act = ActionId::new("network", "CreateNetwork").unwrap_or_else(|_| {
@@ -55,6 +136,12 @@ impl NetworkService {
             self.audit_sink.record(&event);
             return Err(NetworkError::Unauthorized);
         }
+        self.audit_mutation_admission(
+            auth,
+            ns.clone(),
+            act.clone(),
+            ResourceType::new("network", "network").map_err(|_| NetworkError::InvalidRequest)?,
+        )?;
         match self
             .create_network_for_project(auth.effective_scope().id().as_str(), name)
             .await
@@ -232,12 +319,28 @@ impl NetworkService {
         name: String,
         description: String,
     ) -> Result<o3k_store::SecurityGroupRecord, NetworkError> {
+        self.create_security_group_for_project_with_id(
+            project_id,
+            Uuid::now_v7(),
+            name,
+            description,
+        )
+        .await
+    }
+
+    pub async fn create_security_group_for_project_with_id(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        name: String,
+        description: String,
+    ) -> Result<o3k_store::SecurityGroupRecord, NetworkError> {
         if project_id.trim().is_empty() || name.trim().is_empty() {
             return Err(NetworkError::InvalidRequest);
         }
         let _guard = self.lock().await;
         let group = o3k_store::SecurityGroupRecord {
-            id: Uuid::now_v7(),
+            id,
             project_id: project_id.to_owned(),
             name,
             description,
@@ -363,6 +466,31 @@ impl NetworkService {
         port_max: Option<u16>,
         remote_ip_prefix: Option<String>,
     ) -> Result<o3k_store::SecurityGroupRuleRecord, NetworkError> {
+        self.create_security_group_rule_for_project_with_id(
+            project_id,
+            Uuid::now_v7(),
+            group_id,
+            direction,
+            protocol,
+            port_min,
+            port_max,
+            remote_ip_prefix,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_security_group_rule_for_project_with_id(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        group_id: Uuid,
+        direction: String,
+        protocol: String,
+        port_min: Option<u16>,
+        port_max: Option<u16>,
+        remote_ip_prefix: Option<String>,
+    ) -> Result<o3k_store::SecurityGroupRuleRecord, NetworkError> {
         let direction = parse_security_group_direction(&direction)?;
         let protocol_value = parse_security_group_protocol(&protocol)?;
         if matches!(protocol_value, NetworkProtocol::Icmp | NetworkProtocol::Any)
@@ -390,7 +518,7 @@ impl NetworkService {
             return Err(NetworkError::NotFound);
         }
         let rule = o3k_store::CanonicalNetworkPolicyRuleRecord {
-            id: Uuid::now_v7(),
+            id,
             policy_id: group_id,
             project_id: project_id.to_owned(),
             direction: match direction {
@@ -870,12 +998,21 @@ impl NetworkService {
         name: Option<String>,
         admin_state_up: Option<bool>,
     ) -> Result<NetworkRecord, NetworkError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| NetworkError::AuditUnavailable)?;
         let (namespace, action, resource_type) = self
             .authorize_canonical_action(auth, "UpdateNetwork", "network", Some(id), None)
             .await?;
         if name.as_deref().is_some_and(|value| value.trim().is_empty()) {
             return Err(NetworkError::InvalidRequest);
         }
+        self.audit_mutation_admission(
+            auth,
+            namespace.clone(),
+            action.clone(),
+            resource_type.clone(),
+        )?;
         let project_id = auth.effective_scope().id().as_str();
         let current = self
             .inner
@@ -905,6 +1042,9 @@ impl NetworkService {
     }
 
     pub async fn delete_network(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| NetworkError::AuditUnavailable)?;
         let ns = ServiceNamespace::new("network")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
         let act = ActionId::new("network", "DeleteNetwork").unwrap_or_else(|_| {
@@ -928,6 +1068,12 @@ impl NetworkService {
             self.audit_sink.record(&event);
             return Err(NetworkError::NotFound);
         }
+        self.audit_mutation_admission(
+            auth,
+            ns.clone(),
+            act.clone(),
+            ResourceType::new("network", "network").map_err(|_| NetworkError::InvalidRequest)?,
+        )?;
         match self
             .delete_network_for_project(auth.effective_scope().id().as_str(), id)
             .await

@@ -16,6 +16,9 @@ impl NetworkService {
         network_id: Uuid,
         name: String,
     ) -> Result<PortRecord, NetworkError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| NetworkError::AuditUnavailable)?;
         self.create_port_with_fixed_ip(auth, network_id, name, None)
             .await
     }
@@ -51,6 +54,12 @@ impl NetworkService {
             self.audit_sink.record(&event);
             return Err(NetworkError::Unauthorized);
         }
+        self.audit_mutation_admission(
+            auth,
+            ns.clone(),
+            act.clone(),
+            ResourceType::new("network", "port").map_err(|_| NetworkError::InvalidRequest)?,
+        )?;
         match self
             .create_port_for_project_with_fixed_ip(
                 auth.effective_scope().id().as_str(),
@@ -361,6 +370,12 @@ impl NetworkService {
             self.audit_sink.record(&event);
             return Err(NetworkError::NotFound);
         }
+        self.audit_mutation_admission(
+            auth,
+            ns.clone(),
+            act.clone(),
+            ResourceType::new("network", "port").map_err(|_| NetworkError::InvalidRequest)?,
+        )?;
         self.get_port_for_project(auth.effective_scope().id().as_str(), id)
             .await
     }
@@ -390,20 +405,43 @@ impl NetworkService {
 
     pub async fn update_port_name_for_project(
         &self,
-        project_id: &str,
+        auth: &AuthContext,
         id: Uuid,
         name: String,
     ) -> Result<PortRecord, NetworkError> {
+        let namespace = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let action = ActionId::new("network", "UpdatePort").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "UpdatePort".to_owned())
+        });
+        let resource_type =
+            ResourceType::new("network", "port").map_err(|_| NetworkError::InvalidRequest)?;
+        self.audit_mutation_admission(
+            auth,
+            namespace.clone(),
+            action.clone(),
+            resource_type.clone(),
+        )?;
+        let project_id = auth.effective_scope().id().as_str();
         let current = self.get_port_for_project(project_id, id).await?;
         if current.name.starts_with("o3k-server:") {
             return Err(NetworkError::Conflict);
         }
-        self.inner
+        let result = self
+            .inner
             .repository
             .update_port_name(project_id, &id, &name)
             .await
-            .map_err(map_store_error)?;
-        self.get_port_for_project(project_id, id).await
+            .map_err(map_store_error);
+        self.audit_canonical_result(
+            auth,
+            namespace,
+            action,
+            resource_type,
+            Some(id),
+            result.as_ref().map(|_| ()),
+        );
+        result
     }
 
     async fn project_canonical_port(
@@ -449,7 +487,24 @@ impl NetworkService {
     }
 
     pub async fn delete_port(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
-        self.authorize_delete_port(auth, id).await?;
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| NetworkError::AuditUnavailable)?;
+        let _port = self.authorize_delete_port(auth, id).await?;
+        let ns = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let act = ActionId::new("network", "DeletePort").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "DeletePort".to_owned())
+        });
+        // Compatibility deletion is a durable mutation as well.  Admission
+        // must be recorded before removing the canonical endpoint and its
+        // relations; a sink outage must never permit an unaudited delete.
+        self.audit_mutation_admission(
+            auth,
+            ns,
+            act,
+            ResourceType::new("network", "port").map_err(|_| NetworkError::InvalidRequest)?,
+        )?;
         match self
             .delete_port_for_project(auth.effective_scope().id().as_str(), id)
             .await

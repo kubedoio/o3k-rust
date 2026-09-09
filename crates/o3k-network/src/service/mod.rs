@@ -48,6 +48,8 @@ impl PortBindingState {
 
 #[derive(Debug, Error)]
 pub enum NetworkError {
+    #[error("audit persistence is unavailable")]
+    AuditUnavailable,
     #[error("unauthorized")]
     Unauthorized,
     #[error("network resource not found")]

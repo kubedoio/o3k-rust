@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/schemas/native/relationship-list-response/v1",
+  "title": "O3K Native Relationship List Response v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items", "next_cursor"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "slot",
+          "resource_type",
+          "ownership",
+          "state",
+          "parent_operation_id"
+        ],
+        "properties": {
+          "slot": {"type": "string", "minLength": 1},
+          "resource_type": {"type": "string", "minLength": 3},
+          "resource_id": {"type": ["string", "null"]},
+          "ownership": {"type": "string", "minLength": 1},
+          "state": {"type": "string", "minLength": 1},
+          "parent_operation_id": {"type": "string", "minLength": 1},
+          "child_operation_id": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "next_cursor": {"type": ["string", "null"]}
+  },
+  "x-o3k-contract-version": "v1",
+  "x-o3k-related-adr": "ADR-0173",
+  "x-o3k-related-spec": "SPEC-0030"
+}

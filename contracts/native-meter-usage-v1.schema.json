@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-meter-usage-v1.schema.json",
+  "title": "O3K Native Historical Meter Usage",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["meter_id", "unit", "total_quantity", "event_count", "effective_from", "effective_to", "complete", "authority"],
+  "properties": {
+    "meter_id": {"type": "string", "minLength": 1},
+    "unit": {"type": "string", "minLength": 1},
+    "total_quantity": {"type": "integer", "minimum": 0},
+    "event_count": {"type": "integer", "minimum": 0},
+    "effective_from": {"type": "string", "format": "date-time"},
+    "effective_to": {"type": "string", "format": "date-time"},
+    "complete": {"type": "boolean"},
+    "authority": {"type": "string", "const": "o3k-metering-events"}
+  }
+}

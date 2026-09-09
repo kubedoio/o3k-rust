@@ -8,11 +8,14 @@ use crate::{
     StoreError,
 };
 
+mod audit;
 mod compute;
 mod coordination;
 mod core;
+mod governance;
 mod identity;
 mod image;
+mod metering;
 mod network;
 mod placement;
 mod policy;

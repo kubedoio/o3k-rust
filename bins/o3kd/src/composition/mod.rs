@@ -299,17 +299,22 @@ pub async fn build_composition(
     });
 
     let identity_store = store.clone();
+    let durable_audit_sink: std::sync::Arc<dyn o3k_kernel::AuditSink> =
+        o3k_store::audit_sink::DurableAuditSink::start(store.clone(), 1024)
+            .map_err(|error| format!("durable audit writer failed to start: {error}"))?;
     let image_repository: Arc<dyn o3k_store::ImageRepository> = store.clone();
     let image_service = o3k_image::ImageService::open(
         config.data_dir.join("images"),
         o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
         image_repository,
     )
-    .await?;
+    .await?
+    .with_audit_sink(durable_audit_sink.clone());
     let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
     let network_service =
         o3k_network::NetworkService::open(config.data_dir.join("network"), network_repository)
-            .await?;
+            .await?
+            .with_audit_sink(durable_audit_sink.clone());
     let config_drive_root = config.data_dir.join("config-drive");
     let config_drive_store = o3k_config_drive::ConfigDriveStore::open(&config_drive_root)?;
     let console_service = o3k_console::ConsoleService::open(config.data_dir.join("console"))?;
@@ -391,6 +396,7 @@ pub async fn build_composition(
         network_external_realm_id,
         network_agent: network_agent_identity.clone(),
         public_allocator: public_allocator_for_binding.clone(),
+        public_address_store: Some(store.clone()),
         unbind_lock: Arc::new(tokio::sync::Mutex::new(())),
     });
 
@@ -406,6 +412,7 @@ pub async fn build_composition(
             network_external_realm_id,
             network_agent: network_agent_identity.clone(),
             public_allocator: public_allocator_for_binding.clone(),
+            public_address_store: Some(store.clone()),
         });
         o3k_compute::ComputeService::new(
             store.clone(),
@@ -451,6 +458,7 @@ pub async fn build_composition(
             o3k_config::Provider::Agent => unreachable!("agent provider handled above"),
         }
     };
+    compute_service = compute_service.with_audit_sink(durable_audit_sink.clone());
     compute_service = compute_service.with_coordination(
         coordination_store.clone(),
         controller_id.clone(),
@@ -900,12 +908,43 @@ pub async fn build_composition(
         network_reader,
     )?
     .with_locations(native_locations)
+    .with_capacity_reader(std::sync::Arc::new(
+        crate::native_adapters::CapacityReaderAdapter {
+            placement: placement.clone(),
+        },
+    ))
     .with_operation_reader(operation_reader)
+    .with_audit_reader(std::sync::Arc::new(
+        crate::native_adapters::AuditReaderAdapter {
+            store: store.clone(),
+        },
+    ))
+    .with_governance_reader(std::sync::Arc::new(
+        crate::native_adapters::GovernanceReaderAdapter {
+            store: store.clone(),
+        },
+    ))
+    .with_governance_mutator(std::sync::Arc::new(
+        crate::native_adapters::GovernanceReaderAdapter {
+            store: store.clone(),
+        },
+    ))
+    .with_quota_reader(std::sync::Arc::new(
+        crate::native_adapters::QuotaReaderAdapter {
+            store: store.clone(),
+        },
+    ))
+    .with_meter_reader(std::sync::Arc::new(
+        crate::native_adapters::MeterReaderAdapter {
+            store: store.clone(),
+        },
+    ))
     .with_resource_application(generic_application)
     .with_authorizer(std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard()));
     let native_lifecycle_registry = native_state.lifecycle_registry();
     state = state.with_native_api(native_state);
     state = state.with_storage_store(store.clone());
+    state = state.with_public_address_store(store.clone());
     if let Some(provider) = native_storage_provider {
         state = state.with_storage_provider(provider);
     }
@@ -1388,6 +1427,7 @@ mod tests {
             network_agent: None,
             network_external_realm_id: None,
             public_allocator: Some(Arc::new(public_allocator)),
+            public_address_store: None,
         };
         let net = network
             .create_network_for_project("project-a", "flat".to_owned())
@@ -1557,6 +1597,7 @@ mod tests {
             }),
             network_external_realm_id: None,
             public_allocator: None,
+            public_address_store: Some(store.clone()),
         };
         let net = network
             .create_network_for_project("project-a", "flat".to_owned())
@@ -1666,6 +1707,7 @@ mod tests {
                 agent_epoch: "agent-epoch".to_owned(),
             }),
             public_allocator: Some(Arc::new(public_allocator)),
+            public_address_store: None,
             unbind_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         projector
@@ -1744,6 +1786,7 @@ mod tests {
             network_agent: None,
             network_external_realm_id: None,
             public_allocator: None,
+            public_address_store: None,
             unbind_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         let net = network

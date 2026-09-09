@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-meter-definition-v1.schema.json",
+  "title": "O3K Native Meter Definition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "owning_service", "unit", "aggregation", "applicability", "supported_granularities", "tenant_visible", "status"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "owning_service": {"type": "string", "minLength": 1, "maxLength": 64},
+    "unit": {"type": "string", "enum": ["count", "event"]},
+    "aggregation": {"type": "string", "enum": ["gauge", "sum"]},
+    "applicability": {"type": "string", "enum": ["project"]},
+    "supported_granularities": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": ["instant", "bounded_interval"]}},
+    "tenant_visible": {"type": "boolean"},
+    "status": {"type": "string", "enum": ["available"]}
+  }
+}

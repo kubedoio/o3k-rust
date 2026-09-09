@@ -5,7 +5,10 @@ use crate::{
     compile_attachment_plan_with_defaults,
 };
 use o3k_domain::{NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent};
-use o3k_kernel::{AuditOutcome, AuthContext, LimitKey, LimitValue, OwnershipScope, ScopeId};
+use o3k_kernel::{
+    AuditEvent, AuditOutcome, AuditSink, AuditSinkError, AuthContext, LimitKey, LimitValue,
+    OwnershipScope, ScopeId,
+};
 use o3k_store::DurableStore;
 use std::{
     collections::HashSet,
@@ -35,6 +38,170 @@ fn auth(project_id: &str) -> AuthContext {
         uuid::Uuid::now_v7().to_string(),
         None,
     )
+}
+
+struct UnavailableAuditSink;
+
+impl AuditSink for UnavailableAuditSink {
+    fn ensure_available(&self) -> Result<(), AuditSinkError> {
+        Err(AuditSinkError::Unavailable)
+    }
+
+    fn record(&self, _event: &AuditEvent) {}
+}
+
+#[tokio::test]
+async fn canonical_mutation_fails_closed_before_repository_write_on_audit_outage()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = root("audit-admission");
+    let _ = fs::remove_dir_all(&path);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let service = NetworkService::open(&path, store.clone())
+        .await?
+        .with_audit_sink(Arc::new(UnavailableAuditSink));
+
+    assert!(matches!(
+        service
+            .create_canonical_network(&auth("project-a"), "must-not-commit".to_owned())
+            .await,
+        Err(NetworkError::AuditUnavailable)
+    ));
+    assert!(store.list_canonical_networks("project-a").await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn compatibility_port_delete_fails_closed_before_authority_removal_on_audit_outage()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = root("port-delete-audit-admission");
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let service = NetworkService::open(&path, store.clone()).await?;
+    let network = service
+        .create_network_for_project("project-a", "network".to_owned())
+        .await?;
+    let subnet = service
+        .create_subnet_for_project(
+            "project-a",
+            network.id,
+            "subnet".to_owned(),
+            "10.0.0.0/24".to_owned(),
+            Some("10.0.0.1".parse()?),
+            Some("10.0.0.2".parse()?),
+            Some("10.0.0.254".parse()?),
+        )
+        .await?;
+    let port = service
+        .create_port_for_project("project-a", network.id, "port".to_owned())
+        .await?;
+    assert_eq!(port.subnet_id, Some(subnet.id));
+
+    let service = service.with_audit_sink(Arc::new(UnavailableAuditSink));
+    assert!(matches!(
+        service.delete_port(&auth("project-a"), port.id).await,
+        Err(NetworkError::AuditUnavailable)
+    ));
+    // The compatibility path must not remove canonical authority after an
+    // audit admission failure.
+    assert!(
+        service
+            .get_port_for_project("project-a", port.id)
+            .await
+            .is_ok()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn compatibility_network_update_fails_closed_before_canonical_write_on_audit_outage()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = root("network-update-audit-admission");
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let service = NetworkService::open(&path, store.clone()).await?;
+    let network = service
+        .create_network_for_project("project-a", "before".to_owned())
+        .await?;
+    let service = service.with_audit_sink(Arc::new(UnavailableAuditSink));
+
+    assert!(matches!(
+        service
+            .update_network(
+                &auth("project-a"),
+                network.id,
+                Some("after".to_owned()),
+                Some(false),
+            )
+            .await,
+        Err(NetworkError::AuditUnavailable)
+    ));
+    let current = store
+        .get_canonical_network("project-a", &network.id)
+        .await?
+        .ok_or(NetworkError::NotFound)?;
+    assert_eq!(current.name, "before");
+    assert!(current.admin_state_up);
+    Ok(())
+}
+
+#[tokio::test]
+async fn compatibility_network_delete_fails_closed_before_authority_removal_on_audit_outage()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = root("network-delete-audit-admission");
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let service = NetworkService::open(&path, store.clone()).await?;
+    let network = service
+        .create_network_for_project("project-a", "network".to_owned())
+        .await?;
+    let service = service.with_audit_sink(Arc::new(UnavailableAuditSink));
+
+    assert!(matches!(
+        service.delete_network(&auth("project-a"), network.id).await,
+        Err(NetworkError::AuditUnavailable)
+    ));
+    assert!(
+        store
+            .get_canonical_network("project-a", &network.id)
+            .await?
+            .is_some()
+    );
+    assert!(
+        service
+            .get_network_for_project("project-a", network.id)
+            .await
+            .is_ok()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_realm_success_audit_and_authority_are_committed_together()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = root("realm-audit-atomic");
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let service = NetworkService::open(&path, store.clone()).await?;
+    let network = service
+        .create_canonical_network_for_project("project-a", "network".to_owned())
+        .await?;
+    let service = service.with_audit_sink(Arc::new(UnavailableAuditSink));
+
+    // The authenticated path must not fall back to the project-scoped helper:
+    // a durable audit outage rejects the mutation before canonical authority
+    // can be committed.
+    let result = service
+        .create_canonical_realm(
+            &auth("project-a"),
+            network.id,
+            "10.0.0.0/24".to_owned(),
+            false,
+        )
+        .await;
+    assert!(matches!(result, Err(NetworkError::AuditUnavailable)));
+    assert!(
+        store
+            .list_canonical_realms("project-a", &network.id)
+            .await?
+            .is_empty()
+    );
+    Ok(())
 }
 
 fn root(label: &str) -> PathBuf {
@@ -1130,7 +1297,7 @@ async fn concurrent_explicit_fixed_ip_creation_has_one_winner()
         .await?;
     assert!(matches!(
         setup
-            .update_port_name_for_project("project-a", server_port.id, "renamed".to_owned(),)
+            .update_port_name_for_project(&auth("project-a"), server_port.id, "renamed".to_owned(),)
             .await,
         Err(NetworkError::Conflict)
     ));

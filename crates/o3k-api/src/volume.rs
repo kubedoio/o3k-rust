@@ -97,6 +97,7 @@ fn view(record: &VolumeRecord) -> VolumeView {
         .volume
         .metadata
         .iter()
+        .filter(|(key, _)| !sensitive_metadata_key(key))
         .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
         .collect::<serde_json::Map<_, _>>();
     VolumeView {
@@ -116,6 +117,40 @@ fn view(record: &VolumeRecord) -> VolumeView {
         created_at: record.created_at.clone(),
         updated_at: record.created_at.clone(),
     }
+}
+
+/// Compatibility projections must obey the same non-disclosure boundary as
+/// native projections.  Metadata is user supplied, but provider adapters and
+/// older rows may contain backend credentials or topology values.
+fn sensitive_metadata_key(key: &str) -> bool {
+    let normalized: String = key
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    [
+        "password",
+        "passwd",
+        "token",
+        "secret",
+        "credential",
+        "privatekey",
+        "userData",
+        "userdata",
+        "environment",
+        "connectionstring",
+        "hostpath",
+        "devicepath",
+        "providerid",
+        "providerreference",
+        "providerresourceid",
+        "provideroperationid",
+        "backendid",
+        "nodeid",
+        "chap",
+    ]
+    .iter()
+    .any(|blocked| normalized == blocked.to_ascii_lowercase() || normalized.contains(blocked))
 }
 
 fn unavailable() -> Response {
@@ -275,14 +310,71 @@ pub async fn remove_native_volume(
     };
     match provider.delete_volume(&request).await {
         Ok(()) | Err(o3k_storage::StorageProviderError::NotFound) => {}
-        Err(error) => return Err(error.to_string()),
+        Err(error) => {
+            // The provider error is typed at this boundary.  Preserve its
+            // uncertainty in the canonical operation instead of allowing
+            // callers to collapse every failure into a generic retryable
+            // response while leaving the operation Pending.
+            if let Some(operation_id) = operation_id {
+                let state = if error.is_unknown_outcome() {
+                    o3k_kernel::OperationState::UnknownOutcome
+                } else {
+                    o3k_kernel::OperationState::Failed
+                };
+                let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                    state,
+                    1,
+                    None,
+                    Some(chrono::Utc::now().to_rfc3339()),
+                    Some(error.to_string()),
+                )
+                .map_err(|lifecycle_error| lifecycle_error.to_string())?;
+                store
+                    .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                    .await
+                    .map_err(|store_error| store_error.to_string())?;
+            }
+            return Err(error.to_string());
+        }
     }
     match provider.inspect_volume(&request).await {
         // Keep the Deleting row as recovery inventory.  The caller removes
         // it only after all durable lifecycle projections have committed.
         Err(o3k_storage::StorageProviderError::NotFound) => Ok(()),
-        Ok(_) => Err("provider volume is still present".to_owned()),
-        Err(error) => Err(error.to_string()),
+        Ok(_) => {
+            if let Some(operation_id) = operation_id {
+                let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                    o3k_kernel::OperationState::UnknownOutcome,
+                    1,
+                    None,
+                    Some(chrono::Utc::now().to_rfc3339()),
+                    Some("provider deletion outcome unknown; observe before retry".to_owned()),
+                )
+                .map_err(|error| error.to_string())?;
+                store
+                    .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            Err("provider volume is still present".to_owned())
+        }
+        Err(error) => {
+            if let Some(operation_id) = operation_id {
+                let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                    o3k_kernel::OperationState::UnknownOutcome,
+                    1,
+                    None,
+                    Some(chrono::Utc::now().to_rfc3339()),
+                    Some("provider deletion outcome unknown; observe before retry".to_owned()),
+                )
+                .map_err(|lifecycle_error| lifecycle_error.to_string())?;
+                store
+                    .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                    .await
+                    .map_err(|store_error| store_error.to_string())?;
+            }
+            Err(error.to_string())
+        }
     }
 }
 
@@ -313,7 +405,14 @@ pub(crate) async fn list(
     let Ok((_, store)) = scoped_store(&state, &headers, &project_id).await else {
         return unavailable();
     };
-    match store.list_volumes(&project_id).await {
+    // The compatibility wire shape has no cursor field, so keep its legacy
+    // response bounded rather than allowing an unbounded repository read.
+    // Native callers use the cursor-based collection contract instead.
+    const MAX_COMPATIBILITY_VOLUMES: usize = 1_000;
+    match store
+        .list_volumes_page(&project_id, None, MAX_COMPATIBILITY_VOLUMES)
+        .await
+    {
         Ok(records) => Json(VolumeListResponse {
             volumes: records.iter().map(view).collect(),
         })

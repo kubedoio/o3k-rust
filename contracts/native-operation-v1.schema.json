@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-operation-v1.schema.json",
+  "title": "O3K Native Operation v1",
+  "type": "object",
+  "required": ["id", "service", "action", "actor", "owner_scope", "resource_type", "state", "attempt", "created_at"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"type": "string", "format": "uuid"},
+    "service": {"type": "string", "minLength": 1},
+    "action": {
+      "type": "object", "required": ["namespace", "action"], "additionalProperties": false,
+      "properties": {"namespace": {"type": "string", "minLength": 1}, "action": {"type": "string", "minLength": 1}}
+    },
+    "actor": {"type": "string", "minLength": 1},
+    "owner_scope": {
+      "type": "object", "required": ["id", "kind", "name", "domain_id"], "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["project", "domain", "system"]},
+        "name": {"type": ["string", "null"]},
+        "domain_id": {"type": ["string", "null"]}
+      }
+    },
+    "resource_type": {
+      "type": "object", "required": ["namespace", "name"], "additionalProperties": false,
+      "properties": {"namespace": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1}}
+    },
+    "resource_id": {"type": ["string", "null"]},
+    "state": {"enum": ["pending", "running", "succeeded", "retryable", "unknown_outcome", "failed"]},
+    "attempt": {"type": "integer", "minimum": 0},
+    "created_at": {"type": "string", "format": "date-time"},
+    "started_at": {"type": ["string", "null"], "format": "date-time"},
+    "finished_at": {"type": ["string", "null"], "format": "date-time"},
+    "error": {"type": ["string", "null"]},
+    "request_id": {"type": ["string", "null"]}
+  }
+}

@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::{ImageMetadataRecord, ImageRepository, StoreError};
+use crate::port::durable::DurableStore;
+use crate::{AuditEventRecord, ImageMetadataRecord, ImageRepository, StoreError};
 
 use super::{
     PostgresStore,
@@ -10,6 +11,16 @@ use super::{
 
 #[async_trait]
 impl ImageRepository for PostgresStore {
+    async fn create_or_replay_canonical_image_operation(
+        &self,
+        operation: &crate::OperationRecord,
+        canonical: &crate::CanonicalOperationRecord,
+        request: &crate::IdempotencyReservationRequest,
+    ) -> Result<crate::IdempotencyReservation, StoreError> {
+        self.create_or_replay_canonical_scoped_operation(operation, canonical, request)
+            .await
+    }
+
     async fn insert_image(&self, image: &ImageMetadataRecord) -> Result<(), StoreError> {
         let id_str = image.id.to_string();
         sqlx::query(
@@ -29,6 +40,28 @@ impl ImageRepository for PostgresStore {
         .await
         .map_err(map_pg_error)?;
         Ok(())
+    }
+
+    async fn insert_image_with_audit(
+        &self,
+        image: &ImageMetadataRecord,
+        audit: &AuditEventRecord,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let id_str = image.id.to_string();
+        sqlx::query("INSERT INTO image_metadata (id, name, project_id, status, visibility, container_format, disk_format, size, checksum) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+            .bind(&id_str).bind(&image.name).bind(&image.project_id).bind(&image.status)
+            .bind(&image.visibility).bind(&image.container_format).bind(&image.disk_format)
+            .bind(image.size).bind(&image.checksum).execute(&mut *tx).await
+            .map_err(map_pg_error)?;
+        sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,effective_scope,service_namespace,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category,event_json) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
+            .bind(&audit.event_id).bind(&audit.timestamp).bind(&audit.request_id).bind(&audit.audit_id)
+            .bind(&audit.principal_id).bind(&audit.effective_scope).bind(&audit.service_namespace)
+            .bind(&audit.action).bind(&audit.resource_type).bind(&audit.resource_id).bind(&audit.owner_scope)
+            .bind(audit.operation_id.map(|id| id.to_string())).bind(&audit.outcome)
+            .bind(&audit.reason_category).bind(&audit.event_json).execute(&mut *tx).await
+            .map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)
     }
 
     async fn list_images(&self, project_id: &str) -> Result<Vec<ImageMetadataRecord>, StoreError> {
@@ -51,6 +84,11 @@ impl ImageRepository for PostgresStore {
         after_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ImageMetadataRecord>, StoreError> {
+        if !(1..=1000).contains(&limit) {
+            return Err(StoreError::Corrupt(
+                "image page limit outside 1..=1000".into(),
+            ));
+        }
         let limit = i64::try_from(limit)
             .map_err(|_| StoreError::Corrupt("image page limit overflow".to_owned()))?;
         let rows = if let Some(after_id) = after_id {
@@ -110,6 +148,36 @@ impl ImageRepository for PostgresStore {
             .ok_or(StoreError::ImageNotFound)
     }
 
+    async fn activate_image_with_audit(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        size: u64,
+        checksum: &str,
+        audit: &AuditEventRecord,
+    ) -> Result<ImageMetadataRecord, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let id_str = id.to_string();
+        let res = sqlx::query("UPDATE image_metadata SET status = 'active', size = $1, checksum = $2 WHERE id = $3 AND project_id = $4 AND status = 'queued'")
+            .bind(size as i64).bind(checksum).bind(&id_str).bind(project_id).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if res.rows_affected() == 0 {
+            return Err(StoreError::ImageNotFound);
+        }
+        sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,effective_scope,service_namespace,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category,event_json) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
+            .bind(&audit.event_id).bind(&audit.timestamp).bind(&audit.request_id).bind(&audit.audit_id).bind(&audit.principal_id).bind(&audit.effective_scope).bind(&audit.service_namespace).bind(&audit.action).bind(&audit.resource_type).bind(&audit.resource_id).bind(&audit.owner_scope).bind(audit.operation_id.map(|v| v.to_string())).bind(&audit.outcome).bind(&audit.reason_category).bind(&audit.event_json).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)?;
+        let row = sqlx::query("SELECT * FROM image_metadata WHERE id = $1 AND project_id = $2")
+            .bind(&id_str)
+            .bind(project_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        row.as_ref()
+            .map(parse_pg_image)
+            .transpose()?
+            .ok_or(StoreError::ImageNotFound)
+    }
+
     async fn delete_image(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
         let id_str = id.to_string();
         let res = sqlx::query(
@@ -127,5 +195,21 @@ impl ImageRepository for PostgresStore {
             return Err(StoreError::ImageNotFound);
         }
         Ok(())
+    }
+
+    async fn delete_image_with_audit(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        audit: &AuditEventRecord,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let id_str = id.to_string();
+        let res = sqlx::query("UPDATE image_metadata SET status = 'deleted' WHERE id = $1 AND project_id = $2 AND status != 'deleted'").bind(&id_str).bind(project_id).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if res.rows_affected() == 0 {
+            return Err(StoreError::ImageNotFound);
+        }
+        sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,effective_scope,service_namespace,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category,event_json) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)").bind(&audit.event_id).bind(&audit.timestamp).bind(&audit.request_id).bind(&audit.audit_id).bind(&audit.principal_id).bind(&audit.effective_scope).bind(&audit.service_namespace).bind(&audit.action).bind(&audit.resource_type).bind(&audit.resource_id).bind(&audit.owner_scope).bind(audit.operation_id.map(|v| v.to_string())).bind(&audit.outcome).bind(&audit.reason_category).bind(&audit.event_json).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)
     }
 }

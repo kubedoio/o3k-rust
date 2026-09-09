@@ -6,39 +6,79 @@
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::StatusCode,
+    middleware::{self, Next},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use o3k_kernel::{LocationRegistry, ManifestRegistry, ServiceLifecycleState, ServiceManifest};
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 
+pub mod audit;
 pub mod auth;
 pub mod compute;
+pub mod diagnostics;
 pub mod error;
+pub mod governance;
 pub mod identity;
+pub mod metering;
 pub mod network;
 pub mod operation;
 pub mod pagination;
+pub mod quota;
 pub mod resource;
 pub mod resource_contract;
 pub mod volume;
 
 use resource::{LifecycleOperation, ResourceDescriptor};
 
+const MAX_NATIVE_QUERY_BYTES: usize = 8 * 1024;
+const MAX_NATIVE_FILTER_PARAMETERS: usize = 16;
+
+fn native_query_within_budget(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return true;
+    };
+    if query.len() > MAX_NATIVE_QUERY_BYTES {
+        return false;
+    }
+    query
+        .split('&')
+        .filter(|part| {
+            let key = part.split('=').next().unwrap_or_default();
+            key == "filter"
+        })
+        .count()
+        <= MAX_NATIVE_FILTER_PARAMETERS
+}
+
+async fn reject_oversized_native_query(request: Request, next: Next) -> axum::response::Response {
+    if !native_query_within_budget(request.uri().query()) {
+        return crate::error::ProblemDetails::new(crate::error::ErrorCode::BadRequest)
+            .into_response();
+    }
+    next.run(request).await
+}
+
 /// Shared application state for the native API router.
 #[derive(Clone, Default)]
 pub struct NativeApiState {
     pub registry: Option<ManifestRegistry>,
-    lifecycle_registry: Option<Arc<RwLock<ManifestRegistry>>>,
+    pub(crate) lifecycle_registry: Option<Arc<RwLock<ManifestRegistry>>>,
     pub cursor_config: pagination::CursorConfig,
     pub token_issuer: Option<std::sync::Arc<dyn auth::TokenIssuer>>,
     pub server_reader: Option<std::sync::Arc<dyn compute::ServerReader>>,
     pub volume_reader: Option<std::sync::Arc<dyn volume::VolumeReader>>,
     pub network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
     pub operation_reader: Option<std::sync::Arc<dyn operation::OperationReader>>,
+    pub audit_reader: Option<std::sync::Arc<dyn audit::AuditReader>>,
+    pub governance_reader: Option<std::sync::Arc<dyn governance::GovernanceReader>>,
+    pub governance_mutator: Option<std::sync::Arc<dyn governance::GovernanceMutator>>,
+    pub quota_reader: Option<std::sync::Arc<dyn quota::QuotaReader>>,
+    pub meter_reader: Option<std::sync::Arc<dyn metering::MeterReader>>,
+    pub capacity_reader: Option<std::sync::Arc<dyn diagnostics::CapacityReader>>,
     /// Validated generic resource descriptors.  This is the northbound
     /// registry; applications below it are intentionally controller-agnostic.
     resource_index: resource::ResourceDispatcher,
@@ -81,6 +121,12 @@ impl NativeApiState {
             volume_reader,
             network_reader,
             operation_reader: None,
+            audit_reader: None,
+            governance_reader: None,
+            governance_mutator: None,
+            quota_reader: None,
+            meter_reader: None,
+            capacity_reader: None,
             resource_index,
             resource_application: None,
             authorizer: None,
@@ -105,6 +151,42 @@ impl NativeApiState {
     }
 
     #[must_use]
+    pub fn with_audit_reader(mut self, reader: std::sync::Arc<dyn audit::AuditReader>) -> Self {
+        self.audit_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_governance_reader(
+        mut self,
+        reader: std::sync::Arc<dyn governance::GovernanceReader>,
+    ) -> Self {
+        self.governance_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_quota_reader(mut self, reader: std::sync::Arc<dyn quota::QuotaReader>) -> Self {
+        self.quota_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_meter_reader(mut self, reader: std::sync::Arc<dyn metering::MeterReader>) -> Self {
+        self.meter_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_capacity_reader(
+        mut self,
+        reader: std::sync::Arc<dyn diagnostics::CapacityReader>,
+    ) -> Self {
+        self.capacity_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
     pub fn with_resource_application(
         mut self,
         application: resource::SharedResourceApplication,
@@ -119,6 +201,15 @@ impl NativeApiState {
         authorizer: std::sync::Arc<dyn o3k_kernel::Authorizer>,
     ) -> Self {
         self.authorizer = Some(authorizer);
+        self
+    }
+
+    #[must_use]
+    pub fn with_governance_mutator(
+        mut self,
+        mutator: std::sync::Arc<dyn governance::GovernanceMutator>,
+    ) -> Self {
+        self.governance_mutator = Some(mutator);
         self
     }
 
@@ -169,11 +260,35 @@ pub fn router(state: NativeApiState) -> Router {
                 .delete(resource::delete),
         )
         .route(
+            "/{namespace}/{collection}/{id}/relationships",
+            get(resource::relationships),
+        )
+        .route(
             "/{namespace}/{collection}/{id}/actions/{action_name}",
             post(resource::action),
         )
         .route("/operations", get(operation::list_operations))
         .route("/operations/{id}", get(operation::show_operation))
+        .route("/audit/events", get(audit::list_audit_events))
+        .route("/audit/events/{id}", get(audit::show_audit_event))
+        .route("/iam/projects", get(governance::list_projects))
+        .route("/quota", get(quota::list_quota))
+        .route("/metering", get(metering::list_meters))
+        .route("/metering/usage", get(metering::usage))
+        .route("/metering/definitions", get(metering::list_definitions))
+        .route("/operator/diagnostics", get(diagnostics::show))
+        .route("/iam/projects/{id}", get(governance::show_project))
+        .route("/iam/principals", get(governance::list_principals))
+        .route("/iam/principals/{id}", get(governance::show_principal))
+        .route(
+            "/iam/role-assignments",
+            get(governance::list_role_assignments).post(governance::create_role_assignment),
+        )
+        .route(
+            "/iam/role-assignments/{id}",
+            delete(governance::delete_role_assignment),
+        )
+        .layer(middleware::from_fn(reject_oversized_native_query))
         .layer(DefaultBodyLimit::max(1_048_576))
         .with_state(state)
 }
@@ -227,9 +342,29 @@ pub async fn api_root() -> Json<ApiRootResponse> {
             "/o3k/v1/identity/me",
             "/o3k/v1/operator/profile",
             "/o3k/v1/compute/servers",
+            "/o3k/v1/compute/servers/{id}",
             "/o3k/v1/volume/volumes",
+            "/o3k/v1/volume/volumes/{id}",
             "/o3k/v1/network/address-realms",
+            "/o3k/v1/network/address-realms/{id}",
+            "/o3k/v1/{namespace}/{collection}",
+            "/o3k/v1/{namespace}/{collection}/{id}",
+            "/o3k/v1/{namespace}/{collection}/{id}/actions/{action_name}",
             "/o3k/v1/operations/{id}",
+            "/o3k/v1/operations",
+            "/o3k/v1/audit/events",
+            "/o3k/v1/audit/events/{id}",
+            "/o3k/v1/iam/projects",
+            "/o3k/v1/quota",
+            "/o3k/v1/metering",
+            "/o3k/v1/metering/usage",
+            "/o3k/v1/metering/definitions",
+            "/o3k/v1/operator/diagnostics",
+            "/o3k/v1/iam/projects/{id}",
+            "/o3k/v1/iam/principals",
+            "/o3k/v1/iam/principals/{id}",
+            "/o3k/v1/iam/role-assignments",
+            "/o3k/v1/{namespace}/{collection}/{id}/relationships",
         ],
     })
 }
@@ -254,6 +389,10 @@ pub struct ServicesResponse {
 }
 
 pub async fn discover_services(State(state): State<NativeApiState>) -> impl IntoResponse {
+    // Discovery is a public collection endpoint. Keep the bound at the
+    // registry boundary so a malformed/overgrown registry cannot force an
+    // unbounded allocation in the HTTP handler.
+    const MAX_DISCOVERED_SERVICES: usize = 256;
     let Some(registry) = state.lifecycle_registry.as_ref() else {
         return (
             StatusCode::OK,
@@ -270,8 +409,15 @@ pub async fn discover_services(State(state): State<NativeApiState>) -> impl Into
             .into_response();
     };
 
-    let services: Vec<DiscoveredService> = registry
-        .all()
+    let manifests = registry.all_bounded(MAX_DISCOVERED_SERVICES + 1);
+    if manifests.len() > MAX_DISCOVERED_SERVICES {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"services": [], "count": 0})),
+        )
+            .into_response();
+    }
+    let services: Vec<DiscoveredService> = manifests
         .iter()
         .map(|m| {
             let lc = registry
@@ -353,6 +499,13 @@ fn create_input_schema_id(namespace: &str, collection: &str, version: &str) -> S
     )
 }
 
+fn update_input_schema_id(namespace: &str, collection: &str, version: &str) -> String {
+    format!(
+        "{}#/x-o3k-update-spec",
+        schema_id(namespace, collection, version)
+    )
+}
+
 fn action_metadata(descriptor: &ResourceDescriptor) -> Vec<ActionSchemaMetadata> {
     let mut actions: Vec<_> =
         descriptor
@@ -371,16 +524,35 @@ fn action_metadata(descriptor: &ResourceDescriptor) -> Vec<ActionSchemaMetadata>
                 action_id: action.to_string(),
                 target: target.to_owned(),
                     input: match operation {
-                    LifecycleOperation::Create => resource_contract::ContractKind::for_resource(
-                        &descriptor.resource_type.to_string(),
-                        &descriptor.schema_version,
-                    ).map(|_| create_input_schema_id(
-                        descriptor.resource_type.namespace(),
-                        &descriptor.collection,
-                        &descriptor.schema_version,
-                    )),
-                    _ => None,
-                },
+                        LifecycleOperation::Create => resource_contract::ContractKind::for_resource(
+                            &descriptor.resource_type.to_string(),
+                            &descriptor.schema_version,
+                        )
+                        .map(|_| {
+                            create_input_schema_id(
+                                descriptor.resource_type.namespace(),
+                                &descriptor.collection,
+                                &descriptor.schema_version,
+                            )
+                        }),
+                        LifecycleOperation::Update => {
+                            resource_contract::ContractKind::for_resource(
+                                &descriptor.resource_type.to_string(),
+                                &descriptor.schema_version,
+                            )
+                            .filter(|kind| {
+                                matches!(kind, resource_contract::ContractKind::ComputeServer)
+                            })
+                            .map(|_| {
+                                update_input_schema_id(
+                                    descriptor.resource_type.namespace(),
+                                    &descriptor.collection,
+                                    &descriptor.schema_version,
+                                )
+                            })
+                        }
+                        _ => None,
+                    },
                 output: Some(match operation {
                     LifecycleOperation::List =>
                         "https://o3k.io/contracts/native-resource-list-response-v1.schema.json",
@@ -465,6 +637,10 @@ fn placement_for_service(
 }
 
 pub async fn discover_resource_types(State(state): State<NativeApiState>) -> impl IntoResponse {
+    // Resource discovery is a public collection endpoint.  Bound the
+    // allocation at the dispatcher boundary and fail closed if the registry
+    // exceeds the advertised response limit.
+    const MAX_DISCOVERED_RESOURCE_TYPES: usize = 1024;
     if state.lifecycle_registry.is_none() {
         return (
             StatusCode::OK,
@@ -473,8 +649,18 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
             .into_response();
     };
 
-    let mut resource_types: Vec<DiscoveredResourceType> = Vec::new();
-    for descriptor in state.resource_index.all() {
+    let descriptors = state
+        .resource_index
+        .all_bounded(MAX_DISCOVERED_RESOURCE_TYPES + 1);
+    if descriptors.len() > MAX_DISCOVERED_RESOURCE_TYPES {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"resource_types": [], "count": 0})),
+        )
+            .into_response();
+    }
+    let mut resource_types: Vec<DiscoveredResourceType> = Vec::with_capacity(descriptors.len());
+    for descriptor in descriptors {
         let mut actions = std::collections::HashMap::new();
         for (op, action) in &descriptor.lifecycle_actions {
             actions.insert(format!("{op:?}").to_lowercase(), action.to_string());
@@ -512,7 +698,9 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
                     || (descriptor.resource_type.name() == "volume"
                         && ["AttachVolume", "DetachVolume"]
                             .iter()
-                            .any(|name| action.ends_with(name))))
+                            .any(|name| action.ends_with(name)))
+                    || (descriptor.resource_type.name() == "image"
+                        && action.ends_with("UploadImage")))
         }) {
             let Some((_, name)) = action_id.split_once(':') else {
                 continue;
@@ -521,8 +709,17 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
                 name: name.to_lowercase(),
                 action_id: action_id.clone(),
                 target: "instance".to_owned(),
-                input: None,
-                output: None,
+                input: if action_id.ends_with("UploadImage") {
+                    Some(
+                        "https://o3k.io/contracts/native-image-upload-action-v1.schema.json"
+                            .to_owned(),
+                    )
+                } else {
+                    None
+                },
+                output: Some(
+                    "https://o3k.io/contracts/native-mutation-result-v1.schema.json".to_owned(),
+                ),
                 asynchronous: true,
             });
         }
@@ -612,6 +809,7 @@ pub async fn discover_resource_schema(
             .into_response();
     };
     let spec_schema = contract.schema();
+    let update_schema = contract.update_schema();
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -623,6 +821,11 @@ pub async fn discover_resource_schema(
                 {"$ref": "https://o3k.io/contracts/native-resource-envelope-v1.schema.json"},
                 {"type": "object", "properties": {"spec": spec_schema}, "required": ["spec"]}
             ],
+            // The create representation is the primary resource schema.  A
+            // mutation may also advertise a distinct typed update input; keep
+            // it in the same versioned document so clients never have to
+            // infer update semantics from runtime behavior.
+            "x-o3k-update-spec": update_schema,
             "x-o3k-resource-type": resource_type,
             "x-o3k-schema-version": descriptor.schema_version,
         })),
@@ -689,12 +892,27 @@ pub async fn discover_regions(State(state): State<NativeApiState>) -> impl IntoR
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use o3k_kernel::ActionId;
     use o3k_kernel::manifest::{ManifestController, RegisteredResourceType, ResourceScope};
     use o3k_kernel::resource::ResourceType;
     use o3k_kernel::{
         AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, ScopeKind, ServiceManifest,
         UserPrincipal,
     };
+
+    #[test]
+    fn native_query_budget_rejects_oversized_and_repeated_filters() {
+        assert!(native_query_within_budget(None));
+        assert!(native_query_within_budget(Some(
+            "filter=state:ready&limit=20"
+        )));
+        let repeated = std::iter::repeat_n("filter=state:ready", MAX_NATIVE_FILTER_PARAMETERS + 1)
+            .collect::<Vec<_>>()
+            .join("&");
+        assert!(!native_query_within_budget(Some(&repeated)));
+        let oversized = format!("filter={}", "x".repeat(MAX_NATIVE_QUERY_BYTES));
+        assert!(!native_query_within_budget(Some(&oversized)));
+    }
 
     #[derive(Clone)]
     struct TestIssuer(AuthContext);
@@ -793,6 +1011,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn update_action_metadata_references_typed_update_contract() {
+        let mut lifecycle_actions = std::collections::HashMap::new();
+        lifecycle_actions.insert(
+            LifecycleOperation::Update,
+            ActionId::new_unchecked("compute", "UpdateServer"),
+        );
+        let descriptor = ResourceDescriptor {
+            resource_type: ResourceType::new_unchecked("compute", "server"),
+            collection: "servers".to_owned(),
+            schema_version: "v1".to_owned(),
+            scope: o3k_kernel::ResourceScope::Tenant,
+            lifecycle_actions,
+            owning_service: "compute".to_owned(),
+            ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
+            ready: true,
+        };
+        let actions = action_metadata(&descriptor);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].input.as_deref(),
+            Some("https://o3k.io/schemas/compute/servers/v1/resource#/x-o3k-update-spec")
+        );
+    }
+
     #[tokio::test]
     async fn api_root_returns_version() {
         let state = NativeApiState::new(
@@ -804,7 +1047,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let app = router(state);
+        let app = router(state.clone());
         let response = axum::http::Request::builder()
             .uri("/")
             .body(axum::body::Body::empty())
@@ -827,6 +1070,51 @@ mod tests {
                 .iter()
                 .any(|endpoint| endpoint == "/o3k/v1/identity/scopes")
         );
+        assert!(
+            body["endpoints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|endpoint| endpoint == "/o3k/v1/operations")
+        );
+        assert!(
+            body["endpoints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|endpoint| endpoint == "/o3k/v1/metering/definitions")
+        );
+        assert!(
+            body["endpoints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|endpoint| endpoint == "/o3k/v1/{namespace}/{collection}/{id}/relationships")
+        );
+    }
+
+    #[tokio::test]
+    async fn router_rejects_repeated_filters_before_authentication_extraction() {
+        let state = NativeApiState::new(
+            Some(test_manifest_registry()),
+            pagination::CursorConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let query = std::iter::repeat_n("filter=state:ready", MAX_NATIVE_FILTER_PARAMETERS + 1)
+            .collect::<Vec<_>>()
+            .join("&");
+        let request = axum::http::Request::builder()
+            .uri(format!("/compute/servers?{query}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = tower::ServiceExt::oneshot(router(state), request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -877,6 +1165,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_governance_and_operator_routes_fail_closed_for_tenants() {
+        for uri in [
+            "/iam/projects",
+            "/iam/principals",
+            "/iam/role-assignments",
+            "/operator/diagnostics",
+        ] {
+            let state = NativeApiState::new(
+                Some(test_manifest_registry()),
+                pagination::CursorConfig::default(),
+                Some(Arc::new(TestIssuer(test_operator_context(false)))),
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
+            let response = tower::ServiceExt::oneshot(
+                router(state),
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn native_role_assignment_post_fails_closed_for_tenants_before_body_processing() {
+        let state = NativeApiState::new(
+            Some(test_manifest_registry()),
+            pagination::CursorConfig::default(),
+            Some(Arc::new(TestIssuer(test_operator_context(false)))),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
+        let response = tower::ServiceExt::oneshot(
+            router(state),
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/iam/role-assignments")
+                .header("authorization", "Bearer test-token")
+                .header("idempotency-key", "tenant-denied")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    "{\"principal_id\":\"p\",\"project_id\":\"project-a\",\"role_id\":\"member\"}",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn federated_scope_discovery_rejects_empty_external_credentials() {
         let state = NativeApiState::new(
             Some(test_manifest_registry()),
@@ -914,7 +1264,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let app = router(state);
+        let app = router(state.clone());
         let response = axum::http::Request::builder()
             .uri("/services")
             .body(axum::body::Body::empty())
@@ -948,7 +1298,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let app = router(state);
+        let app = router(state.clone());
         let response = axum::http::Request::builder()
             .uri("/services")
             .body(axum::body::Body::empty())
@@ -992,7 +1342,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let app = router(state);
+        let app = router(state.clone());
         let response = axum::http::Request::builder()
             .uri("/resource-types")
             .body(axum::body::Body::empty())
@@ -1023,6 +1373,92 @@ mod tests {
         assert!(kinds.iter().any(|kind| kind == "compute:server"));
         assert!(kinds.iter().any(|kind| kind == "network:address_realm"));
         assert!(kinds.iter().any(|kind| kind == "volume:volume"));
+        // Contract matrix: every advertised row must resolve to a typed
+        // versioned schema, and every action output must use a known native
+        // mutation/read contract.  This is intentionally driven from the
+        // response so discovery and the runtime contract registry cannot
+        // silently diverge.
+        for item in body["resource_types"].as_array().unwrap() {
+            let namespace = item["namespace"].as_str().unwrap();
+            let collection = item["collection"].as_str().unwrap();
+            let version = item["schema_version"].as_str().unwrap();
+            let typed_contract = resource_contract::ContractKind::for_resource(
+                &format!("{namespace}:{}", item["name"].as_str().unwrap()),
+                version,
+            );
+            // Some manifest resources are read-only domain projections whose
+            // dedicated contract is owned by their service adapter. The
+            // generic schema matrix applies to resources backed by the native
+            // typed contract registry only.
+            if typed_contract.is_none() {
+                continue;
+            }
+            let schema_response = tower::ServiceExt::oneshot(
+                router(state.clone()),
+                axum::http::Request::builder()
+                    .uri(format!(
+                        "/resource-schemas/{namespace}/{collection}/{version}"
+                    ))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(schema_response.status(), StatusCode::OK);
+            for action in item["actions"].as_array().unwrap() {
+                assert!(
+                    matches!(
+                        action["output"].as_str(),
+                        Some(
+                            "https://o3k.io/contracts/native-resource-list-response-v1.schema.json"
+                        ) | Some(
+                            "https://o3k.io/contracts/native-resource-envelope-v1.schema.json"
+                        ) | Some("https://o3k.io/contracts/native-mutation-result-v1.schema.json")
+                    ),
+                    "action advertises an unknown output contract: {}",
+                    action["action_id"]
+                );
+            }
+        }
+        let image = body["resource_types"].as_array().and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["namespace"] == "image" && item["name"] == "image")
+        });
+        assert!(image.is_some(), "seeded image resource discovery");
+        let Some(image) = image else { return };
+        let upload = image["actions"].as_array().and_then(|actions| {
+            actions
+                .iter()
+                .find(|item| item["action_id"] == "image:UploadImage")
+        });
+        assert!(upload.is_some(), "image upload action discovery");
+        let Some(upload) = upload else { return };
+        assert_eq!(
+            upload["input"],
+            "https://o3k.io/contracts/native-image-upload-action-v1.schema.json"
+        );
+
+        // Every advertised built-in resource must also have a resolvable
+        // versioned resource schema. This catches discovery/schema drift (in
+        // particular image:image, whose upload action uses a separate byte
+        // contract).
+        let response = axum::http::Request::builder()
+            .uri("/resource-schemas/image/image/v1")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = tower::ServiceExt::oneshot(router(state), response)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let schema: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(schema["x-o3k-resource-type"], "image:image");
+        assert!(schema["allOf"][1]["properties"]["spec"].is_object());
     }
 
     #[tokio::test]

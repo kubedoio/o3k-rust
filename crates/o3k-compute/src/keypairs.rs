@@ -69,9 +69,16 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::Unauthorized);
         }
+        self.audit_mutation_admission(
+            auth,
+            act.clone(),
+            ResourceType::new("compute", "keypair").map_err(|_| ComputeError::InvalidRequest)?,
+        )?;
         match self
             .create_keypair(
                 auth.principal().id().as_str(),
@@ -90,13 +97,17 @@ impl ComputeService {
                         ResourceId::new(kp.name.clone()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Ok(kp)
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Err(error)
             }
         }
@@ -125,7 +136,9 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::Unauthorized);
         }
         self.list_keypairs(
@@ -174,7 +187,9 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::NotFound);
         }
         self.show_keypair(
@@ -226,9 +241,16 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::NotFound);
         }
+        self.audit_mutation_admission(
+            auth,
+            act.clone(),
+            ResourceType::new("compute", "keypair").map_err(|_| ComputeError::InvalidRequest)?,
+        )?;
         match self
             .delete_keypair(
                 auth.principal().id().as_str(),
@@ -246,13 +268,17 @@ impl ComputeService {
                         ResourceId::new(name.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Ok(())
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Err(error)
             }
         }

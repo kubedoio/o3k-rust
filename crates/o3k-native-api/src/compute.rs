@@ -62,6 +62,7 @@ pub struct ServerItem {
 // ── Query parameters ──────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListQuery {
     pub limit: Option<String>,
     pub cursor: Option<String>,
@@ -77,7 +78,7 @@ pub struct ServerListResponse {
 }
 
 fn server_to_native_v1(server: &ServerItem) -> serde_json::Value {
-    let mut value = serde_json::json!({
+    let value = serde_json::json!({
         "api_version": "o3k.io/v1",
         "kind": "compute:server",
         "metadata": {
@@ -95,12 +96,9 @@ fn server_to_native_v1(server: &ServerItem) -> serde_json::Value {
             "state": server.state,
         }
     });
-    if let Some(migration_id) = &server.migration_id {
-        value["metadata"]["migration_id"] = migration_id.clone().into();
-    }
-    if let Some(source_key) = &server.source_key {
-        value["metadata"]["source_key"] = source_key.clone().into();
-    }
+    // Migration bookkeeping is controller-private state.  It must never be
+    // projected into the native tenant contract: exposing either value would
+    // leak internal/provider identity and make it reusable as tenant truth.
     value
 }
 
@@ -253,5 +251,23 @@ mod envelope_tests {
             source_key: None,
         });
         crate::assert_resource_envelope_schema(&value);
+    }
+
+    #[test]
+    fn compute_envelope_does_not_project_controller_migration_metadata() {
+        let value = server_to_native_v1(&ServerItem {
+            id: "server-a".into(),
+            name: "demo".into(),
+            project_id: "project-a".into(),
+            flavor_id: "flavor-a".into(),
+            image_id: "image-a".into(),
+            state: "active".into(),
+            created_at: None,
+            generation: 1,
+            migration_id: Some("provider-private-migration".into()),
+            source_key: Some("provider-private-source".into()),
+        });
+        let serialized = value.to_string();
+        assert!(!serialized.contains("provider-private"));
     }
 }

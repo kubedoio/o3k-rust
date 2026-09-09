@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-metering-v1.schema.json",
+  "title": "O3K Native Metering Projection",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "unit", "value", "complete", "as_of", "authority"],
+    "properties": {
+      "name": {"type": "string", "minLength": 1},
+      "unit": {"type": "string", "const": "count"},
+      "value": {"type": "integer", "minimum": 0},
+      "complete": {"type": "boolean"},
+      "as_of": {"type": "string", "format": "date-time"},
+      "authority": {"type": "string", "const": "o3k-resource-lifecycle"}
+    }
+  }
+}

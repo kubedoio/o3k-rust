@@ -95,6 +95,8 @@ pub struct CachedImageArtifact {
 
 #[derive(Debug, Error)]
 pub enum ImageError {
+    #[error("audit persistence is unavailable")]
+    AuditUnavailable,
     #[error("unauthorized")]
     Unauthorized,
     #[error("image not found")]
@@ -981,6 +983,32 @@ impl ImageService {
             .await
     }
 
+    /// Native lifecycle entry point.  The canonical operation is supplied by
+    /// the northbound admission boundary so the durable mutation audit is
+    /// correlated with the operation that owns the resource transition.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_with_id_and_operation(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+        operation_id: Uuid,
+        name: String,
+        visibility: String,
+        container_format: String,
+        disk_format: String,
+    ) -> Result<ImageRecord, ImageError> {
+        self.create_authorized_with_operation(
+            auth,
+            id,
+            Some(operation_id),
+            name,
+            visibility,
+            container_format,
+            disk_format,
+        )
+        .await
+    }
+
     async fn create_authorized(
         &self,
         auth: &AuthContext,
@@ -990,6 +1018,32 @@ impl ImageService {
         container_format: String,
         disk_format: String,
     ) -> Result<ImageRecord, ImageError> {
+        self.create_authorized_with_operation(
+            auth,
+            id,
+            None,
+            name,
+            visibility,
+            container_format,
+            disk_format,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_authorized_with_operation(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+        operation_id: Option<Uuid>,
+        name: String,
+        visibility: String,
+        container_format: String,
+        disk_format: String,
+    ) -> Result<ImageRecord, ImageError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| ImageError::AuditUnavailable)?;
         let ns = ServiceNamespace::new("image")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("image".to_owned()));
         let act = ActionId::new("image", "CreateImage").unwrap_or_else(|_| {
@@ -1011,27 +1065,38 @@ impl ImageService {
             self.audit_sink.record(&event);
             return Err(ImageError::Unauthorized);
         }
+        let mut success_event =
+            AuditEvent::from_auth(auth, ns.clone(), act.clone(), AuditOutcome::Succeeded)
+                .with_resource(
+                    ResourceType::new("image", "image").unwrap_or_else(|_| {
+                        ResourceType::new_unchecked("image".to_owned(), "image".to_owned())
+                    }),
+                    ResourceId::new(id.to_string()).ok(),
+                    Some(auth.effective_scope().clone()),
+                );
+        if let Some(operation_id) = operation_id {
+            success_event = success_event.with_operation(operation_id);
+        }
+        let success_audit = o3k_store::AuditEventRecord::from_kernel_event(&success_event)
+            .map_err(ImageError::Store)?;
         match self
-            .create_for_project_with_id(
+            .create_for_project_with_id_and_audit(
                 auth.effective_scope().id().as_str(),
                 id,
                 name,
                 visibility,
                 container_format,
                 disk_format,
+                Some(&success_audit),
             )
             .await
         {
             Ok(record) => {
-                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
-                    .with_resource(
-                        ResourceType::new("image", "image").unwrap_or_else(|_| {
-                            ResourceType::new_unchecked("image".to_owned(), "image".to_owned())
-                        }),
-                        ResourceId::new(record.id.to_string()).ok(),
-                        Some(auth.effective_scope().clone()),
-                    );
-                self.audit_sink.record(&event);
+                // Preserve the synchronous kernel audit projection for
+                // callers that inspect the configured sink while the same
+                // event is durably admitted by the repository transaction.
+                // Durable sinks deduplicate by event_id.
+                self.audit_sink.record(&success_event);
                 Ok(record)
             }
             Err(error) => {
@@ -1070,6 +1135,29 @@ impl ImageService {
         visibility: String,
         container_format: String,
         disk_format: String,
+    ) -> Result<ImageRecord, ImageError> {
+        self.create_for_project_with_id_and_audit(
+            project_id,
+            id,
+            name,
+            visibility,
+            container_format,
+            disk_format,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_for_project_with_id_and_audit(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        name: String,
+        visibility: String,
+        container_format: String,
+        disk_format: String,
+        audit: Option<&o3k_store::AuditEventRecord>,
     ) -> Result<ImageRecord, ImageError> {
         if name.trim().is_empty()
             || container_format.trim().is_empty()
@@ -1116,7 +1204,16 @@ impl ImageService {
                 other => ImageError::Store(other),
             })?;
 
-        match self.inner.repository.insert_image(&record).await {
+        let insert = match audit {
+            Some(audit) => {
+                self.inner
+                    .repository
+                    .insert_image_with_audit(&record, audit)
+                    .await
+            }
+            None => self.inner.repository.insert_image(&record).await,
+        };
+        match insert {
             Ok(()) => {
                 let _ = self
                     .inner
@@ -1319,6 +1416,27 @@ impl ImageService {
         id: Uuid,
         content: &[u8],
     ) -> Result<ImageRecord, ImageError> {
+        self.upload_with_operation(auth, id, content, None).await
+    }
+
+    /// Native action entry point.  The admission boundary supplies the
+    /// canonical Operation identity so the durable activation audit is
+    /// correlated with the operation returned to the caller.
+    pub async fn upload_with_operation(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+        content: &[u8],
+        operation_id: Option<Uuid>,
+    ) -> Result<ImageRecord, ImageError> {
+        // Upload publishes durable image bytes and changes the authoritative
+        // image state.  Admit the audit write before validation, quota
+        // reservation, or filesystem mutation so an audit outage cannot leave
+        // an un-audited upload side effect behind.  The repository transaction
+        // below still couples activation with the success event.
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| ImageError::AuditUnavailable)?;
         let ns = ServiceNamespace::new("image")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("image".to_owned()));
         let act = ActionId::new("image", "UploadImage").unwrap_or_else(|_| {
@@ -1341,20 +1459,28 @@ impl ImageService {
             self.audit_sink.record(&event);
             return Err(ImageError::NotFound);
         }
+        let success_event =
+            AuditEvent::from_auth(auth, ns.clone(), act.clone(), AuditOutcome::Succeeded)
+                .with_resource(
+                    ResourceType::new_unchecked("image".to_owned(), "image".to_owned()),
+                    ResourceId::new(id.to_string()).ok(),
+                    Some(auth.effective_scope().clone()),
+                );
+        let success_event = match operation_id {
+            Some(operation_id) => success_event.with_operation(operation_id),
+            None => success_event,
+        };
         match self
-            .upload_for_project(auth.effective_scope().id().as_str(), id, content)
+            .upload_for_project_with_audit(
+                auth.effective_scope().id().as_str(),
+                id,
+                content,
+                Some(&success_event),
+            )
             .await
         {
             Ok(record) => {
-                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
-                    .with_resource(
-                        ResourceType::new("image", "image").unwrap_or_else(|_| {
-                            ResourceType::new_unchecked("image".to_owned(), "image".to_owned())
-                        }),
-                        ResourceId::new(id.to_string()).ok(),
-                        Some(auth.effective_scope().clone()),
-                    );
-                self.audit_sink.record(&event);
+                self.audit_sink.record(&success_event);
                 Ok(record)
             }
             Err(error) => {
@@ -1371,6 +1497,17 @@ impl ImageService {
         project_id: &str,
         id: Uuid,
         content: &[u8],
+    ) -> Result<ImageRecord, ImageError> {
+        self.upload_for_project_with_audit(project_id, id, content, None)
+            .await
+    }
+
+    async fn upload_for_project_with_audit(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        content: &[u8],
+        audit: Option<&AuditEvent>,
     ) -> Result<ImageRecord, ImageError> {
         if content.len() > self.max_upload_bytes {
             return Err(ImageError::TooLarge);
@@ -1440,10 +1577,20 @@ impl ImageService {
             return Err(ImageError::Storage(error));
         }
         let checksum = format!("{:x}", Sha256::digest(content));
+        let audit_record = audit
+            .map(o3k_store::AuditEventRecord::from_kernel_event)
+            .transpose()
+            .map_err(ImageError::Store)?;
         match self
             .inner
             .repository
-            .activate_image(project_id, &id, content.len() as u64, &checksum)
+            .activate_image_with_audit(
+                project_id,
+                &id,
+                content.len() as u64,
+                &checksum,
+                audit_record.as_ref().ok_or(ImageError::AuditUnavailable)?,
+            )
             .await
         {
             Ok(record) => {
@@ -1467,6 +1614,20 @@ impl ImageService {
     }
 
     pub async fn delete(&self, auth: &AuthContext, id: Uuid) -> Result<(), ImageError> {
+        self.delete_with_operation(auth, id, None).await
+    }
+
+    /// Native lifecycle entry point correlated to the already-admitted
+    /// canonical delete operation.
+    pub async fn delete_with_operation(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+        operation_id: Option<Uuid>,
+    ) -> Result<(), ImageError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| ImageError::AuditUnavailable)?;
         let ns = ServiceNamespace::new("image")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("image".to_owned()));
         let act = ActionId::new("image", "DeleteImage").unwrap_or_else(|_| {
@@ -1489,20 +1650,26 @@ impl ImageService {
             self.audit_sink.record(&event);
             return Err(ImageError::NotFound);
         }
+        let mut success_event =
+            AuditEvent::from_auth(auth, ns.clone(), act.clone(), AuditOutcome::Succeeded)
+                .with_resource(
+                    ResourceType::new_unchecked("image".to_owned(), "image".to_owned()),
+                    ResourceId::new(id.to_string()).ok(),
+                    Some(auth.effective_scope().clone()),
+                );
+        if let Some(operation_id) = operation_id {
+            success_event = success_event.with_operation(operation_id);
+        }
         match self
-            .delete_for_project(auth.effective_scope().id().as_str(), id)
+            .delete_for_project_with_audit(
+                auth.effective_scope().id().as_str(),
+                id,
+                Some(&success_event),
+            )
             .await
         {
             Ok(()) => {
-                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
-                    .with_resource(
-                        ResourceType::new("image", "image").unwrap_or_else(|_| {
-                            ResourceType::new_unchecked("image".to_owned(), "image".to_owned())
-                        }),
-                        ResourceId::new(id.to_string()).ok(),
-                        Some(auth.effective_scope().clone()),
-                    );
-                self.audit_sink.record(&event);
+                self.audit_sink.record(&success_event);
                 Ok(())
             }
             Err(error) => {
@@ -1515,12 +1682,32 @@ impl ImageService {
     }
 
     pub async fn delete_for_project(&self, project_id: &str, id: Uuid) -> Result<(), ImageError> {
-        let _guard = self.lock.lock().await;
-        self.inner
-            .repository
-            .delete_image(project_id, &id)
+        self.delete_for_project_with_audit(project_id, id, None)
             .await
-            .map_err(Self::map_store_error)?;
+    }
+
+    async fn delete_for_project_with_audit(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        audit: Option<&AuditEvent>,
+    ) -> Result<(), ImageError> {
+        let _guard = self.lock.lock().await;
+        if let Some(audit) = audit {
+            let record =
+                o3k_store::AuditEventRecord::from_kernel_event(audit).map_err(ImageError::Store)?;
+            self.inner
+                .repository
+                .delete_image_with_audit(project_id, &id, &record)
+                .await
+                .map_err(Self::map_store_error)?;
+        } else {
+            self.inner
+                .repository
+                .delete_image(project_id, &id)
+                .await
+                .map_err(Self::map_store_error)?;
+        }
         let content = content_path(&self.inner.root, id);
         if content.exists() {
             fs::remove_file(content).map_err(ImageError::Storage)?;
@@ -1589,6 +1776,16 @@ fn image_from_store(record: ImageMetadataRecord) -> Result<ImageRecord, ImageErr
 mod tests {
     use super::*;
 
+    struct UnavailableAuditSink;
+
+    impl o3k_kernel::AuditSink for UnavailableAuditSink {
+        fn ensure_available(&self) -> Result<(), o3k_kernel::AuditSinkError> {
+            Err(o3k_kernel::AuditSinkError::Unavailable)
+        }
+
+        fn record(&self, _event: &o3k_kernel::AuditEvent) {}
+    }
+
     fn auth(project_id: &str) -> AuthContext {
         AuthContext::new(
             o3k_kernel::Principal::User(o3k_kernel::UserPrincipal::new(
@@ -1656,6 +1853,55 @@ mod tests {
         assert_eq!(artifact.content, b"image-bytes");
         fs::remove_dir_all(path)?;
         fs::remove_file(&sqlite_path)?;
+        let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+        let _ = fs::remove_file(format!("{sqlite_path}-shm"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_fails_closed_before_filesystem_or_quota_side_effects_when_audit_is_unavailable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("audit-unavailable-upload");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let store =
+            Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone())
+            .await?
+            .with_audit_sink(Arc::new(UnavailableAuditSink));
+        let image = service
+            .create(
+                &auth("project-a"),
+                "audit-fail".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await;
+        assert!(matches!(image, Err(ImageError::AuditUnavailable)));
+
+        // Use a separate service with the normal sink to create the queued
+        // record, then replace the sink before upload admission.
+        let normal = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone()).await?;
+        let queued = normal
+            .create(
+                &auth("project-a"),
+                "audit-fail-queued".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+        let failed = normal
+            .with_audit_sink(Arc::new(UnavailableAuditSink))
+            .upload(&auth("project-a"), queued.id, b"must-not-publish")
+            .await;
+        assert!(matches!(failed, Err(ImageError::AuditUnavailable)));
+        assert!(!content_path(&path, queued.id).exists());
+
+        drop(service);
+        drop(store);
+        let _ = fs::remove_dir_all(path);
+        let _ = fs::remove_file(&sqlite_path);
         let _ = fs::remove_file(format!("{sqlite_path}-wal"));
         let _ = fs::remove_file(format!("{sqlite_path}-shm"));
         Ok(())

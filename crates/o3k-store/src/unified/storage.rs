@@ -125,6 +125,26 @@ impl StorageRepository for O3kStore {
         }
     }
 
+    async fn list_volume_attachments_v1_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<VolumeAttachmentRecordV1>, StoreError> {
+        match self {
+            Self::Sqlite(store) => {
+                store
+                    .list_volume_attachments_v1_page(project_id, after_id, limit)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .list_volume_attachments_v1_page(project_id, after_id, limit)
+                    .await
+            }
+        }
+    }
+
     async fn update_volume_attachment_v1(
         &self,
         expected_generation: u64,

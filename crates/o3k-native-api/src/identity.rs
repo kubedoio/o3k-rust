@@ -26,11 +26,13 @@ use crate::{
 };
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FederatedScopeDiscoveryRequest {
     pub federated: FederatedScopeCredentials,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FederatedScopeCredentials {
     pub access_token: String,
 }
@@ -141,6 +143,15 @@ pub async fn operator_profile(
     auth: BearerAuth,
     request_id: RequestId,
 ) -> Response {
+    // Operator capabilities are system-scoped by contract.  Do not rely on
+    // an authorizer implementation to reject a project-scoped context: an
+    // incorrectly configured policy must not turn a tenant token into an
+    // operator probe.
+    if auth.0.effective_scope().kind() != o3k_kernel::ScopeKind::System {
+        return ProblemDetails::with_detail(ErrorCode::Forbidden, "system scope required")
+            .with_request_id(request_id.0)
+            .into_response();
+    }
     let Some(authorizer) = state.authorizer.as_ref() else {
         return ProblemDetails::with_detail(
             ErrorCode::Forbidden,

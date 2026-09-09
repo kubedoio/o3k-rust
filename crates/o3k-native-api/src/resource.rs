@@ -9,7 +9,7 @@
 use base64::Engine as _;
 use std::{collections::HashMap, sync::Arc};
 
-use crate::pagination::{CursorPayload, continuation_index, parse_page_size};
+use crate::pagination::{CursorPayload, parse_page_size};
 use crate::{
     NativeApiState,
     auth::BearerAuth,
@@ -18,6 +18,7 @@ use crate::{
 use async_trait::async_trait;
 use axum::{
     Json,
+    body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -26,7 +27,10 @@ use o3k_kernel::{
     ActionId, AuthContext, AuthorizationDecision, AuthorizationRequest, ResourceTarget,
     ResourceType,
 };
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{self, SeqAccess, Visitor},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LifecycleOperation {
@@ -167,6 +171,14 @@ impl ResourceDispatcher {
         self.descriptors.values()
     }
 
+    /// Return at most `limit` descriptors without materializing the complete
+    /// dispatch index.  Public discovery callers request one extra entry to
+    /// detect overflow and fail closed before constructing a response.
+    #[must_use]
+    pub fn all_bounded(&self, limit: usize) -> Vec<&ResourceDescriptor> {
+        self.descriptors.values().take(limit).collect()
+    }
+
     pub(crate) fn is_ready(&self, descriptor: &ResourceDescriptor) -> bool {
         let Some(registry) = &self.lifecycle_registry else {
             return descriptor.ready;
@@ -188,10 +200,7 @@ impl ResourceDispatcher {
         name: &str,
     ) -> Option<ActionId> {
         let registry = self.lifecycle_registry.as_ref()?.read().ok()?;
-        let manifest = registry
-            .all()
-            .into_iter()
-            .find(|manifest| manifest.service_id == descriptor.owning_service)?;
+        let manifest = registry.get(&descriptor.owning_service)?;
         let wire = format!("{}:{name}", descriptor.resource_type.namespace());
         manifest
             .actions
@@ -274,10 +283,102 @@ pub struct MutationResult {
     pub resource: Option<serde_json::Value>,
 }
 
+/// Bounded result at the application boundary.  Implementations must fetch
+/// at most `limit + 1` records and use the extra record only to determine
+/// whether a continuation exists; callers never receive an unbounded
+/// collection from the HTTP application.
+#[derive(Debug, Clone)]
+pub struct ResourcePage {
+    pub items: Vec<serde_json::Value>,
+    pub has_more: bool,
+}
+
+impl ResourcePage {
+    /// Enforce the application boundary before any HTTP projection work.
+    /// Implementations are expected to query `page_size + 1`; this defensive
+    /// normalization keeps an accidentally over-sized adapter result bounded
+    /// and preserves the continuation signal.
+    pub fn bounded(mut self, page_size: usize) -> Self {
+        let has_more = self.has_more || self.items.len() > page_size;
+        self.items.truncate(page_size.saturating_add(1));
+        self.has_more = has_more;
+        self
+    }
+}
+
+/// Remove fields which are never part of a tenant-facing resource contract.
+/// Resource applications may be backed by an external controller, so the
+/// HTTP boundary must remain safe even when that controller returns an
+/// over-inclusive document.  This is deliberately deny-by-name and recursive;
+/// public resource schemas remain the authoritative allow-list for normal
+/// native resources.
+pub(crate) fn public_value(value: serde_json::Value) -> serde_json::Value {
+    fn forbidden(key: &str) -> bool {
+        // Treat separator variants uniformly.  Provider/controller payloads
+        // are not trusted to use one naming convention; in particular a
+        // spaced or punctuated spelling must not bypass the deny list.
+        let key = key
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .collect::<String>();
+        [
+            "password",
+            "token",
+            "secret",
+            "privatekey",
+            "credential",
+            "chap",
+            "userdata",
+            "userdatapayload",
+            "providerid",
+            "providerreference",
+            "providerresourceid",
+            "provideroperationid",
+            "providerpath",
+            "providerhost",
+            "backend",
+            "backendid",
+            "nodeid",
+            "hostpath",
+            "connection",
+            "connectionstring",
+            "devicepath",
+            "rawenvironment",
+            "environment",
+        ]
+        .iter()
+        .any(|needle| key.contains(needle))
+    }
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .filter(|(key, _)| !forbidden(key))
+                .map(|(key, value)| (key, public_value(value)))
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(public_value).collect())
+        }
+        other => other,
+    }
+}
+
+fn public_mutation(mut result: MutationResult) -> MutationResult {
+    result.resource = result.resource.map(public_value);
+    result
+}
+
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionRequest {
     #[serde(default = "empty_action_input")]
     pub input: serde_json::Value,
+    /// Optional bounded raw action payload.  This is intentionally not part
+    /// of the JSON representation: binary actions negotiate their media type
+    /// at the HTTP boundary and domain handlers validate the bytes.
+    #[serde(skip)]
+    pub payload: Option<Bytes>,
 }
 
 fn empty_action_input() -> serde_json::Value {
@@ -320,6 +421,24 @@ pub trait ResourceApplication: Send + Sync {
         auth: &AuthContext,
         query: &ListQuery,
     ) -> Result<Vec<serde_json::Value>, ResourceApplicationError>;
+    /// Bounded list contract. Every implementation must push scope, filtering,
+    /// ordering, and the page bound through its repository boundary. There is
+    /// deliberately no fallback to `list`: such a fallback would make an
+    /// otherwise valid application capable of loading an unbounded collection.
+    async fn list_page(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &AuthContext,
+        query: &ListQuery,
+    ) -> Result<ResourcePage, ResourceApplicationError>;
+    async fn validate_list_cursor(
+        &self,
+        _descriptor: &ResourceDescriptor,
+        _auth: &AuthContext,
+        _cursor_id: &str,
+    ) -> Result<bool, ResourceApplicationError> {
+        Ok(true)
+    }
     async fn show(
         &self,
         descriptor: &ResourceDescriptor,
@@ -334,6 +453,23 @@ pub trait ResourceApplication: Send + Sync {
         limit: usize,
     ) -> Result<Vec<RelationshipView>, ResourceApplicationError> {
         let _ = (descriptor, auth, id, limit);
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
+    async fn relationships_page(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &AuthContext,
+        id: &str,
+        after_slot: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RelationshipView>, ResourceApplicationError> {
+        // Never fall back to the legacy whole-collection method here.  This
+        // is a public collection boundary and a default fallback would allow
+        // an otherwise valid adapter to load an unbounded relationship set
+        // before the HTTP layer can enforce its page size.  Adapters that
+        // expose relationships must implement the repository-bounded page
+        // contract explicitly (including the continuation anchor).
+        let _ = (descriptor, auth, id, after_slot, limit);
         Err(ResourceApplicationError::UnsupportedOperation)
     }
     async fn update(
@@ -467,6 +603,14 @@ fn authorize(
 mod tests {
     use super::*;
 
+    #[test]
+    fn action_request_rejects_undeclared_wire_fields() {
+        let result = serde_json::from_str::<ActionRequest>(
+            r#"{"input":{},"provider_credentials":"secret"}"#,
+        );
+        assert!(result.is_err());
+    }
+
     fn descriptor(namespace: &str, name: &str, collection: &str) -> ResourceDescriptor {
         let mut lifecycle_actions = HashMap::new();
         for (operation, action) in [
@@ -518,6 +662,30 @@ mod tests {
     }
 
     #[test]
+    fn relationship_list_projection_matches_versioned_schema() {
+        let relationship = RelationshipView {
+            slot: "root".into(),
+            resource_type: "network:network".into(),
+            resource_id: Some("network-1".into()),
+            ownership: "exclusive".into(),
+            state: "bound".into(),
+            parent_operation_id: "operation-1".into(),
+            child_operation_id: None,
+        };
+        let payload = serde_json::json!({
+            "items": [relationship],
+            "next_cursor": null
+        });
+        let schema: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../contracts/native-relationship-list-response-v1.schema.json"
+        )))
+        .unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.validate(&payload).is_ok());
+    }
+
+    #[test]
     fn lifecycle_actions_are_descriptor_authoritative() {
         let mut registry = ResourceDispatcher::default();
         let mut value = descriptor("network", "network_intent", "network-intents");
@@ -558,6 +726,47 @@ mod tests {
         let mut d = descriptor("compute", "server", "servers");
         d.lifecycle_actions.remove(&LifecycleOperation::Delete);
         assert!(registry.register(d).is_ok());
+    }
+
+    #[test]
+    fn list_filter_shape_is_bounded_before_repository_dispatch() {
+        assert_eq!(
+            validate_filter_shape(&vec![
+                "observed_state=ready".to_owned();
+                MAX_LIST_FILTERS + 1
+            ]),
+            Err(ErrorCode::BadRequest)
+        );
+        assert_eq!(
+            validate_filter_shape(&["x".repeat(MAX_LIST_FILTER_LENGTH + 1)]),
+            Err(ErrorCode::BadRequest)
+        );
+        assert!(validate_filter_shape(&["observed_state=ready".to_owned()]).is_ok());
+    }
+
+    #[test]
+    fn resource_page_contract_caps_adapter_results_to_page_size_plus_one() {
+        let page = ResourcePage {
+            items: (0..128)
+                .map(|id| serde_json::json!({"metadata": {"id": id}}))
+                .collect(),
+            has_more: false,
+        }
+        .bounded(7);
+        assert_eq!(page.items.len(), 8);
+        assert!(page.has_more);
+    }
+
+    #[test]
+    fn public_projection_rejects_spaced_secret_and_provider_keys() {
+        let value = public_value(serde_json::json!({
+            "private key": "must not escape",
+            "provider id": "backend-id",
+            "safe label": "ok",
+        }));
+        assert!(value.get("private key").is_none());
+        assert!(value.get("provider id").is_none());
+        assert_eq!(value["safe label"], "ok");
     }
 
     #[test]
@@ -677,8 +886,10 @@ pub async fn update(
         )
         .await
     {
-        Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
-        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Ok(result) if result.complete => {
+            (StatusCode::OK, Json(public_mutation(result))).into_response()
+        }
+        Ok(result) => (StatusCode::ACCEPTED, Json(public_mutation(result))).into_response(),
         Err(error) => application_problem(error),
     }
 }
@@ -688,7 +899,7 @@ pub async fn action(
     headers: HeaderMap,
     Path((namespace, collection, id, action_name)): Path<(String, String, String, String)>,
     State(state): State<NativeApiState>,
-    Json(request): Json<ActionRequest>,
+    body: Bytes,
 ) -> Response {
     let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
         return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
@@ -708,17 +919,52 @@ pub async fn action(
     let Some(application) = state.resource_application else {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     };
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let request = if content_type.is_some_and(|value| {
+        value.split(';').next().is_some_and(|media_type| {
+            media_type
+                .trim()
+                .eq_ignore_ascii_case("application/octet-stream")
+        })
+    }) {
+        ActionRequest {
+            input: empty_action_input(),
+            payload: Some(body),
+        }
+    } else {
+        // Action inputs are versioned JSON contracts.  Do not accept an
+        // arbitrary text media type and guess its representation; callers
+        // must negotiate the declared JSON or binary action contract.
+        if !content_type.is_some_and(|value| {
+            value.split(';').next().is_some_and(|media_type| {
+                media_type.trim().eq_ignore_ascii_case("application/json")
+            })
+        }) {
+            return ProblemDetails::new(ErrorCode::UnsupportedMediaType).into_response();
+        }
+        let Ok(input) = serde_json::from_slice::<ActionRequest>(&body) else {
+            return ProblemDetails::new(ErrorCode::BadRequest).into_response();
+        };
+        ActionRequest {
+            payload: None,
+            ..input
+        }
+    };
     let key = match idempotency_key(&headers) {
         Ok(Some(key)) => key,
         Ok(None) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
     match application
-        .action(descriptor, &auth.0, &id, action, request, &key)
+        .action(descriptor, &auth.0, &id, action, request, key)
         .await
     {
-        Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
-        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Ok(result) if result.complete => {
+            (StatusCode::OK, Json(public_mutation(result))).into_response()
+        }
+        Ok(result) => (StatusCode::ACCEPTED, Json(public_mutation(result))).into_response(),
         Err(error) => application_problem(error),
     }
 }
@@ -840,8 +1086,10 @@ async fn create_for(
         .create(descriptor, &auth.0, validated, key)
         .await
     {
-        Ok(result) if result.complete => (StatusCode::CREATED, Json(result)).into_response(),
-        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Ok(result) if result.complete => {
+            (StatusCode::CREATED, Json(public_mutation(result))).into_response()
+        }
+        Ok(result) => (StatusCode::ACCEPTED, Json(public_mutation(result))).into_response(),
         Err(error) => application_problem(error),
     }
 }
@@ -945,7 +1193,7 @@ async fn delete_for(
         .await
     {
         Ok(result) if result.complete => StatusCode::NO_CONTENT.into_response(),
-        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Ok(result) => (StatusCode::ACCEPTED, Json(public_mutation(result))).into_response(),
         Err(error) => application_problem(error),
     }
 }
@@ -960,10 +1208,19 @@ pub struct ListQuery {
     pub order: String,
     /// Resource-specific filters must be declared by the resource contract;
     /// arbitrary spec/provider fields are intentionally not queryable.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bounded_filters")]
     pub filter: Vec<String>,
+    /// Parsed canonical filter. Only durable observed state is advertised in
+    /// v1; adapters must reject every other predicate before touching a store.
+    #[serde(skip)]
+    pub observed_state: Option<String>,
     #[serde(skip)]
     pub continuation_id: Option<String>,
+    /// Parsed bounded page size passed to the repository application. Keeping
+    /// this on the request prevents adapters from fetching the global maximum
+    /// for every small page request.
+    #[serde(skip)]
+    pub page_size: usize,
 }
 
 fn default_order() -> String {
@@ -974,6 +1231,60 @@ fn query_hash(query: &ListQuery) -> String {
     use sha2::{Digest, Sha256};
     let canonical = serde_json::to_vec(&(query.order.as_str(), &query.filter)).unwrap_or_default();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(canonical))
+}
+
+// Axum materializes repeated query parameters before the handler runs. Bound
+// both their count and size before any adapter/repository work is attempted.
+const MAX_LIST_FILTERS: usize = 16;
+const MAX_LIST_FILTER_LENGTH: usize = 256;
+
+/// Deserialize repeated `filter` parameters with a hard bound while the
+/// query is still being materialized.  Validating `Vec<String>` after the
+/// default serde implementation has run would permit an attacker to make the
+/// extractor allocate an arbitrarily large vector before returning 400.
+fn deserialize_bounded_filters<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct BoundedFilters;
+
+    impl<'de> Visitor<'de> for BoundedFilters {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("at most 16 filter values, each at most 256 bytes long")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut filters = Vec::with_capacity(MAX_LIST_FILTERS);
+            while let Some(filter) = seq.next_element::<String>()? {
+                if filters.len() == MAX_LIST_FILTERS {
+                    return Err(de::Error::custom("too many filter values"));
+                }
+                if filter.len() > MAX_LIST_FILTER_LENGTH {
+                    return Err(de::Error::custom("filter value is too long"));
+                }
+                filters.push(filter);
+            }
+            Ok(filters)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedFilters)
+}
+
+fn validate_filter_shape(filters: &[String]) -> Result<(), ErrorCode> {
+    if filters.len() > MAX_LIST_FILTERS
+        || filters
+            .iter()
+            .any(|filter| filter.len() > MAX_LIST_FILTER_LENGTH)
+    {
+        return Err(ErrorCode::BadRequest);
+    }
+    Ok(())
 }
 
 pub async fn list(
@@ -998,9 +1309,24 @@ pub async fn list(
     let Some(application) = state.resource_application else {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     };
-    if query.order != "id.asc" || !query.filter.is_empty() {
+    if query.order != "id.asc" {
         return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response();
     }
+    if let Err(error) = validate_filter_shape(&query.filter) {
+        return ProblemDetails::new(error).into_response();
+    }
+    for filter in &query.filter {
+        let Some(value) = filter.strip_prefix("observed_state=") else {
+            return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response();
+        };
+        if value.is_empty() || value.len() > 64 || value.chars().any(|c| c.is_control()) {
+            return ProblemDetails::new(ErrorCode::BadRequest).into_response();
+        }
+        if query.observed_state.replace(value.to_owned()).is_some() {
+            return ProblemDetails::new(ErrorCode::BadRequest).into_response();
+        }
+    }
+    query.page_size = parse_page_size(query.limit.as_deref());
     let effective_query_hash = query_hash(&query);
     let scope = auth.0.effective_scope().id().to_string();
     let resource_type = descriptor.resource_type.to_string();
@@ -1013,34 +1339,36 @@ pub async fn list(
         ) else {
             return ProblemDetails::new(ErrorCode::InvalidCursor).into_response();
         };
+        match application
+            .validate_list_cursor(descriptor, &auth.0, &payload.last_id)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                return ProblemDetails::new(ErrorCode::InvalidCursor).into_response();
+            }
+        }
         query.continuation_id = Some(payload.last_id);
     }
-    let items = match application.list(descriptor, &auth.0, &query).await {
-        Ok(items) => items,
+    let page_result = match application.list_page(descriptor, &auth.0, &query).await {
+        Ok(page) => page,
         Err(error) => return application_problem(error),
     };
-    let mut items = items;
+    let page_result = page_result.bounded(query.page_size);
+    let mut items = page_result
+        .items
+        .into_iter()
+        .map(public_value)
+        .collect::<Vec<_>>();
     items.sort_by(|a, b| {
         a["metadata"]["id"]
             .as_str()
             .cmp(&b["metadata"]["id"].as_str())
     });
-    let start = if query.cursor.is_some() {
-        let ids = items
-            .iter()
-            .filter_map(|item| item["metadata"]["id"].as_str().map(str::to_owned))
-            .collect::<Vec<_>>();
-        match continuation_index(&ids, query.continuation_id.as_deref().unwrap_or_default()) {
-            Ok(index) => index,
-            Err(_) => return ProblemDetails::new(ErrorCode::InvalidCursor).into_response(),
-        }
-    } else {
-        0
-    };
-    let page_size = parse_page_size(query.limit.as_deref());
-    let end = (start + page_size).min(items.len());
-    let page = items[start..end].to_vec();
-    let next_cursor = if end < items.len() {
+    let page_size = query.page_size;
+    let has_more = page_result.has_more || items.len() > page_size;
+    let page = items.into_iter().take(page_size).collect::<Vec<_>>();
+    let next_cursor = if has_more {
         page.last()
             .and_then(|item| item["metadata"]["id"].as_str())
             .map(|last_id| {
@@ -1084,7 +1412,7 @@ pub async fn show(
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     };
     match application.show(descriptor, &auth.0, &id).await {
-        Ok(resource) => (StatusCode::OK, Json(resource)).into_response(),
+        Ok(resource) => (StatusCode::OK, Json(public_value(resource))).into_response(),
         Err(error) => application_problem(error),
     }
 }
@@ -1108,16 +1436,112 @@ pub async fn relationships(
     let Some(application) = state.resource_application else {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     };
-    match application
-        .relationships(
+    if let Err(error) = validate_filter_shape(&query.filter) {
+        return ProblemDetails::new(error).into_response();
+    }
+    if query.order != "id.asc" || !query.filter.is_empty() {
+        return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response();
+    }
+    let effective_query_hash = query_hash(&query);
+    let scope = auth.0.effective_scope().id().to_string();
+    let resource_type = format!("{namespace}:{collection}:relationships:{id}");
+    let after_slot = if let Some(cursor) = query.cursor.as_deref() {
+        match state.cursor_config.decode_cursor(
+            cursor,
+            &scope,
+            &resource_type,
+            &effective_query_hash,
+        ) {
+            Ok(payload) => Some(payload.last_id),
+            Err(_) => return ProblemDetails::new(ErrorCode::InvalidCursor).into_response(),
+        }
+    } else {
+        None
+    };
+    let page_size = parse_page_size(query.limit.as_deref());
+    let mut items = match application
+        .relationships_page(
             descriptor,
             &auth.0,
             &id,
-            parse_page_size(query.limit.as_deref()),
+            after_slot.as_deref(),
+            page_size.saturating_add(1),
         )
         .await
     {
-        Ok(items) => (StatusCode::OK, Json(serde_json::json!({"items": items}))).into_response(),
-        Err(error) => application_problem(error),
+        Ok(items) => items,
+        Err(error) => return application_problem(error),
+    };
+    let has_more = items.len() > page_size;
+    if has_more {
+        let _ = items.pop();
+    }
+    let next_cursor = if has_more {
+        items.last().map(|item| {
+            state.cursor_config.encode_cursor(&CursorPayload {
+                last_id: item.slot.clone(),
+                scope_id: scope.clone(),
+                resource_type: resource_type.clone(),
+                query_hash: effective_query_hash.clone(),
+                version: 1,
+            })
+        })
+    } else {
+        None
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"items": items, "next_cursor": next_cursor})),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::public_value;
+    use serde_json::json;
+
+    #[test]
+    fn public_resource_projection_removes_nested_provider_and_secret_fields() {
+        let projected = public_value(json!({
+            "metadata": {"id": "r1"},
+            "spec": {"name": "safe", "user_data": "payload"},
+            "status": {"provider_id": "private-id", "nested": [{"password": "pw"}]},
+            "backendId": "backend", "nodeId": "node", "hostPath": "/private",
+            "providerReference": "ref", "providerResourceId": "resource",
+            "providerOperationId": "operation",
+            "connection": "should-not-be-here"
+        }));
+        assert_eq!(projected["metadata"]["id"], "r1");
+        assert!(projected["spec"].get("user_data").is_none());
+        assert!(projected["status"].get("provider_id").is_none());
+        assert!(projected["status"]["nested"][0].get("password").is_none());
+        assert!(projected.get("backendId").is_none());
+        assert!(projected.get("nodeId").is_none());
+        assert!(projected.get("hostPath").is_none());
+        assert!(projected.get("providerReference").is_none());
+        assert!(projected.get("providerResourceId").is_none());
+        assert!(projected.get("providerOperationId").is_none());
+        assert!(projected.get("connection").is_none());
+    }
+}
+
+#[cfg(test)]
+mod bounded_query_tests {
+    use super::ListQuery;
+
+    #[test]
+    fn repeated_filters_are_rejected_during_deserialization() {
+        let query = format!(
+            "{{\"filter\":[{}]}}",
+            (0..17).map(|_| "\"x\"").collect::<Vec<_>>().join(",")
+        );
+        assert!(serde_json::from_str::<ListQuery>(&query).is_err());
+    }
+
+    #[test]
+    fn oversized_filter_is_rejected_during_deserialization() {
+        let query = format!(r#"{{"filter":["{}"]}}"#, "x".repeat(257));
+        assert!(serde_json::from_str::<ListQuery>(&query).is_err());
     }
 }

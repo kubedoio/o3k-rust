@@ -395,6 +395,204 @@ impl StaticAuthorizer {
                 },
             );
         }
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("operator", "ListProjects"),
+            ResourceType::new("iam", "project"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: false,
+                    required_roles: vec!["operator".to_owned()],
+                },
+            );
+        }
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("operator", "ReadProject"),
+            ResourceType::new("iam", "project"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: false,
+                    required_roles: vec!["operator".to_owned()],
+                },
+            );
+        }
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("operator", "ListPrincipals"),
+            ResourceType::new("iam", "principal"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: false,
+                    required_roles: vec!["operator".to_owned()],
+                },
+            );
+        }
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("operator", "ListRoleAssignments"),
+            ResourceType::new("iam", "role_assignment"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: false,
+                    required_roles: vec!["operator".to_owned()],
+                },
+            );
+        }
+        // Role-assignment mutations are operator-only and system-scoped.  The
+        // native IAM writer must use this canonical action; it must not infer
+        // authority from the target project or principal relationship.
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("operator", "AssignRole"),
+            ResourceType::new("iam", "role_assignment"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: false,
+                    required_roles: vec!["operator".to_owned()],
+                },
+            );
+        }
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("operator", "ReadPrincipal"),
+            ResourceType::new("iam", "principal"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: false,
+                    required_roles: vec!["operator".to_owned()],
+                },
+            );
+        }
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("operator", "ReadDiagnostics"),
+            ResourceType::new("operator", "diagnostics"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: false,
+                    required_roles: vec!["operator".to_owned()],
+                },
+            );
+        }
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("operator", "ReadAudit"),
+            ResourceType::new("audit", "event"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User, PrincipalKind::Service],
+                    require_ownership: false,
+                    required_roles: vec!["operator".to_owned()],
+                },
+            );
+        }
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("quota", "Read"),
+            ResourceType::new("quota", "dimension"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: true,
+                    required_roles: vec![],
+                },
+            );
+        }
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("metering", "Read"),
+            ResourceType::new("metering", "meter"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: true,
+                    required_roles: vec![],
+                },
+            );
+        }
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("audit", "Read"),
+            ResourceType::new("audit", "event"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: true,
+                    required_roles: vec![],
+                },
+            );
+        }
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("operation", "Read"),
+            ResourceType::new("operation", "operation"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: true,
+                    required_roles: vec![],
+                },
+            );
+        }
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("operator", "ReadOperations"),
+            ResourceType::new("operation", "operation"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User, PrincipalKind::Service],
+                    require_ownership: false,
+                    required_roles: vec!["operator".to_owned()],
+                },
+            );
+        }
     }
 }
 
@@ -422,7 +620,16 @@ impl Authorizer for StaticAuthorizer {
             };
         }
 
-        if request.action == ActionId::new_unchecked("operator", "ReadProfile")
+        if (request.action == ActionId::new_unchecked("operator", "ReadProfile")
+            || request.action == ActionId::new_unchecked("operator", "ListProjects")
+            || request.action == ActionId::new_unchecked("operator", "ReadProject")
+            || request.action == ActionId::new_unchecked("operator", "ListPrincipals")
+            || request.action == ActionId::new_unchecked("operator", "ListRoleAssignments")
+            || request.action == ActionId::new_unchecked("operator", "AssignRole")
+            || request.action == ActionId::new_unchecked("operator", "ReadPrincipal")
+            || request.action == ActionId::new_unchecked("operator", "ReadDiagnostics")
+            || request.action == ActionId::new_unchecked("operator", "ReadAudit")
+            || request.action == ActionId::new_unchecked("operator", "ReadOperations"))
             && request.auth_context.effective_scope().kind() != ScopeKind::System
         {
             return AuthorizationDecision::Deny {

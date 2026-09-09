@@ -55,6 +55,45 @@ impl DurableStore for O3kStore {
         }
     }
 
+    async fn list_resources_page_by_observed_state(
+        &self,
+        project_id: &str,
+        kind: &str,
+        observed_state: Option<&str>,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResourceRecord>, crate::StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.list_resources_page_by_observed_state(
+                    project_id,
+                    kind,
+                    observed_state,
+                    after_id,
+                    limit,
+                )
+                .await
+            }
+            Self::Postgres(s) => {
+                s.list_resources_page_by_observed_state(
+                    project_id,
+                    kind,
+                    observed_state,
+                    after_id,
+                    limit,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn count_resources(&self, project_id: &str, kind: &str) -> Result<u64, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.count_resources(project_id, kind).await,
+            Self::Postgres(s) => s.count_resources(project_id, kind).await,
+        }
+    }
+
     async fn update_resource(
         &self,
         id: Uuid,
@@ -311,6 +350,44 @@ impl DurableStore for O3kStore {
             }
             Self::Postgres(s) => {
                 s.list_canonical_operations_page(owner_scope, after_id, limit)
+                    .await
+            }
+        }
+    }
+
+    async fn list_canonical_operations_filtered_page(
+        &self,
+        owner_scope: &str,
+        after_id: Option<Uuid>,
+        limit: u32,
+        filters: &crate::CanonicalOperationFilters,
+    ) -> Result<Vec<CanonicalOperationRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.list_canonical_operations_filtered_page(owner_scope, after_id, limit, filters)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.list_canonical_operations_filtered_page(owner_scope, after_id, limit, filters)
+                    .await
+            }
+        }
+    }
+
+    async fn list_canonical_operations_system_page(
+        &self,
+        owner_scope: Option<&str>,
+        after_id: Option<Uuid>,
+        limit: u32,
+        filters: &crate::CanonicalOperationFilters,
+    ) -> Result<Vec<crate::CanonicalOperationRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.list_canonical_operations_system_page(owner_scope, after_id, limit, filters)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.list_canonical_operations_system_page(owner_scope, after_id, limit, filters)
                     .await
             }
         }

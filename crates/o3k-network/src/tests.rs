@@ -1136,7 +1136,7 @@ mod tests {
             .await?;
         assert!(matches!(
             setup
-                .update_port_name_for_project("project-a", server_port.id, "renamed".to_owned(),)
+            .update_port_name_for_project(&auth("project-a"), server_port.id, "renamed".to_owned(),)
                 .await,
             Err(NetworkError::Conflict)
         ));

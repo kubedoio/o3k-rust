@@ -52,6 +52,31 @@ release_context: >-
   tracker contract stays blocked until the required evidence and human
   decisions exist.
 
+# Issue #907 is an integrated production closure and is intentionally tracked
+# separately from the individual product profiles below. Passing portable
+# contract/conformance checks or a child profile never promotes this record to
+# production status. The executable integrated gate must consume protected,
+# profile-bound evidence before this can change to passed.
+northbound_contract_closure:
+  issue: 907
+  status: not-proven
+  claim_scope: >-
+    Araf P2.2-P2.8 native O3K northbound contract closure only; this record is
+    not a production-readiness, HA, or generic OpenStack parity claim.
+  required_evidence: protected-integrated-production-gate
+  blockers:
+    - accepted northbound HTTPS/TLS certificate and ingress ownership authority
+    - complete pinned real-provider lifecycle convergence in an approved
+      production profile (P13.5A passes; P13.5B reaches Floating IP cleanup
+      but exposes missing authoritative compute-port binding host intent;
+      O3K rejects the projection rather than fabricating provider topology)
+    - protected manifest covering all 16 integrated closure criteria
+  last_gate_result: >-
+    Portable prerequisites and P13.5A pass with verified OpenTofu 1.12.6 and
+    OpenStack provider 3.4.0 artifacts. P13.5B remains not-proven: the server
+    lifecycle succeeds, but terminal port-binding projection is rejected when
+    no durable host intent exists, and complete cleanup evidence is absent.
+
 # How to read this file
 # ---------------------
 # One record per product profile (SPEC-0024 and

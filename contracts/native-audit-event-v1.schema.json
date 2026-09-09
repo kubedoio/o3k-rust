@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-audit-event-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "timestamp", "request_id", "audit_id", "principal_id", "effective_scope", "service_namespace", "action", "outcome"],
+  "properties": {
+    "event_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "timestamp": {"type": "string", "minLength": 1, "maxLength": 64},
+    "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "audit_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "principal_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "effective_scope": {"type": "string", "minLength": 1, "maxLength": 256},
+    "service_namespace": {"type": "string", "minLength": 1, "maxLength": 128},
+    "action": {"type": "string", "minLength": 1, "maxLength": 256},
+    "resource_type": {"type": ["string", "null"], "maxLength": 256},
+    "resource_id": {"type": ["string", "null"], "maxLength": 256},
+    "owner_scope": {"type": ["string", "null"], "maxLength": 256},
+    "operation_id": {"type": ["string", "null"], "maxLength": 64},
+    "outcome": {"type": "string", "enum": ["allowed", "denied", "succeeded", "failed", "unknown_outcome"]},
+    "reason_category": {"type": ["string", "null"], "maxLength": 512}
+  }
+}

@@ -12,11 +12,93 @@ use o3k_kernel::{
 use o3k_store::{server_state_from_storage, server_state_to_storage};
 
 impl ComputeService {
+    /// Persist authorization admission before an authenticated mutation crosses
+    /// the compute repository/provider boundary. This is deliberately an
+    /// `Allowed` intent, not completion evidence: a crash after admission or
+    /// provider execution is recovered from the canonical Operation journal.
+    pub(super) fn audit_mutation_admission(
+        &self,
+        auth: &AuthContext,
+        action: ActionId,
+        resource_type: ResourceType,
+    ) -> Result<(), ComputeError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| ComputeError::Unavailable)?;
+        let event = AuditEvent::from_auth(
+            auth,
+            ServiceNamespace::new_unchecked("compute".to_owned()),
+            action,
+            AuditOutcome::Allowed,
+        )
+        .with_resource(resource_type, None, Some(auth.effective_scope().clone()));
+        self.audit_sink
+            .record_checked(&event)
+            .map_err(|_| ComputeError::Unavailable)
+    }
+
+    /// Compatibility callers are admitted through the same canonical journal
+    /// as native callers.  The compatibility idempotency key is part of the
+    /// canonical semantic request, so retries cannot create a second
+    /// provider operation.
     pub async fn create_server_for_auth(
         &self,
         auth: &AuthContext,
         input: ServerCreateInput,
     ) -> Result<Server, ComputeError> {
+        let action = ActionId::new_unchecked("compute".to_owned(), "CreateServer".to_owned());
+        let semantic = serde_json::json!({
+            "project_id": input.project_id.clone(),
+            "name": input.name.clone(),
+            "image_id": input.image_id.clone(),
+            "flavor_id": input.flavor_id.to_string(),
+            "network_ids": input.network_ids.clone(),
+            "key_name": input.key_name.clone(),
+            "config_drive": input.config_drive.clone(),
+            "idempotency_key": input.idempotency_key.clone(),
+        });
+        let context = o3k_reconciler::CanonicalMutationContext::new(
+            action,
+            auth.principal().id().as_str().to_owned(),
+            auth.effective_scope().clone(),
+            Some(auth.request_id().to_owned()),
+            input.idempotency_key.clone(),
+            semantic,
+        )
+        .map_err(ComputeError::Reconcile)?;
+        match self
+            .create_server_for_auth_canonical(auth, input, context)
+            .await
+        {
+            Ok(receipt) => Ok(receipt.resource),
+            Err(error) => {
+                let event = AuditEvent::from_auth(
+                    auth,
+                    ServiceNamespace::new_unchecked("compute".to_owned()),
+                    ActionId::new_unchecked("compute".to_owned(), "CreateServer".to_owned()),
+                    AuditOutcome::Failed,
+                )
+                .with_reason(error.to_string());
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
+                Err(error)
+            }
+        }
+    }
+
+    // Retained as a non-public migration reference until all compatibility
+    // callers have moved to the canonical adapter. It is deliberately not
+    // reachable from an authenticated public entry point.
+    #[allow(dead_code)]
+    async fn create_server_for_auth_legacy(
+        &self,
+        auth: &AuthContext,
+        input: ServerCreateInput,
+    ) -> Result<Server, ComputeError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| ComputeError::Unavailable)?;
         let ns = ServiceNamespace::new("compute")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
         let act = ActionId::new("compute", "CreateServer").unwrap_or_else(|_| {
@@ -35,9 +117,16 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::Unauthorized);
         }
+        self.audit_mutation_admission(
+            auth,
+            act.clone(),
+            ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+        )?;
         match self.create_server_for_user(input).await {
             Ok(server) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
@@ -48,13 +137,17 @@ impl ComputeService {
                         ResourceId::new(server.id.as_uuid().to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Ok(server)
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Err(error)
             }
         }
@@ -66,6 +159,9 @@ impl ComputeService {
         input: ServerCreateInput,
         context: o3k_reconciler::CanonicalMutationContext,
     ) -> Result<MutationReceipt<Server>, ComputeError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| ComputeError::Unavailable)?;
         // CANONICAL INVARIANT: the canonical context's action must match the
         // expected mutation (InvalidRequest — a structural wiring error),
         // while the actor and owner_scope must match the authenticated request
@@ -94,9 +190,35 @@ impl ComputeService {
         {
             return Err(ComputeError::Unauthorized);
         }
-        let accepted = self
+        self.audit_mutation_admission(
+            auth,
+            action.clone(),
+            ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+        )?;
+        let accepted = match self
             .create_server_for_user_with_context(input, Some(&context))
-            .await?;
+            .await
+        {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                // Admission is recorded before the side effect, but a
+                // rejected request (for example quota exhaustion) still
+                // needs a terminal audit outcome.  Keep this checked so an
+                // audit-store failure cannot turn a durable denial into an
+                // apparently successful request.
+                let event = AuditEvent::from_auth(
+                    auth,
+                    ServiceNamespace::new_unchecked("compute".to_owned()),
+                    action.clone(),
+                    AuditOutcome::Failed,
+                )
+                .with_reason(error.to_string());
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
+                return Err(error);
+            }
+        };
         Ok(MutationReceipt {
             resource: accepted.server,
             operation_id: accepted.operation_id,

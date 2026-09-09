@@ -342,6 +342,40 @@ pub(crate) async fn insert_postgres_canonical_acceptance(
         .bind(&canonical.resource_type).bind(&canonical.resource_id).bind(i32::try_from(canonical.attempt).map_err(|_| StoreError::Corrupt("operation attempt exceeds storage range".into()))?)
         .bind(&canonical.created_at).bind(&canonical.started_at).bind(&canonical.finished_at).bind(&canonical.error).bind(&canonical.request_id)
         .execute(&mut **tx).await.map_err(map_pg_error)?;
+    // Admit the security audit record in the same transaction as the
+    // canonical operation.  `accepted` describes durable control-plane
+    // acceptance only; provider completion is recorded by reconciliation.
+    let event_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:canonical-acceptance-audit:{}", operation.id).as_bytes(),
+    );
+    let fallback_request_id = operation.id.to_string();
+    let request_id = canonical
+        .request_id
+        .as_deref()
+        .unwrap_or(&fallback_request_id);
+    let event_json = serde_json::json!({
+        "event_id": event_id.to_string(),
+        "request_id": request_id,
+        "audit_id": event_id.to_string(),
+        "principal_id": canonical.actor,
+        "effective_scope": canonical.owner_scope,
+        "service_namespace": canonical.service,
+        "action": canonical.action,
+        "resource_type": canonical.resource_type,
+        "resource_id": canonical.resource_id,
+        "owner_scope": canonical.owner_scope,
+        "operation_id": operation.id,
+        "outcome": "accepted"
+    })
+    .to_string();
+    sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,effective_scope,service_namespace,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category,event_json) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (event_id) DO NOTHING")
+        .bind(event_id.to_string()).bind(&canonical.created_at).bind(request_id)
+        .bind(event_id.to_string()).bind(&canonical.actor).bind(&canonical.owner_scope)
+        .bind(&canonical.service).bind(&canonical.action).bind(&canonical.resource_type)
+        .bind(&canonical.resource_id).bind(&canonical.owner_scope)
+        .bind(operation.id.to_string()).bind("accepted").bind(Option::<String>::None)
+        .bind(event_json).execute(&mut **tx).await.map_err(map_pg_error)?;
     Ok(())
 }
 pub(crate) fn parse_pg_volume_attachment(

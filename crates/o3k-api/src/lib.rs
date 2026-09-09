@@ -109,6 +109,7 @@ pub struct AppState {
     image: Option<Arc<ImageService>>,
     network: Option<Arc<NetworkService>>,
     public_allocator: Option<Arc<PublicAddressAllocator>>,
+    public_address_store: Option<Arc<dyn o3k_store::PublicAddressRepository>>,
     network_external_realm_id: Option<uuid::Uuid>,
     network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
     network_controller: Option<o3k_network::NetworkControllerLease>,
@@ -139,6 +140,7 @@ impl Default for AppState {
             image: None,
             network: None,
             public_allocator: None,
+            public_address_store: None,
             network_external_realm_id: None,
             network_dispatcher: None,
             network_controller: None,
@@ -209,6 +211,18 @@ impl AppState {
     #[must_use]
     pub fn with_public_allocator(mut self, allocator: PublicAddressAllocator) -> Self {
         self.public_allocator = Some(Arc::new(allocator));
+        self
+    }
+
+    /// Configures the durable canonical public-address authority.  The
+    /// file-backed allocator remains only a provider-realization fallback for
+    /// portable profiles that do not configure a database repository.
+    #[must_use]
+    pub fn with_public_address_store<S>(mut self, store: Arc<S>) -> Self
+    where
+        S: o3k_store::PublicAddressRepository + 'static,
+    {
+        self.public_address_store = Some(store);
         self
     }
 

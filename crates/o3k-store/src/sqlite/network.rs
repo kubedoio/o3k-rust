@@ -322,6 +322,41 @@ impl SqliteStore {
         .map(|_| ())
     }
 
+    pub async fn insert_canonical_network_with_audit(
+        &self,
+        network: &CanonicalNetworkRecord,
+        audit: &crate::AuditEventRecord,
+    ) -> Result<(), StoreError> {
+        validate_canonical_state(&network.state)?;
+        let generation = checked_generation(network.generation)?;
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let duplicate = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM canonical_networks WHERE project_id = ? AND name = ? LIMIT 1",
+        )
+        .bind(&network.project_id)
+        .bind(&network.name)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        .is_some();
+        if duplicate {
+            return Err(StoreError::ResourceAlreadyExists);
+        }
+        sqlx::query("INSERT INTO canonical_networks (id, project_id, name, admin_state_up, generation, state) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(network.id.to_string()).bind(&network.project_id).bind(&network.name)
+            .bind(network.admin_state_up).bind(generation).bind(&network.state)
+            .execute(&mut *tx).await.map_err(map_canonical_insert_error)?;
+        sqlx::query("INSERT OR IGNORE INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,effective_scope,service_namespace,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category,event_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(&audit.event_id).bind(&audit.timestamp).bind(&audit.request_id)
+            .bind(&audit.audit_id).bind(&audit.principal_id).bind(&audit.effective_scope)
+            .bind(&audit.service_namespace).bind(&audit.action).bind(&audit.resource_type)
+            .bind(&audit.resource_id).bind(&audit.owner_scope)
+            .bind(audit.operation_id.map(|id| id.to_string())).bind(&audit.outcome)
+            .bind(&audit.reason_category).bind(&audit.event_json)
+            .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)
+    }
+
     pub async fn get_canonical_network(
         &self,
         project_id: &str,
@@ -349,6 +384,24 @@ impl SqliteStore {
         .fetch_all(&self.pool)
         .await
         .map_err(StoreError::Database)?;
+        rows.iter().map(canonical_network_from_row).collect()
+    }
+
+    pub async fn list_canonical_networks_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CanonicalNetworkRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("network page limit overflow".to_owned()))?;
+        let rows = if let Some(after_id) = after_id {
+            sqlx::query("SELECT id, project_id, name, admin_state_up, generation, state FROM canonical_networks WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?")
+                .bind(project_id).bind(after_id).bind(limit).fetch_all(&self.pool).await
+        } else {
+            sqlx::query("SELECT id, project_id, name, admin_state_up, generation, state FROM canonical_networks WHERE project_id = ? ORDER BY id LIMIT ?")
+                .bind(project_id).bind(limit).fetch_all(&self.pool).await
+        }.map_err(StoreError::Database)?;
         rows.iter().map(canonical_network_from_row).collect()
     }
 
@@ -430,6 +483,30 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub async fn delete_canonical_network_with_audit(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+        operation_id: Uuid,
+        audit: &crate::AuditEventRecord,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let result = sqlx::query("DELETE FROM canonical_networks WHERE id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE network_id = canonical_networks.id)")
+            .bind(network_id.to_string()).bind(project_id).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NetworkInUse);
+        }
+        sqlx::query("UPDATE resources SET desired_state='DELETED', observed_state='DELETED', generation=generation+1, observed_generation=observed_generation+1 WHERE id=? AND kind='network:network' AND project_id=?")
+            .bind(network_id.to_string()).bind(project_id).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        sqlx::query("UPDATE operations SET state='succeeded', error_category=NULL, error_message=NULL WHERE id=? AND resource_id=?")
+            .bind(operation_id.to_string()).bind(network_id.to_string()).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        sqlx::query("UPDATE canonical_operation_metadata SET finished_at=COALESCE(finished_at, CURRENT_TIMESTAMP), error=NULL WHERE operation_id=?")
+            .bind(operation_id.to_string()).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        sqlx::query("INSERT OR IGNORE INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,effective_scope,service_namespace,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category,event_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(&audit.event_id).bind(&audit.timestamp).bind(&audit.request_id).bind(&audit.audit_id).bind(&audit.principal_id).bind(&audit.effective_scope).bind(&audit.service_namespace).bind(&audit.action).bind(&audit.resource_type).bind(&audit.resource_id).bind(&audit.owner_scope).bind(audit.operation_id.map(|id| id.to_string())).bind(&audit.outcome).bind(&audit.reason_category).bind(&audit.event_json).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)
+    }
+
     pub async fn insert_canonical_realm(
         &self,
         realm: &CanonicalAddressRealmRecord,
@@ -457,6 +534,43 @@ impl SqliteStore {
         .await
         .map_err(map_canonical_insert_error)
         .map(|_| ())
+    }
+
+    pub async fn insert_canonical_realm_with_audit(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+        audit: &crate::AuditEventRecord,
+    ) -> Result<(), StoreError> {
+        validate_canonical_state(&realm.state)?;
+        let generation = checked_generation(realm.generation)?;
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let owner: Option<String> = sqlx::query_scalar(
+            "SELECT project_id FROM canonical_networks WHERE id = ? AND state = 'active'",
+        )
+        .bind(realm.network_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        if owner.as_deref() != Some(realm.project_id.as_str()) {
+            return Err(StoreError::OwnershipConflict);
+        }
+        sqlx::query("INSERT INTO canonical_address_realms (id, network_id, project_id, prefix, overlapping_prefixes, generation, state) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind(realm.id.to_string()).bind(realm.network_id.to_string()).bind(&realm.project_id)
+            .bind(&realm.prefix).bind(realm.overlapping_prefixes).bind(generation).bind(&realm.state)
+            .execute(&mut *tx).await.map_err(map_canonical_insert_error)?;
+        sqlx::query("INSERT OR IGNORE INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,effective_scope,service_namespace,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category,event_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(&audit.event_id).bind(&audit.timestamp).bind(&audit.request_id).bind(&audit.audit_id)
+            .bind(&audit.principal_id).bind(&audit.effective_scope).bind(&audit.service_namespace)
+            .bind(&audit.action).bind(&audit.resource_type).bind(&audit.resource_id).bind(&audit.owner_scope)
+            .bind(audit.operation_id.map(|id| id.to_string())).bind(&audit.outcome).bind(&audit.reason_category)
+            .bind(&audit.event_json).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        // Authority, projection, and its success audit must commit together.
+        sqlx::query("INSERT INTO resources (id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(realm.id.to_string()).bind("network:address_realm")
+            .bind(&realm.project_id).bind(generation).bind(generation)
+            .bind(&realm.state).bind(&realm.state).bind(Option::<String>::None)
+            .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)
     }
 
     pub async fn get_canonical_realm(
@@ -2277,6 +2391,21 @@ impl NetworkRepository for SqliteStore {
     ) -> Result<(), StoreError> {
         self.insert_canonical_network(network).await
     }
+    async fn insert_canonical_network_with_audit(
+        &self,
+        network: &CanonicalNetworkRecord,
+        audit: &crate::AuditEventRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_canonical_network_with_audit(network, audit)
+            .await
+    }
+    async fn insert_canonical_realm_with_audit(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+        audit: &crate::AuditEventRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_canonical_realm_with_audit(realm, audit).await
+    }
     async fn get_canonical_network(
         &self,
         project_id: &str,
@@ -2289,6 +2418,15 @@ impl NetworkRepository for SqliteStore {
         project_id: &str,
     ) -> Result<Vec<CanonicalNetworkRecord>, StoreError> {
         self.list_canonical_networks(project_id).await
+    }
+    async fn list_canonical_networks_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CanonicalNetworkRecord>, StoreError> {
+        self.list_canonical_networks_page(project_id, after_id, limit)
+            .await
     }
     async fn update_canonical_network(
         &self,
@@ -2581,6 +2719,16 @@ impl NetworkRepository for SqliteStore {
         network_id: &Uuid,
     ) -> Result<(), StoreError> {
         self.delete_canonical_network(project_id, network_id).await
+    }
+    async fn delete_canonical_network_with_audit(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+        operation_id: Uuid,
+        audit: &crate::AuditEventRecord,
+    ) -> Result<(), StoreError> {
+        self.delete_canonical_network_with_audit(project_id, network_id, operation_id, audit)
+            .await
     }
     async fn backfill_canonical_network_state(&self) -> Result<(), StoreError> {
         self.backfill_canonical_network_state().await

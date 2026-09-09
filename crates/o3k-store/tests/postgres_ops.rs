@@ -10,8 +10,9 @@ use uuid::Uuid;
 use o3k_kernel::{LimitKey, LimitValue, OwnershipScope, ResourceAmount, ScopeId, ScopeKind};
 use o3k_store::{
     DurableStore, ImageMetadataRecord, ImageRepository, NetworkRecord, NetworkRepository,
-    OperationRecord, OperationState, PlacementInventoryRecord, PlacementRepository, PortRecord,
-    PostgresStore, QuotaRepository, ResourceRecord, StoreError, SubnetRecord,
+    OperationRecord, OperationState, PlacementAllocationRecord, PlacementInventoryRecord,
+    PlacementRepository, PlacementResourceRecord, PortRecord, PostgresStore, QuotaRepository,
+    ResourceRecord, StoreError, SubnetRecord,
 };
 
 async fn prepare_test_database(database_url: &str) -> Option<PgConnection> {
@@ -292,6 +293,92 @@ async fn test_postgres_backup_and_restore() {
         .arg("-c")
         .arg("DROP DATABASE IF EXISTS o3k_restore_test;")
         .output();
+}
+
+#[tokio::test]
+async fn test_postgres_capacity_summary_is_sql_bounded_and_excludes_deleted() {
+    let (_db_url, store, _database_guard) = match get_test_store().await {
+        Some(pair) => pair,
+        None => {
+            eprintln!("Skipping test_postgres_capacity_summary: no PostgreSQL instance available");
+            return;
+        }
+    };
+    store
+        .register_provider(
+            "node-capacity-a",
+            &[
+                PlacementInventoryRecord {
+                    resource_class: "VCPU".to_owned(),
+                    total: 8,
+                    reserved: 2,
+                    allocation_ratio: 1.0,
+                    used: 0,
+                },
+                PlacementInventoryRecord {
+                    resource_class: "MEMORY_MB".to_owned(),
+                    total: 1024,
+                    reserved: 0,
+                    allocation_ratio: 1.0,
+                    used: 0,
+                },
+            ],
+        )
+        .await
+        .expect("register provider");
+    store
+        .register_provider(
+            "node-capacity-b",
+            &[PlacementInventoryRecord {
+                resource_class: "VCPU".to_owned(),
+                total: 4000,
+                reserved: 0,
+                allocation_ratio: 1.0,
+                used: 0,
+            }],
+        )
+        .await
+        .expect("register provider");
+    store
+        .commit_allocation(
+            "node-capacity-a",
+            1,
+            &PlacementAllocationRecord {
+                id: "capacity-allocation".to_owned(),
+                provider_id: "node-capacity-a".to_owned(),
+                consumer_id: "capacity-consumer".to_owned(),
+                resources: vec![PlacementResourceRecord {
+                    resource_class: "VCPU".to_owned(),
+                    amount: 3,
+                }],
+            },
+        )
+        .await
+        .expect("commit allocation");
+    store
+        .set_provider_state("node-capacity-b", "Deleted")
+        .await
+        .expect("delete provider");
+
+    let (dimensions, enabled, degraded) = store.capacity_summary(1).await.expect("summary");
+    assert_eq!(dimensions.len(), 1, "SQL LIMIT must bound dimensions");
+    assert_eq!(dimensions[0].resource_class, "MEMORY_MB");
+    assert_eq!(dimensions[0].available, 1024);
+    assert_eq!(dimensions[0].used, 0);
+    assert_eq!(enabled, 1);
+    assert_eq!(degraded, 0);
+
+    let (all_dimensions, _, _) = store.capacity_summary(64).await.expect("summary");
+    let vcpu = all_dimensions
+        .iter()
+        .find(|dimension| dimension.resource_class == "VCPU")
+        .expect("VCPU dimension");
+    assert_eq!(
+        vcpu.total, 8,
+        "deleted provider must not contribute capacity"
+    );
+    assert_eq!(vcpu.used, 3, "allocation usage must be reflected");
+    assert_eq!(vcpu.available, 3);
 }
 
 #[tokio::test]

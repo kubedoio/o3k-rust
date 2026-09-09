@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-governance-mutation-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["assignment", "operation_id"],
+  "properties": {
+    "operation_id": { "type": "string", "format": "uuid" },
+    "assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "principal_id", "project_id", "role_id", "created_at"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "principal_id": { "type": "string", "minLength": 1 },
+        "project_id": { "type": "string", "minLength": 1 },
+        "role_id": { "type": "string", "minLength": 1 },
+        "created_at": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

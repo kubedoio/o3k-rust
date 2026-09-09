@@ -179,32 +179,23 @@ impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
         ) {
             return Err(NativeReadError::Forbidden);
         }
-        let networks = self
+        // Resolve by the compound owner/id index.  Iterating every network and
+        // loading all realms made a single-resource read scale with the whole
+        // project and risked cross-tenant work before concealment was applied.
+        let realm = self
             .store
-            .list_canonical_networks(project_id)
+            .get_canonical_realm(project_id, &id)
             .await
-            .map_err(|_| NativeReadError::Internal)?;
-        for network in networks {
-            if let Some(realm) = self
-                .store
-                .list_canonical_realms(project_id, &network.id)
-                .await
-                .map_err(|_| NativeReadError::Internal)?
-                .into_iter()
-                .find(|realm| realm.id == id)
-            {
-                return Ok(AddressRealmItem {
-                    id: realm.id.to_string(),
-                    project_id: realm.project_id,
-                    prefix: realm.prefix,
-                    overlapping_prefixes: realm.overlapping_prefixes,
-                    created_at: None,
-                    generation: i64::try_from(realm.generation)
-                        .map_err(|_| NativeReadError::Internal)?,
-                    state: realm.state,
-                });
-            }
-        }
-        Err(NativeReadError::NotFound)
+            .map_err(|_| NativeReadError::Internal)?
+            .ok_or(NativeReadError::NotFound)?;
+        Ok(AddressRealmItem {
+            id: realm.id.to_string(),
+            project_id: realm.project_id,
+            prefix: realm.prefix,
+            overlapping_prefixes: realm.overlapping_prefixes,
+            created_at: None,
+            generation: i64::try_from(realm.generation).map_err(|_| NativeReadError::Internal)?,
+            state: realm.state,
+        })
     }
 }

@@ -27,6 +27,7 @@ use uuid::Uuid;
 use std::os::unix::fs::PermissionsExt;
 
 mod artifact_transfer;
+pub mod audit_sink;
 pub mod conformance;
 pub mod coordination;
 pub mod postgres;
@@ -49,7 +50,7 @@ pub use unified::O3kStore;
 // Re-exports from domain/ and port/ sub-modules
 pub use domain::error::StoreError;
 pub use domain::records::{
-    AgentCommandRecord, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
+    AgentCommandRecord, AuditEventRecord, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
     CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord,
     CanonicalNetworkPolicyRecord, CanonicalNetworkPolicyRuleRecord, CanonicalNetworkRecord,
     CanonicalOperationLifecycleUpdate, CanonicalOperationRecord, CanonicalPolicyAttachmentRecord,
@@ -59,26 +60,30 @@ pub use domain::records::{
     ImageOverlayOwnershipRecord, ImageOverlayUpdate, KeypairRecord, KeystoneDomainRecord,
     KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, ObservationUpdate,
-    OperationRecord, OperatorAssignmentRecord, PlacementAllocationRecord, PlacementIntentRecord,
+    MeteringAggregate, MeteringEventRecord, NetworkAddressAllocationRecord, NetworkIntentRecord,
+    NetworkRecord, ObservationUpdate, OperationRecord, OperatorAssignmentRecord,
+    PlacementAllocationRecord, PlacementCapacityRecord, PlacementIntentRecord,
     PlacementInventoryRecord, PlacementProviderRecord, PlacementReconcileRecord,
-    PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord,
-    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord,
-    VolumeAttachmentRecord,
+    PlacementResourceRecord, PortRecord, ProviderReference, PublicAddressBindingRecord,
+    ResourceRecord, SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord,
+    SubnetRecord, VolumeAttachmentRecord,
 };
 pub(crate) use domain::records::{legacy_policy_records, validate_canonical_lifecycle_update};
 pub use domain::state::{
     AgentCommandState, CanonicalAcceptanceOutcome, IdempotencyReservation, ImageOverlayState,
     OperationState, WalCheckpointMode,
 };
-pub use port::durable::{DurableStore, RelationshipRepository, ResourceRelationshipRecord};
+pub use port::durable::{
+    CanonicalOperationFilters, DurableStore, RelationshipRepository, ResourceRelationshipRecord,
+};
 pub(crate) use port::durable::{
     RELATIONSHIP_BOUND, RELATIONSHIP_DELETED, RELATIONSHIP_DELETING, RELATIONSHIP_RESERVED,
     RELATIONSHIP_UNKNOWN, relationship_from_row,
 };
 pub use port::service_repos::{
-    ComputeRepository, IdentityRepository, ImageRepository, KeypairRepository, NetworkRepository,
-    PlacementRepository, VolumeAttachmentRepository,
+    AuditEventFilters, AuditRepository, ComputeRepository, GovernanceRepository,
+    IdentityRepository, ImageRepository, KeypairRepository, MeteringRepository, NetworkRepository,
+    PlacementRepository, PublicAddressRepository, VolumeAttachmentRepository,
 };
 /// Maximum attempts for an observation update contended by a concurrent
 /// SQLite writer. BEGIN IMMEDIATE makes the configured busy_timeout apply, so

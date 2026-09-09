@@ -62,6 +62,7 @@ pub struct AddressRealmItem {
 // ── Query parameters ──────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListQuery {
     pub limit: Option<String>,
     pub cursor: Option<String>,

@@ -376,6 +376,7 @@ mod tests {
         AgentNodeSnapshot, AgentObservation, AgentOperationState, AgentOperationUpdate,
         FailureInjection,
     };
+    use o3k_store::AuditRepository;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -2624,13 +2625,19 @@ mod tests {
         // The agent re-registers (reconnect backoff completed); a later sweep
         // tick re-dispatches the create and converges to ACTIVE.
         provider.register();
+        // Start a fresh convergence window after registration.  The first
+        // window only proves that an empty registry does not terminalize the
+        // operation; under workspace-wide parallel load that probe can
+        // legitimately consume most of its budget before the registration
+        // point is reached.
+        let convergence_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             let operation = store.get_operation(request.operation_id).await?;
             if operation.state == o3k_store::OperationState::Succeeded {
                 break;
             }
             assert!(
-                tokio::time::Instant::now() < deadline,
+                tokio::time::Instant::now() < convergence_deadline,
                 "create convergence sweep did not converge after the agent registered"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -4453,6 +4460,13 @@ mod tests {
         ) -> Result<Vec<o3k_store::PlacementProviderRecord>, o3k_store::StoreError> {
             self.inner.list_providers().await
         }
+        async fn capacity_summary(
+            &self,
+            limit: usize,
+        ) -> Result<(Vec<o3k_store::PlacementCapacityRecord>, u64, u64), o3k_store::StoreError>
+        {
+            self.inner.capacity_summary(limit).await
+        }
         async fn register_provider(
             &self,
             node_id: &str,
@@ -5181,6 +5195,23 @@ mod tests {
             Some(first.resource.id.to_string())
         );
         assert_eq!(provider.instance_count(), 1);
+        // Canonical acceptance, including its security-audit admission, is
+        // committed with the resource/operation transaction.  This protects
+        // restart recovery from a visible operation with no audit evidence.
+        let audit_rows = store
+            .list_audit_events_page(
+                "project-a",
+                None,
+                20,
+                &o3k_store::AuditEventFilters {
+                    operation_id: Some(first.operation_id.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert!(audit_rows.iter().any(|event| {
+            event.operation_id == Some(first.operation_id) && event.outcome == "accepted"
+        }));
         let delete_context = o3k_reconciler::CanonicalMutationContext::new(
             ActionId::new("compute", "DeleteServer")?,
             "user-a".into(),

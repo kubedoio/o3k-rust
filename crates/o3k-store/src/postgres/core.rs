@@ -25,6 +25,7 @@ use super::{
 impl DurableStore for PostgresStore {
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError> {
         let id_str = resource.id.to_string();
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         sqlx::query(
             "INSERT INTO resources (id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
@@ -37,10 +38,12 @@ impl DurableStore for PostgresStore {
         .bind(&resource.desired_state)
         .bind(&resource.observed_state)
         .bind(&resource.provider_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(map_pg_error)?;
-        Ok(())
+        let event = crate::MeteringEventRecord::resource_lifecycle(resource, "created");
+        super::metering::append_metering_event_tx(&mut tx, &event).await?;
+        tx.commit().await.map_err(StoreError::Database)
     }
 
     async fn get_resource(&self, id: Uuid) -> Result<ResourceRecord, StoreError> {
@@ -81,6 +84,11 @@ impl DurableStore for PostgresStore {
         after_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ResourceRecord>, StoreError> {
+        if !(1..=1000).contains(&limit) {
+            return Err(StoreError::Corrupt(
+                "resource page limit outside 1..=1000".into(),
+            ));
+        }
         let limit = i64::try_from(limit)
             .map_err(|_| StoreError::Corrupt("native page limit overflow".to_owned()))?;
         let rows = if let Some(after_id) = after_id {
@@ -93,6 +101,43 @@ impl DurableStore for PostgresStore {
         rows.iter().map(row_to_resource).collect()
     }
 
+    async fn list_resources_page_by_observed_state(
+        &self,
+        project_id: &str,
+        kind: &str,
+        observed_state: Option<&str>,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResourceRecord>, StoreError> {
+        if !(1..=1000).contains(&limit) {
+            return Err(StoreError::Corrupt(
+                "resource page limit outside 1..=1000".into(),
+            ));
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("native page limit overflow".to_owned()))?;
+        let rows = match (observed_state, after_id) {
+            (Some(state), Some(after)) => sqlx::query("SELECT * FROM resources WHERE project_id = $1 AND kind = $2 AND observed_state = $3 AND id > $4 ORDER BY id LIMIT $5").bind(project_id).bind(kind).bind(state).bind(after).bind(limit).fetch_all(&self.pool).await,
+            (Some(state), None) => sqlx::query("SELECT * FROM resources WHERE project_id = $1 AND kind = $2 AND observed_state = $3 ORDER BY id LIMIT $4").bind(project_id).bind(kind).bind(state).bind(limit).fetch_all(&self.pool).await,
+            (None, Some(after)) => sqlx::query("SELECT * FROM resources WHERE project_id = $1 AND kind = $2 AND id > $3 ORDER BY id LIMIT $4").bind(project_id).bind(kind).bind(after).bind(limit).fetch_all(&self.pool).await,
+            (None, None) => sqlx::query("SELECT * FROM resources WHERE project_id = $1 AND kind = $2 ORDER BY id LIMIT $3").bind(project_id).bind(kind).bind(limit).fetch_all(&self.pool).await,
+        }.map_err(StoreError::Database)?;
+        rows.iter().map(row_to_resource).collect()
+    }
+
+    async fn count_resources(&self, project_id: &str, kind: &str) -> Result<u64, StoreError> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS count FROM resources WHERE project_id = $1 AND kind = $2",
+        )
+        .bind(project_id)
+        .bind(kind)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let count: i64 = row.get("count");
+        u64::try_from(count).map_err(|_| StoreError::Corrupt("negative resource count".into()))
+    }
+
     async fn update_resource(
         &self,
         id: Uuid,
@@ -103,6 +148,7 @@ impl DurableStore for PostgresStore {
         provider_id: Option<&str>,
     ) -> Result<ResourceRecord, StoreError> {
         let id_str = id.to_string();
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         let res = sqlx::query(
             "UPDATE resources
              SET desired_state = $1, observed_state = $2, observed_generation = $3, provider_id = $4, generation = generation + 1
@@ -114,14 +160,14 @@ impl DurableStore for PostgresStore {
         .bind(provider_id)
         .bind(&id_str)
         .bind(expected_generation)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(StoreError::Database)?;
 
         if res.rows_affected() == 0 {
             let exists = sqlx::query("SELECT 1 FROM resources WHERE id = $1")
                 .bind(&id_str)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *tx)
                 .await
                 .map_err(StoreError::Database)?;
             if exists.is_none() {
@@ -130,7 +176,20 @@ impl DurableStore for PostgresStore {
             return Err(StoreError::StaleGeneration);
         }
 
-        self.get_resource(id).await
+        let row = sqlx::query("SELECT * FROM resources WHERE id = $1")
+            .bind(&id_str)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        let updated = row_to_resource(&row)?;
+        if updated.desired_state.eq_ignore_ascii_case("deleted")
+            || updated.observed_state.eq_ignore_ascii_case("deleted")
+        {
+            let event = crate::MeteringEventRecord::resource_lifecycle(&updated, "deleted");
+            super::metering::append_metering_event_tx(&mut tx, &event).await?;
+        }
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(updated)
     }
 
     async fn update_resource_from_observation(
@@ -543,6 +602,27 @@ impl DurableStore for PostgresStore {
                     .await
                     .map_err(StoreError::Database)?
             }
+            "iam:role_assignment" => {
+                sqlx::query_scalar("SELECT project_id FROM keystone_role_assignments WHERE id=$1")
+                    .bind(operation.resource_id.to_string())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(StoreError::Database)?
+            }
+            "volume:volume_attachment" => {
+                sqlx::query_scalar("SELECT project_id FROM native_volume_attachments WHERE id=$1")
+                    .bind(operation.resource_id.to_string())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(StoreError::Database)?
+            }
+            "image:image" => {
+                sqlx::query_scalar("SELECT project_id FROM image_metadata WHERE id=$1")
+                    .bind(operation.resource_id.to_string())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(StoreError::Database)?
+            }
             _ => {
                 return Err(StoreError::Corrupt(
                     "unsupported canonical scoped resource type".into(),
@@ -601,6 +681,8 @@ impl DurableStore for PostgresStore {
             .bind(resource.id.to_string()).bind(&resource.kind).bind(&resource.project_id).bind(resource.generation)
             .bind(resource.observed_generation).bind(&resource.desired_state).bind(&resource.observed_state).bind(&resource.provider_id)
             .execute(&mut *tx).await.map_err(map_pg_error)?;
+        let event = crate::MeteringEventRecord::resource_lifecycle(resource, "created");
+        super::metering::append_metering_event_tx(&mut tx, &event).await?;
         insert_postgres_canonical_acceptance(&mut tx, operation, canonical).await?;
         let inserted = sqlx::query("INSERT INTO idempotency_reservations (owner_scope,action,idempotency_key,fingerprint,operation_id) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (owner_scope,action,idempotency_key) DO NOTHING RETURNING operation_id")
             .bind(&request.owner_scope).bind(&request.action).bind(&request.key).bind(&request.fingerprint)
@@ -952,7 +1034,112 @@ impl DurableStore for PostgresStore {
         limit: u32,
     ) -> Result<Vec<CanonicalOperationRecord>, StoreError> {
         let rows = sqlx::query("SELECT m.*, o.state FROM canonical_operation_metadata m JOIN operations o ON o.id=m.operation_id WHERE m.owner_scope=$1 AND ($2::text IS NULL OR m.operation_id>$2) ORDER BY m.operation_id LIMIT $3")
-            .bind(owner_scope).bind(after_id.map(|id| id.to_string())).bind(i64::from(limit)).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+            .bind(owner_scope).bind(after_id.map(|id| id.to_string())).bind(i64::from(limit.min(256))).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(CanonicalOperationRecord {
+                    id: Uuid::parse_str(
+                        &row.try_get::<String, _>("operation_id")
+                            .map_err(StoreError::Database)?,
+                    )
+                    .map_err(StoreError::InvalidUuid)?,
+                    service: row.try_get("service").map_err(StoreError::Database)?,
+                    action: row.try_get("action").map_err(StoreError::Database)?,
+                    actor: row.try_get("actor").map_err(StoreError::Database)?,
+                    owner_scope: row.try_get("owner_scope").map_err(StoreError::Database)?,
+                    resource_type: row.try_get("resource_type").map_err(StoreError::Database)?,
+                    resource_id: row.try_get("resource_id").map_err(StoreError::Database)?,
+                    state: OperationState::parse(
+                        &row.try_get::<String, _>("state")
+                            .map_err(StoreError::Database)?,
+                    )?,
+                    attempt: u32::try_from(
+                        row.try_get::<i32, _>("attempt")
+                            .map_err(StoreError::Database)?,
+                    )
+                    .map_err(|_| StoreError::Corrupt("invalid operation attempt".into()))?,
+                    created_at: row.try_get("created_at").map_err(StoreError::Database)?,
+                    started_at: row.try_get("started_at").map_err(StoreError::Database)?,
+                    finished_at: row.try_get("finished_at").map_err(StoreError::Database)?,
+                    error: row.try_get("error").map_err(StoreError::Database)?,
+                    request_id: row.try_get("request_id").map_err(StoreError::Database)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn list_canonical_operations_filtered_page(
+        &self,
+        owner_scope: &str,
+        after_id: Option<Uuid>,
+        limit: u32,
+        filters: &crate::CanonicalOperationFilters,
+    ) -> Result<Vec<CanonicalOperationRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT m.*, o.state FROM canonical_operation_metadata m JOIN operations o ON o.id=m.operation_id
+             WHERE m.owner_scope=$1 AND ($2::text IS NULL OR m.operation_id>$2)
+               AND ($3::text IS NULL OR m.service=$3) AND ($4::text IS NULL OR m.action=$4)
+               AND ($5::text IS NULL OR o.state=$5)
+             ORDER BY m.operation_id LIMIT $6",
+        )
+        .bind(owner_scope)
+        .bind(after_id.map(|id| id.to_string()))
+        .bind(&filters.service)
+        .bind(&filters.action)
+        .bind(&filters.state)
+        .bind(i64::from(limit.min(256)))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(CanonicalOperationRecord {
+                    id: Uuid::parse_str(
+                        &row.try_get::<String, _>("operation_id")
+                            .map_err(StoreError::Database)?,
+                    )
+                    .map_err(StoreError::InvalidUuid)?,
+                    service: row.try_get("service").map_err(StoreError::Database)?,
+                    action: row.try_get("action").map_err(StoreError::Database)?,
+                    actor: row.try_get("actor").map_err(StoreError::Database)?,
+                    owner_scope: row.try_get("owner_scope").map_err(StoreError::Database)?,
+                    resource_type: row.try_get("resource_type").map_err(StoreError::Database)?,
+                    resource_id: row.try_get("resource_id").map_err(StoreError::Database)?,
+                    state: OperationState::parse(
+                        &row.try_get::<String, _>("state")
+                            .map_err(StoreError::Database)?,
+                    )?,
+                    attempt: u32::try_from(
+                        row.try_get::<i32, _>("attempt")
+                            .map_err(StoreError::Database)?,
+                    )
+                    .map_err(|_| StoreError::Corrupt("invalid operation attempt".into()))?,
+                    created_at: row.try_get("created_at").map_err(StoreError::Database)?,
+                    started_at: row.try_get("started_at").map_err(StoreError::Database)?,
+                    finished_at: row.try_get("finished_at").map_err(StoreError::Database)?,
+                    error: row.try_get("error").map_err(StoreError::Database)?,
+                    request_id: row.try_get("request_id").map_err(StoreError::Database)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn list_canonical_operations_system_page(
+        &self,
+        owner_scope: Option<&str>,
+        after_id: Option<Uuid>,
+        limit: u32,
+        filters: &crate::CanonicalOperationFilters,
+    ) -> Result<Vec<CanonicalOperationRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT m.*, o.state FROM canonical_operation_metadata m JOIN operations o ON o.id=m.operation_id
+             WHERE ($1::text IS NULL OR m.owner_scope=$1) AND ($2::text IS NULL OR m.operation_id>$2)
+               AND ($3::text IS NULL OR m.service=$3) AND ($4::text IS NULL OR m.action=$4)
+               AND ($5::text IS NULL OR o.state=$5) ORDER BY m.operation_id LIMIT $6",
+        )
+        .bind(owner_scope).bind(after_id.map(|id| id.to_string()))
+        .bind(&filters.service).bind(&filters.action).bind(&filters.state)
+        .bind(i64::from(limit.min(256))).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         rows.into_iter()
             .map(|row| {
                 Ok(CanonicalOperationRecord {
@@ -1703,6 +1890,13 @@ impl DurableStore for PostgresStore {
         .await
         .map_err(map_pg_error)?;
 
+        // Resource, canonical create operation, and the authoritative
+        // lifecycle observation commit atomically.  Deterministic event
+        // identity makes retries/reconciliation idempotent without inventing
+        // provider telemetry.
+        let event = crate::MeteringEventRecord::resource_lifecycle(resource, "created");
+        super::metering::append_metering_event_tx(&mut tx, &event).await?;
+
         tx.commit().await.map_err(StoreError::Database)?;
         Ok(())
     }
@@ -1767,6 +1961,14 @@ impl DurableStore for PostgresStore {
         .await
         .map_err(map_pg_error)?;
 
+        let row = sqlx::query("SELECT * FROM resources WHERE id = $1")
+            .bind(&id_str)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        let revived = row_to_resource(&row)?;
+        let event = crate::MeteringEventRecord::resource_lifecycle(&revived, "revived");
+        super::metering::append_metering_event_tx(&mut tx, &event).await?;
         tx.commit().await.map_err(StoreError::Database)?;
         self.get_resource(id).await
     }

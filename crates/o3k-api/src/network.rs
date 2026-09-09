@@ -871,11 +871,16 @@ async fn dispatch_l3_gateway_snapshot(
             plan,
         })
         .await
-        .map_err(|error| {
+        // Dispatcher/provider errors are intentionally not projected onto the
+        // compatibility boundary.  Their Display implementations may include
+        // provider-native IDs, host paths, connection details, or backend
+        // diagnostics.  Keep the wire error stable and let the canonical
+        // Operation/Audit records retain the internal typed failure.
+        .map_err(|_error| {
             keystone_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Service Unavailable",
-                error.to_string(),
+                "gateway realization is unavailable",
             )
         })?;
     if status != o3k_network::NetworkPlanStatus::Succeeded {
@@ -1735,6 +1740,14 @@ pub(crate) async fn update_security_group(
         Ok(value) => value,
         Err(error) => return network_error(error),
     };
+    if let Err(error) = service.audit_security_group_mutation_admission(
+        &auth,
+        "UpdateSecurityGroup",
+        "security-group",
+        Some(id),
+    ) {
+        return network_error(error);
+    }
     let group = match service
         .update_security_group_for_project(
             project,
@@ -1745,8 +1758,24 @@ pub(crate) async fn update_security_group(
         .await
     {
         Ok(value) => value,
-        Err(error) => return network_error(error),
+        Err(error) => {
+            service.audit_security_group_mutation_result(
+                &auth,
+                "UpdateSecurityGroup",
+                "security-group",
+                Some(id),
+                Err(&error),
+            );
+            return network_error(error);
+        }
     };
+    service.audit_security_group_mutation_result(
+        &auth,
+        "UpdateSecurityGroup",
+        "security-group",
+        Some(id),
+        Ok(()),
+    );
     match security_group_response(service, project, group).await {
         Ok(value) => Json(SecurityGroupEnvelope {
             security_group: value,
@@ -1769,12 +1798,38 @@ pub(crate) async fn delete_security_group(
         Ok(value) => value,
         Err(response) => return response,
     };
+    if let Err(error) = service.audit_security_group_mutation_admission(
+        &auth,
+        "DeleteSecurityGroup",
+        "security-group",
+        Some(id),
+    ) {
+        return network_error(error);
+    }
     match service
         .delete_security_group_for_project(auth.effective_scope().id().as_str(), id)
         .await
     {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => network_error(error),
+        Ok(()) => {
+            service.audit_security_group_mutation_result(
+                &auth,
+                "DeleteSecurityGroup",
+                "security-group",
+                Some(id),
+                Ok(()),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(error) => {
+            service.audit_security_group_mutation_result(
+                &auth,
+                "DeleteSecurityGroup",
+                "security-group",
+                Some(id),
+                Err(&error),
+            );
+            network_error(error)
+        }
     }
 }
 
@@ -1919,12 +1974,29 @@ pub(crate) async fn delete_security_group_rule(
         Ok(value) => value,
         Err(error) => return network_error(error),
     };
+    if let Err(error) = service.audit_security_group_mutation_admission(
+        &auth,
+        "DeleteSecurityGroupRule",
+        "security-group-rule",
+        Some(id),
+    ) {
+        return network_error(error);
+    }
     let deleting_rule = match service
         .begin_security_group_rule_deletion_for_project(project, id)
         .await
     {
         Ok(value) => value,
-        Err(error) => return network_error(error),
+        Err(error) => {
+            service.audit_security_group_mutation_result(
+                &auth,
+                "DeleteSecurityGroupRule",
+                "security-group-rule",
+                Some(id),
+                Err(&error),
+            );
+            return network_error(error);
+        }
     };
     if let Err(response) =
         dispatch_security_group_endpoints(&state, project, rule.security_group_id).await
@@ -1935,8 +2007,22 @@ pub(crate) async fn delete_security_group_rule(
         .finalize_security_group_rule_deletion_for_project(project, id, deleting_rule.generation)
         .await
     {
+        service.audit_security_group_mutation_result(
+            &auth,
+            "DeleteSecurityGroupRule",
+            "security-group-rule",
+            Some(id),
+            Err(&error),
+        );
         return network_error(error);
     }
+    service.audit_security_group_mutation_result(
+        &auth,
+        "DeleteSecurityGroupRule",
+        "security-group-rule",
+        Some(id),
+        Ok(()),
+    );
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -2678,6 +2764,11 @@ pub(crate) fn network_error(error: NetworkError) -> axum::response::Response {
             "Unauthorized",
             "The request has not been authenticated.",
         ),
+        NetworkError::AuditUnavailable => keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "audit persistence is unavailable",
+        ),
         NetworkError::NotFound => keystone_error(
             StatusCode::NOT_FOUND,
             "Not Found",
@@ -2799,6 +2890,137 @@ fn public_allocator(
             "floating IP service is not configured",
         )
     })
+}
+
+fn public_store_error(error: o3k_store::StoreError) -> PublicAddressError {
+    match error {
+        o3k_store::StoreError::ResourceNotFound | o3k_store::StoreError::NetworkNotFound => {
+            PublicAddressError::NotFound
+        }
+        o3k_store::StoreError::OwnershipConflict => PublicAddressError::NotOwner,
+        o3k_store::StoreError::NetworkInUse => PublicAddressError::InUse,
+        o3k_store::StoreError::NetworkAddressExhausted => PublicAddressError::Exhausted,
+        o3k_store::StoreError::ResourceAlreadyExists
+        | o3k_store::StoreError::NetworkAddressConflict
+        | o3k_store::StoreError::IdempotencyConflict => PublicAddressError::AssociationConflict,
+        other => PublicAddressError::Storage(std::io::Error::other(other.to_string())),
+    }
+}
+
+fn public_binding(record: o3k_store::PublicAddressBindingRecord) -> PublicAddressBinding {
+    PublicAddressBinding {
+        allocation_id: record.allocation_id,
+        operation_id: record.operation_id,
+        project_id: record.project_id,
+        public_address: record.public_address,
+        endpoint_id: record.endpoint_id,
+        generation: record.generation,
+    }
+}
+
+async fn list_public_bindings(
+    state: &AppState,
+    project_id: &str,
+) -> Result<Vec<PublicAddressBinding>, PublicAddressError> {
+    if let Some(store) = state.public_address_store.as_ref() {
+        return store
+            .list_public_addresses(project_id, 10_000)
+            .await
+            .map(|records| records.into_iter().map(public_binding).collect())
+            .map_err(public_store_error);
+    }
+    public_allocator(state)
+        .map_err(|_| PublicAddressError::NotFound)?
+        .list(project_id)
+}
+
+async fn get_public_binding(
+    state: &AppState,
+    project_id: &str,
+    allocation_id: Uuid,
+) -> Result<PublicAddressBinding, PublicAddressError> {
+    if let Some(store) = state.public_address_store.as_ref() {
+        return store
+            .get_public_address(project_id, allocation_id)
+            .await
+            .map_err(public_store_error)?
+            .map(public_binding)
+            .ok_or(PublicAddressError::NotFound);
+    }
+    public_allocator(state)
+        .map_err(|_| PublicAddressError::NotFound)?
+        .get(project_id, allocation_id)
+}
+
+async fn allocate_public_binding(
+    state: &AppState,
+    project_id: &str,
+    operation_id: &str,
+    allocation_id: Uuid,
+) -> Result<PublicAddressBinding, PublicAddressError> {
+    if let Some(store) = state.public_address_store.as_ref() {
+        let allocator = public_allocator(state).map_err(|_| PublicAddressError::InvalidPool)?;
+        let (first, last) = allocator.pool_bounds();
+        return store
+            .allocate_public_address(project_id, operation_id, allocation_id, first, last)
+            .await
+            .map(public_binding)
+            .map_err(public_store_error);
+    }
+    public_allocator(state)
+        .map_err(|_| PublicAddressError::NotFound)?
+        .allocate_with_id(project_id, operation_id, allocation_id)
+}
+
+async fn associate_public_binding(
+    state: &AppState,
+    project_id: &str,
+    allocation_id: Uuid,
+    endpoint_id: Uuid,
+) -> Result<PublicAddressBinding, PublicAddressError> {
+    if let Some(store) = state.public_address_store.as_ref() {
+        return store
+            .associate_public_address(project_id, allocation_id, endpoint_id)
+            .await
+            .map(public_binding)
+            .map_err(public_store_error);
+    }
+    public_allocator(state)
+        .map_err(|_| PublicAddressError::NotFound)?
+        .associate(project_id, allocation_id, endpoint_id)
+}
+
+async fn disassociate_public_binding(
+    state: &AppState,
+    project_id: &str,
+    allocation_id: Uuid,
+) -> Result<PublicAddressBinding, PublicAddressError> {
+    if let Some(store) = state.public_address_store.as_ref() {
+        return store
+            .disassociate_public_address(project_id, allocation_id)
+            .await
+            .map(public_binding)
+            .map_err(public_store_error);
+    }
+    public_allocator(state)
+        .map_err(|_| PublicAddressError::NotFound)?
+        .disassociate(project_id, allocation_id)
+}
+
+async fn release_public_binding(
+    state: &AppState,
+    project_id: &str,
+    allocation_id: Uuid,
+) -> Result<(), PublicAddressError> {
+    if let Some(store) = state.public_address_store.as_ref() {
+        return store
+            .release_public_address(project_id, allocation_id)
+            .await
+            .map_err(public_store_error);
+    }
+    public_allocator(state)
+        .map_err(|_| PublicAddressError::NotFound)?
+        .release(project_id, allocation_id)
 }
 
 async fn dispatch_public_binding(
@@ -2937,11 +3159,7 @@ pub(crate) async fn list_floating_ips(
         Ok(value) => value,
         Err(response) => return response,
     };
-    let allocator = match public_allocator(&state) {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    match allocator.list(auth.effective_scope().id().as_str()) {
+    match list_public_bindings(&state, auth.effective_scope().id().as_str()).await {
         Ok(values) => Json(FloatingIpList {
             floatingips: values
                 .into_iter()
@@ -2967,10 +3185,6 @@ pub(crate) async fn create_floating_ip(
     // unlocked concurrent port delete can otherwise let a stale public Apply
     // recreate nftables after the Floating IP has been removed.
     let _mutation_guard = state.network_mutation_lock.lock().await;
-    let allocator = match public_allocator(&state) {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
     let Ok(Json(body)) = request else {
         return keystone_error(
             StatusCode::BAD_REQUEST,
@@ -2989,7 +3203,8 @@ pub(crate) async fn create_floating_ip(
         return public_error(PublicAddressError::InvalidPool);
     }
     let operation_id = headers
-        .get("x-openstack-request-id")
+        .get("idempotency-key")
+        .or_else(|| headers.get("x-openstack-request-id"))
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.trim().is_empty())
         .map(str::to_owned)
@@ -3007,13 +3222,16 @@ pub(crate) async fn create_floating_ip(
     } else {
         None
     };
-    let mut binding = match allocator.allocate(project_id, &operation_id) {
-        Ok(value) => value,
-        Err(error) => return public_error(error),
-    };
+    let mut binding =
+        match allocate_public_binding(&state, project_id, &operation_id, Uuid::now_v7()).await {
+            Ok(value) => value,
+            Err(error) => return public_error(error),
+        };
     if let Some(port) = endpoint {
         let port_id = port.id;
-        binding = match allocator.associate(project_id, binding.allocation_id, port_id) {
+        binding = match associate_public_binding(&state, project_id, binding.allocation_id, port_id)
+            .await
+        {
             Ok(value) => value,
             Err(error) => return public_error(error),
         };
@@ -3041,11 +3259,7 @@ pub(crate) async fn show_floating_ip(
         Ok(value) => value,
         Err(response) => return response,
     };
-    let allocator = match public_allocator(&state) {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    match allocator.get(auth.effective_scope().id().as_str(), id) {
+    match get_public_binding(&state, auth.effective_scope().id().as_str(), id).await {
         Ok(value) => Json(FloatingIpEnvelope {
             floatingip: floating_ip_response(value, state.network_external_realm_id),
         })
@@ -3067,10 +3281,6 @@ pub(crate) async fn update_floating_ip(
     // Keep the canonical association change and its derived provider plan in
     // the same mutation epoch as endpoint deletion.
     let _mutation_guard = state.network_mutation_lock.lock().await;
-    let allocator = match public_allocator(&state) {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
     let Ok(Json(body)) = request else {
         return keystone_error(
             StatusCode::BAD_REQUEST,
@@ -3092,7 +3302,7 @@ pub(crate) async fn update_floating_ip(
             {
                 return public_error(PublicAddressError::MissingEndpoint);
             }
-            let binding = match allocator.associate(project_id, id, port_id) {
+            let binding = match associate_public_binding(&state, project_id, id, port_id).await {
                 Ok(value) => value,
                 Err(error) => return public_error(error),
             };
@@ -3105,7 +3315,7 @@ pub(crate) async fn update_floating_ip(
             Ok(binding)
         }
         None => {
-            let binding = match allocator.get(project_id, id) {
+            let binding = match get_public_binding(&state, project_id, id).await {
                 Ok(value) => value,
                 Err(error) => return public_error(error),
             };
@@ -3115,7 +3325,7 @@ pub(crate) async fn update_floating_ip(
             {
                 return response;
             }
-            allocator.disassociate(project_id, id)
+            disassociate_public_binding(&state, project_id, id).await
         }
     };
     match result {
@@ -3140,12 +3350,8 @@ pub(crate) async fn delete_floating_ip(
     // concurrent endpoint mutation cannot recreate the public binding after
     // this delete has completed.
     let _mutation_guard = state.network_mutation_lock.lock().await;
-    let allocator = match public_allocator(&state) {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
     let project_id = auth.effective_scope().id().as_str();
-    let binding = match allocator.get(project_id, id) {
+    let binding = match get_public_binding(&state, project_id, id).await {
         Ok(value) => value,
         Err(error) => return public_error(error),
     };
@@ -3157,10 +3363,12 @@ pub(crate) async fn delete_floating_ip(
     // Neutron-compatible clients delete an associated floating IP directly.
     // Remove host realization first, then clear canonical association before
     // releasing the allocation.
-    if let Err(error) = allocator.disassociate(project_id, id) {
+    if binding.endpoint_id.is_some()
+        && let Err(error) = disassociate_public_binding(&state, project_id, id).await
+    {
         return public_error(error);
     }
-    match allocator.release(project_id, id) {
+    match release_public_binding(&state, project_id, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => public_error(error),
     }
@@ -3706,9 +3914,7 @@ pub(crate) async fn update_port(
     }
     let security_groups = body.port.security_groups;
     if let Some(name) = body.port.name
-        && let Err(error) = service
-            .update_port_name_for_project(project, id, name)
-            .await
+        && let Err(error) = service.update_port_name_for_project(&auth, id, name).await
     {
         return network_error(error);
     }
@@ -3772,9 +3978,9 @@ pub(crate) async fn delete_port(
     // delete.  Remove the derived public realization while the endpoint
     // snapshot is still available; otherwise the provider cannot compile a
     // removal plan after the port has disappeared.
-    if let Some(allocator) = state.public_allocator.as_ref() {
+    if state.public_allocator.is_some() || state.public_address_store.is_some() {
         let project = auth.effective_scope().id().as_str();
-        let bindings = match allocator.list(project) {
+        let bindings = match list_public_bindings(&state, project).await {
             Ok(values) => values
                 .into_iter()
                 .filter(|binding| binding.endpoint_id == Some(id))
@@ -3788,7 +3994,9 @@ pub(crate) async fn delete_port(
             {
                 return response;
             }
-            if let Err(error) = allocator.disassociate(project, binding.allocation_id) {
+            if let Err(error) =
+                disassociate_public_binding(&state, project, binding.allocation_id).await
+            {
                 return public_error(error);
             }
         }

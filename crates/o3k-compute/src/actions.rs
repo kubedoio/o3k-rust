@@ -19,6 +19,9 @@ impl ComputeService {
         action: InstanceAction,
         context: CanonicalMutationContext,
     ) -> Result<MutationReceipt<ServerId>, ComputeError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| ComputeError::Unavailable)?;
         let action_name = match action {
             InstanceAction::Start => "StartServer",
             InstanceAction::Stop => "StopServer",
@@ -60,11 +63,6 @@ impl ComputeService {
         {
             return Err(ComputeError::NotFound);
         }
-        let lifecycle_action = match action {
-            InstanceAction::Start => LifecycleAction::Start,
-            InstanceAction::Stop => LifecycleAction::Stop,
-            InstanceAction::Reboot => LifecycleAction::Reboot,
-        };
         let operation_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!(
@@ -73,6 +71,35 @@ impl ComputeService {
             )
             .as_bytes(),
         );
+        // Equivalent retries must be replayable even after the first action
+        // changed the observed state (for example, Stop transitions Active to
+        // Stopped). Only a new request is subject to the current-state guard;
+        // this check happens before reserving anything, so invalid requests
+        // cannot leave a poisoned pending operation.
+        let replay_candidate = match self.store.get_canonical_operation(operation_id).await {
+            Ok(_) => true,
+            Err(StoreError::OperationNotFound) => false,
+            Err(error) => return Err(ComputeError::Store(error)),
+        };
+        let lifecycle_action = match action {
+            InstanceAction::Start => LifecycleAction::Start,
+            InstanceAction::Stop => LifecycleAction::Stop,
+            InstanceAction::Reboot => LifecycleAction::Reboot,
+        };
+        if !replay_candidate {
+            // Validate the observed lifecycle before reserving an operation.
+            // A request that is invalid for the current state must not leave a
+            // durable pending operation which could later be mistaken for an
+            // accepted mutation (or block a legitimate retry).
+            let current = server_state_from_storage(&resource.observed_state)
+                .map_err(|_| ComputeError::Conflict)?;
+            match (action, current) {
+                (InstanceAction::Start, ServerState::Stopped)
+                | (InstanceAction::Stop, ServerState::Active)
+                | (InstanceAction::Reboot, ServerState::Active | ServerState::Stopped) => {}
+                _ => return Err(ComputeError::Conflict),
+            }
+        }
         let acceptance = self
             .journal
             .begin_canonical_lifecycle(id.as_uuid(), operation_id, lifecycle_action, &context)
@@ -97,14 +124,6 @@ impl ComputeService {
             }
             o3k_store::CanonicalAcceptanceOutcome::Created { .. } => false,
         };
-        let current = server_state_from_storage(&resource.observed_state)
-            .map_err(|_| ComputeError::Conflict)?;
-        match (action, current) {
-            (InstanceAction::Start, ServerState::Stopped)
-            | (InstanceAction::Stop, ServerState::Active)
-            | (InstanceAction::Reboot, ServerState::Active | ServerState::Stopped) => {}
-            _ => return Err(ComputeError::Conflict),
-        }
         let operation_state = self
             .reconcile_lifecycle_until_terminal(operation_id)
             .await?;
@@ -135,6 +154,63 @@ impl ComputeService {
         auth: &AuthContext,
         id: ServerId,
     ) -> Result<(), ComputeError> {
+        let action = ActionId::new_unchecked("compute".to_owned(), "DeleteServer".to_owned());
+        let key = format!("compatibility-delete:{}", id);
+        let context = CanonicalMutationContext::new(
+            action,
+            auth.principal().id().as_str().to_owned(),
+            auth.effective_scope().clone(),
+            Some(auth.request_id().to_owned()),
+            key,
+            serde_json::json!({"server_id": id.to_string()}),
+        )
+        .map_err(ComputeError::Reconcile)?;
+        match self
+            .delete_server_for_auth_canonical(auth, id, context)
+            .await
+        {
+            Ok(receipt) if receipt.operation_state == o3k_store::OperationState::Succeeded => {
+                Ok(())
+            }
+            Ok(receipt) => {
+                let error = ComputeError::Conflict;
+                let event = AuditEvent::from_auth(
+                    auth,
+                    ServiceNamespace::new_unchecked("compute".to_owned()),
+                    ActionId::new_unchecked("compute".to_owned(), "DeleteServer".to_owned()),
+                    AuditOutcome::Failed,
+                )
+                .with_reason(format!("operation state {:?}", receipt.operation_state));
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
+                Err(error)
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(
+                    auth,
+                    ServiceNamespace::new_unchecked("compute".to_owned()),
+                    ActionId::new_unchecked("compute".to_owned(), "DeleteServer".to_owned()),
+                    AuditOutcome::Failed,
+                )
+                .with_reason(error.to_string());
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    async fn delete_server_for_auth_legacy(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+    ) -> Result<(), ComputeError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| ComputeError::Unavailable)?;
         let ns = ServiceNamespace::new("compute")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
         let act = ActionId::new("compute", "DeleteServer").unwrap_or_else(|_| {
@@ -155,9 +231,16 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::NotFound);
         }
+        self.audit_mutation_admission(
+            auth,
+            ActionId::new_unchecked("compute".to_owned(), "DeleteServer".to_owned()),
+            ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+        )?;
         match self
             .delete_server(auth.effective_scope().id().as_str(), id)
             .await
@@ -171,13 +254,17 @@ impl ComputeService {
                         ResourceId::new(id.as_uuid().to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Ok(())
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Err(error)
             }
         }
@@ -189,6 +276,9 @@ impl ComputeService {
         id: ServerId,
         context: o3k_reconciler::CanonicalMutationContext,
     ) -> Result<MutationReceipt<ServerId>, ComputeError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| ComputeError::Unavailable)?;
         // CANONICAL INVARIANT: the canonical context's action must match the
         // expected mutation (InvalidRequest), while actor and owner_scope
         // must match the authenticated request (Unauthorized).
@@ -210,13 +300,18 @@ impl ComputeService {
             .authorizer
             .authorize(&AuthorizationRequest {
                 auth_context: auth,
-                action,
+                action: action.clone(),
                 resource_target: target,
             })
             .is_allowed()
         {
             return Err(ComputeError::NotFound);
         }
+        self.audit_mutation_admission(
+            auth,
+            action.clone(),
+            ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+        )?;
         let resource =
             self.store
                 .get_resource(id.as_uuid())
@@ -607,6 +702,71 @@ impl ComputeService {
             InstanceAction::Stop => "StopServer",
             InstanceAction::Reboot => "RebootServer",
         };
+        let canonical_action =
+            ActionId::new_unchecked("compute".to_owned(), action_name.to_owned());
+        let context = CanonicalMutationContext::new(
+            canonical_action.clone(),
+            auth.principal().id().as_str().to_owned(),
+            auth.effective_scope().clone(),
+            Some(auth.request_id().to_owned()),
+            format!("compatibility-{}:{}", action_name, id),
+            serde_json::json!({"server_id": id.to_string(), "action": action_name}),
+        )
+        .map_err(ComputeError::Reconcile)?;
+        let _receipt = match self
+            .action_for_auth_canonical(auth, id, action, context)
+            .await
+        {
+            Ok(receipt) if receipt.operation_state == o3k_store::OperationState::Succeeded => {
+                receipt
+            }
+            Ok(receipt) => {
+                let error = ComputeError::Conflict;
+                let event = AuditEvent::from_auth(
+                    auth,
+                    ServiceNamespace::new_unchecked("compute".to_owned()),
+                    canonical_action.clone(),
+                    AuditOutcome::Failed,
+                )
+                .with_reason(format!("operation state {:?}", receipt.operation_state));
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
+                return Err(error);
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(
+                    auth,
+                    ServiceNamespace::new_unchecked("compute".to_owned()),
+                    canonical_action.clone(),
+                    AuditOutcome::Failed,
+                )
+                .with_reason(error.to_string());
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
+                return Err(error);
+            }
+        };
+        self.show_server(auth.effective_scope().id().as_str(), id)
+            .await
+    }
+
+    #[allow(dead_code)]
+    async fn action_for_auth_legacy(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+        action: InstanceAction,
+    ) -> Result<Server, ComputeError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| ComputeError::Unavailable)?;
+        let action_name = match action {
+            InstanceAction::Start => "StartServer",
+            InstanceAction::Stop => "StopServer",
+            InstanceAction::Reboot => "RebootServer",
+        };
         let ns = ServiceNamespace::new("compute")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
         let act = ActionId::new("compute", action_name).unwrap_or_else(|_| {
@@ -627,9 +787,16 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::NotFound);
         }
+        self.audit_mutation_admission(
+            auth,
+            act.clone(),
+            ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+        )?;
         match self
             .action(auth.effective_scope().id().as_str(), id, action)
             .await
@@ -643,13 +810,17 @@ impl ComputeService {
                         ResourceId::new(server.id.as_uuid().to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Ok(server)
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Err(error)
             }
         }

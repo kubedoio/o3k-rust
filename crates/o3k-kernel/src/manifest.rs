@@ -1496,6 +1496,14 @@ impl ManifestRegistry {
         self.manifests.values().collect()
     }
 
+    /// Return at most `limit` manifests without materializing the complete
+    /// registry. Callers that need overflow detection should request one more
+    /// than their response bound.
+    #[must_use]
+    pub fn all_bounded(&self, limit: usize) -> Vec<&ServiceManifest> {
+        self.manifests.values().take(limit).collect()
+    }
+
     /// Returns the number of registered services.
     #[must_use]
     pub fn len(&self) -> usize {

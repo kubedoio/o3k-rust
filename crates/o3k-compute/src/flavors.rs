@@ -46,7 +46,9 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::Unauthorized);
         }
         self.flavors_for_project(auth.effective_scope().id().as_str())
@@ -67,6 +69,38 @@ impl ComputeService {
                 .map_err(|_| ComputeError::Conflict)?;
             flavors.push(flavor);
         }
+        Ok(flavors)
+    }
+
+    /// Bounded flavor projection for native collection consumers. Built-in
+    /// flavors are merged with the repository page and ordered by durable ID;
+    /// dynamic flavors never require loading the complete project catalog.
+    pub async fn flavors_for_project_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Flavor>, ComputeError> {
+        let mut flavors = self
+            .flavors()
+            .into_iter()
+            .filter(|flavor| after_id.is_none_or(|after| flavor.id.to_string().as_str() > after))
+            .collect::<Vec<_>>();
+        for resource in self
+            .store
+            .list_resources_page(project_id, "compute_flavor", after_id, limit)
+            .await?
+        {
+            if resource.observed_state == "DELETED" {
+                continue;
+            }
+            flavors.push(
+                serde_json::from_str(&resource.desired_state)
+                    .map_err(|_| ComputeError::Conflict)?,
+            );
+        }
+        flavors.sort_by_key(|flavor| flavor.id);
+        flavors.truncate(limit);
         Ok(flavors)
     }
 
@@ -96,7 +130,9 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::Unauthorized);
         }
         match self
@@ -118,16 +154,106 @@ impl ComputeService {
                         ResourceId::new(flavor.id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Ok(flavor)
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Err(error)
             }
         }
+    }
+
+    /// Create a flavor with an identity allocated by the native API's
+    /// idempotency coordinator.  Native callers must reserve the canonical
+    /// operation before invoking this method; keeping the authorization and
+    /// durable resource write here avoids manufacturing a result operation
+    /// after the domain mutation.
+    pub async fn create_flavor_for_auth_with_id(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+        name: String,
+        vcpus: u32,
+        ram_mib: u64,
+        disk_gib: u64,
+    ) -> Result<Flavor, ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "CreateFlavor").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "CreateFlavor".to_owned())
+        });
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: act.clone(),
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("compute", "flavor").map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            self.audit_sink
+                .record_checked(
+                    &AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                        .with_decision(decision)
+                        .with_reason("unauthorized"),
+                )
+                .map_err(|_| ComputeError::Unavailable)?;
+            return Err(ComputeError::Unauthorized);
+        }
+        self.audit_mutation_admission(
+            auth,
+            act.clone(),
+            ResourceType::new("compute", "flavor").map_err(|_| ComputeError::InvalidRequest)?,
+        )?;
+        if name.trim().is_empty() || vcpus == 0 || ram_mib == 0 {
+            return Err(ComputeError::InvalidRequest);
+        }
+        if self
+            .flavors_for_project(auth.effective_scope().id().as_str())
+            .await?
+            .iter()
+            .any(|flavor| flavor.name == name)
+        {
+            return Err(ComputeError::Conflict);
+        }
+        let flavor = Flavor {
+            id,
+            name,
+            vcpus,
+            ram_mib,
+            disk_gib,
+        };
+        let resource = o3k_store::ResourceRecord {
+            id,
+            kind: "compute_flavor".to_owned(),
+            project_id: auth.effective_scope().id().as_str().to_owned(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: serde_json::to_string(&flavor).map_err(|_| ComputeError::Conflict)?,
+            observed_state: "ACTIVE".to_owned(),
+            provider_id: None,
+        };
+        self.store.insert_resource(&resource).await?;
+        self.audit_sink
+            .record_checked(
+                &AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded).with_resource(
+                    ResourceType::new("compute", "flavor").unwrap_or_else(|_| {
+                        ResourceType::new_unchecked("compute".to_owned(), "flavor".to_owned())
+                    }),
+                    ResourceId::new(id.to_string()).ok(),
+                    Some(auth.effective_scope().clone()),
+                ),
+            )
+            .map_err(|_| ComputeError::Unavailable)?;
+        Ok(flavor)
     }
 
     pub async fn create_flavor(
@@ -194,7 +320,9 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::NotFound);
         }
         self.flavor_for_project(auth.effective_scope().id().as_str(), id)
@@ -240,9 +368,16 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::NotFound);
         }
+        self.audit_mutation_admission(
+            auth,
+            act.clone(),
+            ResourceType::new("compute", "flavor").map_err(|_| ComputeError::InvalidRequest)?,
+        )?;
         match self
             .delete_flavor(auth.effective_scope().id().as_str(), id)
             .await
@@ -256,13 +391,17 @@ impl ComputeService {
                         ResourceId::new(id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Ok(())
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Err(error)
             }
         }

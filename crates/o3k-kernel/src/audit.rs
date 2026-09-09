@@ -186,7 +186,30 @@ impl AuditEvent {
 
     #[must_use]
     pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
-        self.reason_category = Some(reason.into());
+        // Audit reasons are categories, never an error or provider payload.
+        // Keep a deliberately small vocabulary so callers cannot accidentally
+        // persist credentials, connection strings, SQL, or backend messages.
+        let reason = reason.into();
+        let category = if reason.starts_with("quota exceeded") {
+            "quota exceeded".to_owned()
+        } else {
+            match reason.as_str() {
+                "unauthorized"
+                | "validation_failed"
+                | "not_found"
+                | "conflict"
+                | "unavailable"
+                | "provider_timeout"
+                | "provider_failed"
+                | "operation_failed"
+                | "idempotency_conflict"
+                | "stale_generation"
+                | "quota exceeded"
+                | "quota_exceeded" => reason.replace('_', " "),
+                _ => "operation_failed".to_owned(),
+            }
+        };
+        self.reason_category = Some(category);
         self
     }
 }
@@ -208,8 +231,40 @@ impl fmt::Display for AuditEvent {
 
 /// Sink port for recording canonical Cloud Kernel audit events.
 pub trait AuditSink: Send + Sync {
+    /// Verifies that a durable audit sink is able to accept a mutation audit
+    /// before the mutation starts.  Production mutation boundaries should
+    /// call this before reserving or changing external state.  The default is
+    /// intentionally successful for in-memory/test sinks.
+    fn ensure_available(&self) -> Result<(), AuditSinkError> {
+        Ok(())
+    }
+
     /// Records a canonical audit event. Implementations must be fail-safe and bounded.
     fn record(&self, event: &AuditEvent);
+
+    /// Fallible audit recording for mutation paths that require fail-closed
+    /// semantics. The legacy [`Self::record`] method remains available for
+    /// compatibility, but production mutation code should use this method and
+    /// abort before an external side effect when it returns an error.
+    fn record_checked(&self, event: &AuditEvent) -> Result<(), AuditSinkError> {
+        self.record(event);
+        Ok(())
+    }
+}
+
+/// Stable, secret-free failure identity for audit persistence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditSinkError {
+    /// The sink is unavailable or has entered its sticky failed state.
+    Unavailable,
+}
+
+impl fmt::Display for AuditSinkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => write!(f, "audit sink unavailable"),
+        }
+    }
 }
 
 /// Audit sink that forwards recorded events to a closure or function.
@@ -259,6 +314,8 @@ impl AuditSink for MemoryAuditSink {
 }
 
 /// No-op audit sink for unit tests or environments with disabled audit tracing.
+/// Production composition must use a durable sink; this compatibility default
+/// intentionally remains permissive for library/test constructors.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoopAuditSink;
 

@@ -163,6 +163,7 @@ pub(crate) struct NetworkBindingProjector {
     pub(crate) network_external_realm_id: Option<Uuid>,
     pub(crate) network_agent: Option<o3k_network::NetworkAgentIdentity>,
     pub(crate) public_allocator: Option<Arc<o3k_network::PublicAddressAllocator>>,
+    pub(crate) public_address_store: Option<Arc<dyn o3k_store::PublicAddressRepository>>,
     /// Terminal compute observations can be delivered more than once. Keep
     /// the read/dispatch/unbind sequence single-flight so a concurrent
     /// observation cannot construct a different remove plan while policy
@@ -203,28 +204,34 @@ impl NetworkBindingProjector {
         let Some(dispatcher) = self.network_dispatcher.as_ref() else {
             return Ok(());
         };
-        let Some(binding) = self
-            .public_allocator
-            .as_ref()
-            .ok_or_else(|| "public allocator is not configured".to_owned())?
-            .get(project_id, allocation_id)
-            .map_err(|error| error.to_string())?
-            .endpoint_id
-            .map(|endpoint_id| (endpoint_id, allocation_id))
-        else {
+        let allocation = if let Some(store) = self.public_address_store.as_ref() {
+            let record = store
+                .get_public_address(project_id, allocation_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "public address allocation not found".to_owned())?;
+            o3k_network::PublicAddressBinding {
+                allocation_id: record.allocation_id,
+                operation_id: record.operation_id,
+                project_id: record.project_id,
+                public_address: record.public_address,
+                endpoint_id: record.endpoint_id,
+                generation: record.generation,
+            }
+        } else {
+            self.public_allocator
+                .as_ref()
+                .ok_or_else(|| "public allocator is not configured".to_owned())?
+                .get(project_id, allocation_id)
+                .map_err(|error| error.to_string())?
+        };
+        let Some(endpoint_id) = allocation.endpoint_id else {
             return Ok(());
         };
         let _guard = self.unbind_lock.lock().await;
-        let allocator = self
-            .public_allocator
-            .as_ref()
-            .ok_or_else(|| "public allocator is not configured".to_owned())?;
-        let allocation = allocator
-            .get(project_id, binding.1)
-            .map_err(|error| error.to_string())?;
         let port = self
             .network
-            .get_port_for_project(project_id, binding.0)
+            .get_port_for_project(project_id, endpoint_id)
             .await
             .map_err(|error| error.to_string())?;
         let Some(host) = port.binding_host.as_deref() else {
@@ -274,7 +281,7 @@ impl NetworkBindingProjector {
         );
         let deadline_unix_ms = super::unix_time_millis().saturating_add(30_000);
         let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
-            endpoint_id: binding.0,
+            endpoint_id,
             realm_id,
             project_id,
             mac: &port.mac_address,
@@ -528,21 +535,30 @@ impl NetworkBindingProjector {
             .policy_defaults_for_endpoint(project_id, port.id)
             .await
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        let public_address = self
-            .public_allocator
-            .as_ref()
-            .map(|allocator| {
-                allocator
-                    .list(project_id)
-                    .map_err(|error| std::io::Error::other(error.to_string()))
-            })
-            .transpose()?
-            .and_then(|bindings| {
-                bindings
-                    .into_iter()
-                    .find(|binding| binding.endpoint_id == Some(port.id))
-                    .map(|binding| binding.public_address)
-            });
+        let public_address = if let Some(store) = self.public_address_store.as_ref() {
+            store
+                .list_public_addresses(project_id, 10_000)
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .into_iter()
+                .find(|binding| binding.endpoint_id == Some(port.id))
+                .map(|binding| binding.public_address)
+        } else {
+            self.public_allocator
+                .as_ref()
+                .map(|allocator| {
+                    allocator
+                        .list(project_id)
+                        .map_err(|error| std::io::Error::other(error.to_string()))
+                })
+                .transpose()?
+                .and_then(|bindings| {
+                    bindings
+                        .into_iter()
+                        .find(|binding| binding.endpoint_id == Some(port.id))
+                        .map(|binding| binding.public_address)
+                })
+        };
         let operation_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!("o3k:network:terminal-binding:{project_id}:{port_id}").as_bytes(),

@@ -2,15 +2,65 @@ use async_trait::async_trait;
 use sqlx::Row;
 
 use crate::{
-    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
-    PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository,
-    PlacementResourceRecord, StoreError,
+    PlacementAllocationRecord, PlacementCapacityRecord, PlacementIntentRecord,
+    PlacementInventoryRecord, PlacementProviderRecord, PlacementReconcileRecord,
+    PlacementRepository, PlacementResourceRecord, StoreError,
 };
 
 use super::PostgresStore;
 
 #[async_trait]
 impl PlacementRepository for PostgresStore {
+    async fn capacity_summary(
+        &self,
+        limit: usize,
+    ) -> Result<(Vec<PlacementCapacityRecord>, u64, u64), StoreError> {
+        let rows = sqlx::query(
+            "SELECT i.resource_class, SUM(i.total)::BIGINT AS total, SUM(i.reserved)::BIGINT AS reserved,
+                    SUM(i.used)::BIGINT AS used,
+                    SUM(FLOOR(i.total * i.allocation_ratio) - i.reserved - i.used)::BIGINT AS available
+             FROM placement_inventories i JOIN placement_providers p ON p.id = i.provider_id
+             WHERE p.state <> 'Deleted' GROUP BY i.resource_class ORDER BY i.resource_class LIMIT $1",
+        ).bind(i64::try_from(limit).unwrap_or(i64::MAX)).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        let dimensions = rows
+            .iter()
+            .map(|row| {
+                Ok(PlacementCapacityRecord {
+                    resource_class: row
+                        .try_get("resource_class")
+                        .map_err(StoreError::Database)?,
+                    total: row
+                        .try_get::<i64, _>("total")
+                        .map_err(StoreError::Database)?
+                        .max(0) as u64,
+                    reserved: row
+                        .try_get::<i64, _>("reserved")
+                        .map_err(StoreError::Database)?
+                        .max(0) as u64,
+                    used: row
+                        .try_get::<i64, _>("used")
+                        .map_err(StoreError::Database)?
+                        .max(0) as u64,
+                    available: row
+                        .try_get::<i64, _>("available")
+                        .map_err(StoreError::Database)?
+                        .max(0) as u64,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let counts = sqlx::query("SELECT COALESCE(SUM(CASE WHEN state = 'Enabled' THEN 1 ELSE 0 END), 0) AS enabled, COALESCE(SUM(CASE WHEN state IN ('Draining', 'Unavailable') THEN 1 ELSE 0 END), 0) AS degraded FROM placement_providers WHERE state <> 'Deleted'").fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+        Ok((
+            dimensions,
+            counts
+                .try_get::<i64, _>("enabled")
+                .map_err(StoreError::Database)?
+                .max(0) as u64,
+            counts
+                .try_get::<i64, _>("degraded")
+                .map_err(StoreError::Database)?
+                .max(0) as u64,
+        ))
+    }
     async fn get_provider(
         &self,
         provider_id: &str,

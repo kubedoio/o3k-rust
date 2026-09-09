@@ -52,6 +52,41 @@ pub(super) async fn insert_sqlite_canonical_acceptance(
     sqlx::query("INSERT INTO idempotency_reservations (owner_scope,action,idempotency_key,fingerprint,operation_id) VALUES (?,?,?,?,?)")
         .bind(&request.owner_scope).bind(&request.action).bind(&request.key).bind(&request.fingerprint)
         .bind(request.operation_id.to_string()).execute(&mut **connection).await.map_err(StoreError::Database)?;
+    // Canonical acceptance and its security audit admission share this
+    // transaction.  The event is deliberately an `accepted` phase (not a
+    // fabricated provider success); reconciliation records the later
+    // lifecycle outcome.  A deterministic event ID makes retries harmless.
+    let event_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:canonical-acceptance-audit:{}", operation.id).as_bytes(),
+    );
+    let fallback_request_id = operation.id.to_string();
+    let request_id = canonical
+        .request_id
+        .as_deref()
+        .unwrap_or(&fallback_request_id);
+    let event_json = serde_json::json!({
+        "event_id": event_id.to_string(),
+        "request_id": request_id,
+        "audit_id": event_id.to_string(),
+        "principal_id": canonical.actor,
+        "effective_scope": canonical.owner_scope,
+        "service_namespace": canonical.service,
+        "action": canonical.action,
+        "resource_type": canonical.resource_type,
+        "resource_id": canonical.resource_id,
+        "owner_scope": canonical.owner_scope,
+        "operation_id": operation.id,
+        "outcome": "accepted"
+    })
+    .to_string();
+    sqlx::query("INSERT OR IGNORE INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,effective_scope,service_namespace,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category,event_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        .bind(event_id.to_string()).bind(&canonical.created_at).bind(request_id)
+        .bind(event_id.to_string()).bind(&canonical.actor).bind(&canonical.owner_scope)
+        .bind(&canonical.service).bind(&canonical.action).bind(&canonical.resource_type)
+        .bind(&canonical.resource_id).bind(&canonical.owner_scope)
+        .bind(operation.id.to_string()).bind("accepted").bind(Option::<String>::None)
+        .bind(event_json).execute(&mut **connection).await.map_err(StoreError::Database)?;
     Ok(())
 }
 
@@ -84,30 +119,45 @@ pub(super) async fn migrate_operation_resource_scope(pool: &SqlitePool) -> Resul
     .map_err(StoreError::Database)?;
 
     if has_resource_fk == 0 {
+        // Recreate the validation trigger on every startup of the
+        // trigger-based schema.  Older databases may already have the
+        // trigger name installed with a narrower set of canonical resource
+        // tables; `IF NOT EXISTS` would silently preserve that stale
+        // definition and reject newly authoritative image operations.
+        sqlx::query("DROP TRIGGER IF EXISTS resources_delete_generic_operations")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query("DROP TRIGGER IF EXISTS operations_validate_resource_reference")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
         sqlx::query(
-            r#"CREATE TRIGGER IF NOT EXISTS resources_delete_generic_operations
+            r#"CREATE TRIGGER resources_delete_generic_operations
                 AFTER DELETE ON resources
                 BEGIN
                     DELETE FROM operations
-                    WHERE resource_id = OLD.id
-                      AND NOT EXISTS (
-                          SELECT 1 FROM canonical_operation_metadata metadata
-                          WHERE metadata.operation_id = operations.id
-                            AND metadata.resource_type IN ('network:network', 'network:address_realm')
-                      );
+                          WHERE resource_id = OLD.id
+                            AND NOT EXISTS (
+                              SELECT 1 FROM canonical_operation_metadata metadata
+                              WHERE metadata.operation_id = operations.id
+                                AND metadata.resource_type IN ('network:network', 'network:address_realm', 'iam:role_assignment', 'image:image')
+                          );
                 END"#,
         )
         .execute(&mut *connection)
         .await
         .map_err(StoreError::Database)?;
         sqlx::query(
-            r#"CREATE TRIGGER IF NOT EXISTS operations_validate_resource_reference
+            r#"CREATE TRIGGER operations_validate_resource_reference
                 BEFORE INSERT ON operations
                 BEGIN
                     SELECT RAISE(ABORT, 'operation resource not found')
                     WHERE NOT EXISTS (SELECT 1 FROM resources WHERE id = NEW.resource_id)
                       AND NOT EXISTS (SELECT 1 FROM canonical_networks WHERE id = NEW.resource_id)
-                      AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE id = NEW.resource_id);
+                      AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE id = NEW.resource_id)
+                      AND NOT EXISTS (SELECT 1 FROM keystone_role_assignments WHERE id = NEW.resource_id)
+                      AND NOT EXISTS (SELECT 1 FROM image_metadata WHERE id = NEW.resource_id);
                 END"#,
         )
         .execute(&mut *connection)
@@ -163,6 +213,17 @@ pub(super) async fn migrate_operation_resource_scope(pool: &SqlitePool) -> Resul
         .execute(&mut *connection)
         .await
         .map_err(StoreError::Database)?;
+        // Existing triggers reference `operations`; remove them before the
+        // table replacement so SQLite does not retain an invalid trigger
+        // definition while the old table is dropped.
+        sqlx::query("DROP TRIGGER IF EXISTS resources_delete_generic_operations")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query("DROP TRIGGER IF EXISTS operations_validate_resource_reference")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
         sqlx::query("DROP TABLE operations")
             .execute(&mut *connection)
             .await
@@ -184,7 +245,7 @@ pub(super) async fn migrate_operation_resource_scope(pool: &SqlitePool) -> Resul
                       AND NOT EXISTS (
                           SELECT 1 FROM canonical_operation_metadata metadata
                           WHERE metadata.operation_id = operations.id
-                            AND metadata.resource_type IN ('network:network', 'network:address_realm')
+                            AND metadata.resource_type IN ('network:network', 'network:address_realm', 'iam:role_assignment', 'image:image')
                       );
                 END"#,
         )
@@ -212,7 +273,9 @@ pub(super) async fn migrate_operation_resource_scope(pool: &SqlitePool) -> Resul
                     SELECT RAISE(ABORT, 'operation resource not found')
                     WHERE NOT EXISTS (SELECT 1 FROM resources WHERE id = NEW.resource_id)
                       AND NOT EXISTS (SELECT 1 FROM canonical_networks WHERE id = NEW.resource_id)
-                      AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE id = NEW.resource_id);
+                      AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE id = NEW.resource_id)
+                      AND NOT EXISTS (SELECT 1 FROM keystone_role_assignments WHERE id = NEW.resource_id)
+                      AND NOT EXISTS (SELECT 1 FROM image_metadata WHERE id = NEW.resource_id);
                 END"#,
         )
         .execute(&mut *connection)
@@ -909,6 +972,8 @@ impl SqliteStore {
                     sqlx::Error::Database(ref db) if db.is_unique_violation() => StoreError::ResourceAlreadyExists,
                     _ => StoreError::Database(e),
                 })?;
+            let event = crate::MeteringEventRecord::resource_lifecycle(resource, "created");
+            crate::sqlite::metering::append_metering_event_tx(&mut connection, &event).await?;
             insert_sqlite_canonical_acceptance(&mut connection, operation, canonical, request).await?;
             Ok(CanonicalAcceptanceOutcome::Created { operation_id: operation.id, resource_id: resource.id })
         }.await;
@@ -954,6 +1019,7 @@ impl SqliteStore {
 #[async_trait]
 impl DurableStore for SqliteStore {
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         let result = sqlx::query(
             "INSERT INTO resources (id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
@@ -965,10 +1031,14 @@ impl DurableStore for SqliteStore {
         .bind(&resource.desired_state)
         .bind(&resource.observed_state)
         .bind(&resource.provider_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await;
         match result {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                let event = crate::MeteringEventRecord::resource_lifecycle(resource, "created");
+                crate::sqlite::metering::append_metering_event_tx(&mut tx, &event).await?;
+                tx.commit().await.map_err(StoreError::Database)
+            }
             Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
                 Err(StoreError::ResourceAlreadyExists)
             }
@@ -1019,6 +1089,38 @@ impl DurableStore for SqliteStore {
         rows.iter().map(resource_from_row).collect()
     }
 
+    async fn list_resources_page_by_observed_state(
+        &self,
+        project_id: &str,
+        kind: &str,
+        observed_state: Option<&str>,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResourceRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("native page limit overflow".to_owned()))?;
+        let rows = match (observed_state, after_id) {
+            (Some(state), Some(after)) => sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE project_id = ? AND kind = ? AND observed_state = ? AND id > ? ORDER BY id LIMIT ?").bind(project_id).bind(kind).bind(state).bind(after).bind(limit).fetch_all(&self.pool).await,
+            (Some(state), None) => sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE project_id = ? AND kind = ? AND observed_state = ? ORDER BY id LIMIT ?").bind(project_id).bind(kind).bind(state).bind(limit).fetch_all(&self.pool).await,
+            (None, Some(after)) => sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE project_id = ? AND kind = ? AND id > ? ORDER BY id LIMIT ?").bind(project_id).bind(kind).bind(after).bind(limit).fetch_all(&self.pool).await,
+            (None, None) => sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE project_id = ? AND kind = ? ORDER BY id LIMIT ?").bind(project_id).bind(kind).bind(limit).fetch_all(&self.pool).await,
+        }.map_err(StoreError::Database)?;
+        rows.iter().map(resource_from_row).collect()
+    }
+
+    async fn count_resources(&self, project_id: &str, kind: &str) -> Result<u64, StoreError> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS count FROM resources WHERE project_id = ? AND kind = ?",
+        )
+        .bind(project_id)
+        .bind(kind)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let count: i64 = row.get("count");
+        u64::try_from(count).map_err(|_| StoreError::Corrupt("negative resource count".into()))
+    }
+
     async fn update_resource(
         &self,
         id: Uuid,
@@ -1028,6 +1130,7 @@ impl DurableStore for SqliteStore {
         observed_generation: i64,
         provider_id: Option<&str>,
     ) -> Result<ResourceRecord, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         let result = sqlx::query("UPDATE resources SET generation = generation + 1, desired_state = ?, observed_state = ?, observed_generation = ?, provider_id = ? WHERE id = ? AND generation = ?")
             .bind(desired_state)
             .bind(observed_state)
@@ -1035,17 +1138,31 @@ impl DurableStore for SqliteStore {
             .bind(provider_id)
             .bind(id.to_string())
             .bind(expected_generation)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(StoreError::Database)?;
         if result.rows_affected() == 0 {
+            // Release the write transaction before the authoritative lookup;
+            // otherwise SQLite can retain the transaction lock while the
+            // second connection attempts to classify a stale generation.
+            tx.rollback().await.map_err(StoreError::Database)?;
             return match self.get_resource(id).await {
                 Ok(_) => Err(StoreError::StaleGeneration),
                 Err(StoreError::ResourceNotFound) => Err(StoreError::ResourceNotFound),
                 Err(error) => Err(error),
             };
         }
-        self.get_resource(id).await
+        let updated = sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE id = ?")
+            .bind(id.to_string()).fetch_one(&mut *tx).await.map_err(StoreError::Database)?;
+        let updated = resource_from_row(&updated)?;
+        if updated.desired_state.eq_ignore_ascii_case("deleted")
+            || updated.observed_state.eq_ignore_ascii_case("deleted")
+        {
+            let event = crate::MeteringEventRecord::resource_lifecycle(&updated, "deleted");
+            crate::sqlite::metering::append_metering_event_tx(&mut tx, &event).await?;
+        }
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(updated)
     }
 
     async fn update_resource_from_observation(
@@ -1239,7 +1356,9 @@ impl DurableStore for SqliteStore {
         after_id: Option<Uuid>,
         limit: u32,
     ) -> Result<Vec<CanonicalOperationRecord>, StoreError> {
-        let limit = i64::from(limit);
+        // Keep the repository boundary bounded even for internal callers; the
+        // HTTP layer's page-size cap is not a sufficient database safeguard.
+        let limit = i64::from(limit.min(256));
         let rows = if let Some(after_id) = after_id {
             sqlx::query("SELECT m.*, o.state FROM canonical_operation_metadata m JOIN operations o ON o.id=m.operation_id WHERE m.owner_scope=? AND m.operation_id>? ORDER BY m.operation_id LIMIT ?")
                 .bind(owner_scope).bind(after_id.to_string()).bind(limit).fetch_all(&self.pool).await
@@ -1247,6 +1366,100 @@ impl DurableStore for SqliteStore {
             sqlx::query("SELECT m.*, o.state FROM canonical_operation_metadata m JOIN operations o ON o.id=m.operation_id WHERE m.owner_scope=? ORDER BY m.operation_id LIMIT ?")
                 .bind(owner_scope).bind(limit).fetch_all(&self.pool).await
         }.map_err(StoreError::Database)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(CanonicalOperationRecord {
+                    id: Uuid::parse_str(&row.get::<String, _>("operation_id"))
+                        .map_err(StoreError::InvalidUuid)?,
+                    service: row.get("service"),
+                    action: row.get("action"),
+                    actor: row.get("actor"),
+                    owner_scope: row.get("owner_scope"),
+                    resource_type: row.get("resource_type"),
+                    resource_id: row.get("resource_id"),
+                    state: OperationState::parse(&row.get::<String, _>("state"))?,
+                    attempt: u32::try_from(row.get::<i64, _>("attempt"))
+                        .map_err(|_| StoreError::Corrupt("invalid operation attempt".into()))?,
+                    created_at: row.get("created_at"),
+                    started_at: row.get("started_at"),
+                    finished_at: row.get("finished_at"),
+                    error: row.get("error"),
+                    request_id: row.get("request_id"),
+                })
+            })
+            .collect()
+    }
+
+    async fn list_canonical_operations_filtered_page(
+        &self,
+        owner_scope: &str,
+        after_id: Option<Uuid>,
+        limit: u32,
+        filters: &crate::CanonicalOperationFilters,
+    ) -> Result<Vec<CanonicalOperationRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT m.*, o.state FROM canonical_operation_metadata m JOIN operations o ON o.id=m.operation_id
+             WHERE m.owner_scope=? AND (? IS NULL OR m.operation_id>?)
+               AND (? IS NULL OR m.service=?) AND (? IS NULL OR m.action=?)
+               AND (? IS NULL OR o.state=?)
+             ORDER BY m.operation_id LIMIT ?",
+        )
+        .bind(owner_scope)
+        .bind(after_id.map(|id| id.to_string()))
+        .bind(after_id.map(|id| id.to_string()))
+        .bind(&filters.service)
+        .bind(&filters.service)
+        .bind(&filters.action)
+        .bind(&filters.action)
+        .bind(&filters.state)
+        .bind(&filters.state)
+        .bind(i64::from(limit.min(256)))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(CanonicalOperationRecord {
+                    id: Uuid::parse_str(&row.get::<String, _>("operation_id"))
+                        .map_err(StoreError::InvalidUuid)?,
+                    service: row.get("service"),
+                    action: row.get("action"),
+                    actor: row.get("actor"),
+                    owner_scope: row.get("owner_scope"),
+                    resource_type: row.get("resource_type"),
+                    resource_id: row.get("resource_id"),
+                    state: OperationState::parse(&row.get::<String, _>("state"))?,
+                    attempt: u32::try_from(row.get::<i64, _>("attempt"))
+                        .map_err(|_| StoreError::Corrupt("invalid operation attempt".into()))?,
+                    created_at: row.get("created_at"),
+                    started_at: row.get("started_at"),
+                    finished_at: row.get("finished_at"),
+                    error: row.get("error"),
+                    request_id: row.get("request_id"),
+                })
+            })
+            .collect()
+    }
+
+    async fn list_canonical_operations_system_page(
+        &self,
+        owner_scope: Option<&str>,
+        after_id: Option<Uuid>,
+        limit: u32,
+        filters: &crate::CanonicalOperationFilters,
+    ) -> Result<Vec<CanonicalOperationRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT m.*, o.state FROM canonical_operation_metadata m JOIN operations o ON o.id=m.operation_id
+             WHERE (? IS NULL OR m.owner_scope=?) AND (? IS NULL OR m.operation_id>?)
+               AND (? IS NULL OR m.service=?) AND (? IS NULL OR m.action=?)
+               AND (? IS NULL OR o.state=?) ORDER BY m.operation_id LIMIT ?",
+        )
+        .bind(owner_scope).bind(owner_scope)
+        .bind(after_id.map(|id| id.to_string())).bind(after_id.map(|id| id.to_string()))
+        .bind(&filters.service).bind(&filters.service)
+        .bind(&filters.action).bind(&filters.action)
+        .bind(&filters.state).bind(&filters.state).bind(i64::from(limit.min(256)))
+        .fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         rows.into_iter()
             .map(|row| {
                 Ok(CanonicalOperationRecord {
@@ -1337,6 +1550,15 @@ impl DurableStore for SqliteStore {
                     .bind(operation.resource_id.to_string()).fetch_optional(&mut *connection).await
                     .map_err(StoreError::Database)?,
                 "network:address_realm" => sqlx::query_scalar("SELECT project_id FROM canonical_address_realms WHERE id=?")
+                    .bind(operation.resource_id.to_string()).fetch_optional(&mut *connection).await
+                    .map_err(StoreError::Database)?,
+                "iam:role_assignment" => sqlx::query_scalar("SELECT project_id FROM keystone_role_assignments WHERE id=?")
+                    .bind(operation.resource_id.to_string()).fetch_optional(&mut *connection).await
+                    .map_err(StoreError::Database)?,
+                "volume:volume_attachment" => sqlx::query_scalar("SELECT project_id FROM native_volume_attachments WHERE id=?")
+                    .bind(operation.resource_id.to_string()).fetch_optional(&mut *connection).await
+                    .map_err(StoreError::Database)?,
+                "image:image" => sqlx::query_scalar("SELECT project_id FROM image_metadata WHERE id=?")
                     .bind(operation.resource_id.to_string()).fetch_optional(&mut *connection).await
                     .map_err(StoreError::Database)?,
                 _ => return Err(StoreError::Corrupt("unsupported canonical scoped resource type".into())),
@@ -2010,6 +2232,12 @@ impl DurableStore for SqliteStore {
             .execute(&mut *transaction)
             .await
             .map_err(StoreError::Database)?;
+        // Keep the lifecycle observation in the same transaction as the
+        // resource and its canonical create operation.  This path is used by
+        // placement-backed creates and must not leave a resource visible to
+        // metering only after a crash or a partial operation insert.
+        let event = crate::MeteringEventRecord::resource_lifecycle(resource, "created");
+        crate::sqlite::metering::append_metering_event_tx(&mut transaction, &event).await?;
         transaction.commit().await.map_err(StoreError::Database)
     }
 
@@ -2081,6 +2309,26 @@ impl DurableStore for SqliteStore {
             }
             Err(error) => return Err(StoreError::Database(error)),
         }
+        let revived = ResourceRecord {
+            id,
+            kind: sqlx::query_scalar("SELECT kind FROM resources WHERE id = ?")
+                .bind(id.to_string())
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(StoreError::Database)?,
+            project_id: sqlx::query_scalar("SELECT project_id FROM resources WHERE id = ?")
+                .bind(id.to_string())
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(StoreError::Database)?,
+            generation: expected_generation + 1,
+            observed_generation,
+            desired_state: desired_state.to_owned(),
+            observed_state: observed_state.to_owned(),
+            provider_id: provider_id.map(str::to_owned),
+        };
+        let event = crate::MeteringEventRecord::resource_lifecycle(&revived, "revived");
+        crate::sqlite::metering::append_metering_event_tx(&mut transaction, &event).await?;
         transaction.commit().await.map_err(StoreError::Database)?;
         self.get_resource(id).await
     }

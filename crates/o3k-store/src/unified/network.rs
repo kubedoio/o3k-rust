@@ -5,11 +5,76 @@ use crate::{
     CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
     CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord,
     CanonicalNetworkRecord, CanonicalRealmBindingRecord, NetworkAddressAllocationRecord,
-    NetworkIntentRecord, NetworkRecord, NetworkRepository, PortRecord, SecurityGroupBindingRecord,
-    SecurityGroupRecord, SecurityGroupRuleRecord, StoreError, SubnetRecord,
+    NetworkIntentRecord, NetworkRecord, NetworkRepository, PortRecord, PublicAddressBindingRecord,
+    PublicAddressRepository, SecurityGroupBindingRecord, SecurityGroupRecord,
+    SecurityGroupRuleRecord, StoreError, SubnetRecord,
 };
 
 use super::O3kStore;
+
+#[async_trait]
+impl PublicAddressRepository for O3kStore {
+    async fn allocate_public_address(
+        &self,
+        p: &str,
+        o: &str,
+        id: Uuid,
+        f: std::net::Ipv4Addr,
+        l: std::net::Ipv4Addr,
+    ) -> Result<PublicAddressBindingRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.allocate_public_address(p, o, id, f, l).await,
+            Self::Postgres(s) => s.allocate_public_address(p, o, id, f, l).await,
+        }
+    }
+    async fn associate_public_address(
+        &self,
+        p: &str,
+        id: Uuid,
+        e: Uuid,
+    ) -> Result<PublicAddressBindingRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.associate_public_address(p, id, e).await,
+            Self::Postgres(s) => s.associate_public_address(p, id, e).await,
+        }
+    }
+    async fn disassociate_public_address(
+        &self,
+        p: &str,
+        id: Uuid,
+    ) -> Result<PublicAddressBindingRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.disassociate_public_address(p, id).await,
+            Self::Postgres(s) => s.disassociate_public_address(p, id).await,
+        }
+    }
+    async fn release_public_address(&self, p: &str, id: Uuid) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.release_public_address(p, id).await,
+            Self::Postgres(s) => s.release_public_address(p, id).await,
+        }
+    }
+    async fn get_public_address(
+        &self,
+        p: &str,
+        id: Uuid,
+    ) -> Result<Option<PublicAddressBindingRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_public_address(p, id).await,
+            Self::Postgres(s) => s.get_public_address(p, id).await,
+        }
+    }
+    async fn list_public_addresses(
+        &self,
+        p: &str,
+        l: usize,
+    ) -> Result<Vec<PublicAddressBindingRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_public_addresses(p, l).await,
+            Self::Postgres(s) => s.list_public_addresses(p, l).await,
+        }
+    }
+}
 
 #[async_trait]
 impl NetworkRepository for O3kStore {
@@ -32,6 +97,26 @@ impl NetworkRepository for O3kStore {
             Self::Postgres(s) => s.insert_canonical_network(network).await,
         }
     }
+    async fn insert_canonical_network_with_audit(
+        &self,
+        network: &CanonicalNetworkRecord,
+        audit: &crate::AuditEventRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_canonical_network_with_audit(network, audit).await,
+            Self::Postgres(s) => s.insert_canonical_network_with_audit(network, audit).await,
+        }
+    }
+    async fn insert_canonical_realm_with_audit(
+        &self,
+        realm: &CanonicalAddressRealmRecord,
+        audit: &crate::AuditEventRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_canonical_realm_with_audit(realm, audit).await,
+            Self::Postgres(s) => s.insert_canonical_realm_with_audit(realm, audit).await,
+        }
+    }
     async fn get_canonical_network(
         &self,
         project_id: &str,
@@ -49,6 +134,23 @@ impl NetworkRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.list_canonical_networks(project_id).await,
             Self::Postgres(s) => s.list_canonical_networks(project_id).await,
+        }
+    }
+    async fn list_canonical_networks_page(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CanonicalNetworkRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.list_canonical_networks_page(project_id, after_id, limit)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.list_canonical_networks_page(project_id, after_id, limit)
+                    .await
+            }
         }
     }
     async fn update_canonical_network(
@@ -521,6 +623,24 @@ impl NetworkRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.delete_canonical_network(project_id, network_id).await,
             Self::Postgres(s) => s.delete_canonical_network(project_id, network_id).await,
+        }
+    }
+    async fn delete_canonical_network_with_audit(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+        operation_id: Uuid,
+        audit: &crate::AuditEventRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.delete_canonical_network_with_audit(project_id, network_id, operation_id, audit)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.delete_canonical_network_with_audit(project_id, network_id, operation_id, audit)
+                    .await
+            }
         }
     }
     async fn backfill_canonical_network_state(&self) -> Result<(), StoreError> {

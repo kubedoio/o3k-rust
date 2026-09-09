@@ -23,11 +23,13 @@ use crate::{NativeApiState, error::ProblemDetails};
 /// This is the canonical native IAM request, separate from the
 /// Keystone-compatible `TokenRequest`. Both map to the same O3K IAM.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeTokenRequestV1 {
     pub auth: NativeAuth,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeAuth {
     pub method: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,6 +61,7 @@ pub enum NativeCredentialV1 {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeFederatedCredentials {
     pub access_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,6 +215,7 @@ impl NativeAuth {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativePasswordCredentials {
     pub user_id: String,
     pub password: String,

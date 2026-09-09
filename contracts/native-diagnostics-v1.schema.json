@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-diagnostics-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "services", "locations", "capacity"],
+  "properties": {
+    "status": { "enum": ["healthy", "degraded", "unavailable", "unknown"] },
+    "services": { "type": "array", "items": { "$ref": "#/$defs/service" } },
+    "locations": { "type": "array", "items": { "type": "string" } },
+    "capacity": { "$ref": "#/$defs/capacity" }
+  },
+  "$defs": {
+    "service": {
+      "type": "object", "additionalProperties": false,
+      "required": ["service_id", "namespace", "service_version", "controller_state", "healthy", "detail", "regions"],
+      "properties": {
+        "service_id": { "type": "string", "minLength": 1 },
+        "namespace": { "type": "string", "minLength": 1 },
+        "service_version": { "type": "string", "minLength": 1 },
+        "controller_state": { "type": ["string", "null"] },
+        "healthy": { "type": ["boolean", "null"] },
+        "detail": { "type": ["string", "null"] },
+        "regions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "capacity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["available", "reason", "dimensions"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "reason": { "type": "string", "minLength": 1 },
+        "dimensions": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["resource_class", "total", "reserved", "used", "available"],
+            "properties": {
+              "resource_class": { "type": "string", "minLength": 1 },
+              "total": { "type": "integer", "minimum": 0 },
+              "reserved": { "type": "integer", "minimum": 0 },
+              "used": { "type": "integer", "minimum": 0 },
+              "available": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "maxItems": 64
+        }
+      }
+    }
+  }
+}

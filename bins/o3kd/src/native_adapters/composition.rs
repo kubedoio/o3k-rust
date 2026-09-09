@@ -301,9 +301,7 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
                 ownership: o3k_kernel::RelationshipOwnership::Exclusive,
             });
         }
-        let result = self
-            .application
-            .create(
+        let result = self.application.create(
                 &descriptor,
                 &auth,
                 o3k_native_api::resource::ValidatedCreateRequest {

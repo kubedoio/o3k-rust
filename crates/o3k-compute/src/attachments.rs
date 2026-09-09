@@ -37,9 +37,17 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::NotFound);
         }
+        self.audit_mutation_admission(
+            auth,
+            act.clone(),
+            ResourceType::new("volume", "volume_attachment")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+        )?;
         match self
             .attach_volume(
                 auth.effective_scope().id().as_str(),
@@ -63,13 +71,17 @@ impl ComputeService {
                         ResourceId::new(record.id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Ok(record)
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Err(error)
             }
         }
@@ -123,7 +135,9 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::NotFound);
         }
         self.list_volume_attachments(auth.effective_scope().id().as_str(), server_id)
@@ -173,7 +187,9 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::NotFound);
         }
         self.get_volume_attachment(
@@ -224,9 +240,17 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.audit_sink
+                .record_checked(&event)
+                .map_err(|_| ComputeError::Unavailable)?;
             return Err(ComputeError::NotFound);
         }
+        self.audit_mutation_admission(
+            auth,
+            act.clone(),
+            ResourceType::new("volume", "volume_attachment")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+        )?;
         match self
             .detach_volume(
                 auth.effective_scope().id().as_str(),
@@ -247,13 +271,17 @@ impl ComputeService {
                         ResourceId::new(attachment_id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Ok(())
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.audit_sink
+                    .record_checked(&event)
+                    .map_err(|_| ComputeError::Unavailable)?;
                 Err(error)
             }
         }

@@ -2,10 +2,75 @@
 mod tests {
     use crate::*;
     use std::error::Error;
+    use std::net::Ipv4Addr;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn sqlite_public_address_authority_is_scoped_idempotent_and_restartable()
+    -> Result<(), Box<dyn Error>> {
+        let path =
+            std::env::temp_dir().join(format!("o3k-public-address-{}.sqlite", Uuid::now_v7()));
+        let store = crate::sqlite::SqliteStore::connect_file(&path).await?;
+        let allocation_id = Uuid::now_v7();
+        let first = store
+            .allocate_public_address(
+                "project-a",
+                "operation-a",
+                allocation_id,
+                Ipv4Addr::new(198, 51, 100, 10),
+                Ipv4Addr::new(198, 51, 100, 12),
+            )
+            .await?;
+        let replay = store
+            .allocate_public_address(
+                "project-a",
+                "operation-a",
+                Uuid::now_v7(),
+                Ipv4Addr::new(198, 51, 100, 10),
+                Ipv4Addr::new(198, 51, 100, 12),
+            )
+            .await?;
+        assert_eq!(first, replay);
+        assert!(
+            store
+                .get_public_address("project-b", allocation_id)
+                .await?
+                .is_none()
+        );
+        let associated = store
+            .associate_public_address("project-a", allocation_id, Uuid::now_v7())
+            .await?;
+        assert_eq!(associated.generation, 2);
+        assert!(matches!(
+            store
+                .release_public_address("project-a", allocation_id)
+                .await,
+            Err(StoreError::NetworkInUse)
+        ));
+        let reopened = crate::sqlite::SqliteStore::connect_file(&path).await?;
+        let persisted = reopened
+            .get_public_address("project-a", allocation_id)
+            .await?
+            .ok_or(StoreError::NetworkNotFound)?;
+        assert_eq!(persisted, associated);
+        reopened
+            .disassociate_public_address("project-a", allocation_id)
+            .await?;
+        reopened
+            .release_public_address("project-a", allocation_id)
+            .await?;
+        assert!(
+            reopened
+                .get_public_address("project-a", allocation_id)
+                .await?
+                .is_none()
+        );
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn sqlite_scoped_operation_migration_preserves_populated_database()
@@ -644,6 +709,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_canonical_operation_collection_pushes_filters_into_store_query()
+    -> Result<(), StoreError> {
+        let (store, resource_id) = concurrent_store_fixture().await?;
+        for (service_action, state) in [
+            ("compute:StartServer", OperationState::Succeeded),
+            ("network:CreateNetwork", OperationState::Failed),
+        ] {
+            let operation_id = Uuid::now_v7();
+            let mut operation = idempotent_operation(resource_id, operation_id);
+            operation.state = state;
+            let mut canonical =
+                canonical_idempotent_operation(&operation, "project-a", service_action);
+            if service_action.starts_with("network:") {
+                canonical.resource_type = "network:network".into();
+            }
+            let request = IdempotencyReservationRequest::from_semantics(
+                "project-a",
+                service_action,
+                operation_id.to_string(),
+                if service_action.starts_with("network:") {
+                    "network:network"
+                } else {
+                    "compute:server"
+                },
+                None,
+                &serde_json::json!({"operation": service_action}),
+                operation_id,
+            )?;
+            store
+                .create_or_replay_canonical_idempotent_operation(&operation, &canonical, &request)
+                .await?;
+        }
+
+        let records = store
+            .list_canonical_operations_filtered_page(
+                "project-a",
+                None,
+                10,
+                &CanonicalOperationFilters {
+                    service: Some("compute".into()),
+                    action: None,
+                    state: Some("succeeded".into()),
+                },
+            )
+            .await?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].service, "compute");
+        assert_eq!(records[0].state, OperationState::Succeeded);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sqlite_idempotency_concurrent_equivalent_requests_have_one_winner()
     -> Result<(), StoreError> {
         let (store, resource_id) = concurrent_store_fixture().await?;
@@ -995,6 +1112,20 @@ mod tests {
                 resource_id: resource.id
             }
         );
+        // Acceptance is a single durable transaction: the canonical
+        // operation and its security audit admission are committed together.
+        // This must remain true for both SQLite and the equivalent PostgreSQL
+        // implementation (the latter is covered by the PostgreSQL conformance
+        // suite).  In particular, an idempotent replay must not append a
+        // second audit event.
+        let accepted_audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE operation_id = ? AND outcome = 'accepted'",
+        )
+        .bind(operation.id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        assert_eq!(accepted_audits, 1);
         let losing_resource = ResourceRecord {
             id: Uuid::now_v7(),
             ..resource.clone()
@@ -1034,6 +1165,14 @@ mod tests {
             o3k_kernel::Operation::try_from(store.get_canonical_operation(operation.id).await?)
                 .is_ok()
         );
+        let replay_audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE operation_id = ? AND outcome = 'accepted'",
+        )
+        .bind(operation.id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        assert_eq!(replay_audits, 1);
         Ok(())
     }
 
@@ -1213,6 +1352,84 @@ mod tests {
         assert!(matches!(
             store.get_canonical_operation(operation.id).await,
             Err(StoreError::Corrupt(_))
+        ));
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_canonical_scoped_operation_uses_authoritative_image_row()
+    -> Result<(), StoreError> {
+        let path = std::env::temp_dir().join(format!("o3k-scoped-image-{}.sqlite", Uuid::now_v7()));
+        let store = SqliteStore::connect_file(&path).await?;
+        let resource_id = Uuid::now_v7();
+        store
+            .insert_image(&ImageMetadataRecord {
+                id: resource_id,
+                name: "native-image".to_owned(),
+                project_id: "project-a".to_owned(),
+                status: "queued".to_owned(),
+                visibility: "private".to_owned(),
+                container_format: "bare".to_owned(),
+                disk_format: "raw".to_owned(),
+                size: None,
+                checksum: None,
+            })
+            .await?;
+        let operation = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id,
+            kind: "lifecycle:delete".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        let canonical = CanonicalOperationRecord {
+            resource_type: "image:image".to_owned(),
+            ..canonical_idempotent_operation(&operation, "project-a", "image:DeleteImage")
+        };
+        let request = IdempotencyReservationRequest::from_semantics(
+            "project-a",
+            "image:DeleteImage",
+            "native-image-delete",
+            "image:image",
+            Some(&resource_id.to_string()),
+            &serde_json::json!({}),
+            operation.id,
+        )?;
+        assert_eq!(
+            store
+                .create_or_replay_canonical_scoped_operation(&operation, &canonical, &request)
+                .await?,
+            IdempotencyReservation::Created(operation.id)
+        );
+        let cross_project_operation = OperationRecord {
+            id: Uuid::now_v7(),
+            ..operation
+        };
+        let cross_project_request = IdempotencyReservationRequest {
+            owner_scope: "project-b".to_owned(),
+            operation_id: cross_project_operation.id,
+            ..request
+        };
+        let cross_project_canonical = CanonicalOperationRecord {
+            id: cross_project_operation.id,
+            owner_scope: "project-b".to_owned(),
+            ..canonical
+        };
+        assert!(matches!(
+            store
+                .create_or_replay_canonical_scoped_operation(
+                    &cross_project_operation,
+                    &cross_project_canonical,
+                    &cross_project_request,
+                )
+                .await,
+            Err(StoreError::ResourceNotFound)
         ));
         drop(store);
         let _ = std::fs::remove_file(&path);
@@ -2199,6 +2416,56 @@ mod tests {
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(format!("{}-wal", path.display()));
         let _ = fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn placement_capacity_summary_is_sql_bounded_and_excludes_deleted()
+    -> Result<(), Box<dyn Error>> {
+        let store = testkit::open_memory().await?;
+        store
+            .register_provider(
+                "node-a",
+                &[
+                    PlacementInventoryRecord {
+                        resource_class: "VCPU".to_owned(),
+                        total: 8,
+                        reserved: 2,
+                        allocation_ratio: 1.0,
+                        used: 1,
+                    },
+                    PlacementInventoryRecord {
+                        resource_class: "MEMORY_MB".to_owned(),
+                        total: 1024,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 256,
+                    },
+                ],
+            )
+            .await?;
+        store
+            .register_provider(
+                "node-b",
+                &[PlacementInventoryRecord {
+                    resource_class: "VCPU".to_owned(),
+                    total: 4,
+                    reserved: 0,
+                    allocation_ratio: 1.0,
+                    used: 0,
+                }],
+            )
+            .await?;
+        store.set_provider_state("node-b", "Deleted").await?;
+
+        let (dimensions, enabled, degraded) = store.capacity_summary(1).await?;
+        assert_eq!(dimensions.len(), 1, "SQL LIMIT must bound returned classes");
+        assert_eq!(dimensions[0].resource_class, "MEMORY_MB");
+        // Placement usage is derived from durable allocations; the
+        // provider-reported `used` field is intentionally not trusted.
+        assert_eq!(dimensions[0].available, 1024);
+        assert_eq!(enabled, 1);
+        assert_eq!(degraded, 0);
         Ok(())
     }
 

@@ -31,6 +31,16 @@ pub struct ResourceRelationshipRecord {
     pub fingerprint: String,
 }
 
+/// Bounded, indexed filters for canonical operation collection reads.
+/// Values are public operation fields only; provider/backend predicates are
+/// intentionally not expressible through this port.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CanonicalOperationFilters {
+    pub service: Option<String>,
+    pub action: Option<String>,
+    pub state: Option<String>,
+}
+
 /// Generic durable parent/child relationship port.
 ///
 /// This deliberately contains no service-specific vocabulary.  External
@@ -134,6 +144,18 @@ pub trait DurableStore: Send + Sync {
         after_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ResourceRecord>, StoreError>;
+    /// Bounded query for the one generic resource predicate advertised by the
+    /// native v1 contract. `observed_state` is durable O3K state; provider
+    /// fields are deliberately not queryable.
+    async fn list_resources_page_by_observed_state(
+        &self,
+        project_id: &str,
+        kind: &str,
+        observed_state: Option<&str>,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResourceRecord>, StoreError>;
+    async fn count_resources(&self, project_id: &str, kind: &str) -> Result<u64, StoreError>;
     async fn update_resource(
         &self,
         id: Uuid,
@@ -207,6 +229,22 @@ pub trait DurableStore: Send + Sync {
         owner_scope: &str,
         after_id: Option<Uuid>,
         limit: u32,
+    ) -> Result<Vec<CanonicalOperationRecord>, StoreError>;
+    async fn list_canonical_operations_filtered_page(
+        &self,
+        owner_scope: &str,
+        after_id: Option<Uuid>,
+        limit: u32,
+        filters: &CanonicalOperationFilters,
+    ) -> Result<Vec<CanonicalOperationRecord>, StoreError>;
+    /// Bounded system/operator collection. `owner_scope` narrows the query
+    /// when supplied; `None` is the explicitly authorized system-wide view.
+    async fn list_canonical_operations_system_page(
+        &self,
+        owner_scope: Option<&str>,
+        after_id: Option<Uuid>,
+        limit: u32,
+        filters: &CanonicalOperationFilters,
     ) -> Result<Vec<CanonicalOperationRecord>, StoreError>;
     async fn update_canonical_operation_lifecycle(
         &self,

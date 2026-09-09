@@ -16,6 +16,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::manifest::ServiceManifest;
 
+/// Maximum topology cardinality accepted by the canonical registry.  Location
+/// discovery has no pagination contract in v1, so the authority must reject
+/// configurations that could make its bounded response unbounded.
+pub const MAX_CANONICAL_REGIONS: usize = 1_000;
+pub const MAX_AVAILABILITY_DOMAINS_PER_REGION: usize = 1_000;
+
 /// Identifier characters permitted in a canonical location ID.
 ///
 /// Location IDs are restricted to a stable, human-safe, provider-neutral
@@ -63,6 +69,12 @@ pub struct RegionDeclaration {
 /// location references.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LocationError {
+    #[error("too many canonical regions (maximum {MAX_CANONICAL_REGIONS})")]
+    TooManyRegions,
+    #[error(
+        "region '{0}' declares too many availability domains (maximum {MAX_AVAILABILITY_DOMAINS_PER_REGION})"
+    )]
+    TooManyAvailabilityDomains(String),
     #[error("empty region id")]
     EmptyRegionId,
     #[error("empty availability domain id")]
@@ -119,12 +131,18 @@ impl LocationRegistry {
     /// availability-domain IDs within a region, and the same availability
     /// domain appearing in more than one region (an ambiguous mapping).
     pub fn from_declarations(declarations: Vec<RegionDeclaration>) -> Result<Self, LocationError> {
+        if declarations.len() > MAX_CANONICAL_REGIONS {
+            return Err(LocationError::TooManyRegions);
+        }
         let mut seen_regions = HashMap::new();
         // Tracks availability-domain -> region for cross-region duplicates.
         let mut az_to_region: HashMap<&str, &str> = HashMap::new();
 
         for region in &declarations {
             validate_region_id(region)?;
+            if region.availability_domains.len() > MAX_AVAILABILITY_DOMAINS_PER_REGION {
+                return Err(LocationError::TooManyAvailabilityDomains(region.id.clone()));
+            }
             if seen_regions.insert(&region.id, ()).is_some() {
                 return Err(LocationError::DuplicateRegion(region.id.clone()));
             }
@@ -163,6 +181,14 @@ impl LocationRegistry {
     #[must_use]
     pub fn regions(&self) -> &[RegionDeclaration] {
         &self.regions
+    }
+
+    /// Return at most `limit` canonical regions without materializing a
+    /// second collection. Callers that need overflow detection should request
+    /// one more than their response bound.
+    #[must_use]
+    pub fn regions_bounded(&self, limit: usize) -> Vec<&RegionDeclaration> {
+        self.regions.iter().take(limit).collect()
     }
 
     /// Returns true if no regions are configured.
@@ -317,6 +343,27 @@ mod tests {
     fn rejects_empty_region_id() {
         let err = LocationRegistry::from_declarations(vec![declaration("", &[])]).unwrap_err();
         assert_eq!(err, LocationError::EmptyRegionId);
+    }
+
+    #[test]
+    fn rejects_topology_exceeding_unpaginated_contract_bound() {
+        let regions = (0..=MAX_CANONICAL_REGIONS)
+            .map(|index| declaration(&format!("region-{index}"), &[]))
+            .collect();
+        assert_eq!(
+            LocationRegistry::from_declarations(regions).unwrap_err(),
+            LocationError::TooManyRegions
+        );
+
+        let azs = (0..=MAX_AVAILABILITY_DOMAINS_PER_REGION)
+            .map(|index| format!("az-{index}"))
+            .collect::<Vec<_>>();
+        let az_refs = azs.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            LocationRegistry::from_declarations(vec![declaration("region-a", &az_refs)])
+                .unwrap_err(),
+            LocationError::TooManyAvailabilityDomains("region-a".to_owned())
+        );
     }
 
     #[test]

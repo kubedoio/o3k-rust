@@ -686,6 +686,15 @@ impl NetworkService {
         resource_id: Option<Uuid>,
         parent: Option<(&str, Uuid)>,
     ) -> Result<(ServiceNamespace, ActionId, ResourceType), NetworkError> {
+        // Authenticated canonical mutations must have a live durable audit
+        // admission path before touching the repository. Read-only calls may
+        // continue during an audit outage, but mutation intent must fail
+        // closed rather than create an unaudited state transition.
+        if !action_name.starts_with("Read") && !action_name.starts_with("List") {
+            self.audit_sink
+                .ensure_available()
+                .map_err(|_| NetworkError::AuditUnavailable)?;
+        }
         let namespace = ServiceNamespace::new("network")
             .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
         let action =
@@ -726,21 +735,23 @@ impl NetworkService {
             resource_target: target,
         });
         if !decision.is_allowed() {
-            self.audit_sink.record(
-                &AuditEvent::from_auth(
-                    auth,
-                    namespace.clone(),
-                    action.clone(),
-                    AuditOutcome::Denied,
+            self.audit_sink
+                .record_checked(
+                    &AuditEvent::from_auth(
+                        auth,
+                        namespace.clone(),
+                        action.clone(),
+                        AuditOutcome::Denied,
+                    )
+                    .with_resource(
+                        resource_type.clone(),
+                        resource_id.and_then(|id| ResourceId::new(id.to_string()).ok()),
+                        Some(OwnershipScope::project(owner_scope, None, None)),
+                    )
+                    .with_decision(decision.clone())
+                    .with_reason("unauthorized"),
                 )
-                .with_resource(
-                    resource_type.clone(),
-                    resource_id.and_then(|id| ResourceId::new(id.to_string()).ok()),
-                    Some(OwnershipScope::project(owner_scope, None, None)),
-                )
-                .with_decision(decision.clone())
-                .with_reason("unauthorized"),
-            );
+                .map_err(|_| NetworkError::AuditUnavailable)?;
             return Err(match decision.reason() {
                 DecisionReason::ScopeMismatch | DecisionReason::MissingOwnership => {
                     NetworkError::NotFound
@@ -774,6 +785,27 @@ impl NetworkService {
             event = event.with_reason(error.to_string());
         }
         self.audit_sink.record(&event);
+    }
+
+    /// Persist the authorization admission before a compatibility mutation
+    /// crosses the repository boundary.  The legacy `record` port is
+    /// intentionally retained for read/terminal reporting, but mutation
+    /// admission must fail closed when the durable sink is unavailable.
+    pub(super) fn audit_mutation_admission(
+        &self,
+        auth: &AuthContext,
+        namespace: ServiceNamespace,
+        action: ActionId,
+        resource_type: ResourceType,
+    ) -> Result<(), NetworkError> {
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| NetworkError::AuditUnavailable)?;
+        let event = AuditEvent::from_auth(auth, namespace, action, AuditOutcome::Allowed)
+            .with_resource(resource_type, None, Some(auth.effective_scope().clone()));
+        self.audit_sink
+            .record_checked(&event)
+            .map_err(|_| NetworkError::AuditUnavailable)
     }
 
     async fn recover_realm_deletion_operations(&self) -> Result<(), NetworkError> {
@@ -944,11 +976,45 @@ impl NetworkService {
         let (namespace, action, resource_type) = self
             .authorize_canonical_action(auth, "CreateNetwork", "network", None, None)
             .await?;
+        let id = Uuid::now_v7();
+        let network = o3k_store::CanonicalNetworkRecord {
+            id,
+            project_id: auth.effective_scope().id().as_str().to_owned(),
+            name,
+            admin_state_up: true,
+            generation: 1,
+            state: "active".to_owned(),
+        };
+        let success_event = AuditEvent::from_auth(
+            auth,
+            namespace.clone(),
+            action.clone(),
+            AuditOutcome::Succeeded,
+        )
+        .with_resource(
+            resource_type.clone(),
+            Some(ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?),
+            Some(auth.effective_scope().clone()),
+        );
+        let audit_record = o3k_store::AuditEventRecord::from_kernel_event(&success_event)
+            .map_err(map_store_error)?;
         let result = self
-            .create_canonical_network_for_project(auth.effective_scope().id().as_str(), name)
-            .await;
-        let audit_result = result.as_ref().map(|_| ());
-        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
+            .inner
+            .repository
+            .insert_canonical_network_with_audit(&network, &audit_record)
+            .await
+            .map(|_| network)
+            .map_err(map_store_error);
+        if result.is_err() {
+            self.audit_canonical_result(
+                auth,
+                namespace,
+                action,
+                resource_type,
+                Some(id),
+                result.as_ref().map(|_| ()),
+            );
+        }
         result
     }
 
@@ -1017,6 +1083,21 @@ impl NetworkService {
             result.as_ref().map(|_| ()),
         );
         result
+    }
+
+    pub async fn list_canonical_networks_page(
+        &self,
+        auth: &AuthContext,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<o3k_store::CanonicalNetworkRecord>, NetworkError> {
+        self.authorize_canonical_action(auth, "ListNetworks", "network", None, None)
+            .await?;
+        self.inner
+            .repository
+            .list_canonical_networks_page(auth.effective_scope().id().as_str(), after_id, limit)
+            .await
+            .map_err(map_store_error)
     }
 
     pub async fn delete_canonical_network_for_project(
@@ -1140,17 +1221,52 @@ impl NetworkService {
                 Some(("network", network_id)),
             )
             .await?;
-        let result = self
-            .create_canonical_realm_for_project(
-                auth.effective_scope().id().as_str(),
-                network_id,
-                prefix,
-                overlapping_prefixes,
-            )
-            .await;
-        let audit_result = result.as_ref().map(|_| ());
-        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
-        result
+        self.audit_sink
+            .ensure_available()
+            .map_err(|_| NetworkError::AuditUnavailable)?;
+        // The authenticated mutation uses the repository transaction which
+        // commits canonical authority and its successful audit together.  The
+        // project-scoped helper intentionally remains for import/reconcile
+        // callers and must not be used as a public mutation path.
+        let prefix = Ipv4Net::parse(&prefix)?.canonical();
+        let _guard = self.lock.lock().await;
+        let project_id = auth.effective_scope().id().as_str();
+        let network = self
+            .inner
+            .repository
+            .get_canonical_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        if network.state != "active" {
+            return Err(NetworkError::Conflict);
+        }
+        let realm = o3k_store::CanonicalAddressRealmRecord {
+            id: Uuid::now_v7(),
+            network_id,
+            project_id: project_id.to_owned(),
+            prefix,
+            overlapping_prefixes,
+            generation: 1,
+            state: "active".to_owned(),
+        };
+        let success_event = AuditEvent::from_auth(auth, namespace, action, AuditOutcome::Succeeded)
+            .with_resource(
+                resource_type,
+                Some(
+                    ResourceId::new(realm.id.to_string())
+                        .map_err(|_| NetworkError::InvalidRequest)?,
+                ),
+                Some(auth.effective_scope().clone()),
+            );
+        let audit_record = o3k_store::AuditEventRecord::from_kernel_event(&success_event)
+            .map_err(map_store_error)?;
+        self.inner
+            .repository
+            .insert_canonical_realm_with_audit(&realm, &audit_record)
+            .await
+            .map_err(map_store_error)?;
+        Ok(realm)
     }
 
     pub async fn list_canonical_realms_for_project(

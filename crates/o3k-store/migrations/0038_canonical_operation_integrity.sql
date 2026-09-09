@@ -7,5 +7,7 @@ BEGIN
     SELECT RAISE(ABORT, 'operation resource not found')
     WHERE NOT EXISTS (SELECT 1 FROM resources WHERE id = NEW.resource_id)
       AND NOT EXISTS (SELECT 1 FROM canonical_networks WHERE id = NEW.resource_id)
-      AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE id = NEW.resource_id);
+      AND NOT EXISTS (SELECT 1 FROM canonical_address_realms WHERE id = NEW.resource_id)
+      AND NOT EXISTS (SELECT 1 FROM keystone_role_assignments WHERE id = NEW.resource_id)
+      AND NOT EXISTS (SELECT 1 FROM image_metadata WHERE id = NEW.resource_id);
 END;

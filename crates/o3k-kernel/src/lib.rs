@@ -30,7 +30,8 @@ pub mod scope;
 
 pub use action::ActionId;
 pub use audit::{
-    AuditEvent, AuditOutcome, AuditSink, EventId, FnAuditSink, MemoryAuditSink, NoopAuditSink,
+    AuditEvent, AuditOutcome, AuditSink, AuditSinkError, EventId, FnAuditSink, MemoryAuditSink,
+    NoopAuditSink,
 };
 pub use auth_context::AuthContext;
 pub use authorization::{
@@ -188,6 +189,64 @@ mod tests {
         assert_eq!(
             auth.authorize(&request).reason(),
             &DecisionReason::UnsupportedPrincipal
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn operator_audit_action_is_system_scoped_and_role_protected() -> Result<(), KernelError> {
+        let auth = StaticAuthorizer::standard();
+        let target = ResourceTarget::collection(
+            ResourceType::new("audit", "event")?,
+            Some(ScopeId::new("system")?),
+        );
+        let system = test_system_operator_context();
+        assert!(
+            auth.authorize(&AuthorizationRequest {
+                auth_context: &system,
+                action: ActionId::new("operator", "ReadAudit")?,
+                resource_target: target.clone(),
+            })
+            .is_allowed()
+        );
+        let project = test_user_context("usr-1", "proj-1");
+        assert_eq!(
+            auth.authorize(&AuthorizationRequest {
+                auth_context: &project,
+                action: ActionId::new("operator", "ReadAudit")?,
+                resource_target: target,
+            })
+            .reason(),
+            &DecisionReason::ScopeMismatch
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn operator_assign_role_is_system_scoped_and_role_protected() -> Result<(), KernelError> {
+        let auth = StaticAuthorizer::standard();
+        let target = ResourceTarget::collection(
+            ResourceType::new("iam", "role_assignment")?,
+            Some(ScopeId::new("system")?),
+        );
+        let system = test_system_operator_context();
+        assert!(
+            auth.authorize(&AuthorizationRequest {
+                auth_context: &system,
+                action: ActionId::new("operator", "AssignRole")?,
+                resource_target: target.clone(),
+            })
+            .is_allowed()
+        );
+        let project = test_user_context("usr-1", "proj-1");
+        assert_eq!(
+            auth.authorize(&AuthorizationRequest {
+                auth_context: &project,
+                action: ActionId::new("operator", "AssignRole")?,
+                resource_target: target,
+            })
+            .reason(),
+            &DecisionReason::ScopeMismatch
         );
         Ok(())
     }
@@ -404,6 +463,35 @@ mod tests {
             Some("cinder")
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn checked_audit_record_is_available_for_fail_closed_mutations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sink = MemoryAuditSink::new();
+        let auth = AuthContext::new(
+            Principal::User(UserPrincipal::new(
+                PrincipalId::new_unchecked("user-audit"),
+                "user-audit",
+                None,
+            )),
+            OwnershipScope::project(ScopeId::new_unchecked("project-audit"), None, None),
+            vec!["member".into()],
+            1,
+            1,
+            "audit-check",
+            "request-check",
+            None,
+        );
+        let event = AuditEvent::from_auth(
+            &auth,
+            ServiceNamespace::new("compute")?,
+            ActionId::new("compute", "ReadServer")?,
+            AuditOutcome::Succeeded,
+        );
+        assert_eq!(sink.record_checked(&event), Ok(()));
+        assert_eq!(sink.events().len(), 1);
         Ok(())
     }
 }
