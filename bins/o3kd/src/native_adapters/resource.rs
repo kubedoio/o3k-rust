@@ -301,23 +301,19 @@ fn floating_ip_json(
 }
 
 fn generic_external_json(resource: &o3k_store::ResourceRecord) -> serde_json::Value {
-    let spec = serde_json::from_str(&resource.desired_state).unwrap_or(serde_json::Value::Null);
-    let mut metadata = serde_json::json!({
+    // Durable desired state is not a public DTO: it may contain user-data,
+    // provider references, or credentials from older/imported records.  Only
+    // stable identity and lifecycle state cross the native boundary here.
+    let metadata = serde_json::json!({
         "id": resource.id,
         "owner_scope": resource.project_id,
         "generation": resource.generation
     });
-    if let Some(migration_id) = spec.get("migration_id").and_then(serde_json::Value::as_str) {
-        metadata["migration_id"] = serde_json::Value::String(migration_id.to_owned());
-    }
-    if let Some(source_key) = spec.get("source_key").and_then(serde_json::Value::as_str) {
-        metadata["source_key"] = serde_json::Value::String(source_key.to_owned());
-    }
     serde_json::json!({
         "api_version": "o3k.io/v1",
         "kind": resource.kind,
         "metadata": metadata,
-        "spec": spec,
+        "spec": {},
         "status": {"state": resource.observed_state}
     })
 }
@@ -325,7 +321,6 @@ fn generic_external_json(resource: &o3k_store::ResourceRecord) -> serde_json::Va
 fn bounded_store_kind(resource_type: &str) -> Option<&str> {
     match resource_type {
         "image:image"
-        | "compute:server"
         | "network:network"
         | "network:subnet"
         | "network:port"
@@ -335,6 +330,7 @@ fn bounded_store_kind(resource_type: &str) -> Option<&str> {
         | "network:router_interface" => Some(resource_type),
         // Volumes predate the generic resource envelope and use this
         // canonical durable kind.
+        "compute:server" => Some("compute_instance"),
         "volume:volume" => Some("volume"),
         _ => None,
     }

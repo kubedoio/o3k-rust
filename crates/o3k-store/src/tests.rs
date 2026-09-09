@@ -3675,4 +3675,6 @@ mod tests {
 fn a0_requested_limit_uses_exactly_one_lookahead() {
     assert_eq!(crate::port::durable::bounded_fetch_limit(1).ok(), Some(2));
     assert_eq!(crate::port::durable::bounded_fetch_limit(50).ok(), Some(51));
+    assert!(crate::port::durable::bounded_fetch_limit(0).is_err());
+    assert!(crate::port::durable::bounded_fetch_limit(201).is_err());
 }

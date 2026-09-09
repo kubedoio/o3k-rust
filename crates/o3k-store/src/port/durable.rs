@@ -149,6 +149,11 @@ impl<T> RepositoryPage<T> {
 /// row is the only authority used to determine `has_more`; callers must never
 /// materialize an unbounded collection and truncate it afterwards.
 pub(crate) fn bounded_fetch_limit(limit: usize) -> Result<i64, StoreError> {
+    if !(1..=200).contains(&limit) {
+        return Err(StoreError::Corrupt(
+            "native page limit out of bounds".to_owned(),
+        ));
+    }
     i64::try_from(limit.saturating_add(1))
         .map_err(|_| StoreError::Corrupt("native page limit overflow".to_owned()))
 }

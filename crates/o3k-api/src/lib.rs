@@ -518,7 +518,8 @@ pub fn router_with_state(state: AppState) -> Router {
             )
             .route(
                 "/o3k/v1/compute/servers",
-                post(o3k_native_api::resource::create_compute),
+                get(o3k_native_api::resource::list_compute)
+                    .post(o3k_native_api::resource::create_compute),
             )
             .route(
                 "/o3k/v1/compute/servers/{id}",
@@ -527,7 +528,8 @@ pub fn router_with_state(state: AppState) -> Router {
             )
             .route(
                 "/o3k/v1/volume/volumes",
-                post(o3k_native_api::resource::create_volume),
+                get(o3k_native_api::resource::list_volume)
+                    .post(o3k_native_api::resource::create_volume),
             )
             .route(
                 "/o3k/v1/volume/volumes/{id}",

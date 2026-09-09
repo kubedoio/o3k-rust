@@ -806,6 +806,36 @@ pub async fn list(
     }
 }
 
+/// Fixed collection routes use these adapters so the shared list handler
+/// receives the canonical namespace/collection path parameters.
+pub async fn list_compute(
+    auth: BearerAuth,
+    State(state): State<NativeApiState>,
+    Query(query): Query<ListQuery>,
+) -> Response {
+    list(
+        auth,
+        Path(("compute".to_owned(), "servers".to_owned())),
+        State(state),
+        Query(query),
+    )
+    .await
+}
+
+pub async fn list_volume(
+    auth: BearerAuth,
+    State(state): State<NativeApiState>,
+    Query(query): Query<ListQuery>,
+) -> Response {
+    list(
+        auth,
+        Path(("volume".to_owned(), "volumes".to_owned())),
+        State(state),
+        Query(query),
+    )
+    .await
+}
+
 pub async fn show(
     auth: BearerAuth,
     Path((namespace, collection, id)): Path<(String, String, String)>,

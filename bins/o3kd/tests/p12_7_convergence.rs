@@ -99,8 +99,10 @@ async fn get_json(
                 .body(Body::empty())?,
         )
         .await?;
-    assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
-    Ok(response_json(response).await)
+    let status = response.status();
+    let body = response_json(response).await;
+    assert_eq!(status, StatusCode::OK, "GET {uri}: {body:?}");
+    Ok(body)
 }
 
 async fn status_for(app: &axum::Router, method: Method, uri: &str, token: &str) -> StatusCode {
@@ -208,7 +210,10 @@ async fn build_http_runtime(
     });
     let native = o3k_native_api::NativeApiState::new(
         Some(manifests),
-        o3k_native_api::pagination::CursorConfig::default(),
+        o3k_native_api::pagination::CursorConfig::new(
+            b"test-only-native-cursor-key-at-least-32-bytes".to_vec(),
+        )
+        .expect("test cursor key"),
         Some(token_issuer),
         Some(server_reader),
         None,
@@ -324,7 +329,10 @@ async fn run_native_openstack_http_conformance(
     });
     let native = o3k_native_api::NativeApiState::new(
         Some(manifests),
-        o3k_native_api::pagination::CursorConfig::default(),
+        o3k_native_api::pagination::CursorConfig::new(
+            b"test-only-native-cursor-key-at-least-32-bytes".to_vec(),
+        )
+        .expect("test cursor key"),
         Some(token_issuer),
         Some(server_reader),
         None,
