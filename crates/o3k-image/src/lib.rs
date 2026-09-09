@@ -7,9 +7,9 @@ use std::{
 };
 
 use o3k_kernel::{
-    ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
-    LimitKey, LimitValue, MemoryAuditSink, OwnershipScope, ResourceAmount, ResourceId,
-    ResourceTarget, ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
+    ActionId, AuditEvent, AuditOutcome, AuthContext, AuthorizationRequest, Authorizer, LimitKey,
+    LimitValue, MemoryAuditSink, OwnershipScope, ResourceAmount, ResourceId, ResourceTarget,
+    ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
 };
 use o3k_store::{ImageMetadataRecord, ImageRepository, StoreError};
 use serde::{Deserialize, Serialize};
@@ -907,7 +907,7 @@ pub struct ImageService {
     lock: Arc<tokio::sync::Mutex<()>>,
     max_upload_bytes: usize,
     authorizer: Arc<dyn Authorizer>,
-    audit_sink: o3k_kernel::RequiredAuditPublisher,
+    audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher>,
 }
 
 struct Inner {
@@ -931,7 +931,7 @@ impl ImageService {
             lock: Arc::new(tokio::sync::Mutex::new(())),
             max_upload_bytes,
             authorizer: Arc::new(StaticAuthorizer::standard()),
-            audit_sink: o3k_kernel::RequiredAuditPublisher::new(Arc::new(MemoryAuditSink::new())),
+            audit_sink: Arc::new(MemoryAuditSink::new()),
         })
     }
 
@@ -942,8 +942,11 @@ impl ImageService {
     }
 
     #[must_use]
-    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
-        self.audit_sink = o3k_kernel::RequiredAuditPublisher::new(audit_sink);
+    pub fn with_required_audit_publisher(
+        mut self,
+        audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher>,
+    ) -> Self {
+        self.audit_sink = audit_sink;
         self
     }
 

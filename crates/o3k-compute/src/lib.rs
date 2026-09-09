@@ -98,7 +98,7 @@ pub struct ComputeService {
     binding_projector: Option<Arc<dyn PortBindingProjector>>,
     config_drive_cleaner: Option<o3k_config_drive::ConfigDriveStore>,
     authorizer: Arc<dyn Authorizer>,
-    audit_sink: o3k_kernel::RequiredAuditPublisher,
+    audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher>,
     coordination: Option<(
         Arc<dyn o3k_store::CoordinationRepository>,
         o3k_store::ControllerId,
@@ -5947,14 +5947,14 @@ mod tests {
 
     #[tokio::test]
     async fn compute_quota_denial_records_audit_event() -> Result<(), Box<dyn std::error::Error>> {
-        use o3k_kernel::audit::{AuditSink, MemoryAuditSink};
+        use o3k_kernel::audit::MemoryAuditSink;
         use o3k_store::QuotaRepository;
 
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
         let provider = Arc::new(FakeComputeProvider::new());
         let audit_sink = Arc::new(MemoryAuditSink::new());
         let service = ComputeService::new(store.clone(), provider.clone())
-            .with_audit_sink(audit_sink.clone() as Arc<dyn AuditSink>);
+            .with_required_audit_publisher(audit_sink.clone());
 
         let scope = OwnershipScope::project(ScopeId::new_unchecked("proj-audit"), None, None);
         let auth = test_compute_auth("proj-audit", "user-audit", "member");
@@ -6006,7 +6006,7 @@ mod tests {
     #[tokio::test]
     async fn real_finite_server_quota_full_scenario_acceptance()
     -> Result<(), Box<dyn std::error::Error>> {
-        use o3k_kernel::audit::{AuditSink, MemoryAuditSink};
+        use o3k_kernel::audit::MemoryAuditSink;
         use o3k_provider::InstanceAction;
 
         let database_path = PathBuf::from(format!(
@@ -6064,7 +6064,7 @@ mod tests {
         let audit_sink = Arc::new(MemoryAuditSink::new());
         let service = ComputeService::new(store.clone(), provider.clone())
             .with_scheduler(Scheduler::new(placement.clone()))
-            .with_audit_sink(audit_sink.clone() as Arc<dyn AuditSink>);
+            .with_required_audit_publisher(audit_sink.clone());
 
         let scope = OwnershipScope::project(ScopeId::new_unchecked("proj-finite"), None, None);
         let auth = test_compute_auth("proj-finite", "user-finite", "member");

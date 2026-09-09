@@ -286,7 +286,7 @@ async fn authenticated_canonical_entry_points_enforce_scope_and_audit()
     let sink = Arc::new(o3k_kernel::MemoryAuditSink::new());
     let service = NetworkService::open(&path, store)
         .await?
-        .with_audit_sink(sink.clone());
+        .with_required_audit_publisher(sink.clone());
     let network = service
         .create_canonical_network(&auth("project-a"), "authorized".to_owned())
         .await?;
@@ -327,7 +327,7 @@ async fn authenticated_parent_actions_use_canonical_owner_and_audit_outcomes()
     let sink = Arc::new(o3k_kernel::MemoryAuditSink::new());
     let service = NetworkService::open(&path, store)
         .await?
-        .with_audit_sink(sink.clone());
+        .with_required_audit_publisher(sink.clone());
     let network = service
         .create_canonical_network(&auth("project-a"), "matrix".to_owned())
         .await?;

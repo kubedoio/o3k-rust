@@ -229,23 +229,12 @@ pub trait AuditSink: Send + Sync {
     }
 }
 
-/// Capability used by production mutation paths. It intentionally exposes
-/// only awaited required publication, preventing accidental use of the
-/// legacy best-effort `AuditSink::record` method.
-#[derive(Clone)]
-pub struct RequiredAuditPublisher {
-    sink: std::sync::Arc<dyn AuditSink>,
-}
-
-impl RequiredAuditPublisher {
-    #[must_use]
-    pub fn new(sink: std::sync::Arc<dyn AuditSink>) -> Self {
-        Self { sink }
-    }
-
-    pub async fn publish(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
-        self.sink.record_required_async(event).await
-    }
+/// Capability used by production mutation paths.  This is intentionally a
+/// separate trait from [`AuditSink`]: an arbitrary best-effort sink cannot be
+/// injected into a mandatory publication dependency by accident.
+#[async_trait::async_trait]
+pub trait RequiredAuditPublisher: Send + Sync {
+    async fn publish(&self, event: &AuditEvent) -> Result<(), crate::KernelError>;
 }
 
 /// Production sink backed directly by the durable Audit repository. The
@@ -279,6 +268,13 @@ impl<R: crate::DurableAuditRepository> AuditSink for DurableAuditSink<R> {
     }
 }
 
+#[async_trait::async_trait]
+impl<R: crate::DurableAuditRepository> RequiredAuditPublisher for DurableAuditSink<R> {
+    async fn publish(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        self.repository.append(event).await
+    }
+}
+
 /// Audit sink that forwards recorded events to a closure or function.
 pub struct FnAuditSink<F: Fn(&AuditEvent) + Send + Sync>(pub F);
 
@@ -289,6 +285,14 @@ impl<F: Fn(&AuditEvent) + Send + Sync> AuditSink for FnAuditSink<F> {
     }
 
     async fn record_required_async(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        (self.0)(event);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl<F: Fn(&AuditEvent) + Send + Sync> RequiredAuditPublisher for FnAuditSink<F> {
+    async fn publish(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
         (self.0)(event);
         Ok(())
     }
@@ -311,6 +315,15 @@ impl<F: Fn(&AuditEvent) -> Result<(), crate::KernelError> + Send + Sync> AuditSi
     }
 
     fn record_required(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        (self.0)(event)
+    }
+}
+
+#[async_trait::async_trait]
+impl<F: Fn(&AuditEvent) -> Result<(), crate::KernelError> + Send + Sync> RequiredAuditPublisher
+    for DurableFnAuditSink<F>
+{
+    async fn publish(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
         (self.0)(event)
     }
 }
@@ -353,6 +366,14 @@ impl AuditSink for MemoryAuditSink {
     }
 
     async fn record_required_async(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        self.record(event);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl RequiredAuditPublisher for MemoryAuditSink {
+    async fn publish(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
         self.record(event);
         Ok(())
     }

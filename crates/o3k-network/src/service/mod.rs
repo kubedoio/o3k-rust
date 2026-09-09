@@ -104,7 +104,7 @@ pub struct NetworkService {
     inner: Arc<Inner>,
     lock: Arc<tokio::sync::Mutex<()>>,
     authorizer: Arc<dyn Authorizer>,
-    audit_sink: o3k_kernel::RequiredAuditPublisher,
+    audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher>,
 }
 
 struct Inner {

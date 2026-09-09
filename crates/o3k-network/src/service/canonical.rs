@@ -7,7 +7,7 @@ use crate::{
 };
 use o3k_domain::{Ipv4Prefix, NetworkPlanIntent};
 use o3k_kernel::{
-    ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
+    ActionId, AuditEvent, AuditOutcome, AuthContext, AuthorizationRequest, Authorizer,
     DecisionReason, MemoryAuditSink, OwnershipScope, ResourceId, ResourceTarget, ResourceType,
     ScopeId, ServiceNamespace, StaticAuthorizer,
 };
@@ -595,8 +595,8 @@ impl NetworkService {
             lock: Arc::new(tokio::sync::Mutex::new(())),
             authorizer: Arc::new(StaticAuthorizer::standard()),
             // Unit/test construction uses an explicit in-memory sink; production
-            // composition replaces this with DurableAuditSink via with_audit_sink.
-            audit_sink: o3k_kernel::RequiredAuditPublisher::new(Arc::new(MemoryAuditSink::new())),
+            // composition replaces this test publisher with DurableAuditSink.
+            audit_sink: Arc::new(MemoryAuditSink::new()),
         };
         service.recover_realm_deletion_operations().await?;
         Ok(service)
@@ -675,8 +675,11 @@ impl NetworkService {
     }
 
     #[must_use]
-    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
-        self.audit_sink = o3k_kernel::RequiredAuditPublisher::new(audit_sink);
+    pub fn with_required_audit_publisher(
+        mut self,
+        audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher>,
+    ) -> Self {
+        self.audit_sink = audit_sink;
         self
     }
 

@@ -286,7 +286,7 @@ mod tests {
         let sink = Arc::new(o3k_kernel::MemoryAuditSink::new());
         let service = NetworkService::open(&path, store)
             .await?
-            .with_audit_sink(sink.clone());
+            .with_required_audit_publisher(sink.clone());
         let network = service
             .create_canonical_network(&auth("project-a"), "authorized".to_owned())
             .await?;
@@ -327,7 +327,7 @@ mod tests {
         let sink = Arc::new(o3k_kernel::MemoryAuditSink::new());
         let service = NetworkService::open(&path, store)
             .await?
-            .with_audit_sink(sink.clone());
+            .with_required_audit_publisher(sink.clone());
         let network = service
             .create_canonical_network(&auth("project-a"), "matrix".to_owned())
             .await?;

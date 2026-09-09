@@ -303,7 +303,7 @@ pub async fn build_composition(
     // authoritative Audit sink. Test-only constructors may still inject
     // Memory/Noop sinks explicitly, but no production service is allowed to
     // silently fall back to either implementation.
-    let audit_sink: Arc<dyn o3k_kernel::AuditSink> =
+    let audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher> =
         Arc::new(o3k_kernel::DurableAuditSink::new(store.clone()));
     let image_repository: Arc<dyn o3k_store::ImageRepository> = store.clone();
     let image_service = o3k_image::ImageService::open(
@@ -312,12 +312,12 @@ pub async fn build_composition(
         image_repository,
     )
     .await?
-    .with_audit_sink(audit_sink.clone());
+    .with_required_audit_publisher(audit_sink.clone());
     let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
     let network_service =
         o3k_network::NetworkService::open(config.data_dir.join("network"), network_repository)
             .await?
-            .with_audit_sink(audit_sink.clone());
+            .with_required_audit_publisher(audit_sink.clone());
     let config_drive_root = config.data_dir.join("config-drive");
     let config_drive_store = o3k_config_drive::ConfigDriveStore::open(&config_drive_root)?;
     let console_service = o3k_console::ConsoleService::open(config.data_dir.join("console"))?;
@@ -464,7 +464,7 @@ pub async fn build_composition(
         controller_id.clone(),
         controller_epoch.clone(),
     );
-    compute_service = compute_service.with_audit_sink(audit_sink);
+    compute_service = compute_service.with_required_audit_publisher(audit_sink);
     if agent_control_enabled {
         compute_service = compute_service
             .with_scheduler(scheduler)
