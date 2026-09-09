@@ -183,7 +183,10 @@ impl ResourceDispatcher {
 
     pub(crate) fn is_ready(&self, descriptor: &ResourceDescriptor) -> bool {
         let Some(registry) = &self.lifecycle_registry else {
-            return descriptor.ready;
+            // A descriptor without a live registry is suitable for static
+            // unit construction only; production discovery must fail closed
+            // rather than advertise stale readiness captured at startup.
+            return false;
         };
         registry
             .read()
