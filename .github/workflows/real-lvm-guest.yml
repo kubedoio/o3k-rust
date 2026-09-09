@@ -43,8 +43,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! command -v virt-install >/dev/null 2>&1 || ! command -v genisoimage >/dev/null 2>&1; then
-            sudo -n timeout --foreground 900s apt-get update
-            sudo -n timeout --foreground 900s apt-get install -y --no-install-recommends virtinst genisoimage
+            scripts/ci/apt-provision.sh install virtinst genisoimage
           fi
           command -v virsh >/dev/null 2>&1
           command -v virt-install >/dev/null 2>&1

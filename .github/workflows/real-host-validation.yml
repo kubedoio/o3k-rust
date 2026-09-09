@@ -115,8 +115,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! command -v unzip >/dev/null 2>&1; then
-            sudo -n apt-get update
-            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y unzip
+            scripts/ci/apt-provision.sh install unzip
           fi
           command -v unzip >/dev/null 2>&1
           tool_dir="${RUNNER_TEMP}/o3k-p13-provider-tools-${GITHUB_RUN_ID}"
