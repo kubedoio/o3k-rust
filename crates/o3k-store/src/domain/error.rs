@@ -30,6 +30,8 @@ pub enum StoreError {
     InvalidUuid(#[source] uuid::Error),
     #[error("corrupt durable state: {0}")]
     Corrupt(String),
+    #[error("audit event identifier conflicts with existing event")]
+    AuditEventConflict,
     #[error("keypair not found")]
     KeypairNotFound,
     #[error("keypair already exists")]
