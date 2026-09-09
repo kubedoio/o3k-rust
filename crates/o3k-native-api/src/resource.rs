@@ -345,10 +345,55 @@ impl ResourcePage {
             next_cursor,
         }
     }
+
+    /// Fallible production constructor. A continuation probe without a
+    /// canonical resource id cannot safely produce a page cursor, so callers
+    /// must fail closed instead of relying on debug assertions.
+    pub fn try_from_lookahead(
+        mut items: Vec<serde_json::Value>,
+        limit: usize,
+    ) -> Result<Self, &'static str> {
+        if limit == 0 || items.len() > limit.saturating_add(1) {
+            return Err("invalid bounded page");
+        }
+        let has_more = items.len() > limit;
+        if has_more {
+            let id = items
+                .get(limit)
+                .and_then(|item| item["metadata"]["id"].as_str())
+                .ok_or("continuation item missing canonical id")?
+                .to_owned();
+            items.truncate(limit);
+            let last_id = items
+                .last()
+                .and_then(|item| item["metadata"]["id"].as_str())
+                .ok_or("page item missing canonical id")?
+                .to_owned();
+            if last_id == id {
+                return Err("invalid continuation ordering");
+            }
+            return Ok(Self {
+                items,
+                has_more: true,
+                next_cursor: Some(last_id),
+            });
+        }
+        Ok(Self {
+            items,
+            has_more: false,
+            next_cursor: None,
+        })
+    }
 }
 
 #[async_trait]
 pub trait ResourceApplication: Send + Sync {
+    /// Whether this concrete runtime can execute a bounded native collection
+    /// for the descriptor. Discovery must consult this live implementation
+    /// capability; manifest declaration alone is insufficient.
+    fn supports_collection(&self, _descriptor: &ResourceDescriptor) -> bool {
+        false
+    }
     async fn create(
         &self,
         descriptor: &ResourceDescriptor,

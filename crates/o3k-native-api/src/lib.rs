@@ -464,7 +464,14 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
     for descriptor in state.resource_index.all() {
         // Never advertise a manifest-only collection: discovery is an
         // executable capability contract, not a declaration dump.
-        if !resource::ResourceDispatcher::collection_supported(descriptor) {
+        if !resource::ResourceDispatcher::collection_supported(descriptor)
+            || state
+                .resource_application
+                .as_ref()
+                .map_or(true, |application| {
+                    !application.supports_collection(descriptor)
+                })
+        {
             continue;
         }
         let mut actions = std::collections::HashMap::new();

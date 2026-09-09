@@ -111,9 +111,10 @@ impl GenericResourceApplication {
 fn bounded_page(
     items: Vec<serde_json::Value>,
     query: &o3k_native_api::resource::ListQuery,
-) -> o3k_native_api::resource::ResourcePage {
+) -> Result<o3k_native_api::resource::ResourcePage, ResourceApplicationError> {
     let limit = o3k_native_api::pagination::parse_page_size(query.limit.as_deref());
-    o3k_native_api::resource::ResourcePage::from_lookahead(items, limit)
+    o3k_native_api::resource::ResourcePage::try_from_lookahead(items, limit)
+        .map_err(|_| ResourceApplicationError::Internal)
 }
 
 fn compute_error(error: o3k_compute::ComputeError) -> ResourceApplicationError {
@@ -333,6 +334,21 @@ fn generic_external_json(resource: &o3k_store::ResourceRecord) -> serde_json::Va
 
 #[async_trait::async_trait]
 impl ResourceApplication for GenericResourceApplication {
+    fn supports_collection(&self, descriptor: &ResourceDescriptor) -> bool {
+        matches!(
+            descriptor.resource_type.to_string().as_str(),
+            "image:image"
+                | "compute:server"
+                | "network:address_realm"
+                | "network:subnet"
+                | "network:port"
+                | "network:security_group"
+                | "network:security_group_rule"
+                | "network:router"
+                | "network:router_interface"
+                | "volume:volume"
+        )
+    }
     async fn list(
         &self,
         descriptor: &ResourceDescriptor,
@@ -357,13 +373,13 @@ impl ResourceApplication for GenericResourceApplication {
                 let resource = self.store.get_resource(item.id).await.ok();
                 result.push(image_json_with_resource(&item, resource.as_ref()));
             }
-            return Ok(bounded_page(result, query));
+            return bounded_page(result, query);
         }
         if self
             .external_controllers
             .contains_key(&descriptor.owning_service)
         {
-            return self
+            let resources = self
                 .store
                 .list_resources_page(
                     auth.effective_scope().id().as_str(),
@@ -372,10 +388,8 @@ impl ResourceApplication for GenericResourceApplication {
                     o3k_native_api::pagination::parse_page_size(query.limit.as_deref()) + 1,
                 )
                 .await
-                .map(|resources| {
-                    bounded_page(resources.iter().map(generic_external_json).collect(), query)
-                })
-                .map_err(|_| ResourceApplicationError::Internal);
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return bounded_page(resources.iter().map(generic_external_json).collect(), query);
         }
         if matches!(
             descriptor.resource_type.to_string().as_str(),
@@ -386,7 +400,7 @@ impl ResourceApplication for GenericResourceApplication {
                 | "network:router"
                 | "network:router_interface"
         ) {
-            return self
+            let resources = self
                 .store
                 .list_resources_page(
                     auth.effective_scope().id().as_str(),
@@ -395,10 +409,8 @@ impl ResourceApplication for GenericResourceApplication {
                     o3k_native_api::pagination::parse_page_size(query.limit.as_deref()) + 1,
                 )
                 .await
-                .map(|resources| {
-                    bounded_page(resources.iter().map(generic_external_json).collect(), query)
-                })
-                .map_err(|_| ResourceApplicationError::Internal);
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            return bounded_page(resources.iter().map(generic_external_json).collect(), query);
         }
         match descriptor.resource_type.to_string().as_str() {
             // These authorities currently expose only unbounded collection
@@ -406,38 +418,44 @@ impl ResourceApplication for GenericResourceApplication {
             // port exists; never turn an unbounded read into a fake bounded
             // API by truncating in memory.
             "compute:flavor" => Err(ResourceApplicationError::UnsupportedOperation),
-            "compute:server" => self
-                .server
-                .list_servers_page(
-                    auth,
-                    query.continuation_id.as_deref(),
-                    o3k_native_api::pagination::parse_page_size(query.limit.as_deref()) + 1,
-                )
-                .await
-                .map(|items| bounded_page(items.into_iter().map(server_json).collect(), query))
-                .map_err(generic_read_error),
-            "network:address_realm" => self
-                .network
-                .list_address_realms_page(
-                    auth,
-                    query.continuation_id.as_deref(),
-                    o3k_native_api::pagination::parse_page_size(query.limit.as_deref()) + 1,
-                )
-                .await
-                .map(|items| bounded_page(items.into_iter().map(realm_json).collect(), query))
-                .map_err(generic_read_error),
+            "compute:server" => {
+                let items = self
+                    .server
+                    .list_servers_page(
+                        auth,
+                        query.continuation_id.as_deref(),
+                        o3k_native_api::pagination::parse_page_size(query.limit.as_deref()) + 1,
+                    )
+                    .await
+                    .map_err(generic_read_error)?;
+                bounded_page(items.into_iter().map(server_json).collect(), query)
+            }
+            "network:address_realm" => {
+                let items = self
+                    .network
+                    .list_address_realms_page(
+                        auth,
+                        query.continuation_id.as_deref(),
+                        o3k_native_api::pagination::parse_page_size(query.limit.as_deref()) + 1,
+                    )
+                    .await
+                    .map_err(generic_read_error)?;
+                bounded_page(items.into_iter().map(realm_json).collect(), query)
+            }
             "network:network" => Err(ResourceApplicationError::UnsupportedOperation),
             "network:floating_ip" => Err(ResourceApplicationError::UnsupportedOperation),
-            "volume:volume" => self
-                .store
-                .list_volumes_page(
-                    auth.effective_scope().id().as_str(),
-                    query.continuation_id.as_deref(),
-                    o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
-                )
-                .await
-                .map(|items| bounded_page(items.iter().map(native_volume_json).collect(), query))
-                .map_err(|_| ResourceApplicationError::Internal),
+            "volume:volume" => {
+                let items = self
+                    .store
+                    .list_volumes_page(
+                        auth.effective_scope().id().as_str(),
+                        query.continuation_id.as_deref(),
+                        o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
+                    )
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                bounded_page(items.iter().map(native_volume_json).collect(), query)
+            }
             "volume:volume_attachment" => {
                 return Err(ResourceApplicationError::UnsupportedOperation);
                 #[allow(unreachable_code)]
@@ -458,7 +476,7 @@ impl ResourceApplication for GenericResourceApplication {
                             result.push(native_attachment_json(&item, resource.as_ref()));
                         }
                     }
-                    Ok(bounded_page(result, query))
+                    bounded_page(result, query)
                 }
             }
             _ => Err(ResourceApplicationError::NotFound),
