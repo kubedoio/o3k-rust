@@ -1,25 +1,28 @@
-# A0 native query/discovery inventory
+# A0 native collection inventory
 
-This is the checked-in inventory for the Native Query and Discovery Foundation.
-The verifier requires every row advertised by the manifest to have an explicit
-bounded adapter and runtime readiness evidence. `unknown` is a failure, not an
-implicit support claim.
+This matrix is generated from the manifest resource set and the production
+`GenericResourceApplication` capability gate. List is advertised only when
+the manifest declares it, the owning controller is live Ready, and the adapter
+returns a bounded repository page. Suppressed rows never advertise List.
 
-| Resource | Native collection | List declared | Bounded authority | Runtime readiness | Cursor evidence |
-|---|---|---:|---|---|---|
-| Compute server | `/compute/servers` | verify manifest | verify adapter | live controller | A0 verifier |
-| Flavor | `/compute/flavors` | verify manifest | verify adapter | live controller | A0 verifier |
-| Image | `/image/images` | verify manifest | verify adapter | live controller | A0 verifier |
-| Network | `/network/networks` | verify manifest | verify adapter | live controller | A0 verifier |
-| Canonical network | `/network/address-realms` | verify manifest | verify adapter | live controller | A0 verifier |
-| Subnet | `/network/subnets` | verify manifest | verify adapter | live controller | A0 verifier |
-| Port | `/network/ports` | verify manifest | verify adapter | live controller | A0 verifier |
-| Router | `/network/routers` | verify manifest | verify adapter | live controller | A0 verifier |
-| Security group | `/network/security-groups` | verify manifest | verify adapter | live controller | A0 verifier |
-| Floating IP | `/network/floating-ips` | verify manifest | verify adapter | live controller | A0 verifier |
-| Volume | `/volume/volumes` | verify manifest | verify adapter | live controller | A0 verifier |
-| Volume attachment | `/volume/attachments` | verify manifest | verify adapter | live controller | A0 verifier |
+| Resource type | Collection | List status | Bounded authority | Ordering/cursor |
+|---|---|---|---|---|
+| image:image | image | advertised when Ready | `resources` keyset query (`LIMIT N+1`) | `id.asc`, opaque |
+| compute:server | servers | advertised when Ready | `resources` keyset query (`LIMIT N+1`) | `id.asc`, opaque |
+| compute:flavor | flavor | suppressed | no bounded adapter | not advertised |
+| compute:keypair | keypair | suppressed | no manifest List operation | not advertised |
+| network:address_realm | address-realms | suppressed | no bounded adapter | not advertised |
+| network:network | networks | advertised when Ready | `resources` keyset query (`LIMIT N+1`) | `id.asc`, opaque |
+| network:subnet | subnets | advertised when Ready | `resources` keyset query (`LIMIT N+1`) | `id.asc`, opaque |
+| network:port | ports | advertised when Ready | `resources` keyset query (`LIMIT N+1`) | `id.asc`, opaque |
+| network:security_group | security-groups | advertised when Ready | `resources` keyset query (`LIMIT N+1`) | `id.asc`, opaque |
+| network:security_group_rule | security-group-rules | advertised when Ready | `resources` keyset query (`LIMIT N+1`) | `id.asc`, opaque |
+| network:router | routers | advertised when Ready | `resources` keyset query (`LIMIT N+1`) | `id.asc`, opaque |
+| network:router_interface | router-interfaces | advertised when Ready | `resources` keyset query (`LIMIT N+1`) | `id.asc`, opaque |
+| network:floating_ip | floating-ips | suppressed | no bounded adapter | not advertised |
+| volume:volume | volumes | advertised when Ready | `resources` keyset query (`LIMIT N+1`) | `id.asc`, opaque |
+| volume:volume_attachment | volume_attachment | suppressed | no bounded adapter | not advertised |
 
-The resource registry is authoritative for the final advertised set; this
-table deliberately does not grant support to resources absent from it.
-
+The native handler delegates query validation and page construction to the
+application boundary. Compatibility routes are separate protocol adapters and
+are not native collection authorities.
