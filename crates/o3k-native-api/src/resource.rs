@@ -43,8 +43,6 @@ pub struct ResourceDescriptor {
     pub schema_version: String,
     pub scope: o3k_kernel::ResourceScope,
     pub lifecycle_actions: HashMap<LifecycleOperation, ActionId>,
-    /// Non-CRUD actions explicitly declared by the resource manifest.
-    pub actions: HashMap<String, ActionId>,
     pub owning_service: String,
     pub ownership: o3k_kernel::ServiceOwnership,
     pub ready: bool,
@@ -91,31 +89,6 @@ impl ResourceDispatcher {
                 .controller(&manifest.service_id)
                 .is_some_and(|c| c.state == o3k_kernel::controller::ControllerState::Ready);
             for resource in &manifest.resource_types {
-                let mut lifecycle_actions = HashMap::new();
-                let mut actions = HashMap::new();
-                for (operation, action) in &resource.operations {
-                    match operation.as_str() {
-                        "list" => {
-                            lifecycle_actions.insert(LifecycleOperation::List, action.clone());
-                        }
-                        "show" => {
-                            lifecycle_actions.insert(LifecycleOperation::Show, action.clone());
-                        }
-                        "create" => {
-                            lifecycle_actions.insert(LifecycleOperation::Create, action.clone());
-                        }
-                        "delete" => {
-                            lifecycle_actions.insert(LifecycleOperation::Delete, action.clone());
-                        }
-                        "update" => {
-                            lifecycle_actions.insert(LifecycleOperation::Update, action.clone());
-                        }
-                        name if !name.trim().is_empty() => {
-                            actions.insert(name.to_owned(), action.clone());
-                        }
-                        _ => return Err(DescriptorError::InvalidOperation),
-                    }
-                }
                 index.register(ResourceDescriptor {
                     resource_type: resource.resource_type.clone(),
                     collection: resource
@@ -124,8 +97,21 @@ impl ResourceDispatcher {
                         .unwrap_or_else(|| resource.resource_type.name().to_owned()),
                     schema_version: resource.schema_version.clone(),
                     scope: resource.scope,
-                    lifecycle_actions,
-                    actions,
+                    lifecycle_actions: resource
+                        .operations
+                        .iter()
+                        .map(|(operation, action)| {
+                            let operation = match operation.as_str() {
+                                "list" => LifecycleOperation::List,
+                                "show" => LifecycleOperation::Show,
+                                "create" => LifecycleOperation::Create,
+                                "delete" => LifecycleOperation::Delete,
+                                "update" => LifecycleOperation::Update,
+                                _ => return Err(DescriptorError::InvalidOperation),
+                            };
+                            Ok((operation, action.clone()))
+                        })
+                        .collect::<Result<_, _>>()?,
                     owning_service: manifest.service_id.clone(),
                     ownership: manifest.ownership,
                     ready,
@@ -147,11 +133,6 @@ impl ResourceDispatcher {
             return Err(DescriptorError::ReservedCollection);
         }
         for action in descriptor.lifecycle_actions.values() {
-            if action.namespace() != descriptor.resource_type.namespace() {
-                return Err(DescriptorError::InvalidAction);
-            }
-        }
-        for action in descriptor.actions.values() {
             if action.namespace() != descriptor.resource_type.namespace() {
                 return Err(DescriptorError::InvalidAction);
             }
@@ -215,12 +196,6 @@ impl ResourceDispatcher {
     ) -> Option<&ActionId> {
         self.resolve(namespace, collection)
             .and_then(|descriptor| descriptor.lifecycle_actions.get(&operation))
-    }
-
-    #[must_use]
-    pub fn action(&self, namespace: &str, collection: &str, name: &str) -> Option<&ActionId> {
-        self.resolve(namespace, collection)
-            .and_then(|d| d.actions.get(name))
     }
 }
 
@@ -434,10 +409,10 @@ fn declared_named_action(
     name: &str,
 ) -> Result<ActionId, ErrorCode> {
     descriptor
-        .actions
-        .iter()
-        .find(|(declared, action)| declared.as_str() == name || action.action() == name)
-        .map(|(_, action)| action.clone())
+        .lifecycle_actions
+        .values()
+        .find(|action| action.action() == name)
+        .cloned()
         .ok_or(ErrorCode::UnsupportedOperation)
 }
 
@@ -515,7 +490,6 @@ mod tests {
             schema_version: "v1".into(),
             scope: o3k_kernel::ResourceScope::Tenant,
             lifecycle_actions,
-            actions: HashMap::new(),
             owning_service: namespace.into(),
             ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
             ready: true,
@@ -654,10 +628,7 @@ pub async fn action(
         Ok(None) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
-    match application
-        .action(descriptor, &auth.0, &id, action, request, key)
-        .await
-    {
+    match application.action(descriptor, &auth.0, &id, action, request, key).await {
         Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
         Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
         Err(error) => application_problem(error),
