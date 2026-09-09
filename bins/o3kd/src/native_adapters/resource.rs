@@ -349,7 +349,7 @@ impl ResourceApplication for GenericResourceApplication {
                 .list_page_for_project(
                     auth.effective_scope().id().as_str(),
                     query.continuation_id.as_deref(),
-                    o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
+                    o3k_native_api::pagination::parse_page_size(query.limit.as_deref()) + 1,
                 )
                 .await
                 .map_err(image_error)?;
@@ -370,7 +370,7 @@ impl ResourceApplication for GenericResourceApplication {
                     auth.effective_scope().id().as_str(),
                     &descriptor.resource_type.to_string(),
                     query.continuation_id.as_deref(),
-                    o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
+                    o3k_native_api::pagination::parse_page_size(query.limit.as_deref()) + 1,
                 )
                 .await
                 .map(|resources| {
@@ -395,7 +395,7 @@ impl ResourceApplication for GenericResourceApplication {
                     auth.effective_scope().id().as_str(),
                     &descriptor.resource_type.to_string(),
                     query.continuation_id.as_deref(),
-                    o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
+                    o3k_native_api::pagination::parse_page_size(query.limit.as_deref()) + 1,
                 )
                 .await
                 .map(|resources| {
@@ -414,7 +414,7 @@ impl ResourceApplication for GenericResourceApplication {
                 .list_servers_page(
                     auth,
                     query.continuation_id.as_deref(),
-                    o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
+                    o3k_native_api::pagination::parse_page_size(query.limit.as_deref()) + 1,
                 )
                 .await
                 .map(|items| bounded_page(items.into_iter().map(server_json).collect(), query))
@@ -424,7 +424,7 @@ impl ResourceApplication for GenericResourceApplication {
                 .list_address_realms_page(
                     auth,
                     query.continuation_id.as_deref(),
-                    o3k_native_api::pagination::MAX_PAGE_SIZE + 1,
+                    o3k_native_api::pagination::parse_page_size(query.limit.as_deref()) + 1,
                 )
                 .await
                 .map(|items| bounded_page(items.into_iter().map(realm_json).collect(), query))

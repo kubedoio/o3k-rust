@@ -838,7 +838,7 @@ pub async fn list(
     };
     (
         StatusCode::OK,
-        Json(serde_json::json!({"items": items.items, "next_cursor": next_cursor})),
+        Json(serde_json::json!({"items": items.items, "has_more": items.has_more, "next_cursor": next_cursor})),
     )
         .into_response()
 }
