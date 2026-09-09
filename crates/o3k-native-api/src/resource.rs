@@ -742,7 +742,7 @@ pub async fn action(
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
     match application
-        .action(descriptor, &auth.0, &id, action, request, &key)
+        .action(descriptor, &auth.0, &id, action, request, key)
         .await
     {
         Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
