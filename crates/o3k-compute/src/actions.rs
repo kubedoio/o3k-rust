@@ -103,7 +103,21 @@ impl ComputeService {
             (InstanceAction::Start, ServerState::Stopped)
             | (InstanceAction::Stop, ServerState::Active)
             | (InstanceAction::Reboot, ServerState::Active | ServerState::Stopped) => {}
-            _ => return Err(ComputeError::Conflict),
+            _ => {
+                let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                    o3k_kernel::OperationState::Failed,
+                    1,
+                    None,
+                    Some(chrono::Utc::now().to_rfc3339()),
+                    Some("action not applicable to current resource state".to_owned()),
+                )
+                .map_err(ComputeError::Store)?;
+                self.store
+                    .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                    .await
+                    .map_err(ComputeError::Store)?;
+                return Err(ComputeError::Conflict);
+            }
         }
         let operation_state = self
             .reconcile_lifecycle_until_terminal(operation_id)

@@ -4,11 +4,11 @@ use uuid::Uuid;
 
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
-    ArtifactTransferUpdate, CanonicalOperationRecord, DurableStore, IdempotencyReservation,
-    IdempotencyReservationRequest, ImageOverlayIdentity, ImageOverlayOwnershipRecord,
-    ImageOverlayState, ImageOverlayUpdate, ObservationUpdate, OperationRecord, OperationState,
-    ProviderReference, RepositoryPage, ResourceRecord, StoreError,
-    validate_canonical_idempotent_operation_identity,
+    ArtifactTransferUpdate, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
+    DurableStore, IdempotencyReservation, IdempotencyReservationRequest, ImageOverlayIdentity,
+    ImageOverlayOwnershipRecord, ImageOverlayState, ImageOverlayUpdate, ObservationUpdate,
+    OperationRecord, OperationState, ProviderReference, RepositoryPage, ResourceRecord, StoreError,
+    validate_canonical_idempotent_operation_identity, validate_canonical_lifecycle_update,
 };
 
 use super::{
@@ -138,6 +138,64 @@ impl DurableStore for PostgresStore {
         }
 
         self.get_resource(id).await
+    }
+
+    async fn update_resource_and_complete_operation(
+        &self,
+        resource_id: Uuid,
+        expected_generation: i64,
+        desired_state: &str,
+        observed_state: &str,
+        observed_generation: i64,
+        provider_id: Option<&str>,
+        operation_id: Uuid,
+        lifecycle: &CanonicalOperationLifecycleUpdate,
+    ) -> Result<ResourceRecord, StoreError> {
+        validate_canonical_lifecycle_update(lifecycle)?;
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let id_str = resource_id.to_string();
+        let updated = sqlx::query(
+            "UPDATE resources SET desired_state = $1, observed_state = $2, observed_generation = $3, provider_id = $4, generation = generation + 1 WHERE id = $5 AND generation = $6",
+        )
+        .bind(desired_state).bind(observed_state).bind(observed_generation)
+        .bind(provider_id).bind(&id_str).bind(expected_generation)
+        .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if updated.rows_affected() == 0 {
+            let exists = sqlx::query("SELECT 1 FROM resources WHERE id = $1")
+                .bind(&id_str)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?;
+            return if exists.is_none() {
+                Err(StoreError::ResourceNotFound)
+            } else {
+                Err(StoreError::StaleGeneration)
+            };
+        }
+        let operation = sqlx::query("SELECT state FROM operations WHERE id = $1 FOR UPDATE")
+            .bind(operation_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::OperationNotFound)?;
+        let state: String = operation.try_get("state").map_err(StoreError::Database)?;
+        if state == OperationState::Succeeded.as_str() || state == OperationState::Failed.as_str() {
+            return Err(StoreError::Corrupt("operation already terminal".into()));
+        }
+        sqlx::query("UPDATE operations SET state = $1 WHERE id = $2")
+            .bind(lifecycle.state.as_str())
+            .bind(operation_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        let attempt = i32::try_from(lifecycle.attempt)
+            .map_err(|_| StoreError::Corrupt("operation attempt exceeds PostgreSQL INT4".into()))?;
+        sqlx::query("UPDATE canonical_operation_metadata SET attempt = $1, started_at = $2, finished_at = $3, error = $4 WHERE operation_id = $5")
+            .bind(attempt).bind(&lifecycle.started_at).bind(&lifecycle.finished_at)
+            .bind(&lifecycle.public_error).bind(operation_id.to_string())
+            .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)?;
+        self.get_resource(resource_id).await
     }
 
     async fn update_resource_from_observation(

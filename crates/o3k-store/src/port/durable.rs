@@ -192,6 +192,20 @@ pub trait DurableStore: Send + Sync {
         observed_generation: i64,
         provider_id: Option<&str>,
     ) -> Result<ResourceRecord, StoreError>;
+    /// Atomically applies a desired-state generation update and completes its
+    /// canonical operation. This prevents an acknowledged resource mutation
+    /// from being left with a pending operation after a process/DB failure.
+    async fn update_resource_and_complete_operation(
+        &self,
+        resource_id: Uuid,
+        expected_generation: i64,
+        desired_state: &str,
+        observed_state: &str,
+        observed_generation: i64,
+        provider_id: Option<&str>,
+        operation_id: Uuid,
+        lifecycle: &CanonicalOperationLifecycleUpdate,
+    ) -> Result<ResourceRecord, StoreError>;
     async fn update_resource_from_observation(
         &self,
         id: Uuid,

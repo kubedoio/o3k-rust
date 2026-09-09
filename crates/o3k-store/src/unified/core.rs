@@ -3,9 +3,10 @@ use uuid::Uuid;
 
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
-    CanonicalOperationRecord, DurableStore, IdempotencyReservation, IdempotencyReservationRequest,
-    ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayUpdate, ObservationUpdate,
-    OperationRecord, OperationState, ProviderReference, RepositoryPage, ResourceRecord, StoreError,
+    CanonicalOperationLifecycleUpdate, CanonicalOperationRecord, DurableStore,
+    IdempotencyReservation, IdempotencyReservationRequest, ImageOverlayIdentity,
+    ImageOverlayOwnershipRecord, ImageOverlayUpdate, ObservationUpdate, OperationRecord,
+    OperationState, ProviderReference, RepositoryPage, ResourceRecord, StoreError,
 };
 
 use super::O3kStore;
@@ -84,6 +85,47 @@ impl DurableStore for O3kStore {
                     observed_state,
                     observed_generation,
                     provider_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn update_resource_and_complete_operation(
+        &self,
+        resource_id: Uuid,
+        expected_generation: i64,
+        desired_state: &str,
+        observed_state: &str,
+        observed_generation: i64,
+        provider_id: Option<&str>,
+        operation_id: Uuid,
+        lifecycle: &CanonicalOperationLifecycleUpdate,
+    ) -> Result<ResourceRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.update_resource_and_complete_operation(
+                    resource_id,
+                    expected_generation,
+                    desired_state,
+                    observed_state,
+                    observed_generation,
+                    provider_id,
+                    operation_id,
+                    lifecycle,
+                )
+                .await
+            }
+            Self::Postgres(s) => {
+                s.update_resource_and_complete_operation(
+                    resource_id,
+                    expected_generation,
+                    desired_state,
+                    observed_state,
+                    observed_generation,
+                    provider_id,
+                    operation_id,
+                    lifecycle,
                 )
                 .await
             }

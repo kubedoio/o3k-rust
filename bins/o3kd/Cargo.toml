@@ -40,6 +40,7 @@ o3k-storage = { path = "../../crates/o3k-storage" }
 tokio.workspace = true
 tonic.workspace = true
 serde_json.workspace = true
+jsonschema.workspace = true
 serde.workspace = true
 chrono.workspace = true
 tracing.workspace = true
