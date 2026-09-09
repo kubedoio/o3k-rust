@@ -554,6 +554,19 @@ mod native_compute_tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let oversized = format!("{}{}", "x".repeat(257), "");
+        let (status, _) = exec(
+            &router,
+            authed_action(
+                &path,
+                "a",
+                "oversized",
+                serde_json::json!({"input": {"reason": oversized}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -409,7 +409,11 @@ impl ResourceApplication for GenericResourceApplication {
             return Err(ResourceApplicationError::Validation);
         };
         if input.keys().any(|key| key != "reason")
-            || input.get("reason").is_some_and(|value| !value.is_string())
+            || input.get("reason").is_some_and(|value| {
+                value
+                    .as_str()
+                    .is_none_or(|reason| reason.chars().count() > 256)
+            })
         {
             return Err(ResourceApplicationError::Validation);
         }
@@ -545,39 +549,37 @@ impl ResourceApplication for GenericResourceApplication {
                 if matches!(
                     existing_operation.state,
                     o3k_store::OperationState::Pending | o3k_store::OperationState::Running
-                ) {
-                    if let Ok(current) = self.store.get_resource(resource_id).await {
-                        let applied =
-                            serde_json::from_str::<serde_json::Value>(&current.desired_state)
-                                .ok()
-                                .and_then(|value| {
-                                    value
-                                        .get("name")
-                                        .and_then(serde_json::Value::as_str)
-                                        .map(str::to_owned)
-                                })
-                                == Some(name.to_owned())
-                                && current.generation == expected_generation + 1;
-                        if applied {
-                            let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
-                                o3k_kernel::OperationState::Succeeded,
-                                1,
-                                None,
-                                Some(chrono::Utc::now().to_rfc3339()),
-                                None,
-                            )
+                ) && let Ok(current) = self.store.get_resource(resource_id).await
+                {
+                    let applied = serde_json::from_str::<serde_json::Value>(&current.desired_state)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("name")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        == Some(name.to_owned())
+                        && current.generation == expected_generation + 1;
+                    if applied {
+                        let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                            o3k_kernel::OperationState::Succeeded,
+                            1,
+                            None,
+                            Some(chrono::Utc::now().to_rfc3339()),
+                            None,
+                        )
+                        .map_err(|_| ResourceApplicationError::Internal)?;
+                        self.store
+                            .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                            .await
                             .map_err(|_| ResourceApplicationError::Internal)?;
-                            self.store
-                                .update_canonical_operation_lifecycle(operation_id, &lifecycle)
-                                .await
-                                .map_err(|_| ResourceApplicationError::Internal)?;
-                            return Ok(MutationResult {
-                                operation_id: operation_id.to_string(),
-                                resource_id: Some(id.to_owned()),
-                                complete: true,
-                                resource: None,
-                            });
-                        }
+                        return Ok(MutationResult {
+                            operation_id: operation_id.to_string(),
+                            resource_id: Some(id.to_owned()),
+                            complete: true,
+                            resource: None,
+                        });
                     }
                 }
                 if existing_operation.state == o3k_store::OperationState::Failed {
@@ -601,10 +603,11 @@ impl ResourceApplication for GenericResourceApplication {
                 Some("stale generation".to_owned()),
             )
             .map_err(|_| ResourceApplicationError::Internal)?;
-            if let Err(_) = self
+            if self
                 .store
                 .update_canonical_operation_lifecycle(operation_id, &lifecycle)
                 .await
+                .is_err()
             {
                 return Err(ResourceApplicationError::Internal);
             }

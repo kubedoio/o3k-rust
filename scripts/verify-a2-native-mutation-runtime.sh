@@ -35,6 +35,8 @@ check A2-18 rg -q 'StatusCode::NOT_FOUND' "$tests"
 check A2-19 rg -q 'StatusCode::NOT_IMPLEMENTED' "$tests"
 check A2-20 rg -q 'StatusCode::BAD_REQUEST' "$tests"
 check A2-21 rg -q 'provider\.instance_count\(\)' "$tests"
+check A2-SCHEMA test -s "$root/contracts/native-action-input-v1.schema.json"
+check A2-SCHEMA-REF rg -q 'native-action-input/v1' "$root/crates/o3k-native-api/src/lib.rs"
 
 if cargo test -p o3kd native_adapters::tests::native_compute --all-features >/dev/null; then
   printf 'A2-TESTS PASS\n'
