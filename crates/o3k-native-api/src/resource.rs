@@ -241,6 +241,12 @@ pub struct MutationResult {
 
 #[async_trait]
 pub trait ResourceApplication: Send + Sync {
+    /// Runtime capability authority used by discovery.  A manifest declaration
+    /// alone is insufficient: adapters must explicitly prove bounded support.
+    fn supports_collection(&self, _descriptor: &ResourceDescriptor) -> bool {
+        false
+    }
+
     async fn create(
         &self,
         descriptor: &ResourceDescriptor,
