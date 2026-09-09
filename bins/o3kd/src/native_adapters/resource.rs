@@ -556,7 +556,8 @@ impl ResourceApplication for GenericResourceApplication {
                                         .and_then(serde_json::Value::as_str)
                                         .map(str::to_owned)
                                 })
-                                == Some(name.to_owned());
+                                == Some(name.to_owned())
+                                && current.generation == expected_generation + 1;
                         if applied {
                             let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
                                 o3k_kernel::OperationState::Succeeded,

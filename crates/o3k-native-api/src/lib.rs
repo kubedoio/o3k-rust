@@ -410,15 +410,7 @@ fn action_metadata(
             name: name.clone(),
             action_id: action.to_string(),
             target: "instance".to_owned(),
-            input: Some(format!(
-                "{}#/actions/{}/input",
-                schema_id(
-                    descriptor.resource_type.namespace(),
-                    &descriptor.collection,
-                    &descriptor.schema_version
-                ),
-                name
-            )),
+            input: Some("https://o3k.io/schemas/native-action-input/v1".to_owned()),
             output: None,
             asynchronous: true,
         });

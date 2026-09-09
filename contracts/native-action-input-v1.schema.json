@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/schemas/native-action-input/v1",
+  "title": "O3K native domain action input",
+  "type": "object",
+  "properties": {
+    "reason": { "type": "string", "maxLength": 256 }
+  },
+  "additionalProperties": false
+}
