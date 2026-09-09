@@ -74,7 +74,10 @@ impl AuditRepository for PostgresStore {
         cutoff: &str,
         limit: usize,
     ) -> Result<u64, StoreError> {
-        let n = crate::port::durable::bounded_fetch_limit(limit)?;
+        let n = i64::try_from(limit)
+            .ok()
+            .filter(|n| (1..=200).contains(n))
+            .ok_or_else(|| StoreError::Corrupt("audit prune batch out of bounds".into()))?;
         Ok(sqlx::query("DELETE FROM audit_events WHERE event_id IN (SELECT event_id FROM audit_events WHERE timestamp < $1 ORDER BY timestamp,event_id LIMIT $2)").bind(cutoff).bind(n as i64).execute(&self.pool).await.map_err(StoreError::Database)?.rows_affected())
     }
 }

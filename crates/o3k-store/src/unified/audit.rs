@@ -194,15 +194,20 @@ impl DurableAuditRepository for O3kStore {
     }
 
     async fn prune_before(&self, cutoff: &str) -> Result<u64, o3k_kernel::KernelError> {
+        // Retention is deliberately batch-bounded; callers can repeat this
+        // privileged operation until the horizon is reached.
+        const BATCH: i64 = 200;
         Ok(match self {
-            Self::Sqlite(s) => sqlx::query("DELETE FROM audit_events WHERE timestamp < ?")
+            Self::Sqlite(s) => sqlx::query("DELETE FROM audit_events WHERE event_id IN (SELECT event_id FROM audit_events WHERE timestamp < ? ORDER BY timestamp,event_id LIMIT ?)")
                 .bind(cutoff)
+                .bind(BATCH)
                 .execute(&s.pool)
                 .await
                 .map_err(err)?
                 .rows_affected(),
-            Self::Postgres(s) => sqlx::query("DELETE FROM audit_events WHERE timestamp < $1")
+            Self::Postgres(s) => sqlx::query("DELETE FROM audit_events WHERE event_id IN (SELECT event_id FROM audit_events WHERE timestamp < $1 ORDER BY timestamp,event_id LIMIT $2)")
                 .bind(cutoff)
+                .bind(BATCH)
                 .execute(&s.pool)
                 .await
                 .map_err(err)?

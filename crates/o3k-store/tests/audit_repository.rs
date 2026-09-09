@@ -72,12 +72,31 @@ async fn sqlite_audit_identity_paging_and_restart_are_durable() {
         .unwrap();
     assert_eq!(final_page.items.len(), 2);
     assert!(!final_page.has_more);
+    assert_eq!(
+        store
+            .prune_audit_events_before("2026-01-01T00:00:02Z", 1)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(matches!(
+        store.get_audit_event("project-a", "0001").await,
+        Err(StoreError::ResourceNotFound)
+    ));
 
     drop(store);
     let reopened = SqliteStore::connect_file(&path).await.unwrap();
+    assert!(matches!(
+        reopened.get_audit_event("project-a", "0001").await,
+        Err(StoreError::ResourceNotFound)
+    ));
     assert_eq!(
-        reopened.get_audit_event("project-a", "0001").await.unwrap(),
-        first
+        reopened
+            .get_audit_event("project-a", "0002")
+            .await
+            .unwrap()
+            .event_id,
+        "0002"
     );
     assert!(matches!(
         reopened.get_audit_event("project-b", "0001").await,
