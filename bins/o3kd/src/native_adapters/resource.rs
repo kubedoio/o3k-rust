@@ -479,10 +479,21 @@ impl ResourceApplication for GenericResourceApplication {
                 return Err(ResourceApplicationError::IdempotencyConflict);
             }
             o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent { operation_id, .. } => {
+                // An idempotent replay must reflect the durable operation state.
+                // In particular, a request which was accepted but whose resource
+                // write failed must not be reported as a successful replay.
+                let existing_operation = self
+                    .store
+                    .get_canonical_operation(operation_id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::Internal)?;
+                if existing_operation.state == o3k_store::OperationState::Failed {
+                    return Err(ResourceApplicationError::Conflict);
+                }
                 return Ok(MutationResult {
                     operation_id: operation_id.to_string(),
                     resource_id: Some(id.to_owned()),
-                    complete: true,
+                    complete: existing_operation.state == o3k_store::OperationState::Succeeded,
                     resource: None,
                 });
             }
