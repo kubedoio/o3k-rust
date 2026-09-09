@@ -323,6 +323,27 @@ pub struct ResourcePage {
     pub next_cursor: Option<String>,
 }
 
+impl ResourcePage {
+    /// Construct a page from a bounded look-ahead (`limit + 1`) result. The
+    /// authority, rather than HTTP, owns continuation semantics.
+    pub fn from_lookahead(mut items: Vec<serde_json::Value>, limit: usize) -> Self {
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        let next_cursor = has_more
+            .then(|| items.last())
+            .flatten()
+            .and_then(|item| item["metadata"]["id"].as_str())
+            .map(str::to_owned);
+        debug_assert!(items.len() <= limit);
+        debug_assert_eq!(has_more, next_cursor.is_some());
+        Self {
+            items,
+            has_more,
+            next_cursor,
+        }
+    }
+}
+
 #[async_trait]
 pub trait ResourceApplication: Send + Sync {
     async fn create(
@@ -1134,5 +1155,36 @@ pub async fn relationships(
     {
         Ok(items) => (StatusCode::OK, Json(serde_json::json!({"items": items}))).into_response(),
         Err(error) => application_problem(error),
+    }
+}
+
+#[cfg(test)]
+mod page_contract_tests {
+    use super::ResourcePage;
+    use serde_json::json;
+
+    #[test]
+    fn lookahead_page_has_explicit_continuation_invariants() {
+        let empty = ResourcePage::from_lookahead(Vec::new(), 2);
+        assert!(empty.items.is_empty());
+        assert!(!empty.has_more);
+        assert!(empty.next_cursor.is_none());
+
+        let final_page = ResourcePage::from_lookahead(vec![json!({"metadata":{"id":"a"}})], 2);
+        assert_eq!(final_page.items.len(), 1);
+        assert!(!final_page.has_more);
+        assert!(final_page.next_cursor.is_none());
+
+        let continued = ResourcePage::from_lookahead(
+            vec![
+                json!({"metadata":{"id":"a"}}),
+                json!({"metadata":{"id":"b"}}),
+                json!({"metadata":{"id":"c"}}),
+            ],
+            2,
+        );
+        assert_eq!(continued.items.len(), 2);
+        assert!(continued.has_more);
+        assert_eq!(continued.next_cursor.as_deref(), Some("b"));
     }
 }

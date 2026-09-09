@@ -109,25 +109,11 @@ impl GenericResourceApplication {
 }
 
 fn bounded_page(
-    mut items: Vec<serde_json::Value>,
+    items: Vec<serde_json::Value>,
     query: &o3k_native_api::resource::ListQuery,
 ) -> o3k_native_api::resource::ResourcePage {
     let limit = o3k_native_api::pagination::parse_page_size(query.limit.as_deref());
-    let has_more = items.len() > limit;
-    let next_cursor = if has_more {
-        items
-            .get(limit.saturating_sub(1))
-            .and_then(|item| item["metadata"]["id"].as_str())
-            .map(str::to_owned)
-    } else {
-        None
-    };
-    items.truncate(limit);
-    o3k_native_api::resource::ResourcePage {
-        items,
-        has_more,
-        next_cursor,
-    }
+    o3k_native_api::resource::ResourcePage::from_lookahead(items, limit)
 }
 
 fn compute_error(error: o3k_compute::ComputeError) -> ResourceApplicationError {
