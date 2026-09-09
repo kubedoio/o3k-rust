@@ -113,8 +113,20 @@ fn bounded_page(
 ) -> o3k_native_api::resource::ResourcePage {
     let limit = o3k_native_api::pagination::parse_page_size(query.limit.as_deref());
     let has_more = items.len() > limit;
+    let continuation_id = if has_more {
+        items
+            .get(limit.saturating_sub(1))
+            .and_then(|item| item["metadata"]["id"].as_str())
+            .map(str::to_owned)
+    } else {
+        None
+    };
     items.truncate(limit);
-    o3k_native_api::resource::ResourcePage { items, has_more }
+    o3k_native_api::resource::ResourcePage {
+        items,
+        has_more,
+        continuation_id,
+    }
 }
 
 fn compute_error(error: o3k_compute::ComputeError) -> ResourceApplicationError {

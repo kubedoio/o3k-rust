@@ -247,6 +247,7 @@ pub struct MutationResult {
 pub struct ResourcePage {
     pub items: Vec<serde_json::Value>,
     pub has_more: bool,
+    pub continuation_id: Option<String>,
 }
 
 #[async_trait]
@@ -820,19 +821,15 @@ pub async fn list(
         Err(error) => return application_problem(error),
     };
     let next_cursor = if items.has_more {
-        items
-            .items
-            .last()
-            .and_then(|item| item["metadata"]["id"].as_str())
-            .map(|last_id| {
-                state.cursor_config.encode_cursor(&CursorPayload {
-                    last_id: last_id.to_owned(),
-                    scope_id: scope,
-                    resource_type,
-                    query_hash: effective_query_hash,
-                    version: 1,
-                })
+        items.continuation_id.as_deref().map(|last_id| {
+            state.cursor_config.encode_cursor(&CursorPayload {
+                last_id: last_id.to_owned(),
+                scope_id: scope,
+                resource_type,
+                query_hash: effective_query_hash,
+                version: 1,
             })
+        })
     } else {
         None
     };
