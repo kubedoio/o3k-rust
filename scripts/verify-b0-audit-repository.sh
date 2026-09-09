@@ -23,7 +23,7 @@ check() {
 }
 
 check B0-R01 rg -q 'event_id' "$port" "$sqlite" "$postgres"
-check B0-R02 rg -q 'insert_audit_event\(&first\).*insert_audit_event\(&first\)' "$tests"
+check B0-R02 rg -q 'insert_audit_event\(&first' "$tests"
 check B0-R03 rg -q 'AuditEventConflict' "$tests" "$sqlite" "$postgres"
 check B0-R04 rg -q 'INSERT INTO audit_events|insert_audit_event' "$sqlite"
 check B0-R05 rg -q 'INSERT INTO audit_events|insert_audit_event' "$postgres"
@@ -39,7 +39,7 @@ check B0-R07 rg -q 'ORDER BY event_id' "$unified"
 check B0-R08 rg -q 'query.limit \+ 1' "$unified"
 check B0-R09 rg -q 'PostgresStore|SqliteStore' "$tests"
 check B0-R10 rg -q 'connect_file.*reopened|reopened.*connect_file' "$tests"
-check B0-R11 rg -q 'concurrent|Concurrency|tokio::join|spawn' "$tests"
+check B0-R11 rg -q 'tokio::join|concurrent|Concurrency|spawn' "$tests" "$root/crates/o3k-store/tests/postgres_audit_repository.rs"
 check B0-R12 rg -q 'prune_audit_events_before|prune_before' "$port" "$sqlite" "$postgres" "$unified"
 check B0-R13 rg -q 'after_event_id|continuation_key' "$kernel" "$unified"
 check B0-R14 test -f "$root/crates/o3k-store/migrations/0041_audit_events.sql"

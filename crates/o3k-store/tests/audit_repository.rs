@@ -2,6 +2,7 @@
 
 use o3k_kernel::{AuditQuery, OwnershipScope, ScopeId};
 use o3k_store::{AuditEventRecord, AuditRepository, O3kStore, SqliteStore, StoreError};
+use std::sync::Arc;
 
 fn event(id: &str, scope: &str, service: &str) -> AuditEventRecord {
     AuditEventRecord {
@@ -145,4 +146,27 @@ async fn unified_audit_query_pushes_supported_filters_and_scope() {
         .unwrap();
     assert_eq!(page.events.len(), 1);
     assert_eq!(page.events[0].event_id.as_str(), "0001");
+}
+
+#[tokio::test]
+async fn sqlite_same_id_concurrent_replay_converges() {
+    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+    let e = event("concurrent", "project-a", "compute");
+    let (a, b) = tokio::join!(store.insert_audit_event(&e), store.insert_audit_event(&e));
+    assert!(a.is_ok() && b.is_ok());
+    let mut conflicting = e.clone();
+    conflicting.outcome = "failed".into();
+    let (a, b) = tokio::join!(
+        store.insert_audit_event(&conflicting),
+        store.insert_audit_event(&conflicting)
+    );
+    assert!(matches!(a, Err(StoreError::AuditEventConflict)));
+    assert!(matches!(b, Err(StoreError::AuditEventConflict)));
+    assert_eq!(
+        store
+            .get_audit_event("project-a", "concurrent")
+            .await
+            .unwrap(),
+        e
+    );
 }
