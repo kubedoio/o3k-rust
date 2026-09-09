@@ -28,9 +28,19 @@ fi
 
 rg -q 'record_required_audit' crates/o3k-compute/src/{actions.rs,lifecycle.rs}
 rg -q 'DurableAuditSink::new' bins/o3kd/src/composition/mod.rs
-rg -q 'with_audit_sink\(audit_sink' bins/o3kd/src/composition/mod.rs
+rg -q 'with_required_audit_publisher\(audit_sink' bins/o3kd/src/composition/mod.rs
+
+# Mandatory service state must use the dedicated required-publication trait,
+# never the weaker AuditSink object.
+if rg -n 'audit_sink:.*dyn AuditSink|with_audit_sink' \
+  crates/o3k-compute/src crates/o3k-image/src crates/o3k-network/src \
+  bins/o3kd/src --glob '*.rs' --glob '!**/tests/**'; then
+  echo "FAIL: weak AuditSink dependency remains in mandatory production wiring" >&2
+  exit 1
+fi
 
 echo 'B0-S01 DurableAuditSink production implementation          PASS'
 echo 'B0-S02 required async publication waits for durability     PASS'
 echo 'B0-S04 mandatory production callers migrated               PASS'
 echo 'B0-S05 production composition uses durable sink             PASS'
+echo 'B0-S06 weak AuditSink injection structurally blocked        PASS'
