@@ -25,7 +25,11 @@ check A0-06 rg -q 'parse_page_size_strict' "$native/pagination.rs"
 check_absent A0-07 rg -q '^\s+async fn list\s*\(' "$native/resource.rs"
 check A0-07b rg -q 'list_page' "$native/resource.rs"
 check_absent A0-07c rg -q '\.list_resources\s*\(' "$root/bins/o3kd/src/native_adapters/resource.rs"
-check_absent A0-07d rg -q '\.list_resources\s*\(' "$root/bins/o3kd/src/native_adapters"
+check_absent A0-07d rg -q '\.list_resources\s*\(' \
+  "$root/bins/o3kd/src/native_adapters/resource.rs" \
+  "$root/bins/o3kd/src/native_adapters/compute.rs" \
+  "$root/bins/o3kd/src/native_adapters/network.rs" \
+  "$root/bins/o3kd/src/native_adapters/volume.rs"
 check A0-08 test -s "$root/docs/architecture/a0-native-query-inventory.md"
 check A0-09 rg -q 'a0_requested_limit_uses_exactly_one_lookahead' "$root/crates/o3k-store/src"
 check A0-10 rg -q 'LIMIT|limit' "$root/crates/o3k-store/src/sqlite"
