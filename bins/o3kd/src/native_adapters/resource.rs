@@ -301,170 +301,93 @@ fn floating_ip_json(
 }
 
 fn generic_external_json(resource: &o3k_store::ResourceRecord) -> serde_json::Value {
-    let spec = serde_json::from_str(&resource.desired_state).unwrap_or(serde_json::Value::Null);
-    let mut metadata = serde_json::json!({
+    // Durable desired state is not a public DTO: it may contain user-data,
+    // provider references, or credentials from older/imported records.  Only
+    // stable identity and lifecycle state cross the native boundary here.
+    let metadata = serde_json::json!({
         "id": resource.id,
         "owner_scope": resource.project_id,
         "generation": resource.generation
     });
-    if let Some(migration_id) = spec.get("migration_id").and_then(serde_json::Value::as_str) {
-        metadata["migration_id"] = serde_json::Value::String(migration_id.to_owned());
-    }
-    if let Some(source_key) = spec.get("source_key").and_then(serde_json::Value::as_str) {
-        metadata["source_key"] = serde_json::Value::String(source_key.to_owned());
-    }
+    // Storage kinds are deliberately decoupled from the versioned native
+    // resource type (for example compute_instance is persisted for the
+    // compute:server resource).  Never leak the storage discriminator across
+    // the native contract boundary.
+    let public_kind = match resource.kind.as_str() {
+        "compute_instance" => "compute:server",
+        "volume" => "volume:volume",
+        other => other,
+    };
     serde_json::json!({
         "api_version": "o3k.io/v1",
-        "kind": resource.kind,
+        "kind": public_kind,
         "metadata": metadata,
-        "spec": spec,
+        "spec": {},
         "status": {"state": resource.observed_state}
     })
 }
 
+fn bounded_store_kind(resource_type: &str) -> Option<&str> {
+    match resource_type {
+        "image:image"
+        | "network:network"
+        | "network:subnet"
+        | "network:port"
+        | "network:security_group"
+        | "network:security_group_rule"
+        | "network:router"
+        | "network:router_interface" => Some(resource_type),
+        // Volumes predate the generic resource envelope and use this
+        // canonical durable kind.
+        "compute:server" => Some("compute_instance"),
+        "volume:volume" => Some("volume"),
+        _ => None,
+    }
+}
+
 #[async_trait::async_trait]
 impl ResourceApplication for GenericResourceApplication {
-    async fn list(
+    fn supports_collection(&self, descriptor: &ResourceDescriptor) -> bool {
+        bounded_store_kind(&descriptor.resource_type.to_string()).is_some()
+    }
+
+    async fn list_page(
         &self,
         descriptor: &ResourceDescriptor,
         auth: &o3k_kernel::AuthContext,
-    ) -> Result<Vec<serde_json::Value>, ResourceApplicationError> {
-        if descriptor.resource_type.to_string() == "image:image" {
-            let service = self
-                .image
-                .as_ref()
-                .ok_or(ResourceApplicationError::NotReady)?;
-            let items = service.list(auth).await.map_err(image_error)?;
-            let mut result = Vec::with_capacity(items.len());
-            for item in items {
-                let resource = self.store.get_resource(item.id).await.ok();
-                result.push(image_json_with_resource(&item, resource.as_ref()));
-            }
-            return Ok(result);
-        }
-        if self
-            .external_controllers
-            .contains_key(&descriptor.owning_service)
+        query: &o3k_native_api::pagination::ResourceQuery,
+        cursors: &o3k_native_api::pagination::CursorConfig,
+    ) -> Result<o3k_native_api::pagination::ResourcePage<serde_json::Value>, ResourceApplicationError>
+    {
+        if query.scope_id() != auth.effective_scope().id().as_str()
+            || query.resource_type() != descriptor.resource_type.to_string()
         {
-            return self
-                .store
-                .list_resources(
-                    auth.effective_scope().id().as_str(),
-                    &descriptor.resource_type.to_string(),
-                )
-                .await
-                .map(|resources| resources.iter().map(generic_external_json).collect())
-                .map_err(|_| ResourceApplicationError::Internal);
+            return Err(ResourceApplicationError::Forbidden);
         }
-        if matches!(
-            descriptor.resource_type.to_string().as_str(),
-            "network:network"
-                | "network:subnet"
-                | "network:port"
-                | "network:security_group"
-                | "network:security_group_rule"
-                | "network:router"
-                | "network:router_interface"
-                | "network:floating_ip"
-        ) {
-            return self
-                .store
-                .list_resources(
-                    auth.effective_scope().id().as_str(),
-                    &descriptor.resource_type.to_string(),
-                )
-                .await
-                .map(|resources| resources.iter().map(generic_external_json).collect())
-                .map_err(|_| ResourceApplicationError::Internal);
-        }
-        match descriptor.resource_type.to_string().as_str() {
-            "compute:flavor" => self
-                .compute
-                .flavors_for_auth(auth)
-                .await
-                .map(|items| {
-                    items
-                        .iter()
-                        .map(|item| flavor_json(item, auth.effective_scope().id().as_str()))
-                        .collect()
-                })
-                .map_err(compute_error),
-            "compute:server" => self
-                .server
-                .list_servers(auth)
-                .await
-                .map(|items| items.into_iter().map(server_json).collect())
-                .map_err(generic_read_error),
-            "network:address_realm" => self
-                .network
-                .list_address_realms(auth)
-                .await
-                .map(|items| items.into_iter().map(realm_json).collect())
-                .map_err(generic_read_error),
-            "network:network" => self
-                .network_service
-                .list_canonical_networks(auth)
-                .await
-                .map(|items| items.iter().map(network_json).collect())
-                .map_err(|_| ResourceApplicationError::Internal),
-            "network:floating_ip" => {
-                let allocator = self
-                    .public_allocator
-                    .as_ref()
-                    .ok_or(ResourceApplicationError::NotReady)?;
-                let items = allocator
-                    .list(auth.effective_scope().id().as_str())
-                    .map_err(|_| ResourceApplicationError::Internal)?;
-                let mut result = Vec::with_capacity(items.len());
-                for item in items {
-                    let record = self.store.get_resource(item.allocation_id).await.ok();
-                    let spec = record.as_ref().and_then(|r| {
-                        serde_json::from_str::<serde_json::Value>(&r.desired_state).ok()
-                    });
-                    result.push(floating_ip_json(
-                        &item,
-                        Some(
-                            self.external_realm_id(auth.effective_scope().id().as_str())
-                                .await?,
-                        ),
-                        auth.effective_scope().id().as_str(),
-                        spec.as_ref()
-                            .and_then(|v| v.get("migration_id"))
-                            .and_then(serde_json::Value::as_str),
-                        spec.as_ref()
-                            .and_then(|v| v.get("source_key"))
-                            .and_then(serde_json::Value::as_str),
-                    ));
-                }
-                Ok(result)
-            }
-            "volume:volume" => self
-                .store
-                .list_volumes(auth.effective_scope().id().as_str())
-                .await
-                .map(|items| items.iter().map(native_volume_json).collect())
-                .map_err(|_| ResourceApplicationError::Internal),
-            "volume:volume_attachment" => {
-                let items = self
-                    .store
-                    .list_volume_attachments_v1(auth.effective_scope().id().as_str())
-                    .await
-                    .map_err(|_| ResourceApplicationError::Internal)?;
-                let mut result = Vec::new();
-                for item in items {
-                    if item.attachment.state == VolumeAttachmentState::Attached {
-                        let resource = self
-                            .store
-                            .get_resource(item.attachment.id.as_uuid())
-                            .await
-                            .ok();
-                        result.push(native_attachment_json(&item, resource.as_ref()));
-                    }
-                }
-                Ok(result)
-            }
-            _ => Err(ResourceApplicationError::NotFound),
-        }
+        let Some(store_kind) = bounded_store_kind(query.resource_type()) else {
+            return Err(ResourceApplicationError::UnsupportedOperation);
+        };
+        let page = self
+            .store
+            .list_resources_page(
+                query.scope_id(),
+                store_kind,
+                query.continuation_key(),
+                query.limit(),
+            )
+            .await
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        let items = page.items.iter().map(generic_external_json).collect();
+        let repository = o3k_native_api::pagination::RepositoryPage::new(
+            items,
+            page.has_more,
+            page.continuation_key,
+            query.limit(),
+        )
+        .map_err(|_| ResourceApplicationError::Internal)?;
+        cursors
+            .complete_page(query, repository)
+            .map_err(|_| ResourceApplicationError::Internal)
     }
 
     async fn show(

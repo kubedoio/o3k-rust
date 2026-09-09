@@ -207,7 +207,10 @@ mod native_compute_tests {
 
         let native = o3k_native_api::NativeApiState::new(
             Some(compute_manifest_registry()),
-            o3k_native_api::pagination::CursorConfig::default(),
+            o3k_native_api::pagination::CursorConfig::new(
+                b"test-only-native-cursor-key-at-least-32-bytes".to_vec(),
+            )
+            .expect("cursor key"),
             Some(Arc::new(TestIssuer)),
             Some(Arc::new(ServerReaderAdapter {
                 service: compute.clone(),
@@ -493,6 +496,7 @@ mod native_compute_tests {
             assert_eq!(status, StatusCode::CREATED);
         }
         let (_, page_a) = exec(&router, authed("/compute/servers?limit=1", "a")).await;
+        assert_eq!(page_a["items"][0]["kind"], "compute:server");
         let cursor_a = page_a["next_cursor"].as_str().expect("tenant A cursor");
         let (second_status, second_page) = exec(
             &router,
@@ -553,8 +557,11 @@ mod native_compute_tests {
             authed(&format!("/compute/servers?limit=1&cursor={cursor}"), "a"),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(page_after_delete.get("items").is_none());
+        // Weak-consistency keyset pagination remains valid when the anchor is
+        // deleted after the first page: the continuation predicate is based on
+        // the immutable ordering key, not on anchor existence.
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page_after_delete["items"].as_array().map(Vec::len), Some(1));
         assert_eq!(provider.instance_count(), 1);
     }
 

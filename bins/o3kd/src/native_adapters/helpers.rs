@@ -3,6 +3,7 @@ use o3k_kernel::{
 };
 use uuid::Uuid;
 
+#[cfg(test)]
 pub(super) fn authorize_collection(
     auth: &o3k_kernel::AuthContext,
     action: &str,

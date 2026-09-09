@@ -109,15 +109,74 @@ pub(crate) const RELATIONSHIP_DELETING: &str = "deleting";
 pub(crate) const RELATIONSHIP_DELETED: &str = "deleted";
 pub(crate) const RELATIONSHIP_UNKNOWN: &str = "unknown";
 
+/// A repository-owned bounded page. `continuation_key` is an internal,
+/// stable key; public APIs must wrap it in their own integrity-protected
+/// cursor before returning it to callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryPage<T> {
+    pub items: Vec<T>,
+    pub has_more: bool,
+    pub continuation_key: Option<String>,
+}
+
+impl<T> RepositoryPage<T> {
+    pub(crate) fn new(
+        items: Vec<T>,
+        has_more: bool,
+        continuation_key: Option<String>,
+        requested_limit: usize,
+    ) -> Result<Self, StoreError> {
+        if items.len() > requested_limit
+            || has_more != continuation_key.is_some()
+            || (has_more && items.is_empty())
+            || continuation_key
+                .as_deref()
+                .is_some_and(|key| key.is_empty() || key.len() > 512)
+        {
+            return Err(StoreError::Corrupt(
+                "invalid bounded repository page".to_owned(),
+            ));
+        }
+        Ok(Self {
+            items,
+            has_more,
+            continuation_key,
+        })
+    }
+}
+
+/// Compute the bounded look-ahead requested from a backing store.  The extra
+/// row is the only authority used to determine `has_more`; callers must never
+/// materialize an unbounded collection and truncate it afterwards.
+pub(crate) fn bounded_fetch_limit(limit: usize) -> Result<i64, StoreError> {
+    if !(1..=200).contains(&limit) {
+        return Err(StoreError::Corrupt(
+            "native page limit out of bounds".to_owned(),
+        ));
+    }
+    i64::try_from(limit.saturating_add(1))
+        .map_err(|_| StoreError::Corrupt("native page limit overflow".to_owned()))
+}
+
 #[async_trait]
 pub trait DurableStore: Send + Sync {
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError>;
     async fn get_resource(&self, id: Uuid) -> Result<ResourceRecord, StoreError>;
+    /// Internal compatibility/domain reader. Native northbound collection
+    /// handlers are structurally forbidden from calling this unbounded shape;
+    /// they must use [`Self::list_resources_page`] instead.
     async fn list_resources(
         &self,
         project_id: &str,
         kind: &str,
     ) -> Result<Vec<ResourceRecord>, StoreError>;
+    async fn list_resources_page(
+        &self,
+        project_id: &str,
+        kind: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<RepositoryPage<ResourceRecord>, StoreError>;
     async fn update_resource(
         &self,
         id: Uuid,

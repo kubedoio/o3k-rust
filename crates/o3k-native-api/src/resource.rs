@@ -8,7 +8,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use crate::pagination::{CursorPayload, continuation_index, parse_page_size};
+use crate::pagination::ResourceQuery;
 use crate::{
     NativeApiState,
     auth::BearerAuth,
@@ -167,8 +167,11 @@ impl ResourceDispatcher {
     }
 
     pub(crate) fn is_ready(&self, descriptor: &ResourceDescriptor) -> bool {
+        // A descriptor is derived startup metadata, not a readiness source.
+        // If the live registry is unavailable, fail closed rather than serving
+        // stale `ready=true` captured during construction.
         let Some(registry) = &self.lifecycle_registry else {
-            return descriptor.ready;
+            return false;
         };
         registry
             .read()
@@ -241,6 +244,12 @@ pub struct MutationResult {
 
 #[async_trait]
 pub trait ResourceApplication: Send + Sync {
+    /// Runtime capability authority used by discovery.  A manifest declaration
+    /// alone is insufficient: adapters must explicitly prove bounded support.
+    fn supports_collection(&self, _descriptor: &ResourceDescriptor) -> bool {
+        false
+    }
+
     async fn create(
         &self,
         descriptor: &ResourceDescriptor,
@@ -256,11 +265,13 @@ pub trait ResourceApplication: Send + Sync {
         idempotency_key: Option<&str>,
         expected_generation: Option<i64>,
     ) -> Result<MutationResult, ResourceApplicationError>;
-    async fn list(
+    async fn list_page(
         &self,
         descriptor: &ResourceDescriptor,
         auth: &AuthContext,
-    ) -> Result<Vec<serde_json::Value>, ResourceApplicationError>;
+        query: &ResourceQuery,
+        cursors: &crate::pagination::CursorConfig,
+    ) -> Result<crate::pagination::ResourcePage<serde_json::Value>, ResourceApplicationError>;
     async fn show(
         &self,
         descriptor: &ResourceDescriptor,
@@ -738,6 +749,7 @@ async fn delete_for(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListQuery {
     pub limit: Option<String>,
     pub cursor: Option<String>,
@@ -756,7 +768,7 @@ pub async fn list(
         Ok(action) => action,
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
-    if !descriptor.ready {
+    if !state.resource_index.is_ready(descriptor) {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     }
     if let Err(response) = authorize(&state, descriptor, action, &auth.0, None) {
@@ -765,58 +777,63 @@ pub async fn list(
     let Some(application) = state.resource_application else {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     };
-    let items = match application.list(descriptor, &auth.0).await {
-        Ok(items) => items,
-        Err(error) => return application_problem(error),
-    };
+    if !application.supports_collection(descriptor) {
+        return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response();
+    }
+    if !state.cursor_config.is_available() {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    }
     let scope = auth.0.effective_scope().id().to_string();
     let resource_type = descriptor.resource_type.to_string();
-    let mut items = items;
-    items.sort_by(|a, b| {
-        a["metadata"]["id"]
-            .as_str()
-            .cmp(&b["metadata"]["id"].as_str())
-    });
-    let start = if let Some(cursor) = query.cursor.as_deref() {
-        let Ok(payload) = state
-            .cursor_config
-            .decode_cursor(cursor, &scope, &resource_type)
-        else {
-            return ProblemDetails::new(ErrorCode::InvalidCursor).into_response();
-        };
-        let ids = items
-            .iter()
-            .filter_map(|item| item["metadata"]["id"].as_str().map(str::to_owned))
-            .collect::<Vec<_>>();
-        match continuation_index(&ids, &payload.last_id) {
-            Ok(index) => index,
-            Err(_) => return ProblemDetails::new(ErrorCode::InvalidCursor).into_response(),
+    let resource_query = match state.cursor_config.validate_query(
+        query.limit.as_deref(),
+        query.cursor.as_deref(),
+        &scope,
+        &resource_type,
+    ) {
+        Ok(query) => query,
+        Err(crate::pagination::QueryValidationError::InvalidLimit) => {
+            return ProblemDetails::new(ErrorCode::BadRequest).into_response();
         }
-    } else {
-        0
+        Err(_) => return ProblemDetails::new(ErrorCode::InvalidCursor).into_response(),
     };
-    let page_size = parse_page_size(query.limit.as_deref());
-    let end = (start + page_size).min(items.len());
-    let page = items[start..end].to_vec();
-    let next_cursor = if end < items.len() {
-        page.last()
-            .and_then(|item| item["metadata"]["id"].as_str())
-            .map(|last_id| {
-                state.cursor_config.encode_cursor(&CursorPayload {
-                    last_id: last_id.to_owned(),
-                    scope_id: scope,
-                    resource_type,
-                    version: 1,
-                })
-            })
-    } else {
-        None
-    };
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"items": page, "next_cursor": next_cursor})),
+    match application
+        .list_page(descriptor, &auth.0, &resource_query, &state.cursor_config)
+        .await
+    {
+        Ok(page) => (StatusCode::OK, Json(page)).into_response(),
+        Err(error) => application_problem(error),
+    }
+}
+
+/// Fixed collection routes use these adapters so the shared list handler
+/// receives the canonical namespace/collection path parameters.
+pub async fn list_compute(
+    auth: BearerAuth,
+    State(state): State<NativeApiState>,
+    Query(query): Query<ListQuery>,
+) -> Response {
+    list(
+        auth,
+        Path(("compute".to_owned(), "servers".to_owned())),
+        State(state),
+        Query(query),
     )
-        .into_response()
+    .await
+}
+
+pub async fn list_volume(
+    auth: BearerAuth,
+    State(state): State<NativeApiState>,
+    Query(query): Query<ListQuery>,
+) -> Response {
+    list(
+        auth,
+        Path(("volume".to_owned(), "volumes".to_owned())),
+        State(state),
+        Query(query),
+    )
+    .await
 }
 
 pub async fn show(
@@ -831,7 +848,7 @@ pub async fn show(
         Ok(action) => action,
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
-    if !descriptor.ready {
+    if !state.resource_index.is_ready(descriptor) {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     }
     if let Err(response) = authorize(&state, descriptor, action, &auth.0, Some(&id)) {

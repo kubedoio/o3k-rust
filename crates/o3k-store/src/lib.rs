@@ -71,7 +71,9 @@ pub use domain::state::{
     AgentCommandState, CanonicalAcceptanceOutcome, IdempotencyReservation, ImageOverlayState,
     OperationState, WalCheckpointMode,
 };
-pub use port::durable::{DurableStore, RelationshipRepository, ResourceRelationshipRecord};
+pub use port::durable::{
+    DurableStore, RelationshipRepository, RepositoryPage, ResourceRelationshipRecord,
+};
 pub(crate) use port::durable::{
     RELATIONSHIP_BOUND, RELATIONSHIP_DELETED, RELATIONSHIP_DELETING, RELATIONSHIP_RESERVED,
     RELATIONSHIP_UNKNOWN, relationship_from_row,

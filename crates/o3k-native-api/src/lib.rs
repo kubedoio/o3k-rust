@@ -149,11 +149,8 @@ pub fn router(state: NativeApiState) -> Router {
         )
         .route("/identity/me", get(identity::current_context))
         .route("/operator/profile", get(identity::operator_profile))
-        .route("/compute/servers", get(compute::list_servers))
         .route("/compute/servers/{id}", get(compute::show_server))
-        .route("/volume/volumes", get(volume::list_volumes))
         .route("/volume/volumes/{id}", get(volume::show_volume))
-        .route("/network/address-realms", get(network::list_address_realms))
         .route(
             "/network/address-realms/{id}",
             get(network::show_address_realm),
@@ -346,11 +343,17 @@ fn create_input_schema_id(namespace: &str, collection: &str, version: &str) -> S
     )
 }
 
-fn action_metadata(descriptor: &ResourceDescriptor) -> Vec<ActionSchemaMetadata> {
+fn action_metadata(
+    descriptor: &ResourceDescriptor,
+    collection_supported: bool,
+) -> Vec<ActionSchemaMetadata> {
     let mut actions: Vec<_> =
         descriptor
             .lifecycle_actions
             .iter()
+            .filter(|(operation, _)| {
+                *operation != &LifecycleOperation::List || collection_supported
+            })
             .map(|(operation, action)| {
                 let name = format!("{operation:?}").to_lowercase();
                 let target = match operation {
@@ -468,8 +471,18 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
 
     let mut resource_types: Vec<DiscoveredResourceType> = Vec::new();
     for descriptor in state.resource_index.all() {
+        let live_ready = state.resource_index.is_ready(descriptor);
+        let collection_supported = state
+            .resource_application
+            .as_ref()
+            .is_some_and(|application| {
+                application.supports_collection(descriptor) && state.cursor_config.is_available()
+            });
         let mut actions = std::collections::HashMap::new();
         for (op, action) in &descriptor.lifecycle_actions {
+            if *op == LifecycleOperation::List && (!live_ready || !collection_supported) {
+                continue;
+            }
             actions.insert(format!("{op:?}").to_lowercase(), action.to_string());
         }
         let owning_service = state
@@ -502,7 +515,7 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
             schema_version: descriptor.schema_version.clone(),
             collection: descriptor.collection.clone(),
             scope: descriptor.scope.to_string(),
-            ready: state.resource_index.is_ready(descriptor),
+            ready: live_ready,
             lifecycle_actions: actions,
             placement,
             regions,
@@ -516,7 +529,7 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
                 version: descriptor.schema_version.clone(),
                 representation: "native-resource-envelope".to_owned(),
             },
-            actions: action_metadata(descriptor),
+            actions: action_metadata(descriptor, live_ready && collection_supported),
         });
     }
     resource_types.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
