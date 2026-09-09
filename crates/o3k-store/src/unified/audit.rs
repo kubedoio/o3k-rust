@@ -1,10 +1,76 @@
 use async_trait::async_trait;
-use o3k_kernel::{AuditEvent, AuditQuery, DurableAuditPage, DurableAuditRepository};
+use o3k_kernel::{
+    ActionId, AuditEvent, AuditOutcome, AuditQuery, DurableAuditPage, DurableAuditRepository,
+    EventId, OwnershipScope, PrincipalId, PrincipalKind, ResourceId, ResourceType, ScopeId,
+    ServiceNamespace,
+};
 
 use super::O3kStore;
 
 fn err<E: std::fmt::Display>(e: E) -> o3k_kernel::KernelError {
     o3k_kernel::KernelError::AuditUnavailable(e.to_string())
+}
+
+type AuditRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+);
+
+fn row_event(r: AuditRow) -> Result<AuditEvent, o3k_kernel::KernelError> {
+    let (_, action_name) =
+        r.8.split_once(':')
+            .ok_or_else(|| err("invalid audit action"))?;
+    let service = ServiceNamespace::new(r.7).map_err(err)?;
+    let action = ActionId::new(service.as_str(), action_name).map_err(err)?;
+    let scope = OwnershipScope::project(ScopeId::new_unchecked(r.6), None, None);
+    let resource_type =
+        r.9.as_deref()
+            .and_then(|v| v.split_once(':'))
+            .map(|(ns, n)| ResourceType::new_unchecked(ns, n));
+    Ok(AuditEvent {
+        event_id: EventId::from_string(r.0),
+        timestamp: r.1,
+        request_id: r.2,
+        audit_id: r.3,
+        principal_id: PrincipalId::new_unchecked(r.4),
+        principal_kind: if r.5.to_lowercase().contains("service") {
+            PrincipalKind::Service
+        } else {
+            PrincipalKind::User
+        },
+        effective_scope: scope,
+        service_namespace: service,
+        action,
+        resource_type,
+        resource_id: r.10.map(ResourceId::new_unchecked),
+        owner_scope: r
+            .11
+            .map(|v| OwnershipScope::project(ScopeId::new_unchecked(v), None, None)),
+        authorization_decision: None,
+        operation_id: r.12.and_then(|v| uuid::Uuid::parse_str(&v).ok()),
+        outcome: match r.13.as_str() {
+            "allowed" => AuditOutcome::Allowed,
+            "denied" => AuditOutcome::Denied,
+            "failed" => AuditOutcome::Failed,
+            "unknown_outcome" => AuditOutcome::UnknownOutcome,
+            _ => AuditOutcome::Succeeded,
+        },
+        reason_category: r.14,
+        service_principal: None,
+    })
 }
 
 #[async_trait]
@@ -46,16 +112,21 @@ impl DurableAuditRepository for O3kStore {
         // continuation are always enforced at this boundary.
         let scope = query.scope.id().as_str();
         let n = (query.limit + 1) as i64;
-        let rows: Vec<(String,)> = match self {
-            Self::Sqlite(s) => sqlx::query_as("SELECT event_id FROM audit_events WHERE effective_scope = ? AND (? IS NULL OR event_id > ?) ORDER BY event_id LIMIT ?")
+        let rows: Vec<AuditRow> = match self {
+            Self::Sqlite(s) => sqlx::query_as("SELECT event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category FROM audit_events WHERE effective_scope = ? AND (? IS NULL OR event_id > ?) ORDER BY event_id LIMIT ?")
                 .bind(scope).bind(&query.after_event_id).bind(&query.after_event_id).bind(n).fetch_all(&s.pool).await.map_err(err)?,
-            Self::Postgres(s) => sqlx::query_as("SELECT event_id FROM audit_events WHERE effective_scope = $1 AND ($2 IS NULL OR event_id > $2) ORDER BY event_id LIMIT $3")
+            Self::Postgres(s) => sqlx::query_as("SELECT event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category FROM audit_events WHERE effective_scope = $1 AND ($2 IS NULL OR event_id > $2) ORDER BY event_id LIMIT $3")
                 .bind(scope).bind(&query.after_event_id).bind(n).fetch_all(&s.pool).await.map_err(err)?,
         };
         let has_more = rows.len() > query.limit;
         let continuation_key = has_more.then(|| rows[query.limit - 1].0.clone());
+        let events = rows
+            .into_iter()
+            .take(query.limit)
+            .map(row_event)
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(DurableAuditPage {
-            events: Vec::new(),
+            events,
             has_more,
             continuation_key,
         })
