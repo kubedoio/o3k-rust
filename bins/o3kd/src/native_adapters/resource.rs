@@ -390,6 +390,143 @@ impl ResourceApplication for GenericResourceApplication {
             .map_err(|_| ResourceApplicationError::Internal)
     }
 
+    async fn update(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+        id: &str,
+        request: o3k_native_api::resource::ValidatedUpdateRequest,
+        idempotency_key: Option<&str>,
+        expected_generation: i64,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        if descriptor.resource_type.to_string() != "compute:server" {
+            return Err(ResourceApplicationError::UnsupportedOperation);
+        }
+        let resource_id = Uuid::parse_str(id).map_err(|_| ResourceApplicationError::NotFound)?;
+        let existing = self
+            .store
+            .get_resource(resource_id)
+            .await
+            .map_err(|error| match error {
+                o3k_store::StoreError::ResourceNotFound => ResourceApplicationError::NotFound,
+                _ => ResourceApplicationError::Internal,
+            })?;
+        if existing.kind != "compute_instance"
+            || existing.project_id != auth.effective_scope().id().as_str()
+        {
+            return Err(ResourceApplicationError::NotFound);
+        }
+        if existing.generation != expected_generation {
+            return Err(ResourceApplicationError::PreconditionConflict);
+        }
+        let name = request
+            .spec
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ResourceApplicationError::Validation)?;
+        let mut desired: serde_json::Value = serde_json::from_str(&existing.desired_state)
+            .map_err(|_| ResourceApplicationError::Conflict)?;
+        desired["name"] = serde_json::Value::String(name.to_owned());
+        let action = descriptor
+            .lifecycle_actions
+            .get(&o3k_native_api::resource::LifecycleOperation::Update)
+            .cloned()
+            .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+        let key = idempotency_key.ok_or(ResourceApplicationError::Validation)?;
+        let operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("{}:{}:{}:{}", descriptor.resource_type, id, action, key).as_bytes(),
+        );
+        let operation = o3k_store::OperationRecord {
+            id: operation_id,
+            resource_id,
+            kind: "lifecycle:update".into(),
+            state: o3k_store::OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        let canonical = o3k_store::CanonicalOperationRecord::from_kernel_operation(
+            &o3k_kernel::Operation::new(
+                operation_id,
+                descriptor.owning_service.clone(),
+                action.clone(),
+                auth.principal().id().to_string(),
+                auth.effective_scope().clone(),
+                descriptor.resource_type.clone(),
+                Some(o3k_kernel::ResourceId::new_unchecked(id)),
+                Some(auth.request_id().to_owned()),
+            ),
+        )
+        .map_err(|_| ResourceApplicationError::Internal)?;
+        let identity = o3k_store::IdempotencyReservationRequest::from_semantics(
+            auth.effective_scope().id().as_str(),
+            action.to_string(),
+            key.to_owned(),
+            &descriptor.resource_type.to_string(),
+            Some(id),
+            &serde_json::json!({"spec": request.spec, "generation": expected_generation}),
+            operation_id,
+        )
+        .map_err(|_| ResourceApplicationError::Validation)?;
+        match self
+            .store
+            .create_or_replay_canonical_lifecycle_operation(&operation, &canonical, &identity)
+            .await
+            .map_err(|_| ResourceApplicationError::Internal)?
+        {
+            o3k_store::CanonicalAcceptanceOutcome::Conflict => {
+                return Err(ResourceApplicationError::IdempotencyConflict);
+            }
+            o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent { operation_id, .. } => {
+                return Ok(MutationResult {
+                    operation_id: operation_id.to_string(),
+                    resource_id: Some(id.to_owned()),
+                    complete: true,
+                    resource: None,
+                });
+            }
+            o3k_store::CanonicalAcceptanceOutcome::Created { .. } => {}
+        }
+        let desired =
+            serde_json::to_string(&desired).map_err(|_| ResourceApplicationError::Internal)?;
+        self.store
+            .update_resource(
+                resource_id,
+                expected_generation,
+                &desired,
+                &existing.observed_state,
+                existing.observed_generation,
+                existing.provider_id.as_deref(),
+            )
+            .await
+            .map_err(|error| match error {
+                o3k_store::StoreError::StaleGeneration => {
+                    ResourceApplicationError::PreconditionConflict
+                }
+                _ => ResourceApplicationError::Internal,
+            })?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+            o3k_kernel::OperationState::Succeeded,
+            1,
+            Some(now.clone()),
+            Some(now),
+            None,
+        )
+        .map_err(|_| ResourceApplicationError::Internal)?;
+        self.store
+            .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+            .await
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        Ok(MutationResult {
+            operation_id: operation_id.to_string(),
+            resource_id: Some(id.to_owned()),
+            complete: true,
+            resource: None,
+        })
+    }
+
     async fn show(
         &self,
         descriptor: &ResourceDescriptor,
