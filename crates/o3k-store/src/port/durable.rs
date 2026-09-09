@@ -162,6 +162,9 @@ pub(crate) fn bounded_fetch_limit(limit: usize) -> Result<i64, StoreError> {
 pub trait DurableStore: Send + Sync {
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError>;
     async fn get_resource(&self, id: Uuid) -> Result<ResourceRecord, StoreError>;
+    /// Internal compatibility/domain reader. Native northbound collection
+    /// handlers are structurally forbidden from calling this unbounded shape;
+    /// they must use [`Self::list_resources_page`] instead.
     async fn list_resources(
         &self,
         project_id: &str,
