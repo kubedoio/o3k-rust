@@ -37,7 +37,7 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ComputeError::NotFound);
         }
         match self
@@ -63,13 +63,13 @@ impl ComputeService {
                         ResourceId::new(record.id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Ok(record)
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Err(error)
             }
         }
@@ -123,7 +123,7 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ComputeError::NotFound);
         }
         self.list_volume_attachments(auth.effective_scope().id().as_str(), server_id)
@@ -173,7 +173,7 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ComputeError::NotFound);
         }
         self.get_volume_attachment(
@@ -224,7 +224,7 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ComputeError::NotFound);
         }
         match self
@@ -247,13 +247,13 @@ impl ComputeService {
                         ResourceId::new(attachment_id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Ok(())
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Err(error)
             }
         }

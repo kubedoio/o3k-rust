@@ -8,17 +8,23 @@ set -euo pipefail
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root_dir"
 
-mandatory_files=(
-  crates/o3k-compute/src/actions.rs
-  crates/o3k-compute/src/lifecycle.rs
-  bins/o3kd/src/native_adapters/resource.rs
-)
-for file in "${mandatory_files[@]}"; do
-  if rg -n 'audit_sink\.record\(' "$file"; then
-    echo "FAIL: legacy synchronous AuditSink::record in mandatory path: $file" >&2
-    exit 1
-  fi
-done
+inventory="$root_dir/docs/audit-publication-inventory.md"
+test -s "$inventory"
+if rg -n -i 'unclassified|legacy mandatory remaining' "$inventory"; then
+  echo "FAIL: Audit publication inventory contains unclassified production work" >&2
+  exit 1
+fi
+
+# A mandatory production caller must never use the legacy synchronous method.
+# Keep the search broad so newly added service families cannot silently bypass
+# the durable boundary; tests and kernel compatibility shims are excluded.
+if rg -n 'audit_sink\.record\(' \
+  crates/o3k-compute/src crates/o3k-image/src crates/o3k-network/src \
+  bins/o3kd/src --glob '*.rs' \
+  --glob '!**/tests/**' --glob '!**/*test*.rs'; then
+  echo "FAIL: legacy synchronous AuditSink::record in production service path" >&2
+  exit 1
+fi
 
 rg -q 'record_required_audit' crates/o3k-compute/src/{actions.rs,lifecycle.rs}
 rg -q 'DurableAuditSink::new' bins/o3kd/src/composition/mod.rs
