@@ -349,7 +349,7 @@ impl ResourceApplication for GenericResourceApplication {
                 | "volume:volume"
         )
     }
-    async fn list(
+    async fn list_page(
         &self,
         descriptor: &ResourceDescriptor,
         auth: &o3k_kernel::AuthContext,

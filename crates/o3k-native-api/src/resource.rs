@@ -392,7 +392,7 @@ pub trait ResourceApplication: Send + Sync {
     ) -> Result<MutationResult, ResourceApplicationError>;
     /// Returns at most `limit + 1` items, already ordered by the repository.
     /// The extra item is the bounded continuation probe.
-    async fn list(
+    async fn list_page(
         &self,
         descriptor: &ResourceDescriptor,
         auth: &AuthContext,
@@ -1103,7 +1103,7 @@ pub async fn list(
         };
         query.continuation_id = Some(payload.last_id);
     }
-    let items = match application.list(descriptor, &auth.0, &query).await {
+    let items = match application.list_page(descriptor, &auth.0, &query).await {
         Ok(items) => items,
         Err(error) => return application_problem(error),
     };
