@@ -55,7 +55,7 @@ fi
 if [[ -n "${O3K_DATABASE_URL:-}" ]]; then
   # The dedicated PostgreSQL suite is opt-in and must be run against a real
   # database.  Do not silently substitute SQLite for production evidence.
-  if cargo test -p o3k-store --test audit_repository_postgres --all-features -- --nocapture; then
+  if cargo test -p o3k-store --test postgres_audit_repository --all-features -- --nocapture; then
     pass B0-RUNTIME-POSTGRES
   else
     fail B0-RUNTIME-POSTGRES
