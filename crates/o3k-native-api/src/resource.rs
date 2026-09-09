@@ -299,6 +299,7 @@ pub trait ResourceApplication: Send + Sync {
         query: &ResourceQuery,
         cursors: &crate::pagination::CursorConfig,
     ) -> Result<crate::pagination::ResourcePage<RelationshipView>, ResourceApplicationError> {
+        // Relationships describe topology only and never grant authorization.
         let _ = (descriptor, auth, id, query, cursors);
         Err(ResourceApplicationError::UnsupportedOperation)
     }
