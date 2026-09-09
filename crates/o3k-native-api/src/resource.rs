@@ -1188,6 +1188,7 @@ pub async fn relationships(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod page_contract_tests {
     use super::ResourcePage;
     use serde_json::json;
