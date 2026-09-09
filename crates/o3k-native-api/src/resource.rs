@@ -318,7 +318,9 @@ pub struct RelationshipView {
 pub struct ResourcePage {
     pub items: Vec<serde_json::Value>,
     pub has_more: bool,
-    pub continuation_id: Option<String>,
+    /// Opaque continuation supplied by the application authority. The HTTP
+    /// adapter serializes this value but never derives it from `items`.
+    pub next_cursor: Option<String>,
 }
 
 #[async_trait]
@@ -1056,7 +1058,7 @@ pub async fn list(
         Err(error) => return application_problem(error),
     };
     let next_cursor = if items.has_more {
-        items.continuation_id.as_deref().map(|last_id| {
+        items.next_cursor.as_deref().map(|last_id| {
             state.cursor_config.encode_cursor(&CursorPayload {
                 last_id: last_id.to_owned(),
                 scope_id: scope,

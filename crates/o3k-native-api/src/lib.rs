@@ -149,15 +149,6 @@ pub fn router(state: NativeApiState) -> Router {
         )
         .route("/identity/me", get(identity::current_context))
         .route("/operator/profile", get(identity::operator_profile))
-        .route("/compute/servers", get(compute::list_servers))
-        .route("/compute/servers/{id}", get(compute::show_server))
-        .route("/volume/volumes", get(volume::list_volumes))
-        .route("/volume/volumes/{id}", get(volume::show_volume))
-        .route("/network/address-realms", get(network::list_address_realms))
-        .route(
-            "/network/address-realms/{id}",
-            get(network::show_address_realm),
-        )
         .route(
             "/{namespace}/{collection}",
             get(resource::list).post(resource::create),
