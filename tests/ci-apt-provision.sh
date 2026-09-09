@@ -28,14 +28,14 @@ EOF
 
 rendered="$root/rendered.list"
 O3K_CI_APT_ROOT="$root" "$helper" render "$rendered"
-grep -q 'archive.ubuntu.com/ubuntu noble main' "$rendered"
-grep -q 'URIs: http://archive.ubuntu.com/ubuntu' "$rendered"
-! grep -q 'dl.google.com' "$rendered"
-! grep -q 'packages.example.invalid' "$rendered"
+grep -q 'archive.ubuntu.com/ubuntu noble main' "$rendered/sources.list"
+grep -q 'URIs: http://archive.ubuntu.com/ubuntu' "$rendered/parts/ubuntu.sources"
+! grep -R -q 'dl.google.com' "$rendered"
+! grep -R -q 'packages.example.invalid' "$rendered"
 
 required="$root/required.list"
 O3K_CI_APT_ROOT="$root" O3K_CI_APT_REQUIRED_DOMAINS=packages.example.invalid \
   "$helper" render "$required"
-grep -q 'packages.example.invalid' "$required"
+grep -R -q 'packages.example.invalid' "$required"
 
 echo 'APT source hygiene tests: PASS'

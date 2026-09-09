@@ -8,7 +8,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 render OUTPUT | update | install PACKAGE..." >&2
+  echo "usage: $0 render OUTPUT_DIR | update | install PACKAGE..." >&2
   exit 2
 }
 
@@ -44,41 +44,49 @@ source_allowed() {
 }
 
 render_sources() {
-  local output=$1 file base
-  : > "$output"
+  local output=$1 file base destination
+  mkdir -p "$output/parts"
+  : > "$output/sources.list"
   for file in "$source_list" "$source_parts"/*.list "$source_parts"/*.sources; do
     [[ -f "$file" ]] || continue
     source_allowed "$file" || continue
     base=$(basename "$file")
     # Normalize the runner's regional Ubuntu mirror without changing trust
     # metadata or disabling apt integrity checks.
-    sed -e 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
-        -e 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' "$file" \
-      > "${output}.${base}"
-    cat "${output}.${base}" >> "$output"
-    printf '\n' >> "$output"
-    rm -f "${output}.${base}"
+    if [[ "$file" == *.sources ]]; then
+      destination="$output/parts/$base"
+      sed -e 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
+          -e 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' "$file" > "$destination"
+    else
+      destination="$output/sources.list"
+      sed -e 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
+          -e 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' "$file" >> "$destination"
+      printf '\n' >> "$destination"
+    fi
   done
-  [[ -s "$output" ]] || { echo "no trusted Ubuntu/required APT sources found" >&2; return 1; }
+  [[ -s "$output/sources.list" || -n "$(find "$output/parts" -type f -size +0c -print -quit)" ]] || {
+    echo "no trusted Ubuntu/required APT sources found" >&2
+    return 1
+  }
 }
 
 run_apt() {
   local command=$1; shift
   local temp_dir source_file
   temp_dir=$(mktemp -d)
-  trap 'rm -rf "$temp_dir"' EXIT
+  trap 'rm -rf "${temp_dir:-}"' EXIT
+  render_sources "$temp_dir"
   source_file="$temp_dir/sources.list"
-  render_sources "$source_file"
   local opts=(
     -o "Dir::Etc::sourcelist=$source_file"
-    -o "Dir::Etc::sourceparts=-"
+    -o "Dir::Etc::sourceparts=$temp_dir/parts"
     -o Acquire::Retries=5
     -o Acquire::ForceIPv4=true
     -o Acquire::http::Timeout=20
     -o Acquire::https::Timeout=20
     -o DPkg::Lock::Timeout=120
   )
-  echo "APT sources retained: $(grep -Eo 'https?://[^[:space:]]+' "$source_file" | paste -sd, -)"
+  echo "APT sources retained: $(grep -REho 'https?://[^[:space:]">]+' "$temp_dir" | paste -sd, -)"
   if [[ "$command" == install ]]; then
     timeout --foreground 900s sudo -n env DEBIAN_FRONTEND=noninteractive \
       apt-get "${opts[@]}" update
