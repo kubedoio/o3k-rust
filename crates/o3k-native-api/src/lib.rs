@@ -213,9 +213,9 @@ pub async fn api_root() -> Json<ApiRootResponse> {
             "/o3k/v1/identity/scopes",
             "/o3k/v1/identity/me",
             "/o3k/v1/operator/profile",
-            "/o3k/v1/compute/servers",
-            "/o3k/v1/volume/volumes",
-            "/o3k/v1/network/address-realms",
+            "/o3k/v1/{namespace}/{collection}",
+            "/o3k/v1/{namespace}/{collection}/{id}",
+            "/o3k/v1/operations",
             "/o3k/v1/operations/{id}",
         ],
     })
@@ -468,9 +468,7 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
             || state
                 .resource_application
                 .as_ref()
-                .map_or(true, |application| {
-                    !application.supports_collection(descriptor)
-                })
+                .is_some_and(|application| !application.supports_collection(descriptor))
         {
             continue;
         }

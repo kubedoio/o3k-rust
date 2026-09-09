@@ -327,25 +327,6 @@ pub struct ResourcePage {
 }
 
 impl ResourcePage {
-    /// Construct a page from a bounded look-ahead (`limit + 1`) result. The
-    /// authority, rather than HTTP, owns continuation semantics.
-    pub fn from_lookahead(mut items: Vec<serde_json::Value>, limit: usize) -> Self {
-        let has_more = items.len() > limit;
-        items.truncate(limit);
-        let next_cursor = has_more
-            .then(|| items.last())
-            .flatten()
-            .and_then(|item| item["metadata"]["id"].as_str())
-            .map(str::to_owned);
-        debug_assert!(items.len() <= limit);
-        debug_assert_eq!(has_more, next_cursor.is_some());
-        Self {
-            items,
-            has_more,
-            next_cursor,
-        }
-    }
-
     /// Fallible production constructor. A continuation probe without a
     /// canonical resource id cannot safely produce a page cursor, so callers
     /// must fail closed instead of relying on debug assertions.
@@ -1213,26 +1194,36 @@ mod page_contract_tests {
 
     #[test]
     fn lookahead_page_has_explicit_continuation_invariants() {
-        let empty = ResourcePage::from_lookahead(Vec::new(), 2);
+        let empty = ResourcePage::try_from_lookahead(Vec::new(), 2).unwrap();
         assert!(empty.items.is_empty());
         assert!(!empty.has_more);
         assert!(empty.next_cursor.is_none());
 
-        let final_page = ResourcePage::from_lookahead(vec![json!({"metadata":{"id":"a"}})], 2);
+        let final_page =
+            ResourcePage::try_from_lookahead(vec![json!({"metadata":{"id":"a"}})], 2).unwrap();
         assert_eq!(final_page.items.len(), 1);
         assert!(!final_page.has_more);
         assert!(final_page.next_cursor.is_none());
 
-        let continued = ResourcePage::from_lookahead(
+        let continued = ResourcePage::try_from_lookahead(
             vec![
                 json!({"metadata":{"id":"a"}}),
                 json!({"metadata":{"id":"b"}}),
                 json!({"metadata":{"id":"c"}}),
             ],
             2,
-        );
+        )
+        .unwrap();
         assert_eq!(continued.items.len(), 2);
         assert!(continued.has_more);
         assert_eq!(continued.next_cursor.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn malformed_lookahead_fails_closed() {
+        assert!(
+            ResourcePage::try_from_lookahead(vec![json!({"metadata": {"id": "a"}}), json!({})], 1,)
+                .is_err()
+        );
     }
 }
