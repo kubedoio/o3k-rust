@@ -526,7 +526,7 @@ mod native_compute_tests {
                 &path,
                 "a",
                 "action-stop",
-                serde_json::json!({"input": {"x": 1}}),
+                serde_json::json!({"input": {"reason": "different"}}),
             ),
         )
         .await;

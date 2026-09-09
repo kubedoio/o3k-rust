@@ -405,7 +405,12 @@ impl ResourceApplication for GenericResourceApplication {
         // The published v1 action input schema is an object. The canonical
         // idempotency journal binds the complete payload, so conflicting
         // replays are rejected before provider execution.
-        if !request.input.is_object() {
+        let Some(input) = request.input.as_object() else {
+            return Err(ResourceApplicationError::Validation);
+        };
+        if input.keys().any(|key| key != "reason")
+            || input.get("reason").is_some_and(|value| !value.is_string())
+        {
             return Err(ResourceApplicationError::Validation);
         }
         let action_kind = match action.action() {
@@ -424,7 +429,7 @@ impl ResourceApplication for GenericResourceApplication {
             auth.effective_scope().clone(),
             Some(auth.request_id().to_owned()),
             idempotency_key.to_owned(),
-            request.input,
+            serde_json::Value::Object(input.clone()),
         )
         .map_err(|_| ResourceApplicationError::Validation)?;
         let receipt = self
@@ -537,6 +542,43 @@ impl ResourceApplication for GenericResourceApplication {
                     .get_canonical_operation(operation_id)
                     .await
                     .map_err(|_| ResourceApplicationError::Internal)?;
+                if matches!(
+                    existing_operation.state,
+                    o3k_store::OperationState::Pending | o3k_store::OperationState::Running
+                ) {
+                    if let Ok(current) = self.store.get_resource(resource_id).await {
+                        let applied =
+                            serde_json::from_str::<serde_json::Value>(&current.desired_state)
+                                .ok()
+                                .and_then(|value| {
+                                    value
+                                        .get("name")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_owned)
+                                })
+                                == Some(name.to_owned());
+                        if applied {
+                            let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                                o3k_kernel::OperationState::Succeeded,
+                                1,
+                                None,
+                                Some(chrono::Utc::now().to_rfc3339()),
+                                None,
+                            )
+                            .map_err(|_| ResourceApplicationError::Internal)?;
+                            self.store
+                                .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                                .await
+                                .map_err(|_| ResourceApplicationError::Internal)?;
+                            return Ok(MutationResult {
+                                operation_id: operation_id.to_string(),
+                                resource_id: Some(id.to_owned()),
+                                complete: true,
+                                resource: None,
+                            });
+                        }
+                    }
+                }
                 if existing_operation.state == o3k_store::OperationState::Failed {
                     return Err(ResourceApplicationError::Conflict);
                 }
@@ -550,17 +592,20 @@ impl ResourceApplication for GenericResourceApplication {
             o3k_store::CanonicalAcceptanceOutcome::Created { .. } => {}
         }
         if existing.generation != expected_generation {
-            if let Ok(lifecycle) = o3k_store::CanonicalOperationLifecycleUpdate::new(
+            let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
                 o3k_kernel::OperationState::Failed,
                 1,
                 None,
                 Some(chrono::Utc::now().to_rfc3339()),
                 Some("stale generation".to_owned()),
-            ) {
-                let _ = self
-                    .store
-                    .update_canonical_operation_lifecycle(operation_id, &lifecycle)
-                    .await;
+            )
+            .map_err(|_| ResourceApplicationError::Internal)?;
+            if let Err(_) = self
+                .store
+                .update_canonical_operation_lifecycle(operation_id, &lifecycle)
+                .await
+            {
+                return Err(ResourceApplicationError::Internal);
             }
             return Err(ResourceApplicationError::PreconditionConflict);
         }
