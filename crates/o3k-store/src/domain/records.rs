@@ -26,6 +26,46 @@ pub struct AuditEventRecord {
     pub reason_category: Option<String>,
 }
 
+impl AuditEventRecord {
+    /// Project a kernel event into the bounded, secret-safe durable shape.
+    /// Raw request/provider payloads are intentionally not representable here.
+    pub fn from_kernel_event(event: &o3k_kernel::AuditEvent) -> Self {
+        Self {
+            event_id: event.event_id.as_str().to_owned(),
+            timestamp: event.timestamp.clone(),
+            request_id: event.request_id.clone(),
+            audit_id: event.audit_id.clone(),
+            principal_id: event.principal_id.to_string(),
+            principal_kind: match event.principal_kind {
+                o3k_kernel::PrincipalKind::User => "user".to_owned(),
+                o3k_kernel::PrincipalKind::Service => "service".to_owned(),
+            },
+            effective_scope: event.effective_scope.to_string(),
+            service: event.service_namespace.to_string(),
+            action: event.action.to_string(),
+            resource_type: event.resource_type.as_ref().map(|v| v.to_string()),
+            resource_id: event.resource_id.as_ref().map(|v| v.to_string()),
+            owner_scope: event.owner_scope.as_ref().map(|v| v.to_string()),
+            operation_id: event.operation_id.map(|v| v.to_string()),
+            outcome: event.outcome.to_string(),
+            reason_category: event.reason_category.as_deref().map(normalize_audit_reason),
+        }
+    }
+}
+
+fn normalize_audit_reason(reason: &str) -> String {
+    const MAX_REASON_BYTES: usize = 128;
+    let mut out = reason
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_REASON_BYTES)
+        .collect::<String>();
+    if out.is_empty() {
+        out.push_str("unspecified");
+    }
+    out
+}
+
 use super::error::StoreError;
 use super::state::{AgentCommandState, ImageOverlayState, OperationState};
 
