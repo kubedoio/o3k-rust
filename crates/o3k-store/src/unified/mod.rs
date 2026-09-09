@@ -8,6 +8,7 @@ use crate::{
     StoreError,
 };
 
+mod audit;
 mod compute;
 mod coordination;
 mod core;
