@@ -85,6 +85,18 @@ mod native_compute_tests {
             "update".to_owned(),
             ActionId::new_unchecked("compute", "UpdateServer"),
         );
+        ops.insert(
+            "start".to_owned(),
+            ActionId::new_unchecked("compute", "StartServer"),
+        );
+        ops.insert(
+            "stop".to_owned(),
+            ActionId::new_unchecked("compute", "StopServer"),
+        );
+        ops.insert(
+            "reboot".to_owned(),
+            ActionId::new_unchecked("compute", "RebootServer"),
+        );
         let m = o3k_kernel::ServiceManifest {
             manifest_version: 1,
             service_id: "compute".to_owned(),
@@ -104,6 +116,9 @@ mod native_compute_tests {
                 "compute:DeleteServer".to_owned(),
                 "compute:ShowServer".to_owned(),
                 "compute:UpdateServer".to_owned(),
+                "compute:StartServer".to_owned(),
+                "compute:StopServer".to_owned(),
+                "compute:RebootServer".to_owned(),
             ],
             capabilities: vec![],
             dependencies: vec![],
@@ -1116,7 +1131,11 @@ mod native_compute_tests {
                 .iter()
                 .any(|action| action.ends_with(":DeleteServer"))
         );
-        assert!(!actions.iter().any(|action| action.contains("Update")));
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.ends_with(":UpdateServer"))
+        );
         assert!(
             !actions
                 .iter()

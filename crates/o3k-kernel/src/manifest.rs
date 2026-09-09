@@ -437,7 +437,14 @@ impl ServiceManifest {
             .collect();
         for resource in &self.resource_types {
             for (operation, action) in &resource.operations {
-                if !["list", "show", "create", "update", "delete"].contains(&operation.as_str()) {
+                let lifecycle =
+                    ["list", "show", "create", "update", "delete"].contains(&operation.as_str());
+                if !lifecycle
+                    && (operation.trim().is_empty()
+                        || !operation
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()))
+                {
                     return Err(ManifestError::InvalidField(
                         "resource_types[].operations key",
                     ));
@@ -1692,6 +1699,18 @@ impl ManifestRegistry {
                             (
                                 "delete".to_owned(),
                                 ActionId::new_unchecked("compute", "DeleteServer"),
+                            ),
+                            (
+                                "start".to_owned(),
+                                ActionId::new_unchecked("compute", "StartServer"),
+                            ),
+                            (
+                                "stop".to_owned(),
+                                ActionId::new_unchecked("compute", "StopServer"),
+                            ),
+                            (
+                                "reboot".to_owned(),
+                                ActionId::new_unchecked("compute", "RebootServer"),
                             ),
                         ]),
                     },

@@ -405,6 +405,16 @@ fn action_metadata(
             }
             })
             .collect();
+    for (name, action) in &descriptor.actions {
+        actions.push(ActionSchemaMetadata {
+            name: name.clone(),
+            action_id: action.to_string(),
+            target: "instance".to_owned(),
+            input: None,
+            output: None,
+            asynchronous: true,
+        });
+    }
     actions.sort_by(|a, b| a.name.cmp(&b.name));
     actions
 }

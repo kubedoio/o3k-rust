@@ -399,8 +399,14 @@ impl ResourceApplication for GenericResourceApplication {
         request: ActionRequest,
         idempotency_key: &str,
     ) -> Result<MutationResult, ResourceApplicationError> {
-        if descriptor.resource_type.to_string() != "compute:server" || !request.input.is_object() {
+        if descriptor.resource_type.to_string() != "compute:server" {
             return Err(ResourceApplicationError::UnsupportedOperation);
+        }
+        // The published v1 action input schema is an object. The canonical
+        // idempotency journal binds the complete payload, so conflicting
+        // replays are rejected before provider execution.
+        if !request.input.is_object() {
+            return Err(ResourceApplicationError::Validation);
         }
         let action_kind = match action.action() {
             "StartServer" => o3k_provider::InstanceAction::Start,
@@ -408,7 +414,9 @@ impl ResourceApplication for GenericResourceApplication {
             "RebootServer" => o3k_provider::InstanceAction::Reboot,
             _ => return Err(ResourceApplicationError::UnsupportedOperation),
         };
-        let server_id = id.parse::<Uuid>().map(o3k_compute::ServerId::from_uuid)
+        let server_id = id
+            .parse::<Uuid>()
+            .map(o3k_compute::ServerId::from_uuid)
             .map_err(|_| ResourceApplicationError::NotFound)?;
         let context = o3k_reconciler::CanonicalMutationContext::new(
             action,
@@ -417,13 +425,20 @@ impl ResourceApplication for GenericResourceApplication {
             Some(auth.request_id().to_owned()),
             idempotency_key.to_owned(),
             request.input,
-        ).map_err(|_| ResourceApplicationError::Validation)?;
-        let receipt = self.compute.action_for_auth_canonical(auth, server_id, action_kind, context)
-            .await.map_err(compute_error)?;
+        )
+        .map_err(|_| ResourceApplicationError::Validation)?;
+        let receipt = self
+            .compute
+            .action_for_auth_canonical(auth, server_id, action_kind, context)
+            .await
+            .map_err(compute_error)?;
+        if receipt.operation_state == o3k_store::OperationState::Failed {
+            return Err(ResourceApplicationError::Conflict);
+        }
         Ok(MutationResult {
             operation_id: receipt.operation_id.to_string(),
             resource_id: Some(receipt.resource.to_string()),
-            complete: matches!(receipt.operation_state, o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed),
+            complete: receipt.operation_state == o3k_store::OperationState::Succeeded,
             resource: None,
         })
     }
@@ -453,9 +468,6 @@ impl ResourceApplication for GenericResourceApplication {
             || existing.project_id != auth.effective_scope().id().as_str()
         {
             return Err(ResourceApplicationError::NotFound);
-        }
-        if existing.generation != expected_generation {
-            return Err(ResourceApplicationError::PreconditionConflict);
         }
         let name = request
             .spec
@@ -536,6 +548,9 @@ impl ResourceApplication for GenericResourceApplication {
                 });
             }
             o3k_store::CanonicalAcceptanceOutcome::Created { .. } => {}
+        }
+        if existing.generation != expected_generation {
+            return Err(ResourceApplicationError::PreconditionConflict);
         }
         let desired =
             serde_json::to_string(&desired).map_err(|_| ResourceApplicationError::Internal)?;
