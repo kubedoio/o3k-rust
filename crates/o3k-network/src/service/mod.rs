@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use o3k_kernel::{AuditSink, Authorizer, LimitKey, LimitValue};
+use o3k_kernel::{Authorizer, LimitKey, LimitValue};
 use thiserror::Error;
 
 /// Canonical binding state of a port on its selected host.
@@ -104,7 +104,7 @@ pub struct NetworkService {
     inner: Arc<Inner>,
     lock: Arc<tokio::sync::Mutex<()>>,
     authorizer: Arc<dyn Authorizer>,
-    audit_sink: Arc<dyn AuditSink>,
+    audit_sink: o3k_kernel::RequiredAuditPublisher,
 }
 
 struct Inner {
@@ -134,7 +134,7 @@ impl NetworkService {
         event: &o3k_kernel::AuditEvent,
     ) -> Result<(), NetworkError> {
         self.audit_sink
-            .record_required_async(event)
+            .publish(event)
             .await
             .map_err(|_| NetworkError::AuditUnavailable)
     }

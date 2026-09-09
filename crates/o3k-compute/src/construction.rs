@@ -4,7 +4,7 @@ use super::{
     Scheduler, StaticAuthorizer, Uuid, VolumeAttachmentProvider,
 };
 
-use o3k_kernel::{AuditSink, Authorizer, MemoryAuditSink};
+use o3k_kernel::{AuditSink, Authorizer, MemoryAuditSink, RequiredAuditPublisher};
 use o3k_store::ComputeRepository;
 
 impl ComputeService {
@@ -16,7 +16,7 @@ impl ComputeService {
         event: &o3k_kernel::AuditEvent,
     ) -> Result<(), ComputeError> {
         self.audit_sink
-            .record_required_async(event)
+            .publish(event)
             .await
             .map_err(|_| ComputeError::Unavailable)
     }
@@ -43,7 +43,7 @@ impl ComputeService {
             // The constructor default is a test-safe in-memory sink. The
             // production composition root must (and does) replace it with
             // `DurableAuditSink` before exposing any service.
-            audit_sink: Arc::new(MemoryAuditSink::new()),
+            audit_sink: RequiredAuditPublisher::new(Arc::new(MemoryAuditSink::new())),
             coordination: None,
         }
     }
@@ -67,7 +67,7 @@ impl ComputeService {
 
     #[must_use]
     pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
-        self.audit_sink = audit_sink;
+        self.audit_sink = RequiredAuditPublisher::new(audit_sink);
         self
     }
 

@@ -229,6 +229,25 @@ pub trait AuditSink: Send + Sync {
     }
 }
 
+/// Capability used by production mutation paths. It intentionally exposes
+/// only awaited required publication, preventing accidental use of the
+/// legacy best-effort `AuditSink::record` method.
+#[derive(Clone)]
+pub struct RequiredAuditPublisher {
+    sink: std::sync::Arc<dyn AuditSink>,
+}
+
+impl RequiredAuditPublisher {
+    #[must_use]
+    pub fn new(sink: std::sync::Arc<dyn AuditSink>) -> Self {
+        Self { sink }
+    }
+
+    pub async fn publish(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        self.sink.record_required_async(event).await
+    }
+}
+
 /// Production sink backed directly by the durable Audit repository. The
 /// synchronous legacy methods intentionally do not acknowledge durability;
 /// mandatory callers must await `record_required_async`.

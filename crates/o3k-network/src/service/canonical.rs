@@ -596,7 +596,7 @@ impl NetworkService {
             authorizer: Arc::new(StaticAuthorizer::standard()),
             // Unit/test construction uses an explicit in-memory sink; production
             // composition replaces this with DurableAuditSink via with_audit_sink.
-            audit_sink: Arc::new(MemoryAuditSink::new()),
+            audit_sink: o3k_kernel::RequiredAuditPublisher::new(Arc::new(MemoryAuditSink::new())),
         };
         service.recover_realm_deletion_operations().await?;
         Ok(service)
@@ -676,7 +676,7 @@ impl NetworkService {
 
     #[must_use]
     pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
-        self.audit_sink = audit_sink;
+        self.audit_sink = o3k_kernel::RequiredAuditPublisher::new(audit_sink);
         self
     }
 

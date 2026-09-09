@@ -8,7 +8,7 @@ use std::{
 
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
-    LimitKey, LimitValue, NoopAuditSink, OwnershipScope, ResourceAmount, ResourceId,
+    LimitKey, LimitValue, MemoryAuditSink, OwnershipScope, ResourceAmount, ResourceId,
     ResourceTarget, ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
 };
 use o3k_store::{ImageMetadataRecord, ImageRepository, StoreError};
@@ -907,7 +907,7 @@ pub struct ImageService {
     lock: Arc<tokio::sync::Mutex<()>>,
     max_upload_bytes: usize,
     authorizer: Arc<dyn Authorizer>,
-    audit_sink: Arc<dyn AuditSink>,
+    audit_sink: o3k_kernel::RequiredAuditPublisher,
 }
 
 struct Inner {
@@ -931,7 +931,7 @@ impl ImageService {
             lock: Arc::new(tokio::sync::Mutex::new(())),
             max_upload_bytes,
             authorizer: Arc::new(StaticAuthorizer::standard()),
-            audit_sink: Arc::new(NoopAuditSink),
+            audit_sink: o3k_kernel::RequiredAuditPublisher::new(Arc::new(MemoryAuditSink::new())),
         })
     }
 
@@ -943,7 +943,7 @@ impl ImageService {
 
     #[must_use]
     pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
-        self.audit_sink = audit_sink;
+        self.audit_sink = o3k_kernel::RequiredAuditPublisher::new(audit_sink);
         self
     }
 
@@ -1526,7 +1526,7 @@ impl ImageService {
 
     async fn record_required_audit(&self, event: &AuditEvent) -> Result<(), ImageError> {
         self.audit_sink
-            .record_required_async(event)
+            .publish(event)
             .await
             .map_err(|_| ImageError::AuditUnavailable)
     }

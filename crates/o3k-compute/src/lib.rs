@@ -30,7 +30,7 @@ use o3k_kernel::LimitValue;
 #[cfg(test)]
 use o3k_kernel::{ActionId, ScopeId};
 use o3k_kernel::{
-    AuditSink, AuthContext, Authorizer, LimitKey, OwnershipScope, ResourceAmount, ResourceId,
+    AuthContext, Authorizer, LimitKey, OwnershipScope, ResourceAmount, ResourceId,
     ResourceTarget, ResourceType, StaticAuthorizer,
 };
 #[cfg(test)]
@@ -98,7 +98,7 @@ pub struct ComputeService {
     binding_projector: Option<Arc<dyn PortBindingProjector>>,
     config_drive_cleaner: Option<o3k_config_drive::ConfigDriveStore>,
     authorizer: Arc<dyn Authorizer>,
-    audit_sink: Arc<dyn AuditSink>,
+    audit_sink: o3k_kernel::RequiredAuditPublisher,
     coordination: Option<(
         Arc<dyn o3k_store::CoordinationRepository>,
         o3k_store::ControllerId,
