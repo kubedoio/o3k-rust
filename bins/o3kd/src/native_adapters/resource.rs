@@ -1920,8 +1920,12 @@ impl ResourceApplication for GenericResourceApplication {
         _descriptor: &ResourceDescriptor,
         auth: &o3k_kernel::AuthContext,
         id: &str,
-        limit: usize,
-    ) -> Result<Vec<o3k_native_api::resource::RelationshipView>, ResourceApplicationError> {
+        query: &o3k_native_api::pagination::ResourceQuery,
+        cursors: &o3k_native_api::pagination::CursorConfig,
+    ) -> Result<
+        o3k_native_api::pagination::ResourcePage<o3k_native_api::resource::RelationshipView>,
+        ResourceApplicationError,
+    > {
         let parent = Uuid::parse_str(id).map_err(|_| ResourceApplicationError::NotFound)?;
         let record = self
             .store
@@ -1934,17 +1938,20 @@ impl ResourceApplication for GenericResourceApplication {
         if record.project_id != auth.effective_scope().id().as_str() {
             return Err(ResourceApplicationError::NotFound);
         }
-        let bounded = u32::try_from(limit.saturating_add(1))
+        let bounded = u32::try_from(query.limit().saturating_add(1))
             .map_err(|_| ResourceApplicationError::Internal)?;
         let records = self
             .store
-            .list_relationships_page(parent, None, bounded)
+            .list_relationships_page(parent, query.continuation_key(), bounded)
             .await
             .map_err(|_| ResourceApplicationError::Internal)?;
-        if records.len() > limit {
-            return Err(ResourceApplicationError::Conflict);
+        let has_more = records.len() > query.limit();
+        let mut records = records;
+        if has_more {
+            records.truncate(query.limit());
         }
-        records
+        let continuation = records.last().map(|record| record.slot.clone());
+        let items = records
             .into_iter()
             .map(|record| {
                 Ok(o3k_native_api::resource::RelationshipView {
@@ -1957,7 +1964,17 @@ impl ResourceApplication for GenericResourceApplication {
                     child_operation_id: record.child_operation_id.map(|id| id.to_string()),
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        let repository = o3k_native_api::pagination::RepositoryPage::new(
+            items,
+            has_more,
+            continuation,
+            query.limit(),
+        )
+        .map_err(|_| ResourceApplicationError::Internal)?;
+        cursors
+            .complete_page(query, repository)
+            .map_err(|_| ResourceApplicationError::Internal)
     }
 
     async fn delete(
