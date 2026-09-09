@@ -79,8 +79,8 @@ pub(crate) use port::durable::{
     RELATIONSHIP_UNKNOWN, relationship_from_row,
 };
 pub use port::service_repos::{
-    ComputeRepository, IdentityRepository, ImageRepository, KeypairRepository, NetworkRepository,
-    PlacementRepository, VolumeAttachmentRepository,
+    AuditRepository, ComputeRepository, IdentityRepository, ImageRepository, KeypairRepository,
+    NetworkRepository, PlacementRepository, VolumeAttachmentRepository,
 };
 /// Maximum attempts for an observation update contended by a concurrent
 /// SQLite writer. BEGIN IMMEDIATE makes the configured busy_timeout apply, so

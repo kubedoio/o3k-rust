@@ -6,6 +6,7 @@
 use sqlx::SqlitePool;
 use std::sync::Arc;
 
+mod audit_store;
 mod core;
 mod helpers;
 mod identity;

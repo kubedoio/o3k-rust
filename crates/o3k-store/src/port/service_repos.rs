@@ -3,19 +3,43 @@ use uuid::Uuid;
 
 use crate::domain::error::StoreError;
 use crate::domain::records::{
-    CanonicalAddressPoolRecord, CanonicalAddressRealmRecord, CanonicalEndpointRecord,
-    CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord, CanonicalNetworkPolicyRecord,
-    CanonicalNetworkRecord, CanonicalRealmBindingRecord, FederatedBindingRecord,
-    ImageMetadataRecord, KeypairRecord, KeystoneDomainRecord, KeystoneEndpointRecord,
-    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
-    KeystoneServiceRecord, KeystoneUserRecord, NetworkAddressAllocationRecord, NetworkIntentRecord,
-    NetworkRecord, OperatorAssignmentRecord, PlacementAllocationRecord, PlacementIntentRecord,
-    PlacementInventoryRecord, PlacementProviderRecord, PlacementReconcileRecord, PortRecord,
-    ResourceRecord, SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord,
-    SubnetRecord, VolumeAttachmentRecord,
+    AuditEventRecord, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
+    CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord,
+    CanonicalNetworkPolicyRecord, CanonicalNetworkRecord, CanonicalRealmBindingRecord,
+    FederatedBindingRecord, ImageMetadataRecord, KeypairRecord, KeystoneDomainRecord,
+    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
+    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, OperatorAssignmentRecord,
+    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    PlacementProviderRecord, PlacementReconcileRecord, PortRecord, ResourceRecord,
+    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord,
+    VolumeAttachmentRecord,
 };
 use crate::port::durable::DurableStore;
 use crate::quota::QuotaRepository;
+
+/// Durable, scope-aware audit persistence. Implementations must enforce the
+/// page bound in SQL and never materialize the complete history.
+#[async_trait]
+pub trait AuditRepository: Send + Sync {
+    async fn insert_audit_event(&self, event: &AuditEventRecord) -> Result<(), StoreError>;
+    async fn get_audit_event(
+        &self,
+        scope: &str,
+        event_id: &str,
+    ) -> Result<AuditEventRecord, StoreError>;
+    async fn list_audit_events_page(
+        &self,
+        scope: &str,
+        after_event_id: Option<&str>,
+        limit: usize,
+    ) -> Result<crate::RepositoryPage<AuditEventRecord>, StoreError>;
+    async fn prune_audit_events_before(
+        &self,
+        cutoff: &str,
+        limit: usize,
+    ) -> Result<u64, StoreError>;
+}
 
 /// Durable Keystone-compatible identity records used by the identity
 /// application service: deterministic bootstrap seeding (upserts) and the
