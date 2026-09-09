@@ -8,7 +8,7 @@ use crate::{
 use o3k_domain::{Ipv4Prefix, NetworkPlanIntent};
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
-    DecisionReason, NoopAuditSink, OwnershipScope, ResourceId, ResourceTarget, ResourceType,
+    DecisionReason, MemoryAuditSink, OwnershipScope, ResourceId, ResourceTarget, ResourceType,
     ScopeId, ServiceNamespace, StaticAuthorizer,
 };
 use std::{
@@ -594,7 +594,9 @@ impl NetworkService {
             inner,
             lock: Arc::new(tokio::sync::Mutex::new(())),
             authorizer: Arc::new(StaticAuthorizer::standard()),
-            audit_sink: Arc::new(NoopAuditSink),
+            // Unit/test construction uses an explicit in-memory sink; production
+            // composition replaces this with DurableAuditSink via with_audit_sink.
+            audit_sink: Arc::new(MemoryAuditSink::new()),
         };
         service.recover_realm_deletion_operations().await?;
         Ok(service)
