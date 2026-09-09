@@ -109,6 +109,16 @@ pub(crate) const RELATIONSHIP_DELETING: &str = "deleting";
 pub(crate) const RELATIONSHIP_DELETED: &str = "deleted";
 pub(crate) const RELATIONSHIP_UNKNOWN: &str = "unknown";
 
+/// A repository-owned bounded page. `continuation_key` is an internal,
+/// stable key; public APIs must wrap it in their own integrity-protected
+/// cursor before returning it to callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryPage<T> {
+    pub items: Vec<T>,
+    pub has_more: bool,
+    pub continuation_key: Option<String>,
+}
+
 #[async_trait]
 pub trait DurableStore: Send + Sync {
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError>;
@@ -118,6 +128,13 @@ pub trait DurableStore: Send + Sync {
         project_id: &str,
         kind: &str,
     ) -> Result<Vec<ResourceRecord>, StoreError>;
+    async fn list_resources_page(
+        &self,
+        project_id: &str,
+        kind: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<RepositoryPage<ResourceRecord>, StoreError>;
     async fn update_resource(
         &self,
         id: Uuid,

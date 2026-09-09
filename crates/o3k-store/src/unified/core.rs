@@ -5,7 +5,7 @@ use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
     CanonicalOperationRecord, DurableStore, IdempotencyReservation, IdempotencyReservationRequest,
     ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayUpdate, ObservationUpdate,
-    OperationRecord, OperationState, ProviderReference, ResourceRecord, StoreError,
+    OperationRecord, OperationState, ProviderReference, RepositoryPage, ResourceRecord, StoreError,
 };
 
 use super::O3kStore;
@@ -33,6 +33,25 @@ impl DurableStore for O3kStore {
         match self {
             Self::Sqlite(s) => s.list_resources(project_id, kind).await,
             Self::Postgres(s) => s.list_resources(project_id, kind).await,
+        }
+    }
+
+    async fn list_resources_page(
+        &self,
+        project_id: &str,
+        kind: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<RepositoryPage<ResourceRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.list_resources_page(project_id, kind, after_id, limit)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.list_resources_page(project_id, kind, after_id, limit)
+                    .await
+            }
         }
     }
 

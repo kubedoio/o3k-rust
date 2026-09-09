@@ -7,7 +7,7 @@ use crate::{
     ArtifactTransferUpdate, CanonicalOperationRecord, DurableStore, IdempotencyReservation,
     IdempotencyReservationRequest, ImageOverlayIdentity, ImageOverlayOwnershipRecord,
     ImageOverlayState, ImageOverlayUpdate, ObservationUpdate, OperationRecord, OperationState,
-    ProviderReference, ResourceRecord, StoreError,
+    ProviderReference, RepositoryPage, ResourceRecord, StoreError,
     validate_canonical_idempotent_operation_identity,
 };
 
@@ -72,6 +72,37 @@ impl DurableStore for PostgresStore {
         .map_err(StoreError::Database)?;
 
         rows.iter().map(row_to_resource).collect()
+    }
+
+    async fn list_resources_page(
+        &self,
+        project_id: &str,
+        kind: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<RepositoryPage<ResourceRecord>, StoreError> {
+        let fetch_limit = i64::try_from(limit.saturating_add(1))
+            .map_err(|_| StoreError::Corrupt("native page limit overflow".to_owned()))?;
+        let rows = if let Some(after_id) = after_id {
+            sqlx::query("SELECT * FROM resources WHERE project_id = $1 AND kind = $2 AND id > $3 ORDER BY id LIMIT $4").bind(project_id).bind(kind).bind(after_id).bind(fetch_limit).fetch_all(&self.pool).await
+        } else {
+            sqlx::query("SELECT * FROM resources WHERE project_id = $1 AND kind = $2 ORDER BY id LIMIT $3").bind(project_id).bind(kind).bind(fetch_limit).fetch_all(&self.pool).await
+        }.map_err(StoreError::Database)?;
+        let mut items: Vec<_> = rows.iter().map(row_to_resource).collect::<Result<_, _>>()?;
+        let has_more = items.len() > limit;
+        if has_more {
+            items.pop();
+        }
+        let continuation_key = if has_more {
+            items.last().map(|r| r.id.to_string())
+        } else {
+            None
+        };
+        Ok(RepositoryPage {
+            items,
+            has_more,
+            continuation_key,
+        })
     }
 
     async fn update_resource(

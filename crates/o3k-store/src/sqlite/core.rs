@@ -26,7 +26,7 @@ use crate::{
     ComputeRepository, DatabaseHealth, DurableStore, IdempotencyReservation,
     IdempotencyReservationRequest, ImageOverlayIdentity, ImageOverlayOwnershipRecord,
     ImageOverlayState, ImageOverlayUpdate, ObservationUpdate, OperationRecord, OperationState,
-    ProviderReference, ResourceRecord, SQLITE_BUSY_MAX_ATTEMPTS, StoreError,
+    ProviderReference, RepositoryPage, ResourceRecord, SQLITE_BUSY_MAX_ATTEMPTS, StoreError,
     VolumeAttachmentRecord, WalCheckpointMode, is_sqlite_busy, restrict_sqlite_sidecars,
     validate_canonical_idempotent_operation_identity, validate_canonical_lifecycle_update,
     validate_canonical_operation_read, validate_canonical_resource_acceptance,
@@ -998,6 +998,40 @@ impl DurableStore for SqliteStore {
             .await
             .map_err(StoreError::Database)?;
         rows.iter().map(resource_from_row).collect()
+    }
+
+    async fn list_resources_page(
+        &self,
+        project_id: &str,
+        kind: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<RepositoryPage<ResourceRecord>, StoreError> {
+        let fetch_limit = i64::try_from(limit.saturating_add(1))
+            .map_err(|_| StoreError::Corrupt("native page limit overflow".to_owned()))?;
+        let rows = if let Some(after_id) = after_id {
+            sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE project_id = ? AND kind = ? AND id > ? ORDER BY id LIMIT ?").bind(project_id).bind(kind).bind(after_id).bind(fetch_limit).fetch_all(&self.pool).await
+        } else {
+            sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE project_id = ? AND kind = ? ORDER BY id LIMIT ?").bind(project_id).bind(kind).bind(fetch_limit).fetch_all(&self.pool).await
+        }.map_err(StoreError::Database)?;
+        let mut items: Vec<_> = rows
+            .iter()
+            .map(resource_from_row)
+            .collect::<Result<_, _>>()?;
+        let has_more = items.len() > limit;
+        if has_more {
+            items.pop();
+        }
+        let continuation_key = if has_more {
+            items.last().map(|r| r.id.to_string())
+        } else {
+            None
+        };
+        Ok(RepositoryPage {
+            items,
+            has_more,
+            continuation_key,
+        })
     }
 
     async fn update_resource(
