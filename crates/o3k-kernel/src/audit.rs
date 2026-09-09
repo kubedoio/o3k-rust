@@ -207,6 +207,7 @@ impl fmt::Display for AuditEvent {
 }
 
 /// Sink port for recording canonical Cloud Kernel audit events.
+#[async_trait::async_trait]
 pub trait AuditSink: Send + Sync {
     /// Records a canonical audit event. Implementations must be fail-safe and bounded.
     fn record(&self, event: &AuditEvent);
@@ -218,6 +219,44 @@ pub trait AuditSink: Send + Sync {
         Err(crate::KernelError::AuditUnavailable(
             "sink does not provide durable persistence".into(),
         ))
+    }
+
+    /// Asynchronous durability boundary for production sinks. Implementations
+    /// must not resolve successfully before their required persistence has
+    /// committed. The default preserves fail-closed behavior for legacy sinks.
+    async fn record_required_async(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        self.record_required(event)
+    }
+}
+
+/// Production sink backed directly by the durable Audit repository. The
+/// synchronous legacy methods intentionally do not acknowledge durability;
+/// mandatory callers must await `record_required_async`.
+pub struct DurableAuditSink<R: crate::DurableAuditRepository> {
+    repository: std::sync::Arc<R>,
+}
+
+impl<R: crate::DurableAuditRepository> DurableAuditSink<R> {
+    #[must_use]
+    pub fn new(repository: std::sync::Arc<R>) -> Self {
+        Self { repository }
+    }
+}
+
+#[async_trait::async_trait]
+impl<R: crate::DurableAuditRepository> AuditSink for DurableAuditSink<R> {
+    fn record(&self, _event: &AuditEvent) {
+        // Best-effort legacy callers cannot be allowed to imply durability.
+    }
+
+    fn record_required(&self, _event: &AuditEvent) -> Result<(), crate::KernelError> {
+        Err(crate::KernelError::AuditUnavailable(
+            "durable sink requires asynchronous publication".into(),
+        ))
+    }
+
+    async fn record_required_async(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        self.repository.append(event).await
     }
 }
 
