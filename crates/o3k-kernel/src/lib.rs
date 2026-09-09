@@ -31,7 +31,8 @@ pub mod scope;
 
 pub use action::ActionId;
 pub use audit::{
-    AuditEvent, AuditOutcome, AuditSink, EventId, FnAuditSink, MemoryAuditSink, NoopAuditSink,
+    AuditEvent, AuditOutcome, AuditSink, DurableFnAuditSink, EventId, FnAuditSink, MemoryAuditSink,
+    NoopAuditSink,
 };
 pub use auth_context::AuthContext;
 pub use authorization::{

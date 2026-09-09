@@ -210,6 +210,15 @@ impl fmt::Display for AuditEvent {
 pub trait AuditSink: Send + Sync {
     /// Records a canonical audit event. Implementations must be fail-safe and bounded.
     fn record(&self, event: &AuditEvent);
+
+    /// Records an event whose durability is required for acknowledging the
+    /// enclosing operation. The default deliberately fails closed: a legacy
+    /// best-effort sink must never be mistaken for durable audit.
+    fn record_required(&self, _event: &AuditEvent) -> Result<(), crate::KernelError> {
+        Err(crate::KernelError::AuditUnavailable(
+            "sink does not provide durable persistence".into(),
+        ))
+    }
 }
 
 /// Audit sink that forwards recorded events to a closure or function.
@@ -218,6 +227,27 @@ pub struct FnAuditSink<F: Fn(&AuditEvent) + Send + Sync>(pub F);
 impl<F: Fn(&AuditEvent) + Send + Sync> AuditSink for FnAuditSink<F> {
     fn record(&self, event: &AuditEvent) {
         (self.0)(event);
+    }
+}
+
+/// Adapter for a synchronous, already-durable repository transaction. The
+/// callback must return only after the event is committed (or return an error);
+/// no in-memory queue is inserted by this adapter.
+pub struct DurableFnAuditSink<F: Fn(&AuditEvent) -> Result<(), crate::KernelError> + Send + Sync>(
+    pub F,
+);
+
+impl<F: Fn(&AuditEvent) -> Result<(), crate::KernelError> + Send + Sync> AuditSink
+    for DurableFnAuditSink<F>
+{
+    fn record(&self, event: &AuditEvent) {
+        // Best-effort callers retain the historical sink API. Required callers
+        // must use `record_required`, which propagates the commit failure.
+        let _ = (self.0)(event);
+    }
+
+    fn record_required(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        (self.0)(event)
     }
 }
 

@@ -29,4 +29,7 @@ pub enum KernelError {
 
     #[error("unauthorized: {0}")]
     Unauthorized(String),
+
+    #[error("audit persistence unavailable: {0}")]
+    AuditUnavailable(String),
 }
