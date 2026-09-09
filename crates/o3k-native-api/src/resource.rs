@@ -780,7 +780,7 @@ pub async fn list(
         Ok(action) => action,
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
-    if !descriptor.ready {
+    if !state.resource_index.is_ready(descriptor) {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     }
     if let Err(response) = authorize(&state, descriptor, action, &auth.0, None) {
@@ -847,7 +847,7 @@ pub async fn show(
         Ok(action) => action,
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
-    if !descriptor.ready {
+    if !state.resource_index.is_ready(descriptor) {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     }
     if let Err(response) = authorize(&state, descriptor, action, &auth.0, Some(&id)) {

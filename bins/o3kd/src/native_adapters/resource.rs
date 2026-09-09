@@ -390,17 +390,11 @@ impl ResourceApplication for GenericResourceApplication {
                 .map_err(|_| ResourceApplicationError::Internal);
         }
         match descriptor.resource_type.to_string().as_str() {
-            "compute:flavor" => self
-                .compute
-                .flavors_for_auth(auth)
-                .await
-                .map(|items| {
-                    items
-                        .iter()
-                        .map(|item| flavor_json(item, auth.effective_scope().id().as_str()))
-                        .collect()
-                })
-                .map_err(compute_error),
+            // These authorities currently expose only unbounded collection
+            // reads. Refuse the native collection until a repository page
+            // port exists; never turn an unbounded read into a fake bounded
+            // API by truncating in memory.
+            "compute:flavor" => Err(ResourceApplicationError::UnsupportedOperation),
             "compute:server" => self
                 .server
                 .list_servers_page(
@@ -421,43 +415,8 @@ impl ResourceApplication for GenericResourceApplication {
                 .await
                 .map(|items| items.into_iter().map(realm_json).collect())
                 .map_err(generic_read_error),
-            "network:network" => self
-                .network_service
-                .list_canonical_networks(auth)
-                .await
-                .map(|items| items.iter().map(network_json).collect())
-                .map_err(|_| ResourceApplicationError::Internal),
-            "network:floating_ip" => {
-                let allocator = self
-                    .public_allocator
-                    .as_ref()
-                    .ok_or(ResourceApplicationError::NotReady)?;
-                let items = allocator
-                    .list(auth.effective_scope().id().as_str())
-                    .map_err(|_| ResourceApplicationError::Internal)?;
-                let mut result = Vec::with_capacity(items.len());
-                for item in items {
-                    let record = self.store.get_resource(item.allocation_id).await.ok();
-                    let spec = record.as_ref().and_then(|r| {
-                        serde_json::from_str::<serde_json::Value>(&r.desired_state).ok()
-                    });
-                    result.push(floating_ip_json(
-                        &item,
-                        Some(
-                            self.external_realm_id(auth.effective_scope().id().as_str())
-                                .await?,
-                        ),
-                        auth.effective_scope().id().as_str(),
-                        spec.as_ref()
-                            .and_then(|v| v.get("migration_id"))
-                            .and_then(serde_json::Value::as_str),
-                        spec.as_ref()
-                            .and_then(|v| v.get("source_key"))
-                            .and_then(serde_json::Value::as_str),
-                    ));
-                }
-                Ok(result)
-            }
+            "network:network" => Err(ResourceApplicationError::UnsupportedOperation),
+            "network:floating_ip" => Err(ResourceApplicationError::UnsupportedOperation),
             "volume:volume" => self
                 .store
                 .list_volumes_page(
@@ -469,23 +428,27 @@ impl ResourceApplication for GenericResourceApplication {
                 .map(|items| items.iter().map(native_volume_json).collect())
                 .map_err(|_| ResourceApplicationError::Internal),
             "volume:volume_attachment" => {
-                let items = self
-                    .store
-                    .list_volume_attachments_v1(auth.effective_scope().id().as_str())
-                    .await
-                    .map_err(|_| ResourceApplicationError::Internal)?;
-                let mut result = Vec::new();
-                for item in items {
-                    if item.attachment.state == VolumeAttachmentState::Attached {
-                        let resource = self
-                            .store
-                            .get_resource(item.attachment.id.as_uuid())
-                            .await
-                            .ok();
-                        result.push(native_attachment_json(&item, resource.as_ref()));
+                return Err(ResourceApplicationError::UnsupportedOperation);
+                #[allow(unreachable_code)]
+                {
+                    let items = self
+                        .store
+                        .list_volume_attachments_v1(auth.effective_scope().id().as_str())
+                        .await
+                        .map_err(|_| ResourceApplicationError::Internal)?;
+                    let mut result = Vec::new();
+                    for item in items {
+                        if item.attachment.state == VolumeAttachmentState::Attached {
+                            let resource = self
+                                .store
+                                .get_resource(item.attachment.id.as_uuid())
+                                .await
+                                .ok();
+                            result.push(native_attachment_json(&item, resource.as_ref()));
+                        }
                     }
+                    Ok(result)
                 }
-                Ok(result)
             }
             _ => Err(ResourceApplicationError::NotFound),
         }
