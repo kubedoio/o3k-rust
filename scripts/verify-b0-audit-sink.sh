@@ -42,16 +42,16 @@ fi
 # Production-capable constructors must not silently install an in-memory
 # required publisher. Test fixtures may opt in explicitly, but a constructor
 # used by production composition must require the durable capability.
-if rg -n 'audit_sink:\s*Arc::new\(MemoryAuditSink::new\(\)\)' \
-  crates/o3k-compute/src/construction.rs \
-  crates/o3k-image/src/lib.rs \
-  crates/o3k-network/src/service/canonical.rs; then
+if rg -n 'audit_sink:\s*Arc::new\((MemoryAuditSink|FnAuditSink|DurableFnAuditSink|NoopAuditSink)' \
+  crates bins --glob '*.rs' --glob '!**/tests/**' --glob '!**/*test*.rs'; then
   echo 'FAIL: production-capable constructor installs implicit MemoryAuditSink' >&2
   exit 1
 fi
 
 echo 'B0-S01 DurableAuditSink production implementation          PASS'
 echo 'B0-S02 required async publication waits for durability     PASS'
+echo 'B0-S03 required/test construction separated                PASS'
 echo 'B0-S04 mandatory production callers migrated               PASS'
 echo 'B0-S05 production composition uses durable sink             PASS'
 echo 'B0-S06 weak AuditSink injection structurally blocked        PASS'
+echo 'B0-S07 production Noop/Memory fallback absent               PASS'

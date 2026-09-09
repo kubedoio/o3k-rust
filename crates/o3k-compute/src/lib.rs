@@ -541,7 +541,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        Ok(ComputeService::new(
+        Ok(ComputeService::new_for_test(
             Arc::new(o3k_store::testkit::open_file(&path).await?),
             Arc::new(FakeComputeProvider::new()),
         ))
@@ -684,8 +684,9 @@ mod tests {
             )
             .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
-        let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
-            .with_scheduler(Scheduler::new(placement.clone()));
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_scheduler(Scheduler::new(placement.clone()));
         let server = service
             .create_server(
                 "project-a",
@@ -740,7 +741,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let store: Arc<dyn ComputeRepository> =
             Arc::new(o3k_store::testkit::open_file(&path).await?);
-        let service = ComputeService::new(store, Arc::new(FakeComputeProvider::new()));
+        let service = ComputeService::new_for_test(store, Arc::new(FakeComputeProvider::new()));
         let flavor = service
             .create_flavor("project-a", "custom.small".to_owned(), 1, 1024, 5)
             .await?;
@@ -761,7 +762,7 @@ mod tests {
                 .iter()
                 .any(|value| value == &flavor)
         );
-        let reopened = ComputeService::new(
+        let reopened = ComputeService::new_for_test(
             Arc::new(o3k_store::testkit::open_file(&path).await?),
             Arc::new(FakeComputeProvider::new()),
         );
@@ -941,7 +942,7 @@ mod tests {
         let store: Arc<dyn ComputeRepository> =
             Arc::new(o3k_store::testkit::open_file(&path).await?);
         let provider = Arc::new(FakeComputeProvider::new());
-        let service = ComputeService::new(store.clone(), provider.clone());
+        let service = ComputeService::new_for_test(store.clone(), provider.clone());
         let flavor = service.flavors()[0].id;
         let server = service
             .create_server(
@@ -1248,8 +1249,9 @@ mod tests {
                 )]),
             )
             .await?;
-        let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
-            .with_scheduler(Scheduler::new(placement.clone()));
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_scheduler(Scheduler::new(placement.clone()));
         let keypair = service
             .create_keypair(
                 "user-a",
@@ -1439,7 +1441,7 @@ mod tests {
                 ]),
             )
             .await?;
-        let service = ComputeService::new(store.clone(), provider.clone())
+        let service = ComputeService::new_for_test(store.clone(), provider.clone())
             .with_scheduler(Scheduler::new(placement.clone()));
         let keypair = service
             .create_keypair(
@@ -1762,7 +1764,7 @@ mod tests {
         let raw_store = o3k_store::testkit::open_file(&path).await?;
         let store: Arc<dyn ComputeRepository> = Arc::new(raw_store.clone());
         let placement_store: Arc<dyn o3k_store::PlacementRepository> = Arc::new(raw_store);
-        let service = ComputeService::new(store.clone(), provider);
+        let service = ComputeService::new_for_test(store.clone(), provider);
         let request = CreateInstanceRequest {
             operation_id: Uuid::now_v7(),
             o3k_server_id: Uuid::now_v7(),
@@ -2207,7 +2209,7 @@ mod tests {
         let _ = std::fs::remove_file(&database_path);
         let store: Arc<dyn ComputeRepository> =
             Arc::new(o3k_store::testkit::open_file(&database_path).await?);
-        let service = ComputeService::new(store.clone(), provider);
+        let service = ComputeService::new_for_test(store.clone(), provider);
         let resource_id = Uuid::now_v7();
         let operation_id = Uuid::now_v7();
         let provider_operation_id = Uuid::now_v7();
@@ -2567,7 +2569,7 @@ mod tests {
         let store: Arc<dyn ComputeRepository> =
             Arc::new(o3k_store::testkit::open_file(&path).await?);
         let provider = Arc::new(EmptyRegistryUntilRegisteredProvider::new());
-        let service = ComputeService::new(store.clone(), provider.clone());
+        let service = ComputeService::new_for_test(store.clone(), provider.clone());
         let request = CreateInstanceRequest {
             operation_id: Uuid::now_v7(),
             o3k_server_id: Uuid::now_v7(),
@@ -2803,7 +2805,7 @@ mod tests {
                 ]),
             )
             .await?;
-        let service = ComputeService::new(store.clone(), provider.clone())
+        let service = ComputeService::new_for_test(store.clone(), provider.clone())
             .with_scheduler(Scheduler::new(placement.clone()));
         let keypair = service
             .create_keypair(
@@ -3249,8 +3251,9 @@ mod tests {
         let store: Arc<dyn ComputeRepository> =
             Arc::new(o3k_store::testkit::open_file(&database_path).await?);
         let projector = Arc::new(RecordingProjector::default());
-        let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
-            .with_binding_projector(projector.clone());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
         let request = CreateInstanceRequest {
             operation_id: Uuid::now_v7(),
             o3k_server_id: Uuid::now_v7(),
@@ -3366,8 +3369,9 @@ mod tests {
         let store: Arc<dyn ComputeRepository> =
             Arc::new(o3k_store::testkit::open_file(&database_path).await?);
         let projector = Arc::new(RecordingProjector::default());
-        let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
-            .with_binding_projector(projector.clone());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
         let request = CreateInstanceRequest {
             operation_id: Uuid::now_v7(),
             o3k_server_id: Uuid::now_v7(),
@@ -3475,8 +3479,9 @@ mod tests {
         let store: Arc<dyn ComputeRepository> =
             Arc::new(o3k_store::testkit::open_file(&database_path).await?);
         let projector = Arc::new(RecordingProjector::default());
-        let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
-            .with_binding_projector(projector.clone());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_binding_projector(projector.clone());
         let flavor = service
             .create_flavor("project-a", "tiny".to_owned(), 1, 512, 1)
             .await?;
@@ -3571,8 +3576,9 @@ mod tests {
         let config_drive_root =
             std::env::temp_dir().join(format!("o3k-compute-config-drive-{}", Uuid::now_v7()));
         let config_drive = o3k_config_drive::ConfigDriveStore::open(&config_drive_root)?;
-        let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
-            .with_config_drive_cleaner(config_drive.clone());
+        let service =
+            ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()))
+                .with_config_drive_cleaner(config_drive.clone());
 
         // The already-deleted shortcut: a server whose delete completed in a
         // previous run still owns config-drive media on this control plane.
@@ -3785,7 +3791,7 @@ mod tests {
             )
             .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
-        let service = ComputeService::new(
+        let service = ComputeService::new_for_test(
             Arc::new(raw_store) as Arc<dyn ComputeRepository>,
             Arc::new(FakeComputeProvider::new()),
         )
@@ -3899,7 +3905,7 @@ mod tests {
             )
             .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
-        let service = ComputeService::new(
+        let service = ComputeService::new_for_test(
             Arc::new(raw_store) as Arc<dyn ComputeRepository>,
             Arc::new(FakeComputeProvider::new()),
         )
@@ -4014,7 +4020,7 @@ mod tests {
             .register_provider("node-b", inventory(3))
             .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
-        let service = ComputeService::new(
+        let service = ComputeService::new_for_test(
             Arc::new(raw_store) as Arc<dyn ComputeRepository>,
             Arc::new(FakeComputeProvider::new()),
         )
@@ -4120,9 +4126,9 @@ mod tests {
             )
             .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
-        let service_a = ComputeService::new(store_a, Arc::new(FakeComputeProvider::new()))
+        let service_a = ComputeService::new_for_test(store_a, Arc::new(FakeComputeProvider::new()))
             .with_scheduler(Scheduler::new(placement_a.clone()));
-        let service_b = ComputeService::new(store_b, Arc::new(FakeComputeProvider::new()))
+        let service_b = ComputeService::new_for_test(store_b, Arc::new(FakeComputeProvider::new()))
             .with_scheduler(Scheduler::new(placement_b));
         let flavor = service_a.flavors()[1].id;
         let left = service_a.create_server(
@@ -4381,7 +4387,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let store: Arc<dyn ComputeRepository> =
             Arc::new(o3k_store::testkit::open_file(&path).await?);
-        let service = ComputeService::new(store, fake.clone());
+        let service = ComputeService::new_for_test(store, fake.clone());
         let flavor = service.flavors()[0].id;
         let first = service
             .create_server(
@@ -4610,7 +4616,7 @@ mod tests {
         // The compute service is constructed once; the scheduler reaches the
         // repository through the failing wrapper, so the release failure is
         // injected before the first delete and the retry succeeds.
-        let service = ComputeService::new(
+        let service = ComputeService::new_for_test(
             Arc::new(raw_store) as Arc<dyn ComputeRepository>,
             Arc::new(FakeComputeProvider::new()),
         )
@@ -4766,7 +4772,7 @@ mod tests {
             ))
             .await;
 
-        let service = ComputeService::new(
+        let service = ComputeService::new_for_test(
             Arc::new(raw_store) as Arc<dyn ComputeRepository>,
             Arc::new(FakeComputeProvider::new()),
         )
@@ -4799,7 +4805,7 @@ mod tests {
         let store: Arc<dyn ComputeRepository> =
             Arc::new(o3k_store::testkit::open_file(&database_path).await?);
         let provider = Arc::new(FakeComputeProvider::new());
-        let service = ComputeService::new(store, provider.clone());
+        let service = ComputeService::new_for_test(store, provider.clone());
 
         let non_existent_id = Uuid::now_v7();
         assert!(matches!(
@@ -4881,7 +4887,7 @@ mod tests {
                 ]),
             )
             .await?;
-        let service = ComputeService::new(store, provider.clone())
+        let service = ComputeService::new_for_test(store, provider.clone())
             .with_scheduler(Scheduler::new(placement.clone()));
 
         // Create a server under the durable project ID used by TestLab.
@@ -4986,7 +4992,7 @@ mod tests {
                 ]),
             )
             .await?;
-        let service = ComputeService::new(store, provider.clone())
+        let service = ComputeService::new_for_test(store, provider.clone())
             .with_scheduler(Scheduler::new(placement.clone()));
 
         let server = service
@@ -5130,7 +5136,7 @@ mod tests {
         use o3k_store::DurableStore;
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
         let provider = Arc::new(FakeComputeProvider::default());
-        let service = ComputeService::new(store.clone(), provider.clone());
+        let service = ComputeService::new_for_test(store.clone(), provider.clone());
         let auth = test_compute_auth("project-a", "user-a", "member");
         let input = ServerCreateInput {
             user_id: "user-a".into(),
@@ -5213,7 +5219,7 @@ mod tests {
         // caller must use a NEW key to create a subsequent lifecycle.
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
         let provider = Arc::new(FakeComputeProvider::default());
-        let service = ComputeService::new(store.clone(), provider.clone());
+        let service = ComputeService::new_for_test(store.clone(), provider.clone());
         let auth = test_compute_auth("project-a", "user-a", "member");
         let input = ServerCreateInput {
             user_id: "user-a".into(),
@@ -5284,7 +5290,7 @@ mod tests {
         use o3k_store::DurableStore;
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
         let provider = Arc::new(FakeComputeProvider::default());
-        let service = ComputeService::new(store.clone(), provider.clone());
+        let service = ComputeService::new_for_test(store.clone(), provider.clone());
         let auth = test_compute_auth("project-a", "user-a", "member");
         let input_a = ServerCreateInput {
             user_id: "user-a".into(),
@@ -5366,7 +5372,7 @@ mod tests {
         // CANONICAL INVARIANT: a context with mismatched actor is rejected.
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
         let provider = Arc::new(FakeComputeProvider::default());
-        let service = ComputeService::new(store.clone(), provider.clone());
+        let service = ComputeService::new_for_test(store.clone(), provider.clone());
         let auth = test_compute_auth("project-a", "user-a", "member");
         let input = ServerCreateInput {
             user_id: "user-a".into(),
@@ -5433,7 +5439,7 @@ mod tests {
         use o3k_store::DurableStore;
         let fake = Arc::new(FakeComputeProvider::new());
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = ComputeService::new(store.clone(), fake.clone());
+        let service = ComputeService::new_for_test(store.clone(), fake.clone());
         let auth = test_compute_auth("project-a", "user-a", "member");
         let input = ServerCreateInput {
             user_id: "user-a".into(),
@@ -5527,7 +5533,7 @@ mod tests {
         // InvalidRequest.
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
         let provider = Arc::new(FakeComputeProvider::default());
-        let service = ComputeService::new(store.clone(), provider.clone());
+        let service = ComputeService::new_for_test(store.clone(), provider.clone());
         let auth = test_compute_auth("project-a", "user-a", "member");
         let input = ServerCreateInput {
             user_id: "user-a".into(),
@@ -5568,7 +5574,7 @@ mod tests {
         // InvalidRequest.
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
         let provider = Arc::new(FakeComputeProvider::default());
-        let service = ComputeService::new(store.clone(), provider.clone());
+        let service = ComputeService::new_for_test(store.clone(), provider.clone());
         let auth = test_compute_auth("project-a", "user-a", "member");
         // First create a server so we have something to pass to delete
         let input = ServerCreateInput {
@@ -5750,7 +5756,7 @@ mod tests {
 
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
         let provider = Arc::new(FakeComputeProvider::default());
-        let service = ComputeService::new(store.clone(), provider.clone());
+        let service = ComputeService::new_for_test(store.clone(), provider.clone());
 
         let scope_a = OwnershipScope::project(ScopeId::new_unchecked("proj-a"), None, None);
 
@@ -5953,7 +5959,7 @@ mod tests {
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
         let provider = Arc::new(FakeComputeProvider::new());
         let audit_sink = Arc::new(MemoryAuditSink::new());
-        let service = ComputeService::new(store.clone(), provider.clone())
+        let service = ComputeService::new_for_test(store.clone(), provider.clone())
             .with_required_audit_publisher(audit_sink.clone());
 
         let scope = OwnershipScope::project(ScopeId::new_unchecked("proj-audit"), None, None);
@@ -6062,7 +6068,7 @@ mod tests {
 
         let provider = Arc::new(FakeComputeProvider::new());
         let audit_sink = Arc::new(MemoryAuditSink::new());
-        let service = ComputeService::new(store.clone(), provider.clone())
+        let service = ComputeService::new_for_test(store.clone(), provider.clone())
             .with_scheduler(Scheduler::new(placement.clone()))
             .with_required_audit_publisher(audit_sink.clone());
 
@@ -6230,11 +6236,8 @@ mod tests {
         let epoch_b = o3k_store::ControllerEpoch::new("epoch-b");
 
         let provider = Arc::new(FakeComputeProvider::new());
-        let service = ComputeService::new(store.clone(), provider.clone()).with_coordination(
-            coord.clone(),
-            ctrl_a.clone(),
-            epoch_a.clone(),
-        );
+        let service = ComputeService::new_for_test(store.clone(), provider.clone())
+            .with_coordination(coord.clone(), ctrl_a.clone(), epoch_a.clone());
 
         // 1. When Controller B holds the attachment reconciler lease, Controller A skips
         let busy_lease = coord

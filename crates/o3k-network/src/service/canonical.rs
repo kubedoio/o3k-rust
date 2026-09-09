@@ -573,6 +573,7 @@ impl NetworkService {
     pub async fn open(
         root: impl Into<PathBuf>,
         repository: Arc<dyn o3k_store::NetworkRepository>,
+        audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher>,
     ) -> Result<Self, NetworkError> {
         let root = root.into();
         fs::create_dir_all(&root).map_err(|source| {
@@ -594,12 +595,19 @@ impl NetworkService {
             inner,
             lock: Arc::new(tokio::sync::Mutex::new(())),
             authorizer: Arc::new(StaticAuthorizer::standard()),
-            // Unit/test construction uses an explicit in-memory sink; production
-            // composition replaces this test publisher with DurableAuditSink.
-            audit_sink: Arc::new(MemoryAuditSink::new()),
+            audit_sink,
         };
         service.recover_realm_deletion_operations().await?;
         Ok(service)
+    }
+
+    /// Explicit test construction with an in-memory required publisher.
+    #[doc(hidden)]
+    pub async fn open_for_test(
+        root: impl Into<PathBuf>,
+        repository: Arc<dyn o3k_store::NetworkRepository>,
+    ) -> Result<Self, NetworkError> {
+        Self::open(root, repository, Arc::new(MemoryAuditSink::new())).await
     }
 
     /// Rebuilds one endpoint's effective policy from canonical reusable policy

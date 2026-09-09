@@ -54,7 +54,7 @@ async fn build_two_tenant_app() -> Result<TwoTenantHarness, Box<dyn std::error::
         .await
         .map_err(|error| error.to_string())?;
     let client = Arc::new(client);
-    let compute = ComputeService::new(store.clone(), provider.clone())
+    let compute = ComputeService::new_for_test(store.clone(), provider.clone())
         .with_attachment_provider(client.clone());
     let identity = TokenService::load(
         store.clone(),

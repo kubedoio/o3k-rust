@@ -22,7 +22,11 @@ impl ComputeService {
     }
 
     #[must_use]
-    pub fn new<P>(store: Arc<dyn ComputeRepository>, provider: Arc<P>) -> Self
+    pub fn new<P>(
+        store: Arc<dyn ComputeRepository>,
+        provider: Arc<P>,
+        audit_sink: Arc<dyn RequiredAuditPublisher>,
+    ) -> Self
     where
         Arc<P>: Into<ProviderBackend>,
     {
@@ -40,12 +44,20 @@ impl ComputeService {
             binding_projector: None,
             config_drive_cleaner: None,
             authorizer: Arc::new(StaticAuthorizer::standard()),
-            // The constructor default is a test-safe in-memory sink. The
-            // production composition root must (and does) replace it with
-            // `DurableAuditSink` before exposing any service.
-            audit_sink: Arc::new(MemoryAuditSink::new()),
+            audit_sink,
             coordination: None,
         }
+    }
+
+    /// Explicit test construction with an in-memory required publisher.
+    /// Production callers must use [`ComputeService::new`] and provide the
+    /// durable publisher explicitly.
+    #[doc(hidden)]
+    pub fn new_for_test<P>(store: Arc<dyn ComputeRepository>, provider: Arc<P>) -> Self
+    where
+        Arc<P>: Into<ProviderBackend>,
+    {
+        Self::new(store, provider, Arc::new(MemoryAuditSink::new()))
     }
 
     #[must_use]

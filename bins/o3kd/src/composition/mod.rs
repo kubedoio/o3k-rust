@@ -310,14 +310,18 @@ pub async fn build_composition(
         config.data_dir.join("images"),
         o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
         image_repository,
+        audit_sink.clone(),
     )
     .await?
     .with_required_audit_publisher(audit_sink.clone());
     let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
-    let network_service =
-        o3k_network::NetworkService::open(config.data_dir.join("network"), network_repository)
-            .await?
-            .with_required_audit_publisher(audit_sink.clone());
+    let network_service = o3k_network::NetworkService::open(
+        config.data_dir.join("network"),
+        network_repository,
+        audit_sink.clone(),
+    )
+    .await?
+    .with_required_audit_publisher(audit_sink.clone());
     let config_drive_root = config.data_dir.join("config-drive");
     let config_drive_store = o3k_config_drive::ConfigDriveStore::open(&config_drive_root)?;
     let console_service = o3k_console::ConsoleService::open(config.data_dir.join("console"))?;
@@ -425,6 +429,7 @@ pub async fn build_composition(
                 )
                 .with_artifact_resolver(resolver),
             ),
+            audit_sink.clone(),
         )
         .with_binding_projector(binding_projector.clone())
         .with_config_drive_cleaner(config_drive_store.clone())
@@ -436,6 +441,7 @@ pub async fn build_composition(
             o3k_config::Provider::Fake => o3k_compute::ComputeService::new(
                 store.clone(),
                 Arc::new(o3k_provider::FakeComputeProvider::new()),
+                audit_sink.clone(),
             )
             .with_binding_projector(binding_projector.clone()),
             o3k_config::Provider::CellHv => {
@@ -453,8 +459,12 @@ pub async fn build_composition(
                     client_key: config.cellhv_client_key.clone(),
                 })
                 .await?;
-                o3k_compute::ComputeService::new(store.clone(), Arc::new(provider))
-                    .with_binding_projector(binding_projector.clone())
+                o3k_compute::ComputeService::new(
+                    store.clone(),
+                    Arc::new(provider),
+                    audit_sink.clone(),
+                )
+                .with_binding_projector(binding_projector.clone())
             }
             o3k_config::Provider::Agent => unreachable!("agent provider handled above"),
         }
@@ -1361,7 +1371,7 @@ mod tests {
         let sqlite_path = root.with_extension("sqlite");
         std::fs::create_dir_all(&root)?;
         let store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
-        let image = o3k_image::ImageService::open(
+        let image = o3k_image::ImageService::open_for_test(
             root.join("images"),
             o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
             store.clone(),
@@ -1370,7 +1380,8 @@ mod tests {
         let config_drive = o3k_config_drive::ConfigDriveStore::open(root.join("config-drive"))?;
         let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
         let network =
-            o3k_network::NetworkService::open(root.join("network"), network_repository).await?;
+            o3k_network::NetworkService::open_for_test(root.join("network"), network_repository)
+                .await?;
         let public_address: std::net::Ipv4Addr = "198.51.100.10".parse()?;
         let public_allocator = o3k_network::PublicAddressAllocator::open(
             root.join("public-addresses"),
@@ -1539,7 +1550,7 @@ mod tests {
         let sqlite_path = root.with_extension("sqlite");
         std::fs::create_dir_all(&root)?;
         let store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
-        let image = o3k_image::ImageService::open(
+        let image = o3k_image::ImageService::open_for_test(
             root.join("images"),
             o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
             store.clone(),
@@ -1548,7 +1559,8 @@ mod tests {
         let config_drive = o3k_config_drive::ConfigDriveStore::open(root.join("config-drive"))?;
         let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
         let network =
-            o3k_network::NetworkService::open(root.join("network"), network_repository).await?;
+            o3k_network::NetworkService::open_for_test(root.join("network"), network_repository)
+                .await?;
         let resolver = DaemonCreateResolver {
             store: store.clone(),
             image,
@@ -1627,7 +1639,8 @@ mod tests {
         let store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
         let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
         let network =
-            o3k_network::NetworkService::open(root.join("network"), network_repository).await?;
+            o3k_network::NetworkService::open_for_test(root.join("network"), network_repository)
+                .await?;
         let net = network
             .create_network_for_project("project-a", "terminal".to_owned())
             .await?;
@@ -1740,7 +1753,8 @@ mod tests {
         let store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
         let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
         let network =
-            o3k_network::NetworkService::open(root.join("network"), network_repository).await?;
+            o3k_network::NetworkService::open_for_test(root.join("network"), network_repository)
+                .await?;
         let projector = NetworkBindingProjector {
             network: network.clone(),
             registry: Arc::new(o3k_compute_agent::NodeRegistry::default()),

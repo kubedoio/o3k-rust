@@ -249,7 +249,7 @@ async fn native_volume_projection_requires_durable_attachment_workflow()
         Duration::from_secs(3600),
     )
     .await?;
-    let compute = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()));
+    let compute = ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()));
     let storage_provider = Arc::new(RecoveryProvider::default());
     let state = AppState::new()
         .with_identity(identity)
@@ -414,7 +414,7 @@ async fn delete_missing_volume_is_404_not_an_existence_oracle()
         Duration::from_secs(3600),
     )
     .await?;
-    let compute = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()));
+    let compute = ComputeService::new_for_test(store.clone(), Arc::new(FakeComputeProvider::new()));
     let storage_provider = Arc::new(RecoveryProvider::default());
     let state = AppState::new()
         .with_identity(identity)

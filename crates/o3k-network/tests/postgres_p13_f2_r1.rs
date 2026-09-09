@@ -45,7 +45,7 @@ async fn postgres_p13_f2_r1_reconstructs_and_recovers_realm_cleanup()
             .expect("connect O3K PostgreSQL store"),
     );
     let root = runtime_root();
-    let service = NetworkService::open(&root, store.clone())
+    let service = NetworkService::open_for_test(&root, store.clone())
         .await
         .expect("open network service");
     let network = service
@@ -135,7 +135,7 @@ async fn postgres_p13_f2_r1_reconstructs_and_recovers_realm_cleanup()
         .expect("unknown observation");
     drop(service);
 
-    let reopened = NetworkService::open(&root, store.clone())
+    let reopened = NetworkService::open_for_test(&root, store.clone())
         .await
         .expect("reopen network service");
     let replay_after_restart = reopened
@@ -191,7 +191,7 @@ async fn postgres_p13_f3_fresh_runtime_reconstructs_policy_and_zero_realm_networ
 
     let store_a = Arc::new(PostgresStore::connect_pool(pool.clone()).await?);
     let root = runtime_root();
-    let service_a = NetworkService::open(&root, store_a.clone()).await?;
+    let service_a = NetworkService::open_for_test(&root, store_a.clone()).await?;
     let project = "p13-f3-postgres";
     let network = service_a
         .create_canonical_network_for_project(project, "network".into())
@@ -245,7 +245,7 @@ async fn postgres_p13_f3_fresh_runtime_reconstructs_policy_and_zero_realm_networ
     drop(store_a);
 
     let store_b = Arc::new(PostgresStore::connect_pool(pool.clone()).await?);
-    let service_b = NetworkService::open(&root, store_b.clone()).await?;
+    let service_b = NetworkService::open_for_test(&root, store_b.clone()).await?;
     let snapshot = service_b
         .reconstruct_canonical_network(project, network.id)
         .await?;

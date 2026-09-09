@@ -59,7 +59,7 @@ async fn network_policy_api_persists_updates_and_deletes_canonical_intent()
     let identity = test_service("http://127.0.0.1:8080").await?;
     let project_id = "eba29e2d-53de-461d-ae91-ede7402713cb";
     let store = std::sync::Arc::new(o3k_store::testkit::open_memory().await?);
-    let network = NetworkService::open(root.join("network"), store).await?;
+    let network = NetworkService::open_for_test(root.join("network"), store).await?;
     let network_record = network
         .create_network_for_project(project_id, "policy-network".to_owned())
         .await?;
@@ -242,7 +242,7 @@ async fn floating_ip_lifecycle_is_project_scoped_and_idempotent()
     let identity = test_service("http://127.0.0.1:8080").await?;
     let project_id = "eba29e2d-53de-461d-ae91-ede7402713cb";
     let store = std::sync::Arc::new(o3k_store::testkit::open_memory().await?);
-    let network = NetworkService::open(root.join("network"), store.clone()).await?;
+    let network = NetworkService::open_for_test(root.join("network"), store.clone()).await?;
     let network_record = network
         .create_network_for_project(project_id, "private".to_owned())
         .await?;
@@ -416,7 +416,7 @@ async fn floating_ip_api_dispatches_a_public_binding_plan_to_the_selected_agent(
     let identity = test_service("http://127.0.0.1:8080").await?;
     let project_id = "eba29e2d-53de-461d-ae91-ede7402713cb";
     let store = std::sync::Arc::new(o3k_store::testkit::open_memory().await?);
-    let network = NetworkService::open(root.join("network"), store).await?;
+    let network = NetworkService::open_for_test(root.join("network"), store).await?;
     let network_record = network
         .create_network_for_project(project_id, "private".to_owned())
         .await?;
@@ -631,7 +631,7 @@ async fn registered_agent_console_reads_fall_back_to_durable_cache()
             ]),
         )
         .await?;
-    let compute = ComputeService::new(store, provider)
+    let compute = ComputeService::new_for_test(store, provider)
         .with_scheduler(o3k_scheduler::Scheduler::new(placement))
         .with_agent_registry(std::sync::Arc::new(registry.clone()));
     let console = o3k_console::ConsoleService::open(format!(
@@ -987,7 +987,7 @@ async fn glance_image_lifecycle_is_project_scoped_and_immutable_after_upload()
     let root = std::path::PathBuf::from(format!("/tmp/o3k-api-images-{}", std::process::id()));
     let identity = test_service("http://127.0.0.1:8080").await?;
     let store = std::sync::Arc::new(o3k_store::testkit::open_memory().await?);
-    let image = ImageService::open(&root, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+    let image = ImageService::open_for_test(&root, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
     let state = o3k_api::AppState::new()
         .with_identity(identity)
         .with_image(image);
@@ -1124,7 +1124,7 @@ async fn glance_upload_rejects_corrupt_qcow2_with_terminal_bad_request()
     let _ = std::fs::remove_dir_all(&root);
     let identity = test_service("http://127.0.0.1:8080").await?;
     let store = std::sync::Arc::new(o3k_store::testkit::open_memory().await?);
-    let image = ImageService::open(&root, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+    let image = ImageService::open_for_test(&root, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
     let state = o3k_api::AppState::new()
         .with_identity(identity)
         .with_image(image);
@@ -1205,7 +1205,7 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
     let state = o3k_api::AppState::new()
         .with_identity(identity)
         .with_network(
-            NetworkService::open(
+            NetworkService::open_for_test(
                 &root,
                 std::sync::Arc::new(o3k_store::testkit::open_memory().await?),
             )
@@ -1472,7 +1472,7 @@ async fn neutron_network_projection_reports_zero_and_multiple_realms()
     let _ = std::fs::remove_dir_all(&root);
     let identity = test_service("http://127.0.0.1:8080").await?;
     let store = std::sync::Arc::new(o3k_store::testkit::open_memory().await?);
-    let network = NetworkService::open(&root, store).await?;
+    let network = NetworkService::open_for_test(&root, store).await?;
     let project_id = "eba29e2d-53de-461d-ae91-ede7402713cb";
     let network_record = network
         .create_canonical_network_for_project(project_id, "projection".to_owned())
@@ -1562,12 +1562,12 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let identity = test_service("http://127.0.0.1:8080").await?;
     let store = std::sync::Arc::new(o3k_store::testkit::open_file(&path).await?);
     let provider = std::sync::Arc::new(FakeComputeProvider::new());
-    let compute = ComputeService::new(store, provider.clone());
+    let compute = ComputeService::new_for_test(store, provider.clone());
     let network_root = std::path::PathBuf::from(format!(
         "/tmp/o3k-api-compute-network-{}",
         uuid::Uuid::now_v7()
     ));
-    let network_service = NetworkService::open(
+    let network_service = NetworkService::open_for_test(
         &network_root,
         std::sync::Arc::new(o3k_store::testkit::open_memory().await?),
     )
@@ -2162,7 +2162,7 @@ async fn nova_volume_attachment_lifecycle_list_create_show_delete()
 
     let store = Arc::new(o3k_store::testkit::open_memory().await?);
     let provider = Arc::new(FakeComputeProvider::new());
-    let compute = ComputeService::new(store, provider);
+    let compute = ComputeService::new_for_test(store, provider);
 
     let state = o3k_api::AppState::new().with_compute(compute);
     state.set_ready(true);
@@ -2212,7 +2212,7 @@ async fn router_detach_dispatches_only_the_requested_gateway_and_finalizes_after
     let identity = test_service("http://127.0.0.1:8080").await?;
     let project_id = "eba29e2d-53de-461d-ae91-ede7402713cb";
     let store = Arc::new(o3k_store::testkit::open_memory().await?);
-    let network = NetworkService::open(root.join("network"), store).await?;
+    let network = NetworkService::open_for_test(root.join("network"), store).await?;
     let network_record = network
         .create_network_for_project(project_id, "router-network".to_owned())
         .await?;

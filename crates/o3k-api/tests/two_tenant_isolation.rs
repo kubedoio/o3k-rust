@@ -59,7 +59,7 @@ async fn build_harness() -> Result<TwoTenantHarness, Box<dyn std::error::Error>>
     let audit_sink = Arc::new(MemoryAuditSink::new());
 
     let provider = Arc::new(FakeComputeProvider::new());
-    let compute = ComputeService::new(store.clone(), provider.clone())
+    let compute = ComputeService::new_for_test(store.clone(), provider.clone())
         .with_required_audit_publisher(audit_sink.clone());
     let identity = TokenService::load(
         store.clone(),
@@ -68,11 +68,11 @@ async fn build_harness() -> Result<TwoTenantHarness, Box<dyn std::error::Error>>
     )
     .await?;
     let image_dir = std::env::temp_dir().join(format!("o3k-img-test-{}", uuid::Uuid::now_v7()));
-    let image = ImageService::open(&image_dir, 1024 * 1024, store.clone())
+    let image = ImageService::open_for_test(&image_dir, 1024 * 1024, store.clone())
         .await?
         .with_required_audit_publisher(audit_sink.clone());
     let net_dir = std::env::temp_dir().join(format!("o3k-net-test-{}", uuid::Uuid::now_v7()));
-    let network = NetworkService::open(&net_dir, store.clone())
+    let network = NetworkService::open_for_test(&net_dir, store.clone())
         .await?
         .with_required_audit_publisher(audit_sink.clone());
 

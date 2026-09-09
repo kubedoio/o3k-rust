@@ -37,7 +37,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         let network = service
             .create_canonical_network_for_project("project-a", "canonical".to_owned())
             .await?;
@@ -119,7 +119,7 @@ mod tests {
 
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let reopened = NetworkService::open_for_test(&path, reopened_store.clone()).await?;
         let snapshot = reopened
             .reconstruct_canonical_network("project-a", network.id)
             .await?;
@@ -161,7 +161,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         let identity = auth("project-a");
         let network = service
             .create_network(&identity, "before".to_owned())
@@ -188,7 +188,7 @@ mod tests {
         drop(store);
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let reopened = NetworkService::open_for_test(&path, reopened_store.clone()).await?;
         let restored = reopened.get_network(&identity, network.id).await?;
         assert_eq!(restored.id, network.id);
         assert_eq!(restored.project_id, "project-a");
@@ -222,7 +222,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         let network = service
             .create_canonical_network_for_project("project-a", "canonical".to_owned())
             .await?;
@@ -284,7 +284,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
         let sink = Arc::new(o3k_kernel::MemoryAuditSink::new());
-        let service = NetworkService::open(&path, store)
+        let service = NetworkService::open_for_test(&path, store)
             .await?
             .with_required_audit_publisher(sink.clone());
         let network = service
@@ -325,7 +325,7 @@ mod tests {
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
         let sink = Arc::new(o3k_kernel::MemoryAuditSink::new());
-        let service = NetworkService::open(&path, store)
+        let service = NetworkService::open_for_test(&path, store)
             .await?
             .with_required_audit_publisher(sink.clone());
         let network = service
@@ -498,8 +498,8 @@ mod tests {
         let _ = fs::remove_file(&sqlite_path);
         let store_a = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
         let store_b = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service_a = NetworkService::open(&path, store_a).await?;
-        let service_b = NetworkService::open(&path, store_b).await?;
+        let service_a = NetworkService::open_for_test(&path, store_a).await?;
+        let service_b = NetworkService::open_for_test(&path, store_b).await?;
         let network = service_a
             .create_canonical_network_for_project("project-a", "races".to_owned())
             .await?;
@@ -569,8 +569,8 @@ mod tests {
         let _ = fs::remove_file(&sqlite_path);
         let store_a = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
         let store_b = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service_a = NetworkService::open(&path, store_a).await?;
-        let service_b = NetworkService::open(&path, store_b).await?;
+        let service_a = NetworkService::open_for_test(&path, store_a).await?;
+        let service_b = NetworkService::open_for_test(&path, store_b).await?;
         let network = service_a
             .create_canonical_network_for_project("project-a", "parent-race".to_owned())
             .await?;
@@ -634,7 +634,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         let network = service
             .create_canonical_network_for_project("project-a", "fenced".to_owned())
             .await?;
@@ -704,7 +704,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         let network = service
             .create_canonical_network_for_project("project-a", "recovery".to_owned())
             .await?;
@@ -761,7 +761,7 @@ mod tests {
         drop(service);
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let reopened = NetworkService::open_for_test(&path, reopened_store.clone()).await?;
         let replay = reopened
             .begin_canonical_realm_deletion_for_project("project-a", realm.id)
             .await?;
@@ -813,7 +813,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         let network = service
             .create_network(&auth("project-a"), "flat".to_owned())
             .await?;
@@ -842,7 +842,7 @@ mod tests {
         drop(store);
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let reopened = NetworkService::open_for_test(&path, reopened_store.clone()).await?;
         assert_eq!(
             reopened.get_port(&auth("project-a"), first.id).await?,
             first
@@ -927,7 +927,7 @@ mod tests {
         });
         fs::write(path.join("metadata.json"), serde_json::to_vec(&legacy)?)?;
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         assert_eq!(service.list_networks(&auth("project-a")).await?.len(), 1);
         assert_eq!(service.list_subnets(&auth("project-a")).await?.len(), 1);
         assert_eq!(service.list_ports(&auth("project-a")).await?.len(), 3);
@@ -953,7 +953,7 @@ mod tests {
         assert_eq!(migrated_subnet.mac_address, "02:00:00:00:00:98");
         assert!(!path.join("metadata.json").exists());
         assert!(path.join("metadata.json.imported").exists());
-        let second = NetworkService::open(&path, store).await?;
+        let second = NetworkService::open_for_test(&path, store).await?;
         assert_eq!(second.list_networks(&auth("project-a")).await?.len(), 1);
         assert_eq!(second.list_subnets(&auth("project-a")).await?.len(), 1);
         assert_eq!(second.list_ports(&auth("project-a")).await?.len(), 3);
@@ -966,7 +966,7 @@ mod tests {
         fs::write(corrupt_path.join("metadata.json"), b"not-json")?;
         let corrupt_store = Arc::new(o3k_store::testkit::open_memory().await?);
         assert!(matches!(
-            NetworkService::open(&corrupt_path, corrupt_store).await,
+            NetworkService::open_for_test(&corrupt_path, corrupt_store).await,
             Err(NetworkError::CorruptMetadata(_))
         ));
         assert!(corrupt_path.join("metadata.json").exists());
@@ -1005,7 +1005,7 @@ mod tests {
         )?;
         let duplicate_store = Arc::new(o3k_store::testkit::open_memory().await?);
         assert!(matches!(
-            NetworkService::open(&duplicate_path, duplicate_store).await,
+            NetworkService::open_for_test(&duplicate_path, duplicate_store).await,
             Err(NetworkError::Conflict)
         ));
         assert!(duplicate_path.join("metadata.json").exists());
@@ -1020,7 +1020,7 @@ mod tests {
         let sqlite_path = path.with_extension("sqlite");
         fs::create_dir_all(&path)?;
         let setup_store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
-        let setup = NetworkService::open(&path, setup_store.clone()).await?;
+        let setup = NetworkService::open_for_test(&path, setup_store.clone()).await?;
         let network = setup
             .create_network(&auth("project-a"), "flat".to_owned())
             .await?;
@@ -1041,8 +1041,8 @@ mod tests {
 
         let store_a = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
         let store_b = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
-        let service_a = NetworkService::open(&path, store_a).await?;
-        let service_b = NetworkService::open(&path, store_b).await?;
+        let service_a = NetworkService::open_for_test(&path, store_a).await?;
+        let service_b = NetworkService::open_for_test(&path, store_b).await?;
         let mut handles = Vec::new();
         for index in 0..12 {
             let service = if index % 2 == 0 {
@@ -1090,7 +1090,7 @@ mod tests {
         let sqlite_path = path.with_extension("sqlite");
         fs::create_dir_all(&path)?;
         let setup_store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
-        let setup = NetworkService::open(&path, setup_store.clone()).await?;
+        let setup = NetworkService::open_for_test(&path, setup_store.clone()).await?;
         let network = setup
             .create_network(&auth("project-a"), "flat".to_owned())
             .await?;
@@ -1146,12 +1146,12 @@ mod tests {
         drop(setup);
         drop(setup_store);
 
-        let service_a = NetworkService::open(
+        let service_a = NetworkService::open_for_test(
             &path,
             Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?),
         )
         .await?;
-        let service_b = NetworkService::open(
+        let service_b = NetworkService::open_for_test(
             &path,
             Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?),
         )
@@ -1209,8 +1209,8 @@ mod tests {
         fs::create_dir_all(&path)?;
         let store_a = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
         let store_b = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
-        let service_a = NetworkService::open(&path, store_a).await?;
-        let service_b = NetworkService::open(&path, store_b).await?;
+        let service_a = NetworkService::open_for_test(&path, store_a).await?;
+        let service_b = NetworkService::open_for_test(&path, store_b).await?;
         let auth_a = auth("project-a");
         let auth_b = auth("project-a");
         // Two writers create a network with the same name: exactly one wins.
@@ -1350,7 +1350,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         let network = service
             .create_network(&auth("project-a"), "flat".to_owned())
             .await?;
@@ -1431,7 +1431,7 @@ mod tests {
         drop(store);
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let reopened = NetworkService::open_for_test(&path, reopened_store.clone()).await?;
         let restored = reopened.get_port(&auth("project-a"), port.id).await?;
         assert_eq!(restored.binding_host.as_deref(), Some("compute-1"));
         assert_eq!(restored.binding_state.as_deref(), Some("bound"));
@@ -1451,7 +1451,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         let network = service
             .create_network(&auth("project-a"), "flat".to_owned())
             .await?;
@@ -1478,7 +1478,7 @@ mod tests {
         drop(store);
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let reopened = NetworkService::open_for_test(&path, reopened_store.clone()).await?;
         let replacement = reopened
             .create_port(&auth("project-a"), network.id, "replacement".to_owned())
             .await?;
@@ -1514,7 +1514,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         let network = service
             .create_network(&auth("project-a"), "flat".to_owned())
             .await?;
@@ -1586,7 +1586,7 @@ mod tests {
         drop(store);
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let reopened = NetworkService::open_for_test(&path, reopened_store.clone()).await?;
         let restored = reopened.get_port(&auth("project-a"), port.id).await?;
         assert_eq!(restored.binding_host, None);
         assert_eq!(restored.binding_state.as_deref(), Some("down"));
@@ -1605,7 +1605,7 @@ mod tests {
         let path = root("validation");
         let _ = fs::remove_dir_all(&path);
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = NetworkService::open(&path, store).await?;
+        let service = NetworkService::open_for_test(&path, store).await?;
         let network = service
             .create_network(&auth("project-a"), "flat".to_owned())
             .await?;
@@ -1672,7 +1672,7 @@ mod tests {
         let path = root("network-quota-isolation");
         let _ = fs::remove_dir_all(&path);
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
 
         let scope_a = OwnershipScope::project(ScopeId::new_unchecked("proj-a"), None, None);
 
@@ -1717,7 +1717,7 @@ mod tests {
         let path = root("network-subnets-ports-quota");
         let _ = fs::remove_dir_all(&path);
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
 
         let scope_a = OwnershipScope::project(ScopeId::new_unchecked("proj-sub-port"), None, None);
         let auth_a = auth("proj-sub-port");
@@ -1809,7 +1809,7 @@ mod tests {
         let path = root("policy-intent");
         let _ = fs::remove_dir_all(&path);
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         let project = "project-a";
         let network = service
             .create_network(&auth(project), "policy-net".to_owned())
@@ -1939,7 +1939,7 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         let _ = fs::remove_file(&sqlite_path);
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         let network = service
             .create_network(&auth("project-a"), "net".to_owned())
             .await?;
@@ -2110,7 +2110,7 @@ mod tests {
         let path = root("gateway-delete-reservation");
         let _ = fs::remove_dir_all(&path);
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         let gateway = service
             .create_l3_gateway_for_project("project-a", "edge".to_owned(), None, true)
             .await?;
@@ -2147,7 +2147,7 @@ mod tests {
         let path = root("gateway-detach-reservation");
         let _ = fs::remove_dir_all(&path);
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = NetworkService::open(&path, store.clone()).await?;
+        let service = NetworkService::open_for_test(&path, store.clone()).await?;
         let network = service
             .create_canonical_network_for_project("project-a", "net".to_owned())
             .await?;
