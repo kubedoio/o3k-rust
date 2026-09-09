@@ -1915,6 +1915,81 @@ impl ResourceApplication for GenericResourceApplication {
         })
     }
 
+    async fn relationships(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+        id: &str,
+        query: &o3k_native_api::pagination::ResourceQuery,
+        cursors: &o3k_native_api::pagination::CursorConfig,
+    ) -> Result<
+        o3k_native_api::pagination::ResourcePage<o3k_native_api::resource::RelationshipView>,
+        ResourceApplicationError,
+    > {
+        let parent = Uuid::parse_str(id).map_err(|_| ResourceApplicationError::NotFound)?;
+        let expected_query_resource = format!("relationship:{}:{}", descriptor.resource_type, id);
+        if query.resource_type() != expected_query_resource
+            || query.scope_id() != auth.effective_scope().id().as_str()
+        {
+            return Err(ResourceApplicationError::NotFound);
+        }
+        let record = self
+            .store
+            .get_resource(parent)
+            .await
+            .map_err(|error| match error {
+                o3k_store::StoreError::ResourceNotFound => ResourceApplicationError::NotFound,
+                _ => ResourceApplicationError::Internal,
+            })?;
+        let descriptor_type = descriptor.resource_type.to_string();
+        let Some(expected_kind) = bounded_store_kind(&descriptor_type) else {
+            return Err(ResourceApplicationError::NotFound);
+        };
+        if record.project_id != auth.effective_scope().id().as_str() || record.kind != expected_kind
+        {
+            return Err(ResourceApplicationError::NotFound);
+        }
+        let bounded = u32::try_from(query.limit().saturating_add(1))
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        let records = self
+            .store
+            .list_relationships_page(parent, query.continuation_key(), bounded)
+            .await
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        let has_more = records.len() > query.limit();
+        let mut records = records;
+        if has_more {
+            records.truncate(query.limit());
+        }
+        let continuation = has_more
+            .then(|| records.last().map(|record| record.slot.clone()))
+            .flatten();
+        let items = records
+            .into_iter()
+            .map(|record| {
+                Ok(o3k_native_api::resource::RelationshipView {
+                    slot: record.slot,
+                    resource_type: record.expected_child_resource_type,
+                    resource_id: record.child_resource_id.map(|id| id.to_string()),
+                    ownership: record.ownership,
+                    state: record.state,
+                    parent_operation_id: record.parent_operation_id.to_string(),
+                    child_operation_id: record.child_operation_id.map(|id| id.to_string()),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let repository = o3k_native_api::pagination::RepositoryPage::new(
+            items,
+            has_more,
+            continuation,
+            query.limit(),
+        )
+        .map_err(|_| ResourceApplicationError::Internal)?;
+        cursors
+            .complete_page(query, repository)
+            .map_err(|_| ResourceApplicationError::Internal)
+    }
+
     async fn delete(
         &self,
         descriptor: &ResourceDescriptor,

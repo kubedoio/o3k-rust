@@ -530,11 +530,25 @@ impl o3k_service_sdk::composition::CompositionHandler for CompositionResourceHan
             .as_str()
             .parse()
             .map_err(|_| o3k_service_sdk::composition::CompositionError::Unauthorized)?;
-        let records = self.store.list_relationships(parent).await.map_err(|_| {
-            o3k_service_sdk::composition::CompositionError::Failed(
-                "relationship listing failed".into(),
-            )
-        })?;
+        // Relationship projection is an internal bounded read used by the
+        // composition contract. Never materialize an unbounded relationship
+        // set; callers needing more than this page must use the versioned
+        // native relationship collection contract.
+        const MAX_RELATIONSHIP_PAGE: u32 = 201;
+        let records = self
+            .store
+            .list_relationships_page(parent, None, MAX_RELATIONSHIP_PAGE)
+            .await
+            .map_err(|_| {
+                o3k_service_sdk::composition::CompositionError::Failed(
+                    "relationship listing failed".into(),
+                )
+            })?;
+        if records.len() == MAX_RELATIONSHIP_PAGE as usize {
+            return Err(o3k_service_sdk::composition::CompositionError::Failed(
+                "relationship collection exceeds bounded page".into(),
+            ));
+        }
         records
             .into_iter()
             .map(|record| {

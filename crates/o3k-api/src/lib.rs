@@ -541,6 +541,10 @@ pub fn router_with_state(state: AppState) -> Router {
                 get(o3k_native_api::network::show_address_realm),
             )
             .route(
+                "/o3k/v1/operations",
+                get(o3k_native_api::operation::list_operations),
+            )
+            .route(
                 "/o3k/v1/operations/{id}",
                 get(o3k_native_api::operation::show_operation),
             );
@@ -553,6 +557,10 @@ pub fn router_with_state(state: AppState) -> Router {
                 "/o3k/v1/{namespace}/{collection}/{id}",
                 get(o3k_native_api::resource::show).delete(o3k_native_api::resource::delete),
             );
+        router = router.route(
+            "/o3k/v1/{namespace}/{collection}/{id}/relationships",
+            get(o3k_native_api::resource::relationships),
+        );
     }
     router
         .layer(axum::middleware::from_fn(compatibility_trace_middleware))

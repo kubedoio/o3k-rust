@@ -133,6 +133,17 @@ impl StaticAuthorizer {
         reg("identity", "ValidateToken", "identity", "token", false);
         reg("identity", "RevokeToken", "identity", "token", false);
 
+        // Cloud Kernel operation visibility is explicitly permissioned; the
+        // reader still applies durable owner-scope concealment below this
+        // policy check.
+        reg(
+            "operation",
+            "ReadOperation",
+            "operation",
+            "operation",
+            false,
+        );
+
         // Image
         reg("image", "ListImages", "image", "image", true);
         reg("image", "CreateImage", "image", "image", true);

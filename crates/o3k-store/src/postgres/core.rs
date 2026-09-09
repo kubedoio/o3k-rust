@@ -952,6 +952,47 @@ impl DurableStore for PostgresStore {
         }
     }
 
+    async fn list_canonical_operations_page(
+        &self,
+        owner_scope: &str,
+        after_id: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<CanonicalOperationRecord>, StoreError> {
+        let rows = sqlx::query("SELECT m.*, o.state FROM canonical_operation_metadata m JOIN operations o ON o.id=m.operation_id WHERE m.owner_scope=$1 AND ($2::text IS NULL OR m.operation_id>$2) ORDER BY m.operation_id LIMIT $3")
+            .bind(owner_scope).bind(after_id.map(|id| id.to_string())).bind(i64::from(limit)).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(CanonicalOperationRecord {
+                    id: Uuid::parse_str(
+                        &row.try_get::<String, _>("operation_id")
+                            .map_err(StoreError::Database)?,
+                    )
+                    .map_err(StoreError::InvalidUuid)?,
+                    service: row.try_get("service").map_err(StoreError::Database)?,
+                    action: row.try_get("action").map_err(StoreError::Database)?,
+                    actor: row.try_get("actor").map_err(StoreError::Database)?,
+                    owner_scope: row.try_get("owner_scope").map_err(StoreError::Database)?,
+                    resource_type: row.try_get("resource_type").map_err(StoreError::Database)?,
+                    resource_id: row.try_get("resource_id").map_err(StoreError::Database)?,
+                    state: OperationState::parse(
+                        &row.try_get::<String, _>("state")
+                            .map_err(StoreError::Database)?,
+                    )?,
+                    attempt: u32::try_from(
+                        row.try_get::<i32, _>("attempt")
+                            .map_err(StoreError::Database)?,
+                    )
+                    .map_err(|_| StoreError::Corrupt("invalid operation attempt".into()))?,
+                    created_at: row.try_get("created_at").map_err(StoreError::Database)?,
+                    started_at: row.try_get("started_at").map_err(StoreError::Database)?,
+                    finished_at: row.try_get("finished_at").map_err(StoreError::Database)?,
+                    error: row.try_get("error").map_err(StoreError::Database)?,
+                    request_id: row.try_get("request_id").map_err(StoreError::Database)?,
+                })
+            })
+            .collect()
+    }
+
     async fn get_provider_reference(
         &self,
         resource_id: Uuid,

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use o3k_native_api::error::NativeReadError;
+use o3k_native_api::pagination::RepositoryPage;
 use o3k_store::DurableStore;
 use uuid::Uuid;
 
@@ -65,6 +66,50 @@ impl o3k_native_api::operation::OperationReader for OperationReaderAdapter {
             return Err(NativeReadError::NotFound);
         }
         Ok(operation)
+    }
+
+    async fn list_operations_page(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+        after_id: Option<Uuid>,
+        limit: usize,
+    ) -> Result<RepositoryPage<o3k_kernel::Operation>, NativeReadError> {
+        if auth.effective_scope().kind() != o3k_kernel::ScopeKind::Project {
+            return Err(NativeReadError::Forbidden);
+        }
+        let fetch_limit =
+            u32::try_from(limit.saturating_add(1)).map_err(|_| NativeReadError::Internal)?;
+        let records = self
+            .store
+            .list_canonical_operations_page(
+                auth.effective_scope().id().as_str(),
+                after_id,
+                fetch_limit,
+            )
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "native operation collection failed");
+                NativeReadError::Internal
+            })?;
+        let has_more = records.len() > limit;
+        let mut records = records;
+        if has_more {
+            records.truncate(limit);
+        }
+        let continuation = has_more
+            .then(|| records.last().map(|record| record.id.to_string()))
+            .flatten();
+        let operations = records
+            .into_iter()
+            .map(|record| {
+                o3k_kernel::Operation::try_from(record).map_err(|error| {
+                    tracing::error!(%error, "invalid canonical operation metadata in collection");
+                    NativeReadError::Internal
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        RepositoryPage::new(operations, has_more, continuation, limit)
+            .map_err(|_| NativeReadError::Internal)
     }
 }
 
@@ -206,15 +251,56 @@ mod operation_visibility_tests {
         let reader = Arc::new(OperationReaderAdapter { store });
         let native = o3k_native_api::NativeApiState::new(
             None,
-            o3k_native_api::pagination::CursorConfig::default(),
+            o3k_native_api::pagination::CursorConfig::new(
+                b"test-only-native-cursor-key-at-least-32-bytes".to_vec(),
+            )
+            .expect("test cursor key"),
             Some(Arc::new(TestIssuer)),
             None,
             None,
             None,
         )
         .expect("test manifest registry is valid")
-        .with_operation_reader(reader);
+        .with_operation_reader(reader)
+        .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
         let app = o3k_api::router_with_state(o3k_api::AppState::new().with_native_api(native));
+
+        let list_request = |project: &str| {
+            Request::builder()
+                .uri("/o3k/v1/operations?limit=1")
+                .header("authorization", format!("Bearer project-{project}"))
+                .body(Body::empty())
+                .expect("list request")
+        };
+        let listed = app
+            .clone()
+            .oneshot(list_request("a"))
+            .await
+            .expect("list response");
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(listed.into_body(), usize::MAX)
+                .await
+                .expect("list body"),
+        )
+        .expect("list json");
+        assert_eq!(listed_body["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(listed_body["items"][0]["id"], id.to_string());
+        assert_eq!(listed_body["items"][0]["service"], "compute");
+
+        let foreign_list = app
+            .clone()
+            .oneshot(list_request("b"))
+            .await
+            .expect("foreign list response");
+        assert_eq!(foreign_list.status(), StatusCode::OK);
+        let foreign_list_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(foreign_list.into_body(), usize::MAX)
+                .await
+                .expect("foreign list body"),
+        )
+        .expect("foreign list json");
+        assert_eq!(foreign_list_body["items"].as_array().map(Vec::len), Some(0));
 
         let request = |project: &str, operation: Uuid| {
             Request::builder()

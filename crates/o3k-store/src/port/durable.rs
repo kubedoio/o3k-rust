@@ -51,6 +51,12 @@ pub trait RelationshipRepository: Send + Sync {
         &self,
         parent_resource_id: Uuid,
     ) -> Result<Vec<ResourceRelationshipRecord>, StoreError>;
+    async fn list_relationships_page(
+        &self,
+        parent_resource_id: Uuid,
+        after_slot: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError>;
     async fn bind_relationship(
         &self,
         parent_resource_id: Uuid,
@@ -242,6 +248,15 @@ pub trait DurableStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<CanonicalOperationRecord, StoreError>;
+    /// Returns at most `limit` canonical operations for one owner scope.
+    /// `after_id` is an opaque page position chosen by the caller; ordering is
+    /// stable by operation ID and filtering is performed in SQL.
+    async fn list_canonical_operations_page(
+        &self,
+        owner_scope: &str,
+        after_id: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<CanonicalOperationRecord>, StoreError>;
     async fn update_canonical_operation_lifecycle(
         &self,
         id: Uuid,
