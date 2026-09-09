@@ -322,22 +322,28 @@ fn generic_external_json(resource: &o3k_store::ResourceRecord) -> serde_json::Va
     })
 }
 
+fn bounded_store_kind(resource_type: &str) -> Option<&str> {
+    match resource_type {
+        "image:image"
+        | "compute:server"
+        | "network:network"
+        | "network:subnet"
+        | "network:port"
+        | "network:security_group"
+        | "network:security_group_rule"
+        | "network:router"
+        | "network:router_interface" => Some(resource_type),
+        // Volumes predate the generic resource envelope and use this
+        // canonical durable kind.
+        "volume:volume" => Some("volume"),
+        _ => None,
+    }
+}
+
 #[async_trait::async_trait]
 impl ResourceApplication for GenericResourceApplication {
     fn supports_collection(&self, descriptor: &ResourceDescriptor) -> bool {
-        matches!(
-            descriptor.resource_type.to_string().as_str(),
-            "image:image"
-                | "compute:server"
-                | "network:network"
-                | "network:subnet"
-                | "network:port"
-                | "network:security_group"
-                | "network:security_group_rule"
-                | "network:router"
-                | "network:router_interface"
-                | "volume:volume"
-        )
+        bounded_store_kind(&descriptor.resource_type.to_string()).is_some()
     }
 
     async fn list_page(
@@ -353,12 +359,8 @@ impl ResourceApplication for GenericResourceApplication {
         {
             return Err(ResourceApplicationError::Forbidden);
         }
-        let store_kind = match query.resource_type() {
-            // Volumes predate the generic resource envelope and use this
-            // canonical durable kind; all other supported resources use their
-            // fully-qualified resource type.
-            "volume:volume" => "volume",
-            kind => kind,
+        let Some(store_kind) = bounded_store_kind(query.resource_type()) else {
+            return Err(ResourceApplicationError::UnsupportedOperation);
         };
         let page = self
             .store
