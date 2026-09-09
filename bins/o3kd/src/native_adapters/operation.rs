@@ -235,7 +235,10 @@ mod operation_visibility_tests {
         let reader = Arc::new(OperationReaderAdapter { store });
         let native = o3k_native_api::NativeApiState::new(
             None,
-            o3k_native_api::pagination::CursorConfig::default(),
+            o3k_native_api::pagination::CursorConfig::new(
+                b"test-only-native-cursor-key-at-least-32-bytes".to_vec(),
+            )
+            .expect("test cursor key"),
             Some(Arc::new(TestIssuer)),
             None,
             None,
