@@ -49,7 +49,7 @@ pub use unified::O3kStore;
 // Re-exports from domain/ and port/ sub-modules
 pub use domain::error::StoreError;
 pub use domain::records::{
-    AgentCommandRecord, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
+    AgentCommandRecord, AuditEventRecord, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
     CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord,
     CanonicalNetworkPolicyRecord, CanonicalNetworkPolicyRuleRecord, CanonicalNetworkRecord,
     CanonicalOperationLifecycleUpdate, CanonicalOperationRecord, CanonicalPolicyAttachmentRecord,

@@ -4,6 +4,28 @@ use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Secret-safe durable audit projection.  This deliberately contains only
+/// canonical identifiers and bounded reason categories; request/provider
+/// payloads are not representable by this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditEventRecord {
+    pub event_id: String,
+    pub timestamp: String,
+    pub request_id: String,
+    pub audit_id: String,
+    pub principal_id: String,
+    pub principal_kind: String,
+    pub effective_scope: String,
+    pub service: String,
+    pub action: String,
+    pub resource_type: Option<String>,
+    pub resource_id: Option<String>,
+    pub owner_scope: Option<String>,
+    pub operation_id: Option<String>,
+    pub outcome: String,
+    pub reason_category: Option<String>,
+}
+
 use super::error::StoreError;
 use super::state::{AgentCommandState, ImageOverlayState, OperationState};
 
