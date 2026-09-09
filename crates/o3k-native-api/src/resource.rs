@@ -9,7 +9,7 @@
 use base64::Engine as _;
 use std::{collections::HashMap, sync::Arc};
 
-use crate::pagination::{CursorPayload, parse_page_size};
+use crate::pagination::{CursorPayload, parse_page_size, validate_page_size};
 use crate::{
     NativeApiState,
     auth::BearerAuth,
@@ -165,6 +165,20 @@ impl ResourceDispatcher {
     }
     pub fn all(&self) -> impl Iterator<Item = &ResourceDescriptor> {
         self.descriptors.values()
+    }
+
+    /// A descriptor is only public when its native collection has a bounded
+    /// implementation.  Manifest declaration alone is not an implementation
+    /// claim; these legacy projections are deliberately withheld until their
+    /// canonical page authority exists.
+    pub(crate) fn collection_supported(descriptor: &ResourceDescriptor) -> bool {
+        !matches!(
+            descriptor.resource_type.to_string().as_str(),
+            "compute:flavor"
+                | "network:network"
+                | "network:floating_ip"
+                | "volume:volume_attachment"
+        )
     }
 
     pub(crate) fn is_ready(&self, descriptor: &ResourceDescriptor) -> bool {
@@ -347,7 +361,14 @@ pub trait ResourceApplication: Send + Sync {
         idempotency_key: Option<&str>,
         expected_generation: i64,
     ) -> Result<MutationResult, ResourceApplicationError> {
-        let _ = (descriptor, auth, id, request, idempotency_key, expected_generation);
+        let _ = (
+            descriptor,
+            auth,
+            id,
+            request,
+            idempotency_key,
+            expected_generation,
+        );
         Err(ResourceApplicationError::UnsupportedOperation)
     }
     async fn relationships(
@@ -990,6 +1011,16 @@ pub async fn list(
     let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
         return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
     };
+    if !ResourceDispatcher::collection_supported(descriptor) {
+        return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response();
+    }
+    if validate_page_size(query.limit.as_deref()).is_err()
+        || query.filter.len() > 16
+        || query.filter.iter().any(|value| value.len() > 256)
+        || query.order != "id.asc"
+    {
+        return ProblemDetails::new(ErrorCode::BadRequest).into_response();
+    }
     let action = match declared_action(descriptor, LifecycleOperation::List) {
         Ok(action) => action,
         Err(error) => return ProblemDetails::new(error).into_response(),
@@ -1003,7 +1034,7 @@ pub async fn list(
     let Some(application) = state.resource_application else {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     };
-    if query.order != "id.asc" || !query.filter.is_empty() {
+    if !query.filter.is_empty() {
         return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response();
     }
     let effective_query_hash = query_hash(&query);

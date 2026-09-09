@@ -471,6 +471,11 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
 
     let mut resource_types: Vec<DiscoveredResourceType> = Vec::new();
     for descriptor in state.resource_index.all() {
+        // Never advertise a manifest-only collection: discovery is an
+        // executable capability contract, not a declaration dump.
+        if !resource::ResourceDispatcher::collection_supported(descriptor) {
+            continue;
+        }
         let mut actions = std::collections::HashMap::new();
         for (op, action) in &descriptor.lifecycle_actions {
             actions.insert(format!("{op:?}").to_lowercase(), action.to_string());

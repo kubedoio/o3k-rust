@@ -19,6 +19,21 @@ pub const DEFAULT_PAGE_SIZE: usize = 50;
 
 /// Maximum page size that the server will accept.
 pub const MAX_PAGE_SIZE: usize = 200;
+/// Reject rather than silently changing a caller's requested bound.  Silent
+/// clamping makes clients believe they received the requested page and can
+/// turn malformed requests into unexpectedly expensive work.
+pub fn validate_page_size(limit_param: Option<&str>) -> Result<usize, &'static str> {
+    match limit_param {
+        None => Ok(DEFAULT_PAGE_SIZE),
+        Some(value) => {
+            let parsed = value.parse::<usize>().map_err(|_| "invalid page size")?;
+            if parsed == 0 || parsed > MAX_PAGE_SIZE {
+                return Err("page size out of bounds");
+            }
+            Ok(parsed)
+        }
+    }
+}
 
 /// Internal cursor payload — never exposed directly to clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +196,15 @@ mod tests {
         assert_eq!(decoded.scope_id, "proj-1");
         assert_eq!(decoded.resource_type, "compute:server");
         assert_eq!(decoded.version, 1);
+    }
+
+    #[test]
+    fn page_size_validation_rejects_silent_fallbacks() {
+        assert_eq!(validate_page_size(None), Ok(DEFAULT_PAGE_SIZE));
+        assert_eq!(validate_page_size(Some("1")), Ok(1));
+        assert!(validate_page_size(Some("0")).is_err());
+        assert!(validate_page_size(Some("201")).is_err());
+        assert!(validate_page_size(Some("not-a-number")).is_err());
     }
 
     #[test]

@@ -392,14 +392,12 @@ impl ResourceApplication for GenericResourceApplication {
         }
         if matches!(
             descriptor.resource_type.to_string().as_str(),
-            "network:network"
-                | "network:subnet"
+            "network:subnet"
                 | "network:port"
                 | "network:security_group"
                 | "network:security_group_rule"
                 | "network:router"
                 | "network:router_interface"
-                | "network:floating_ip"
         ) {
             return self
                 .store
