@@ -71,6 +71,31 @@ impl SqliteStore {
         rows.iter().map(relationship_from_row).collect()
     }
 
+    /// Fetch a bounded, keyset-ordered relationship page.
+    pub async fn list_relationships_page(
+        &self,
+        parent: Uuid,
+        after_slot: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
+        let rows = if let Some(after_slot) = after_slot {
+            sqlx::query("SELECT parent_resource_id,parent_resource_type,slot,expected_child_resource_type,child_resource_id,ownership,parent_operation_id,child_operation_id,owner_scope,state,fingerprint FROM resource_relationships WHERE parent_resource_id=? AND slot>? ORDER BY slot LIMIT ?")
+                .bind(parent.to_string())
+                .bind(after_slot)
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await
+        } else {
+            sqlx::query("SELECT parent_resource_id,parent_resource_type,slot,expected_child_resource_type,child_resource_id,ownership,parent_operation_id,child_operation_id,owner_scope,state,fingerprint FROM resource_relationships WHERE parent_resource_id=? ORDER BY slot LIMIT ?")
+                .bind(parent.to_string())
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await
+        }
+        .map_err(StoreError::Database)?;
+        rows.iter().map(relationship_from_row).collect()
+    }
+
     pub async fn bind_relationship(
         &self,
         parent: Uuid,

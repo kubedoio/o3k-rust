@@ -408,6 +408,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unified_relationship_page_dispatch_is_bounded_and_non_recursive()
+    -> Result<(), StoreError> {
+        let store = O3kStore::connect_sqlite_memory().await?;
+        let parent = Uuid::now_v7();
+        store
+            .insert_resource(&ResourceRecord {
+                id: parent,
+                kind: "database:instance".into(),
+                project_id: "project-a".into(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: "{}".into(),
+                observed_state: "ready".into(),
+                provider_id: None,
+            })
+            .await?;
+        for slot in ["network-primary", "volume-data"] {
+            store
+                .reserve_relationship(&ResourceRelationshipRecord {
+                    parent_resource_id: parent,
+                    parent_resource_type: "database:instance".into(),
+                    slot: slot.into(),
+                    expected_child_resource_type: "network:network".into(),
+                    child_resource_id: None,
+                    ownership: "exclusive".into(),
+                    parent_operation_id: Uuid::now_v7(),
+                    child_operation_id: None,
+                    owner_scope: "project-a".into(),
+                    state: "reserved".into(),
+                    fingerprint: format!("fingerprint-{slot}"),
+                })
+                .await?;
+        }
+        let first = store.list_relationships_page(parent, None, 1).await?;
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].slot, "network-primary");
+        let second = store
+            .list_relationships_page(parent, Some(&first[0].slot), 1)
+            .await?;
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].slot, "volume-data");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sqlite_store_passes_conformance() -> Result<(), StoreError> {
         let store = SqliteStore::connect("sqlite::memory:").await?;
         run_conformance(&store).await
