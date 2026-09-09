@@ -167,8 +167,11 @@ impl ResourceDispatcher {
     }
 
     pub(crate) fn is_ready(&self, descriptor: &ResourceDescriptor) -> bool {
+        // A descriptor is derived startup metadata, not a readiness source.
+        // If the live registry is unavailable, fail closed rather than serving
+        // stale `ready=true` captured during construction.
         let Some(registry) = &self.lifecycle_registry else {
-            return descriptor.ready;
+            return false;
         };
         registry
             .read()
