@@ -30,8 +30,8 @@ use o3k_kernel::LimitValue;
 #[cfg(test)]
 use o3k_kernel::{ActionId, ScopeId};
 use o3k_kernel::{
-    AuthContext, Authorizer, LimitKey, OwnershipScope, ResourceAmount, ResourceId,
-    ResourceTarget, ResourceType, StaticAuthorizer,
+    AuthContext, Authorizer, LimitKey, OwnershipScope, ResourceAmount, ResourceId, ResourceTarget,
+    ResourceType, StaticAuthorizer,
 };
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
