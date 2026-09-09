@@ -1,6 +1,6 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use o3k_store::{AuditEventRecord, AuditRepository, PostgresStore, StoreError};
 
@@ -27,15 +27,26 @@ fn event(id: &str, scope: &str) -> AuditEventRecord {
 async fn store() -> Option<PostgresStore> {
     let url = std::env::var("O3K_DATABASE_URL").ok()?;
     let store = PostgresStore::connect(&url).await.ok()?;
-    sqlx::query("DELETE FROM audit_events WHERE event_id IN ('0001','0002','0003','0004','0005','0006','concurrent')")
+    sqlx::query("DELETE FROM audit_events WHERE event_id IN ('0001','0002','0003','0004','0005','0006','concurrent','different-a','different-b')")
         .execute(store.pool())
         .await
         .ok()?;
     Some(store)
 }
 
+// The conformance binary runs tests concurrently against one disposable database.
+// Serialize fixture setup/teardown while retaining true concurrent writes inside
+// the dedicated race test below.
+async fn test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
+
 #[tokio::test]
 async fn postgres_audit_repository_conformance() {
+    let _guard = test_lock().await;
     let Some(store) = store().await else {
         eprintln!("skipping PostgreSQL Audit conformance: O3K_DATABASE_URL unavailable");
         return;
@@ -134,6 +145,7 @@ async fn postgres_audit_repository_conformance() {
 
 #[tokio::test]
 async fn postgres_audit_same_id_concurrent_replay_converges() {
+    let _guard = test_lock().await;
     let Some(store) = store().await else {
         eprintln!("skipping PostgreSQL Audit concurrency: O3K_DATABASE_URL unavailable");
         return;
@@ -166,5 +178,25 @@ async fn postgres_audit_same_id_concurrent_replay_converges() {
             .await
             .unwrap(),
         e
+    );
+
+    let different_a = event("different-a", "project-a");
+    let different_b = event("different-b", "project-a");
+    let (a, b) = tokio::join!(
+        store.insert_audit_event(&different_a),
+        store.insert_audit_event(&different_b)
+    );
+    assert!(a.is_ok() && b.is_ok());
+    assert!(
+        store
+            .get_audit_event("project-a", "different-a")
+            .await
+            .is_ok()
+    );
+    assert!(
+        store
+            .get_audit_event("project-a", "different-b")
+            .await
+            .is_ok()
     );
 }

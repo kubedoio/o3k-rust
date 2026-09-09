@@ -59,7 +59,7 @@ impl AuditRepository for PostgresStore {
         limit: usize,
     ) -> Result<RepositoryPage<AuditEventRecord>, StoreError> {
         let n = crate::port::durable::bounded_fetch_limit(limit)?;
-        let rs = sqlx::query("SELECT * FROM audit_events WHERE effective_scope=$1 AND ($2::text IS NULL OR event_id>$2) ORDER BY event_id LIMIT $3").bind(scope).bind(after).bind(n as i64).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        let rs = sqlx::query("SELECT * FROM audit_events WHERE effective_scope=$1 AND ($2::text IS NULL OR event_id>$2) ORDER BY event_id LIMIT $3").bind(scope).bind(after).bind(n).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
         let more = rs.len() > limit;
         let key = more.then(|| rs[limit - 1].get("event_id"));
         let items = rs
@@ -78,6 +78,6 @@ impl AuditRepository for PostgresStore {
             .ok()
             .filter(|n| (1..=200).contains(n))
             .ok_or_else(|| StoreError::Corrupt("audit prune batch out of bounds".into()))?;
-        Ok(sqlx::query("DELETE FROM audit_events WHERE event_id IN (SELECT event_id FROM audit_events WHERE timestamp < $1 ORDER BY timestamp,event_id LIMIT $2)").bind(cutoff).bind(n as i64).execute(&self.pool).await.map_err(StoreError::Database)?.rows_affected())
+        Ok(sqlx::query("DELETE FROM audit_events WHERE event_id IN (SELECT event_id FROM audit_events WHERE timestamp < $1 ORDER BY timestamp,event_id LIMIT $2)").bind(cutoff).bind(n).execute(&self.pool).await.map_err(StoreError::Database)?.rows_affected())
     }
 }

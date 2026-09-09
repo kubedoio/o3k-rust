@@ -418,3 +418,22 @@ pub trait DurableStore: Send + Sync {
     ) -> Result<ResourceRecord, StoreError>;
     async fn readiness_check(&self) -> Result<(), StoreError>;
 }
+
+#[cfg(test)]
+mod bounded_query_tests {
+    use super::bounded_fetch_limit;
+
+    #[test]
+    fn lookahead_is_exactly_requested_limit_plus_one() {
+        for (requested, expected) in [(1, 2), (10, 11), (50, 51), (200, 201)] {
+            assert_eq!(bounded_fetch_limit(requested).ok(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn invalid_limits_are_rejected_without_query_execution() {
+        for requested in [0, 201, usize::MAX] {
+            assert!(bounded_fetch_limit(requested).is_err());
+        }
+    }
+}
