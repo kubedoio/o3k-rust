@@ -1,13 +1,26 @@
 use super::{
     AgentNodeRegistry, Arc, AttachmentOrchestrator, ComputeError, ComputeService,
-    CreateInstanceRequest, Duration, NoopAuditSink, OperationJournal, PortBindingProjector,
-    ProviderBackend, Scheduler, StaticAuthorizer, Uuid, VolumeAttachmentProvider,
+    CreateInstanceRequest, Duration, OperationJournal, PortBindingProjector, ProviderBackend,
+    Scheduler, StaticAuthorizer, Uuid, VolumeAttachmentProvider,
 };
 
-use o3k_kernel::{AuditSink, Authorizer};
+use o3k_kernel::{AuditSink, Authorizer, MemoryAuditSink};
 use o3k_store::ComputeRepository;
 
 impl ComputeService {
+    /// Publish mandatory control-plane evidence before acknowledging an
+    /// authenticated mutation/action. Legacy synchronous sinks fail closed;
+    /// only the durable async boundary can satisfy this contract.
+    pub async fn record_required_audit(
+        &self,
+        event: &o3k_kernel::AuditEvent,
+    ) -> Result<(), ComputeError> {
+        self.audit_sink
+            .record_required_async(event)
+            .await
+            .map_err(|_| ComputeError::Unavailable)
+    }
+
     #[must_use]
     pub fn new<P>(store: Arc<dyn ComputeRepository>, provider: Arc<P>) -> Self
     where
@@ -27,7 +40,10 @@ impl ComputeService {
             binding_projector: None,
             config_drive_cleaner: None,
             authorizer: Arc::new(StaticAuthorizer::standard()),
-            audit_sink: Arc::new(NoopAuditSink),
+            // The constructor default is a test-safe in-memory sink. The
+            // production composition root must (and does) replace it with
+            // `DurableAuditSink` before exposing any service.
+            audit_sink: Arc::new(MemoryAuditSink::new()),
             coordination: None,
         }
     }

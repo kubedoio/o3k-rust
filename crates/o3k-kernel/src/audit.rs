@@ -263,9 +263,15 @@ impl<R: crate::DurableAuditRepository> AuditSink for DurableAuditSink<R> {
 /// Audit sink that forwards recorded events to a closure or function.
 pub struct FnAuditSink<F: Fn(&AuditEvent) + Send + Sync>(pub F);
 
+#[async_trait::async_trait]
 impl<F: Fn(&AuditEvent) + Send + Sync> AuditSink for FnAuditSink<F> {
     fn record(&self, event: &AuditEvent) {
         (self.0)(event);
+    }
+
+    async fn record_required_async(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        (self.0)(event);
+        Ok(())
     }
 }
 
@@ -319,11 +325,17 @@ impl MemoryAuditSink {
     }
 }
 
+#[async_trait::async_trait]
 impl AuditSink for MemoryAuditSink {
     fn record(&self, event: &AuditEvent) {
         if let Ok(mut guard) = self.events.lock() {
             guard.push(event.clone());
         }
+    }
+
+    async fn record_required_async(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        self.record(event);
+        Ok(())
     }
 }
 

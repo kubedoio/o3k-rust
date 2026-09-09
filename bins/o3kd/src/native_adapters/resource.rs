@@ -497,6 +497,17 @@ impl ResourceApplication for GenericResourceApplication {
             o3k_compute::ServerId::from_uuid(resource_id),
             action.clone(),
         ) {
+            let event = o3k_kernel::AuditEvent::from_auth(
+                auth,
+                o3k_kernel::ServiceNamespace::new_unchecked("compute".to_owned()),
+                action.clone(),
+                o3k_kernel::AuditOutcome::Denied,
+            )
+            .with_reason("unauthorized");
+            self.compute
+                .record_required_audit(&event)
+                .await
+                .map_err(|_| ResourceApplicationError::NotReady)?;
             return Err(ResourceApplicationError::NotFound);
         }
         let key = idempotency_key.ok_or(ResourceApplicationError::Validation)?;
@@ -650,6 +661,22 @@ impl ResourceApplication for GenericResourceApplication {
                 }
                 _ => ResourceApplicationError::Internal,
             })?;
+        let event = o3k_kernel::AuditEvent::from_auth(
+            auth,
+            o3k_kernel::ServiceNamespace::new_unchecked("compute".to_owned()),
+            action,
+            o3k_kernel::AuditOutcome::Succeeded,
+        )
+        .with_resource(
+            descriptor.resource_type.clone(),
+            Some(o3k_kernel::ResourceId::new_unchecked(id)),
+            Some(auth.effective_scope().clone()),
+        )
+        .with_operation(operation_id);
+        self.compute
+            .record_required_audit(&event)
+            .await
+            .map_err(|_| ResourceApplicationError::NotReady)?;
         Ok(MutationResult {
             operation_id: operation_id.to_string(),
             resource_id: Some(id.to_owned()),

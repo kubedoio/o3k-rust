@@ -28,7 +28,7 @@ impl ComputeService {
         self.authorizer
             .authorize(&AuthorizationRequest {
                 auth_context: auth,
-                action,
+                action: action.clone(),
                 resource_target: ResourceTarget::instance(
                     resource_type,
                     resource_id,
@@ -73,6 +73,14 @@ impl ComputeService {
             })
             .is_allowed()
         {
+            let event = AuditEvent::from_auth(
+                auth,
+                ServiceNamespace::new_unchecked("compute".to_owned()),
+                expected.clone(),
+                AuditOutcome::Denied,
+            )
+            .with_reason("unauthorized");
+            self.record_required_audit(&event).await?;
             return Err(ComputeError::NotFound);
         }
         let resource =
@@ -150,6 +158,24 @@ impl ComputeService {
         let operation_state = self
             .reconcile_lifecycle_until_terminal(operation_id)
             .await?;
+        let outcome = match operation_state {
+            o3k_store::OperationState::Succeeded => AuditOutcome::Succeeded,
+            o3k_store::OperationState::Failed => AuditOutcome::Failed,
+            _ => AuditOutcome::UnknownOutcome,
+        };
+        let event = AuditEvent::from_auth(
+            auth,
+            ServiceNamespace::new_unchecked("compute".to_owned()),
+            expected,
+            outcome,
+        )
+        .with_resource(
+            ResourceType::new_unchecked("compute".to_owned(), "server".to_owned()),
+            ResourceId::new(id.as_uuid().to_string()).ok(),
+            Some(auth.effective_scope().clone()),
+        )
+        .with_operation(operation_id);
+        self.record_required_audit(&event).await?;
         Ok(MutationReceipt {
             resource: id,
             operation_id,
@@ -197,7 +223,7 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ComputeError::NotFound);
         }
         match self
@@ -213,13 +239,13 @@ impl ComputeService {
                         ResourceId::new(id.as_uuid().to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Ok(())
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Err(error)
             }
         }
@@ -252,11 +278,19 @@ impl ComputeService {
             .authorizer
             .authorize(&AuthorizationRequest {
                 auth_context: auth,
-                action,
+                action: action.clone(),
                 resource_target: target,
             })
             .is_allowed()
         {
+            let event = AuditEvent::from_auth(
+                auth,
+                ServiceNamespace::new_unchecked("compute".to_owned()),
+                action.clone(),
+                AuditOutcome::Denied,
+            )
+            .with_reason("unauthorized");
+            self.record_required_audit(&event).await?;
             return Err(ComputeError::NotFound);
         }
         let resource =
@@ -310,6 +344,24 @@ impl ComputeService {
                 Some(operation_id),
             )
             .await?;
+        let outcome = match operation_state {
+            o3k_store::OperationState::Succeeded => AuditOutcome::Succeeded,
+            o3k_store::OperationState::Failed => AuditOutcome::Failed,
+            _ => AuditOutcome::UnknownOutcome,
+        };
+        let event = AuditEvent::from_auth(
+            auth,
+            ServiceNamespace::new_unchecked("compute".to_owned()),
+            action,
+            outcome,
+        )
+        .with_resource(
+            ResourceType::new_unchecked("compute".to_owned(), "server".to_owned()),
+            ResourceId::new(id.as_uuid().to_string()).ok(),
+            Some(auth.effective_scope().clone()),
+        )
+        .with_operation(operation_id);
+        self.record_required_audit(&event).await?;
         Ok(MutationReceipt {
             resource: id,
             operation_id,
@@ -669,7 +721,7 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ComputeError::NotFound);
         }
         match self
@@ -685,13 +737,13 @@ impl ComputeService {
                         ResourceId::new(server.id.as_uuid().to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Ok(server)
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Err(error)
             }
         }

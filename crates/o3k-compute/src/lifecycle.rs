@@ -35,7 +35,7 @@ impl ComputeService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ComputeError::Unauthorized);
         }
         match self.create_server_for_user(input).await {
@@ -48,13 +48,13 @@ impl ComputeService {
                         ResourceId::new(server.id.as_uuid().to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Ok(server)
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Err(error)
             }
         }
@@ -92,11 +92,37 @@ impl ComputeService {
             })
             .is_allowed()
         {
+            let event = AuditEvent::from_auth(
+                auth,
+                ServiceNamespace::new_unchecked("compute".to_owned()),
+                action.clone(),
+                AuditOutcome::Denied,
+            )
+            .with_reason("unauthorized");
+            self.record_required_audit(&event).await?;
             return Err(ComputeError::Unauthorized);
         }
         let accepted = self
             .create_server_for_user_with_context(input, Some(&context))
             .await?;
+        let outcome = match accepted.operation_state {
+            o3k_store::OperationState::Succeeded => AuditOutcome::Succeeded,
+            o3k_store::OperationState::Failed => AuditOutcome::Failed,
+            _ => AuditOutcome::UnknownOutcome,
+        };
+        let event = AuditEvent::from_auth(
+            auth,
+            ServiceNamespace::new_unchecked("compute".to_owned()),
+            action,
+            outcome,
+        )
+        .with_resource(
+            ResourceType::new_unchecked("compute".to_owned(), "server".to_owned()),
+            ResourceId::new(accepted.server.id.as_uuid().to_string()).ok(),
+            Some(auth.effective_scope().clone()),
+        )
+        .with_operation(accepted.operation_id);
+        self.record_required_audit(&event).await?;
         Ok(MutationReceipt {
             resource: accepted.server,
             operation_id: accepted.operation_id,
