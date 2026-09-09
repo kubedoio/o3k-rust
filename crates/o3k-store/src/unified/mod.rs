@@ -88,6 +88,29 @@ impl O3kStore {
         }
     }
 
+    /// Dispatch the bounded relationship page to the concrete database store.
+    /// This inherent method is intentionally distinct from the repository
+    /// trait adapter so trait calls cannot recurse through the adapter.
+    pub async fn list_relationships_page(
+        &self,
+        parent: Uuid,
+        after_slot: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<ResourceRelationshipRecord>, StoreError> {
+        match self {
+            Self::Sqlite(store) => {
+                store
+                    .list_relationships_page(parent, after_slot, limit)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .list_relationships_page(parent, after_slot, limit)
+                    .await
+            }
+        }
+    }
+
     pub async fn bind_relationship(
         &self,
         parent: Uuid,
