@@ -1007,8 +1007,7 @@ impl DurableStore for SqliteStore {
         after_id: Option<&str>,
         limit: usize,
     ) -> Result<RepositoryPage<ResourceRecord>, StoreError> {
-        let fetch_limit = i64::try_from(limit.saturating_add(1))
-            .map_err(|_| StoreError::Corrupt("native page limit overflow".to_owned()))?;
+        let fetch_limit = crate::port::durable::bounded_fetch_limit(limit)?;
         let rows = if let Some(after_id) = after_id {
             sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE project_id = ? AND kind = ? AND id > ? ORDER BY id LIMIT ?").bind(project_id).bind(kind).bind(after_id).bind(fetch_limit).fetch_all(&self.pool).await
         } else {

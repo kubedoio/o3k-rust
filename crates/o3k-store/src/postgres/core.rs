@@ -81,8 +81,7 @@ impl DurableStore for PostgresStore {
         after_id: Option<&str>,
         limit: usize,
     ) -> Result<RepositoryPage<ResourceRecord>, StoreError> {
-        let fetch_limit = i64::try_from(limit.saturating_add(1))
-            .map_err(|_| StoreError::Corrupt("native page limit overflow".to_owned()))?;
+        let fetch_limit = crate::port::durable::bounded_fetch_limit(limit)?;
         let rows = if let Some(after_id) = after_id {
             sqlx::query("SELECT * FROM resources WHERE project_id = $1 AND kind = $2 AND id > $3 ORDER BY id LIMIT $4").bind(project_id).bind(kind).bind(after_id).bind(fetch_limit).fetch_all(&self.pool).await
         } else {

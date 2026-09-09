@@ -119,6 +119,14 @@ pub struct RepositoryPage<T> {
     pub continuation_key: Option<String>,
 }
 
+/// Compute the bounded look-ahead requested from a backing store.  The extra
+/// row is the only authority used to determine `has_more`; callers must never
+/// materialize an unbounded collection and truncate it afterwards.
+pub(crate) fn bounded_fetch_limit(limit: usize) -> Result<i64, StoreError> {
+    i64::try_from(limit.saturating_add(1))
+        .map_err(|_| StoreError::Corrupt("native page limit overflow".to_owned()))
+}
+
 #[async_trait]
 pub trait DurableStore: Send + Sync {
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError>;
