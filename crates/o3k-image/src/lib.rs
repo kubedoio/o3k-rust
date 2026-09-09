@@ -128,6 +128,8 @@ pub enum ImageError {
     OverlayFailed,
     #[error("image format verification failed")]
     FormatVerificationFailed,
+    #[error("required audit publication unavailable")]
+    AuditUnavailable,
 }
 
 #[derive(Clone)]
@@ -1008,7 +1010,7 @@ impl ImageService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ImageError::Unauthorized);
         }
         match self
@@ -1031,13 +1033,13 @@ impl ImageService {
                         ResourceId::new(record.id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Ok(record)
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Err(error)
             }
         }
@@ -1155,7 +1157,7 @@ impl ImageService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ImageError::Unauthorized);
         }
         self.list_for_project(auth.effective_scope().id().as_str())
@@ -1193,7 +1195,7 @@ impl ImageService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ImageError::NotFound);
         }
         self.get_for_project(auth.effective_scope().id().as_str(), id)
@@ -1239,7 +1241,7 @@ impl ImageService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ImageError::NotFound);
         }
         self.resolve_artifact_for_project(auth.effective_scope().id().as_str(), id)
@@ -1322,7 +1324,7 @@ impl ImageService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ImageError::NotFound);
         }
         match self
@@ -1338,13 +1340,13 @@ impl ImageService {
                         ResourceId::new(id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Ok(record)
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Err(error)
             }
         }
@@ -1470,7 +1472,7 @@ impl ImageService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ImageError::NotFound);
         }
         match self
@@ -1486,13 +1488,13 @@ impl ImageService {
                         ResourceId::new(id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Ok(())
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Err(error)
             }
         }
@@ -1520,6 +1522,13 @@ impl ImageService {
             .release_reservation_for_operation(&format!("o3k:image:upload:{}:{}", project_id, id))
             .await;
         Ok(())
+    }
+
+    async fn record_required_audit(&self, event: &AuditEvent) -> Result<(), ImageError> {
+        self.audit_sink
+            .record_required_async(event)
+            .await
+            .map_err(|_| ImageError::AuditUnavailable)
     }
 
     fn map_store_error(error: StoreError) -> ImageError {
