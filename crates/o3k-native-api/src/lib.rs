@@ -149,11 +149,8 @@ pub fn router(state: NativeApiState) -> Router {
         )
         .route("/identity/me", get(identity::current_context))
         .route("/operator/profile", get(identity::operator_profile))
-        .route("/compute/servers", get(compute::list_servers))
         .route("/compute/servers/{id}", get(compute::show_server))
-        .route("/volume/volumes", get(volume::list_volumes))
         .route("/volume/volumes/{id}", get(volume::show_volume))
-        .route("/network/address-realms", get(network::list_address_realms))
         .route(
             "/network/address-realms/{id}",
             get(network::show_address_realm),
@@ -478,7 +475,9 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
         let collection_supported = state
             .resource_application
             .as_ref()
-            .is_some_and(|application| application.supports_collection(descriptor));
+            .is_some_and(|application| {
+                application.supports_collection(descriptor) && state.cursor_config.is_available()
+            });
         let mut actions = std::collections::HashMap::new();
         for (op, action) in &descriptor.lifecycle_actions {
             if *op == LifecycleOperation::List && (!live_ready || !collection_supported) {

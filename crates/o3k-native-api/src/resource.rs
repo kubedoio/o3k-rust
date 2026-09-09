@@ -8,7 +8,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use crate::pagination::{CursorPayload, continuation_index, parse_page_size};
+use crate::pagination::ResourceQuery;
 use crate::{
     NativeApiState,
     auth::BearerAuth,
@@ -265,11 +265,13 @@ pub trait ResourceApplication: Send + Sync {
         idempotency_key: Option<&str>,
         expected_generation: Option<i64>,
     ) -> Result<MutationResult, ResourceApplicationError>;
-    async fn list(
+    async fn list_page(
         &self,
         descriptor: &ResourceDescriptor,
         auth: &AuthContext,
-    ) -> Result<Vec<serde_json::Value>, ResourceApplicationError>;
+        query: &ResourceQuery,
+        cursors: &crate::pagination::CursorConfig,
+    ) -> Result<crate::pagination::ResourcePage<serde_json::Value>, ResourceApplicationError>;
     async fn show(
         &self,
         descriptor: &ResourceDescriptor,
@@ -765,7 +767,7 @@ pub async fn list(
         Ok(action) => action,
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
-    if !descriptor.ready {
+    if !state.resource_index.is_ready(descriptor) {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     }
     if let Err(response) = authorize(&state, descriptor, action, &auth.0, None) {
@@ -774,59 +776,33 @@ pub async fn list(
     let Some(application) = state.resource_application else {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     };
-    let items = match application.list(descriptor, &auth.0).await {
-        Ok(items) => items,
-        Err(error) => return application_problem(error),
-    };
+    if !application.supports_collection(descriptor) {
+        return ProblemDetails::new(ErrorCode::UnsupportedOperation).into_response();
+    }
+    if !state.cursor_config.is_available() {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    }
     let scope = auth.0.effective_scope().id().to_string();
     let resource_type = descriptor.resource_type.to_string();
-    let mut items = items;
-    items.sort_by(|a, b| {
-        a["metadata"]["id"]
-            .as_str()
-            .cmp(&b["metadata"]["id"].as_str())
-    });
-    let start = if let Some(cursor) = query.cursor.as_deref() {
-        let Ok(payload) = state
-            .cursor_config
-            .decode_cursor(cursor, &scope, &resource_type)
-        else {
-            return ProblemDetails::new(ErrorCode::InvalidCursor).into_response();
-        };
-        let ids = items
-            .iter()
-            .filter_map(|item| item["metadata"]["id"].as_str().map(str::to_owned))
-            .collect::<Vec<_>>();
-        match continuation_index(&ids, &payload.last_id) {
-            Ok(index) => index,
-            Err(_) => return ProblemDetails::new(ErrorCode::InvalidCursor).into_response(),
+    let resource_query = match state.cursor_config.validate_query(
+        query.limit.as_deref(),
+        query.cursor.as_deref(),
+        &scope,
+        &resource_type,
+    ) {
+        Ok(query) => query,
+        Err(crate::pagination::QueryValidationError::InvalidLimit) => {
+            return ProblemDetails::new(ErrorCode::BadRequest).into_response();
         }
-    } else {
-        0
+        Err(_) => return ProblemDetails::new(ErrorCode::InvalidCursor).into_response(),
     };
-    let page_size = parse_page_size(query.limit.as_deref());
-    let end = (start + page_size).min(items.len());
-    let page = items[start..end].to_vec();
-    let next_cursor = if end < items.len() {
-        page.last()
-            .and_then(|item| item["metadata"]["id"].as_str())
-            .map(|last_id| {
-                state.cursor_config.encode_cursor(&CursorPayload {
-                    last_id: last_id.to_owned(),
-                    scope_id: scope,
-                    resource_type,
-                    version: 1,
-                    query_identity: String::new(),
-                })
-            })
-    } else {
-        None
-    };
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"items": page, "next_cursor": next_cursor})),
-    )
-        .into_response()
+    match application
+        .list_page(descriptor, &auth.0, &resource_query, &state.cursor_config)
+        .await
+    {
+        Ok(page) => (StatusCode::OK, Json(page)).into_response(),
+        Err(error) => application_problem(error),
+    }
 }
 
 pub async fn show(
@@ -841,7 +817,7 @@ pub async fn show(
         Ok(action) => action,
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
-    if !descriptor.ready {
+    if !state.resource_index.is_ready(descriptor) {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
     }
     if let Err(response) = authorize(&state, descriptor, action, &auth.0, Some(&id)) {

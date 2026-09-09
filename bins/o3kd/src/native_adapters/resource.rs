@@ -324,147 +324,45 @@ fn generic_external_json(resource: &o3k_store::ResourceRecord) -> serde_json::Va
 
 #[async_trait::async_trait]
 impl ResourceApplication for GenericResourceApplication {
-    async fn list(
-        &self,
-        descriptor: &ResourceDescriptor,
-        auth: &o3k_kernel::AuthContext,
-    ) -> Result<Vec<serde_json::Value>, ResourceApplicationError> {
-        if descriptor.resource_type.to_string() == "image:image" {
-            let service = self
-                .image
-                .as_ref()
-                .ok_or(ResourceApplicationError::NotReady)?;
-            let items = service.list(auth).await.map_err(image_error)?;
-            let mut result = Vec::with_capacity(items.len());
-            for item in items {
-                let resource = self.store.get_resource(item.id).await.ok();
-                result.push(image_json_with_resource(&item, resource.as_ref()));
-            }
-            return Ok(result);
-        }
-        if self
-            .external_controllers
-            .contains_key(&descriptor.owning_service)
-        {
-            return self
-                .store
-                .list_resources(
-                    auth.effective_scope().id().as_str(),
-                    &descriptor.resource_type.to_string(),
-                )
-                .await
-                .map(|resources| resources.iter().map(generic_external_json).collect())
-                .map_err(|_| ResourceApplicationError::Internal);
-        }
-        if matches!(
+    fn supports_collection(&self, descriptor: &ResourceDescriptor) -> bool {
+        !matches!(
             descriptor.resource_type.to_string().as_str(),
-            "network:network"
-                | "network:subnet"
-                | "network:port"
-                | "network:security_group"
-                | "network:security_group_rule"
-                | "network:router"
-                | "network:router_interface"
+            "compute:flavor"
+                | "network:address_realm"
                 | "network:floating_ip"
-        ) {
-            return self
-                .store
-                .list_resources(
-                    auth.effective_scope().id().as_str(),
-                    &descriptor.resource_type.to_string(),
-                )
-                .await
-                .map(|resources| resources.iter().map(generic_external_json).collect())
-                .map_err(|_| ResourceApplicationError::Internal);
-        }
-        match descriptor.resource_type.to_string().as_str() {
-            "compute:flavor" => self
-                .compute
-                .flavors_for_auth(auth)
-                .await
-                .map(|items| {
-                    items
-                        .iter()
-                        .map(|item| flavor_json(item, auth.effective_scope().id().as_str()))
-                        .collect()
-                })
-                .map_err(compute_error),
-            "compute:server" => self
-                .server
-                .list_servers(auth)
-                .await
-                .map(|items| items.into_iter().map(server_json).collect())
-                .map_err(generic_read_error),
-            "network:address_realm" => self
-                .network
-                .list_address_realms(auth)
-                .await
-                .map(|items| items.into_iter().map(realm_json).collect())
-                .map_err(generic_read_error),
-            "network:network" => self
-                .network_service
-                .list_canonical_networks(auth)
-                .await
-                .map(|items| items.iter().map(network_json).collect())
-                .map_err(|_| ResourceApplicationError::Internal),
-            "network:floating_ip" => {
-                let allocator = self
-                    .public_allocator
-                    .as_ref()
-                    .ok_or(ResourceApplicationError::NotReady)?;
-                let items = allocator
-                    .list(auth.effective_scope().id().as_str())
-                    .map_err(|_| ResourceApplicationError::Internal)?;
-                let mut result = Vec::with_capacity(items.len());
-                for item in items {
-                    let record = self.store.get_resource(item.allocation_id).await.ok();
-                    let spec = record.as_ref().and_then(|r| {
-                        serde_json::from_str::<serde_json::Value>(&r.desired_state).ok()
-                    });
-                    result.push(floating_ip_json(
-                        &item,
-                        Some(
-                            self.external_realm_id(auth.effective_scope().id().as_str())
-                                .await?,
-                        ),
-                        auth.effective_scope().id().as_str(),
-                        spec.as_ref()
-                            .and_then(|v| v.get("migration_id"))
-                            .and_then(serde_json::Value::as_str),
-                        spec.as_ref()
-                            .and_then(|v| v.get("source_key"))
-                            .and_then(serde_json::Value::as_str),
-                    ));
-                }
-                Ok(result)
-            }
-            "volume:volume" => self
-                .store
-                .list_volumes(auth.effective_scope().id().as_str())
-                .await
-                .map(|items| items.iter().map(native_volume_json).collect())
-                .map_err(|_| ResourceApplicationError::Internal),
-            "volume:volume_attachment" => {
-                let items = self
-                    .store
-                    .list_volume_attachments_v1(auth.effective_scope().id().as_str())
-                    .await
-                    .map_err(|_| ResourceApplicationError::Internal)?;
-                let mut result = Vec::new();
-                for item in items {
-                    if item.attachment.state == VolumeAttachmentState::Attached {
-                        let resource = self
-                            .store
-                            .get_resource(item.attachment.id.as_uuid())
-                            .await
-                            .ok();
-                        result.push(native_attachment_json(&item, resource.as_ref()));
-                    }
-                }
-                Ok(result)
-            }
-            _ => Err(ResourceApplicationError::NotFound),
-        }
+                | "volume:volume_attachment"
+        )
+    }
+
+    async fn list_page(
+        &self,
+        _descriptor: &ResourceDescriptor,
+        _auth: &o3k_kernel::AuthContext,
+        query: &o3k_native_api::pagination::ResourceQuery,
+        cursors: &o3k_native_api::pagination::CursorConfig,
+    ) -> Result<o3k_native_api::pagination::ResourcePage<serde_json::Value>, ResourceApplicationError>
+    {
+        let page = self
+            .store
+            .list_resources_page(
+                query.scope_id(),
+                query.resource_type(),
+                query.continuation_key(),
+                query.limit(),
+            )
+            .await
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        let items = page.items.iter().map(generic_external_json).collect();
+        let repository = o3k_native_api::pagination::RepositoryPage::new(
+            items,
+            page.has_more,
+            page.continuation_key,
+            query.limit(),
+        )
+        .map_err(|_| ResourceApplicationError::Internal)?;
+        cursors
+            .complete_page(query, repository)
+            .map_err(|_| ResourceApplicationError::Internal)
     }
 
     async fn show(
