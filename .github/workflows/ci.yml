@@ -38,46 +38,16 @@ jobs:
         timeout-minutes: 10
         run: |
           set -euo pipefail
-          apt_options=(
-            -o Acquire::Retries=5
-            -o Acquire::ForceIPv4=true
-            -o Acquire::http::Timeout=20
-            -o Acquire::https::Timeout=20
-            -o DPkg::Lock::Timeout=120
-          )
-          rewrite_apt_sources() {
-            for apt_source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
-              if [[ -f "${apt_source}" ]]; then
-                sudo -n sed -i \
-                  -e 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
-                  -e 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
-                  "${apt_source}"
-              fi
-            done
-          }
-          # Select the canonical mirror before the first network operation;
-          # waiting for a broken regional mirror makes the timeout fallback
-          # unreachable on runners with a ten-minute step limit.
-          rewrite_apt_sources
-          if ! timeout --foreground 900s sudo -n env DEBIAN_FRONTEND=noninteractive \
-            apt-get "${apt_options[@]}" update; then
-            # GitHub-hosted runners occasionally receive an unhealthy regional
-            # Ubuntu mirror. Retry through the canonical mirror before failing
-            # the job; this is runner provisioning, not a repository failure.
-            rewrite_apt_sources
-            timeout --foreground 900s sudo -n env DEBIAN_FRONTEND=noninteractive \
-              apt-get "${apt_options[@]}" update
-          fi
-          timeout --foreground 900s sudo -n env DEBIAN_FRONTEND=noninteractive \
-            apt-get "${apt_options[@]}" install --no-install-recommends -y \
-              protobuf-compiler libvirt-dev pkg-config python3-yaml qemu-utils sqlite3 tgt
+          scripts/ci/apt-provision.sh install \
+            protobuf-compiler libvirt-dev pkg-config python3-yaml qemu-utils sqlite3 tgt
       - name: Refresh cached libvirt bindings
         run: cargo clean -p virt-sys
       - name: Format
         run: cargo fmt --all -- --check
       - name: Validate packaging scripts
         run: |
-          for file in packaging/*.sh tests/*.sh scripts/*.sh; do bash -n "$file"; done
+          for file in packaging/*.sh tests/*.sh scripts/*.sh scripts/ci/*.sh; do bash -n "$file"; done
+          bash tests/ci-apt-provision.sh
           python3 -m compileall -q scripts
       - name: Test P13.5E deterministic fault proxy and evidence artifact
         run: |
@@ -88,8 +58,7 @@ jobs:
         id: p13-toolchain
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y unzip
+          scripts/ci/apt-provision.sh install unzip
           bash scripts/p13_prepare_toolchain.sh > "$RUNNER_TEMP/p13-toolchain.env"
           sed 's/^export //' "$RUNNER_TEMP/p13-toolchain.env" >> "$GITHUB_ENV"
       - name: Install pinned actionlint
@@ -360,23 +329,7 @@ jobs:
       - name: Install python venv tooling
         run: |
           set -euo pipefail
-          apt_options=(-o Acquire::Retries=5 -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
-          rewrite_apt_sources() {
-            for apt_source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
-              if [[ -f "${apt_source}" ]]; then
-                sudo -n sed -i \
-                  -e 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
-                  -e 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
-                  "${apt_source}"
-              fi
-            done
-          }
-          rewrite_apt_sources
-          if ! timeout --foreground 300s sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update; then
-            rewrite_apt_sources
-            timeout --foreground 300s sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update
-          fi
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" install -y python3-venv python3-pip
+          scripts/ci/apt-provision.sh install python3-venv python3-pip
       - name: Run deterministic Tempest preflight
         env:
           O3K_PREFLIGHT_RESULT: target/tempest-preflight/result.json
