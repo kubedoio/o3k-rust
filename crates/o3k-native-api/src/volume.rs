@@ -30,11 +30,6 @@ pub trait VolumeReader: Send + Sync {
         after_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<VolumeItem>, NativeReadError>;
-    /// List volumes in the given project scope.
-    async fn list_volumes(
-        &self,
-        auth: &o3k_kernel::AuthContext,
-    ) -> Result<Vec<VolumeItem>, NativeReadError>;
     /// Show a single volume by ID.
     async fn show_volume(
         &self,

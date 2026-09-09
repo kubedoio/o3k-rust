@@ -34,11 +34,6 @@ pub trait NetworkReader: Send + Sync {
         after_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<AddressRealmItem>, NativeReadError>;
-    /// List address realms visible to the given project.
-    async fn list_address_realms(
-        &self,
-        auth: &o3k_kernel::AuthContext,
-    ) -> Result<Vec<AddressRealmItem>, NativeReadError>;
     /// Show a single address realm by ID.
     async fn show_address_realm(
         &self,

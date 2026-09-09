@@ -60,29 +60,6 @@ impl o3k_native_api::volume::VolumeReader for VolumeReaderAdapter {
                 NativeReadError::Internal
             })
     }
-    async fn list_volumes(
-        &self,
-        auth: &o3k_kernel::AuthContext,
-    ) -> Result<Vec<VolumeItem>, NativeReadError> {
-        let project_id = auth.effective_scope().id().as_str();
-        if !authorize_collection(
-            auth,
-            "volume:ListVolumes",
-            "volume",
-            "volume",
-            self.authorizer.as_ref(),
-        ) {
-            return Err(NativeReadError::Forbidden);
-        }
-        match self.store.list_volumes(project_id).await {
-            Ok(records) => Ok(records.into_iter().map(volume_item).collect()),
-            Err(e) => {
-                tracing::error!(error = %e, project_id = %project_id, "native volume list failed");
-                Err(NativeReadError::Internal)
-            }
-        }
-    }
-
     async fn show_volume(
         &self,
         auth: &o3k_kernel::AuthContext,

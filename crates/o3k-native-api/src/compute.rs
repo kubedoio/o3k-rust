@@ -32,8 +32,6 @@ pub trait ServerReader: Send + Sync {
         after_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ServerItem>, NativeReadError>;
-    /// List servers visible to the given auth context.
-    async fn list_servers(&self, auth: &AuthContext) -> Result<Vec<ServerItem>, NativeReadError>;
     /// Show a single server by ID within the auth scope.
     async fn show_server(
         &self,

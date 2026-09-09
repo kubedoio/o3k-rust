@@ -115,54 +115,6 @@ impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
             })
             .collect()
     }
-    async fn list_address_realms(
-        &self,
-        auth: &o3k_kernel::AuthContext,
-    ) -> Result<Vec<AddressRealmItem>, NativeReadError> {
-        let project_id = auth.effective_scope().id().as_str();
-        if !authorize_collection(
-            auth,
-            "network:ListAddressRealms",
-            "network",
-            "address_realm",
-            self.authorizer.as_ref(),
-        ) {
-            return Err(NativeReadError::Forbidden);
-        }
-        let networks = self
-            .store
-            .list_canonical_networks(project_id)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, project_id = %project_id, "native address realm list failed");
-                NativeReadError::Internal
-            })?;
-        let mut items = Vec::new();
-        for network in networks {
-            let realms = self
-                .store
-                .list_canonical_realms(project_id, &network.id)
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, network_id = %network.id, "native address realm list failed");
-                    NativeReadError::Internal
-                })?;
-            for realm in realms {
-                items.push(AddressRealmItem {
-                    id: realm.id.to_string(),
-                    project_id: realm.project_id,
-                    prefix: realm.prefix,
-                    overlapping_prefixes: realm.overlapping_prefixes,
-                    created_at: None,
-                    generation: i64::try_from(realm.generation)
-                        .map_err(|_| NativeReadError::Internal)?,
-                    state: realm.state,
-                });
-            }
-        }
-        Ok(items)
-    }
-
     async fn show_address_realm(
         &self,
         auth: &o3k_kernel::AuthContext,
