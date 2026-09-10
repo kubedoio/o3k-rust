@@ -27,6 +27,12 @@ usage after native Compute allocation and release, and rejects a tenant's
 foreign operator read. `network:address_allocations` usage is backed by the
 canonical allocation table in both stores.
 
+The real OIDC-backed process journey also exchanges a system/operator
+credential through `/o3k/v1/identity/tokens`, reads a foreign project's quota,
+sets a finite Compute limit with the generation precondition, observes the
+durable Audit-backed generation advance, rejects a stale reset, and verifies a
+second tenant allocation is rejected before the provider is touched.
+
 Compute create failure and compensation paths release pending quota
 reservations, and terminal `ERROR` compute resources are excluded from active
 usage counters. The regression is covered by

@@ -158,6 +158,12 @@ export P12_8_OPERATOR_PASSWORD="${operator_password}"
 cargo test --locked -p o3kd --test p12_iam_7_real_oidc --all-features -- \
   --ignored --nocapture
 
+# Reuse the same real IdP, durable store and operator binding for the native
+# quota production-composition journey. This keeps the quota administration
+# proof on the accepted OIDC/IAM boundary rather than a test-only token path.
+cargo test --locked -p o3kd --test p12_7_convergence --all-features -- \
+  native_quota_operator_http_uses_real_iam_and_durable_cas --ignored --nocapture
+
 if [[ -n "${O3K_P12_7_AFTER_HOOK:-}" ]]; then
   "${O3K_P12_7_AFTER_HOOK}"
 fi
