@@ -523,7 +523,7 @@ impl PostgresStore {
         match (ns, res) {
             ("compute", "servers") => {
                 let row = sqlx::query(
-                    "SELECT COUNT(*)::BIGINT FROM resources WHERE project_id = $1 AND kind = 'compute_instance' AND UPPER(observed_state) != 'DELETED'",
+                    "SELECT COUNT(*)::BIGINT FROM resources WHERE project_id = $1 AND kind = 'compute_instance' AND UPPER(observed_state) NOT IN ('DELETED', 'ERROR')",
                 )
                 .bind(scope_id)
                 .fetch_one(&mut **tx)
@@ -537,7 +537,7 @@ impl PostgresStore {
                     "SELECT COALESCE(SUM(r.amount), 0)::BIGINT FROM placement_allocations a
                      JOIN placement_allocation_resources r ON a.id = r.allocation_id
                      JOIN resources res ON a.consumer_id = res.id
-                     WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) != 'DELETED' AND r.resource_class = 'VCPU'",
+                     WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) NOT IN ('DELETED', 'ERROR') AND r.resource_class = 'VCPU'",
                 )
                 .bind(scope_id)
                 .fetch_one(&mut **tx)
@@ -551,7 +551,7 @@ impl PostgresStore {
                     "SELECT COALESCE(SUM(r.amount), 0)::BIGINT FROM placement_allocations a
                      JOIN placement_allocation_resources r ON a.id = r.allocation_id
                      JOIN resources res ON a.consumer_id = res.id
-                     WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) != 'DELETED' AND r.resource_class = 'MEMORY_MB'",
+                     WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) NOT IN ('DELETED', 'ERROR') AND r.resource_class = 'MEMORY_MB'",
                 )
                 .bind(scope_id)
                 .fetch_one(&mut **tx)
@@ -565,7 +565,7 @@ impl PostgresStore {
                     "SELECT COALESCE(SUM(r.amount), 0)::BIGINT FROM placement_allocations a
                      JOIN placement_allocation_resources r ON a.id = r.allocation_id
                      JOIN resources res ON a.consumer_id = res.id
-                     WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) != 'DELETED' AND r.resource_class = 'DISK_GB'",
+                     WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) NOT IN ('DELETED', 'ERROR') AND r.resource_class = 'DISK_GB'",
                 )
                 .bind(scope_id)
                 .fetch_one(&mut **tx)

@@ -258,26 +258,6 @@ impl ComputeService {
             ResourceAmount::new_unchecked(LimitKey::compute_memory_mb(), flavor.ram_mib),
             ResourceAmount::new_unchecked(LimitKey::compute_disk_gb(), flavor.disk_gib),
         ];
-        let quota_res = self
-            .store
-            .reserve_quota(&scope, &operation_id.to_string(), &amounts)
-            .await
-            .map_err(|err| match err {
-                StoreError::QuotaExceeded {
-                    key,
-                    limit,
-                    used,
-                    requested,
-                } => ComputeError::QuotaExceeded {
-                    key,
-                    limit,
-                    used,
-                    requested,
-                },
-                StoreError::ReservationConflict(_) => ComputeError::Conflict,
-                other => ComputeError::Store(other),
-            })?;
-
         let request = CreateInstanceRequest {
             operation_id,
             o3k_server_id: server_id,
@@ -557,6 +537,47 @@ impl ComputeService {
             "after-placement-commit",
             "O3K_TEST_FAULT_PAUSE_AFTER_PLACEMENT_COMMIT_MS",
         );
+        // Reserve only after all pre-persistence validation and placement
+        // checks have succeeded.  Placement is a control-plane allocation;
+        // no provider side effect is allowed before this durable quota
+        // reservation.  If quota reservation fails, release that placement
+        // allocation before returning so neither authority leaks state.
+        let quota_res = match self
+            .store
+            .reserve_quota(&scope, &operation_id.to_string(), &amounts)
+            .await
+        {
+            Ok(reservation) => reservation,
+            Err(err) => {
+                if let Some(decision) = placement.as_ref() {
+                    self.release_placement_decision(decision).await?;
+                }
+                return Err(match err {
+                    StoreError::QuotaExceeded {
+                        key,
+                        limit,
+                        used,
+                        requested,
+                    } => ComputeError::QuotaExceeded {
+                        key,
+                        limit,
+                        used,
+                        requested,
+                    },
+                    StoreError::ReservationConflict(_) => ComputeError::Conflict,
+                    other => ComputeError::Store(other),
+                });
+            }
+        };
+        macro_rules! release_quota_and_return {
+            ($error:expr) => {{
+                let error = $error;
+                if let Err(release_error) = self.store.release_reservation(&quota_res.id).await {
+                    return Err(ComputeError::Store(release_error));
+                }
+                return Err(error);
+            }};
+        }
         let request = match revived_from.as_ref() {
             Some(tombstone) => {
                 // Revive the tombstoned row into a fresh lifecycle. The
@@ -584,8 +605,10 @@ impl ComputeService {
                     idempotency_key: revive_idempotency_key,
                     ..request
                 };
-                let desired_state =
-                    serde_json::to_string(&revive_request).map_err(|_| ComputeError::Conflict)?;
+                let desired_state = match serde_json::to_string(&revive_request) {
+                    Ok(value) => value,
+                    Err(_) => release_quota_and_return!(ComputeError::Conflict),
+                };
                 match self
                     .store
                     .revive_resource_and_operation(
@@ -616,10 +639,15 @@ impl ComputeService {
                         // Observe the durable row before deciding what to
                         // release: a decision owned by the live row backs
                         // that row and must not be released.
-                        let existing = self.store.get_resource(id).await?;
+                        let existing = match self.store.get_resource(id).await {
+                            Ok(value) => value,
+                            Err(error) => release_quota_and_return!(ComputeError::Store(error)),
+                        };
                         let existing_request: CreateInstanceRequest =
-                            serde_json::from_str(&existing.desired_state)
-                                .map_err(|_| ComputeError::Conflict)?;
+                            match serde_json::from_str(&existing.desired_state) {
+                                Ok(value) => value,
+                                Err(_) => release_quota_and_return!(ComputeError::Conflict),
+                            };
                         let owns_persisted_placement = placement.as_ref().is_some_and(|decision| {
                             existing_request.placement_provider_id.as_deref()
                                 == Some(decision.provider_id.as_str())
@@ -628,10 +656,11 @@ impl ComputeService {
                         });
                         if let Some(decision) = placement.as_ref()
                             && !owns_persisted_placement
+                            && let Err(error) = self.release_placement_decision(decision).await
                         {
-                            self.release_placement_decision(decision).await?;
+                            release_quota_and_return!(error);
                         }
-                        return Err(ComputeError::Conflict);
+                        release_quota_and_return!(ComputeError::Conflict);
                     }
                     // The placement allocation referenced by this revive was
                     // reconciled away before the intent became durable
@@ -639,9 +668,9 @@ impl ComputeService {
                     // create). Fail closed exactly like the fresh-create
                     // path: the caller retries with a fresh allocation.
                     Err(StoreError::PlacementAllocationNotFound) => {
-                        return Err(ComputeError::Conflict);
+                        release_quota_and_return!(ComputeError::Conflict);
                     }
-                    Err(error) => return Err(ComputeError::Store(error)),
+                    Err(error) => release_quota_and_return!(ComputeError::Store(error)),
                 }
             }
             None => {
@@ -661,10 +690,12 @@ impl ComputeService {
                     };
                 match acceptance {
                     Ok(o3k_store::CanonicalAcceptanceOutcome::Conflict) => {
-                        if let Some(decision) = placement.as_ref() {
-                            self.release_placement_decision(decision).await?;
+                        if let Some(decision) = placement.as_ref()
+                            && let Err(error) = self.release_placement_decision(decision).await
+                        {
+                            release_quota_and_return!(error);
                         }
-                        return Err(ComputeError::Conflict);
+                        release_quota_and_return!(ComputeError::Conflict);
                     }
                     Ok(o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent {
                         operation_id: existing_operation_id,
@@ -689,6 +720,15 @@ impl ComputeService {
                             .show_server(&project_id, ServerId::from_uuid(resource_id))
                             .await?;
                         let operation = self.store.get_operation(existing_operation_id).await?;
+                        match operation.state {
+                            o3k_store::OperationState::Succeeded => {
+                                self.store.commit_reservation(&quota_res.id).await?;
+                            }
+                            o3k_store::OperationState::Failed => {
+                                self.store.release_reservation(&quota_res.id).await?;
+                            }
+                            _ => {}
+                        }
                         return Ok(CreateMutationReceipt {
                             server,
                             operation_id: existing_operation_id,
@@ -707,12 +747,17 @@ impl ComputeService {
                             if let Some(decision) = placement.as_ref() {
                                 self.release_placement_decision(decision).await?;
                             }
-                            return Err(ComputeError::Conflict);
+                            release_quota_and_return!(ComputeError::Conflict);
                         }
-                        let existing = self.store.get_resource(id).await?;
+                        let existing = match self.store.get_resource(id).await {
+                            Ok(value) => value,
+                            Err(error) => release_quota_and_return!(ComputeError::Store(error)),
+                        };
                         let existing_request: CreateInstanceRequest =
-                            serde_json::from_str(&existing.desired_state)
-                                .map_err(|_| ComputeError::Conflict)?;
+                            match serde_json::from_str(&existing.desired_state) {
+                                Ok(value) => value,
+                                Err(_) => release_quota_and_return!(ComputeError::Conflict),
+                            };
                         let owns_persisted_placement = placement.as_ref().is_some_and(|decision| {
                             existing_request.placement_provider_id.as_deref()
                                 == Some(decision.provider_id.as_str())
@@ -721,24 +766,28 @@ impl ComputeService {
                         });
                         if let Some(decision) = placement.as_ref()
                             && !owns_persisted_placement
+                            && let Err(error) = self.release_placement_decision(decision).await
                         {
-                            self.release_placement_decision(decision).await?;
+                            release_quota_and_return!(error);
                         }
                         let legacy_keypair_intent =
                             requests_match_with_keypair_migration(&existing_request, &request);
                         if existing_request != request && !legacy_keypair_intent {
-                            return Err(ComputeError::Conflict);
+                            release_quota_and_return!(ComputeError::Conflict);
                         }
                         if matches!(
                             server_state_from_storage(&existing.observed_state),
                             Ok(ServerState::Deleted)
                         ) {
-                            return Err(ComputeError::NotFound);
+                            release_quota_and_return!(ComputeError::NotFound);
                         }
                         if legacy_keypair_intent {
-                            let desired_state = serde_json::to_string(&request)
-                                .map_err(|_| ComputeError::Conflict)?;
-                            self.store
+                            let desired_state = match serde_json::to_string(&request) {
+                                Ok(value) => value,
+                                Err(_) => release_quota_and_return!(ComputeError::Conflict),
+                            };
+                            if let Err(error) = self
+                                .store
                                 .update_resource(
                                     existing.id,
                                     existing.generation,
@@ -747,32 +796,44 @@ impl ComputeService {
                                     existing.observed_generation,
                                     existing.provider_id.as_deref(),
                                 )
-                                .await?;
+                                .await
+                            {
+                                release_quota_and_return!(ComputeError::Store(error));
+                            }
                         }
-                        let attached = self.store.get_server_keypair_name(id).await?;
+                        let attached = match self.store.get_server_keypair_name(id).await {
+                            Ok(value) => value,
+                            Err(error) => release_quota_and_return!(ComputeError::Store(error)),
+                        };
                         let mut repaired_association = false;
                         if attached != request.key_name {
                             if attached.is_none() {
                                 if let Some(keypair) = keypair.as_ref() {
-                                    self.store.attach_server_keypair(id, keypair.id).await?;
+                                    if let Err(error) =
+                                        self.store.attach_server_keypair(id, keypair.id).await
+                                    {
+                                        release_quota_and_return!(ComputeError::Store(error));
+                                    }
                                     repaired_association = true;
                                 } else {
-                                    return Err(ComputeError::Conflict);
+                                    release_quota_and_return!(ComputeError::Conflict);
                                 }
                             } else {
-                                return Err(ComputeError::Conflict);
+                                release_quota_and_return!(ComputeError::Conflict);
                             }
                         }
                         if repaired_association {
                             match self.journal.reconcile_once(request.operation_id).await {
                                 Ok(o3k_store::OperationState::Failed) => {
-                                    self.store.detach_server_keypair(id).await?;
+                                    if let Err(error) = self.store.detach_server_keypair(id).await {
+                                        release_quota_and_return!(ComputeError::Store(error));
+                                    }
                                     self.project_terminal_binding_outcome(
                                         request.operation_id.to_string().as_str(),
                                         o3k_store::OperationState::Failed,
                                     )
                                     .await;
-                                    return Err(ComputeError::Conflict);
+                                    release_quota_and_return!(ComputeError::Conflict);
                                 }
                                 Ok(o3k_store::OperationState::Succeeded) => {
                                     self.project_terminal_binding_outcome(
@@ -783,18 +844,35 @@ impl ComputeService {
                                 }
                                 Ok(_) => {}
                                 Err(error) => {
-                                    self.store.detach_server_keypair(id).await?;
-                                    return Err(ComputeError::Reconcile(error));
+                                    if let Err(error) = self.store.detach_server_keypair(id).await {
+                                        release_quota_and_return!(ComputeError::Store(error));
+                                    }
+                                    release_quota_and_return!(ComputeError::Reconcile(error));
                                 }
                             }
                         }
-                        let server = self
-                            .show_server(&project_id, ServerId::from_uuid(id))
-                            .await?;
-                        let operation = self
+                        let server =
+                            match self.show_server(&project_id, ServerId::from_uuid(id)).await {
+                                Ok(value) => value,
+                                Err(error) => release_quota_and_return!(error),
+                            };
+                        let operation = match self
                             .store
                             .get_operation(existing_request.operation_id)
-                            .await?;
+                            .await
+                        {
+                            Ok(value) => value,
+                            Err(error) => release_quota_and_return!(ComputeError::Store(error)),
+                        };
+                        match operation.state {
+                            o3k_store::OperationState::Succeeded => {
+                                self.store.commit_reservation(&quota_res.id).await?;
+                            }
+                            o3k_store::OperationState::Failed => {
+                                self.store.release_reservation(&quota_res.id).await?;
+                            }
+                            _ => {}
+                        }
                         return Ok(CreateMutationReceipt {
                             server,
                             operation_id: operation.id,
@@ -809,27 +887,31 @@ impl ComputeService {
                     // allocation. The caller retries; the deterministic
                     // allocation identity keeps the retry idempotent.
                     Err(ReconcileError::Store(StoreError::PlacementAllocationNotFound)) => {
-                        return Err(ComputeError::Conflict);
+                        release_quota_and_return!(ComputeError::Conflict);
                     }
-                    Err(error) => return Err(ComputeError::Reconcile(error)),
+                    Err(error) => release_quota_and_return!(ComputeError::Reconcile(error)),
                 }
                 request
             }
         };
-        if let Some(keypair) = keypair {
-            self.store.attach_server_keypair(id, keypair.id).await?;
+        if let Some(keypair) = keypair
+            && let Err(error) = self.store.attach_server_keypair(id, keypair.id).await
+        {
+            release_quota_and_return!(ComputeError::Store(error));
         }
         let reconcile_state = match self.journal.reconcile_once(request.operation_id).await {
             Ok(state) => state,
             Err(error) => {
-                self.store.detach_server_keypair(id).await?;
+                if let Err(detach_error) = self.store.detach_server_keypair(id).await {
+                    release_quota_and_return!(ComputeError::Store(detach_error));
+                }
                 tracing::warn!(
                     operation_id = %request.operation_id,
                     resource_id = %id,
                     error = %error,
                     "server create reconciliation returned an error"
                 );
-                return Err(ComputeError::Reconcile(error));
+                release_quota_and_return!(ComputeError::Reconcile(error));
             }
         };
         if matches!(
@@ -852,30 +934,40 @@ impl ComputeService {
                     "server create reconciliation failed"
                 );
             }
-            self.store.detach_server_keypair(id).await?;
+            if let Err(error) = self.store.detach_server_keypair(id).await {
+                release_quota_and_return!(ComputeError::Store(error));
+            }
             if let (Some(scheduler), Some(provider_id), Some(allocation_id)) = (
                 self.scheduler.as_ref(),
                 request.placement_provider_id.as_deref(),
                 request.placement_allocation_id.as_deref(),
-            ) {
-                scheduler
-                    .release_terminal(&o3k_scheduler::ScheduleDecision {
+            ) && let Err(error) = scheduler
+                .release_terminal(&o3k_scheduler::ScheduleDecision {
+                    provider_id: provider_id.to_owned(),
+                    allocation_id: allocation_id.to_owned(),
+                    allocation: o3k_placement::Allocation {
                         provider_id: provider_id.to_owned(),
-                        allocation_id: allocation_id.to_owned(),
-                        allocation: o3k_placement::Allocation {
-                            provider_id: provider_id.to_owned(),
-                            consumer_id: id.to_string(),
-                            resources: std::collections::BTreeMap::new(),
-                        },
-                    })
-                    .await?;
+                        consumer_id: id.to_string(),
+                        resources: std::collections::BTreeMap::new(),
+                    },
+                })
+                .await
+            {
+                release_quota_and_return!(ComputeError::Scheduler(error));
             }
-            return Err(ComputeError::Conflict);
+            release_quota_and_return!(ComputeError::Conflict);
         }
-        let server = self
-            .show_server(&project_id, ServerId::from_uuid(id))
-            .await?;
-        let _ = self.store.commit_reservation(&quota_res.id).await;
+        let server = match self.show_server(&project_id, ServerId::from_uuid(id)).await {
+            Ok(value) => value,
+            Err(error) => release_quota_and_return!(error),
+        };
+        if let Err(error) = self.store.commit_reservation(&quota_res.id).await {
+            // Do not report a successful create while its quota reservation is
+            // still pending.  A commit failure is a durable store failure and
+            // must be surfaced to the caller for reconciliation/retry.
+            let _ = self.store.release_reservation(&quota_res.id).await;
+            return Err(ComputeError::Store(error));
+        }
         let operation = self.store.get_operation(request.operation_id).await?;
         Ok(CreateMutationReceipt {
             server,

@@ -6225,6 +6225,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_create_releases_quota_reservation() -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_provider::FailureInjection;
+        use o3k_store::QuotaRepository;
+
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let provider = Arc::new(FakeComputeProvider::new());
+        provider.set_failure(FailureInjection::Terminal)?;
+        let service = ComputeService::new_for_test(store.clone(), provider);
+        let scope = OwnershipScope::project(ScopeId::new_unchecked("proj-failed"), None, None);
+        let auth = test_compute_auth("proj-failed", "user-failed", "member");
+        store
+            .set_limit(&scope, &LimitKey::compute_servers(), LimitValue::Maximum(1))
+            .await?;
+        let flavor_id = service.flavors_for_auth(&auth).await?[0].id;
+
+        let result = service
+            .create_server_for_user(ServerCreateInput {
+                user_id: "user-failed".to_owned(),
+                project_id: "proj-failed".to_owned(),
+                name: "failed-server".to_owned(),
+                image_id: "img-1".to_owned(),
+                flavor_id,
+                network_ids: vec!["net-1".to_owned()],
+                key_name: None,
+                config_drive: None,
+                idempotency_key: "failed-create".to_owned(),
+            })
+            .await;
+        assert!(
+            result.is_err(),
+            "terminal provider failure must fail create: {result:?}"
+        );
+
+        let usage = store
+            .get_usage(&scope, &LimitKey::compute_servers())
+            .await?;
+        assert_eq!(usage.reserved, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn multi_controller_reconciler_leases_mutating_work_and_skips_busy()
     -> Result<(), Box<dyn std::error::Error>> {
         let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
