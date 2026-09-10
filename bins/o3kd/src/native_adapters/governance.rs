@@ -39,6 +39,7 @@ fn now_rfc3339() -> String {
 fn map_store(error: StoreError) -> GovernanceError {
     match error {
         StoreError::ResourceNotFound => GovernanceError::NotFound,
+        StoreError::ResourceAlreadyExists => GovernanceError::Conflict,
         StoreError::Corrupt(_) => GovernanceError::Internal,
         _ => GovernanceError::Unavailable,
     }
@@ -224,6 +225,10 @@ impl GovernanceReader for GovernanceReaderAdapter {
         auth: &AuthContext,
         request: &AssignmentCreateRequest,
     ) -> Result<AssignmentView, GovernanceError> {
+        // Existence of the references is enforced by durable foreign keys; the
+        // enabled check here is a best-effort precondition. A principal or
+        // project disabled concurrently still fails token issuance downstream,
+        // so the race cannot mint usable cloud authority.
         let references = self
             .store
             .check_governance_references(
@@ -273,10 +278,13 @@ impl GovernanceReader for GovernanceReaderAdapter {
             )
             .await
             .map_err(map_store)?;
-        self.reload_identity().await?;
         let record = match outcome {
-            CreateAssignmentOutcome::Created(record)
-            | CreateAssignmentOutcome::Existing(record) => record,
+            CreateAssignmentOutcome::Created(record) => {
+                // Only an actual durable change requires an identity reload.
+                self.reload_identity().await?;
+                record
+            }
+            CreateAssignmentOutcome::Existing(record) => record,
         };
         Ok(assignment_view(record))
     }
@@ -361,8 +369,9 @@ impl GovernanceReader for GovernanceReaderAdapter {
             )
             .await
             .map_err(map_store)?;
-        self.reload_identity().await?;
         if created {
+            // Only an actual durable change requires an identity reload.
+            self.reload_identity().await?;
             return Ok(operator_assignment_view(assignment));
         }
         // Idempotent replay: return the already-canonical durable assignment.

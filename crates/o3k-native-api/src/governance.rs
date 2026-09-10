@@ -359,7 +359,11 @@ where
         query_identity,
     ) {
         Ok(validated) => validated,
-        Err(_) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
+        Err(_) => {
+            return ProblemDetails::new(ErrorCode::BadRequest)
+                .with_request_id(auth.request_id().to_owned())
+                .into_response();
+        }
     };
     let page = match read(
         validated.continuation_key().map(str::to_owned),

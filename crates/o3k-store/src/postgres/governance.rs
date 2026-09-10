@@ -311,7 +311,10 @@ impl GovernanceRepository for PostgresStore {
             .await
             .map_err(StoreError::Database)?
             .ok_or_else(|| {
-                StoreError::Corrupt("role assignment conflict row disappeared".to_owned())
+                // The unique-constraint conflicted row vanished between the
+                // rolled-back insert and this read: a create/delete race.
+                // Surface a deterministic conflict so the caller retries.
+                StoreError::ResourceAlreadyExists
             })?;
         Ok(CreateAssignmentOutcome::Existing(assignment_row(
             &existing,
