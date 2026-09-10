@@ -21,8 +21,18 @@ pub trait AuditReader: Send + Sync {
         &self,
         auth: &AuthContext,
         query: AuditQuery,
-    ) -> Result<RepositoryPage<AuditEvent>, String>;
-    async fn show(&self, auth: &AuthContext, id: &str) -> Result<AuditEvent, String>;
+    ) -> Result<RepositoryPage<AuditEvent>, AuditReadError>;
+    async fn show(&self, auth: &AuthContext, id: &str) -> Result<AuditEvent, AuditReadError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditReadError {
+    /// The durable Audit repository is unavailable or degraded.
+    Unavailable,
+    /// The requested event does not exist in the caller's effective scope.
+    NotFound,
+    /// The repository returned an invalid page, indicating an internal fault.
+    InvalidPage,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,7 +114,15 @@ pub async fn list_audit(
     };
     let page = match reader.list_page(&auth.0, query).await {
         Ok(p) => p,
-        Err(_) => return ProblemDetails::new(ErrorCode::InternalError).into_response(),
+        Err(AuditReadError::Unavailable) => {
+            return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+        }
+        Err(AuditReadError::InvalidPage) => {
+            return ProblemDetails::new(ErrorCode::InternalError).into_response();
+        }
+        Err(AuditReadError::NotFound) => {
+            return ProblemDetails::new(ErrorCode::InternalError).into_response();
+        }
     };
     let page = match state.cursor_config.complete_page(&validated, page) {
         Ok(p) => p,
@@ -126,9 +144,14 @@ pub async fn show_audit(
     }
     match reader.show(&auth.0, &id).await {
         Ok(event) => Json(event).into_response(),
-        Err(error) if error == "not found" => {
+        Err(AuditReadError::NotFound) => {
             ProblemDetails::new(ErrorCode::ResourceNotFound).into_response()
         }
-        Err(_) => ProblemDetails::new(ErrorCode::InternalError).into_response(),
+        Err(AuditReadError::Unavailable) => {
+            ProblemDetails::new(ErrorCode::NotAvailable).into_response()
+        }
+        Err(AuditReadError::InvalidPage) => {
+            ProblemDetails::new(ErrorCode::InternalError).into_response()
+        }
     }
 }

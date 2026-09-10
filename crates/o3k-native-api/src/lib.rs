@@ -1136,6 +1136,7 @@ mod tests {
     #[derive(Clone)]
     struct TestAuditReader {
         events: Arc<Vec<o3k_kernel::AuditEvent>>,
+        unavailable: bool,
     }
 
     #[async_trait::async_trait]
@@ -1144,8 +1145,14 @@ mod tests {
             &self,
             auth: &AuthContext,
             query: o3k_kernel::AuditQuery,
-        ) -> Result<pagination::RepositoryPage<o3k_kernel::AuditEvent>, String> {
-            query.validate().map_err(|e| e.to_string())?;
+        ) -> Result<pagination::RepositoryPage<o3k_kernel::AuditEvent>, audit::AuditReadError>
+        {
+            if self.unavailable {
+                return Err(audit::AuditReadError::Unavailable);
+            }
+            query
+                .validate()
+                .map_err(|_| audit::AuditReadError::InvalidPage)?;
             let mut events: Vec<_> = self
                 .events
                 .iter()
@@ -1182,14 +1189,17 @@ mod tests {
             let continuation = has_more.then(|| events[start - 1].event_id.as_str().to_owned());
             events.truncate(start);
             pagination::RepositoryPage::new(events, has_more, continuation, query.limit)
-                .map_err(|e| e.to_string())
+                .map_err(|_| audit::AuditReadError::InvalidPage)
         }
 
         async fn show(
             &self,
             auth: &AuthContext,
             id: &str,
-        ) -> Result<o3k_kernel::AuditEvent, String> {
+        ) -> Result<o3k_kernel::AuditEvent, audit::AuditReadError> {
+            if self.unavailable {
+                return Err(audit::AuditReadError::Unavailable);
+            }
             self.events
                 .iter()
                 .find(|event| {
@@ -1197,7 +1207,7 @@ mod tests {
                         && event.effective_scope == *auth.effective_scope()
                 })
                 .cloned()
-                .ok_or_else(|| "not found".to_owned())
+                .ok_or(audit::AuditReadError::NotFound)
         }
     }
 
@@ -1251,7 +1261,10 @@ mod tests {
     async fn audit_api_b0_contract_matrix() {
         let events = audit_test_events();
         let issuer = Arc::new(TestIssuer(test_operator_context(false)));
-        let reader = Arc::new(TestAuditReader { events });
+        let reader = Arc::new(TestAuditReader {
+            events,
+            unavailable: false,
+        });
         let cursor = pagination::CursorConfig::new(vec![7; 32]).unwrap();
         let state = NativeApiState::new(
             Some(test_manifest_registry()),
@@ -1335,6 +1348,24 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED); // A03 auth
+
+        let unavailable_state = NativeApiState::new(
+            Some(test_manifest_registry()),
+            pagination::CursorConfig::new(vec![7; 32]).unwrap(),
+            Some(Arc::new(TestIssuer(test_operator_context(false)))),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_audit_reader(Arc::new(TestAuditReader {
+            events: Arc::new(Vec::new()),
+            unavailable: true,
+        }));
+        let response = tower::ServiceExt::oneshot(router(unavailable_state), request("/audit"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     // ── Location & placement discovery (issue #887) ────────────────────

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use o3k_kernel::{AuditEvent, AuditQuery, AuthContext, DurableAuditRepository};
-use o3k_native_api::pagination::RepositoryPage;
+use o3k_native_api::{audit::AuditReadError, pagination::RepositoryPage};
 
 /// Production native-Audit adapter backed by the same durable store used by
 /// mutation services. No in-memory history or provider logs are consulted.
@@ -15,18 +15,18 @@ impl o3k_native_api::audit::AuditReader for AuditReaderAdapter {
         &self,
         _auth: &AuthContext,
         query: AuditQuery,
-    ) -> Result<RepositoryPage<AuditEvent>, String> {
+    ) -> Result<RepositoryPage<AuditEvent>, AuditReadError> {
         let limit = query.limit;
         let page = self
             .store
             .page(&query)
             .await
-            .map_err(|_| "audit unavailable".to_owned())?;
+            .map_err(|_| AuditReadError::Unavailable)?;
         RepositoryPage::new(page.events, page.has_more, page.continuation_key, limit)
-            .map_err(|_| "invalid audit page".to_owned())
+            .map_err(|_| AuditReadError::InvalidPage)
     }
 
-    async fn show(&self, auth: &AuthContext, id: &str) -> Result<AuditEvent, String> {
+    async fn show(&self, auth: &AuthContext, id: &str) -> Result<AuditEvent, AuditReadError> {
         let query = AuditQuery {
             scope: auth.effective_scope().clone(),
             after_event_id: None,
@@ -48,10 +48,10 @@ impl o3k_native_api::audit::AuditReader for AuditReaderAdapter {
             .store
             .page(&query)
             .await
-            .map_err(|_| "audit unavailable".to_owned())?;
+            .map_err(|_| AuditReadError::Unavailable)?;
         page.events
             .into_iter()
             .next()
-            .ok_or_else(|| "not found".to_owned())
+            .ok_or(AuditReadError::NotFound)
     }
 }
