@@ -1012,4 +1012,106 @@ mod tests {
         assert!(parse_timestamp("2026-09-11 10:00:00").is_some());
         assert!(parse_timestamp("garbage").is_none());
     }
+
+    #[tokio::test]
+    async fn provider_lifecycle_never_observed_stale_recovery_never_fabricates() {
+        let store = Arc::new(
+            o3k_store::unified::O3kStore::connect_sqlite_memory()
+                .await
+                .expect("store"),
+        );
+        store
+            .register_provider("provider-a", &[inventory("VCPU", 8, 1, 1.0, 2)])
+            .await
+            .expect("register provider");
+        let agents = fake_agents(HashMap::new());
+        let adapter = DiagnosticsReaderAdapter::new(
+            Arc::new(RwLock::new(ManifestRegistry::new())),
+            agents.clone(),
+            store,
+            o3k_kernel::LocationRegistry::default(),
+        );
+
+        // Restart: durable placement state exists but no agent is observed yet.
+        // The provider must NOT be reported healthy from durable state alone.
+        let page = adapter.providers(10, None).await.expect("providers");
+        assert_eq!(page.items[0].status, DiagnosticStatus::Unknown);
+        assert_eq!(page.items[0].reason, Some(DiagnosticReason::NeverObserved));
+
+        // Agent registers with a fresh heartbeat -> healthy.
+        agents
+            .nodes
+            .lock()
+            .await
+            .insert(
+                "provider-a".to_owned(),
+                (
+                    snapshot(
+                        "provider-a",
+                        AgentAvailability::Available,
+                        AgentAdministrativeState::Enabled,
+                    ),
+                    Some(now_unix_ms()),
+                ),
+            );
+        let page = adapter.providers(10, None).await.expect("providers");
+        assert_eq!(page.items[0].status, DiagnosticStatus::Healthy);
+
+        // Heartbeat stops -> the provider becomes stale, never stays healthy.
+        agents
+            .nodes
+            .lock()
+            .await
+            .insert(
+                "provider-a".to_owned(),
+                (
+                    snapshot(
+                        "provider-a",
+                        AgentAvailability::Unavailable,
+                        AgentAdministrativeState::Enabled,
+                    ),
+                    Some(now_unix_ms() - AGENT_LEASE_MS - 1_000),
+                ),
+            );
+        let page = adapter.providers(10, None).await.expect("providers");
+        assert_eq!(page.items[0].status, DiagnosticStatus::Stale);
+        assert_eq!(page.items[0].reason, Some(DiagnosticReason::HeartbeatLost));
+
+        // Recovery: a fresh observation restores health through the same adapter.
+        agents
+            .nodes
+            .lock()
+            .await
+            .insert(
+                "provider-a".to_owned(),
+                (
+                    snapshot(
+                        "provider-a",
+                        AgentAvailability::Available,
+                        AgentAdministrativeState::Enabled,
+                    ),
+                    Some(now_unix_ms()),
+                ),
+            );
+        let page = adapter.providers(10, None).await.expect("providers");
+        assert_eq!(page.items[0].status, DiagnosticStatus::Healthy);
+        assert_eq!(page.items[0].reason, None);
+    }
+
+    #[test]
+    fn service_lifecycle_tracks_controller_health_transitions() {
+        // Declared -> unknown.
+        let (status, _) = service_status(ControllerState::Declared);
+        assert_eq!(status, DiagnosticStatus::Unknown);
+        // Healthy controller -> healthy.
+        let (status, _) = service_status(ControllerState::Ready);
+        assert_eq!(status, DiagnosticStatus::Healthy);
+        // Reported unhealthy -> unavailable (never a stale healthy).
+        let (status, reason) = service_status(ControllerState::NotReady);
+        assert_eq!(status, DiagnosticStatus::Unavailable);
+        assert_eq!(reason, Some(DiagnosticReason::ReadinessFailed));
+        // Recovery -> healthy.
+        let (status, _) = service_status(ControllerState::Ready);
+        assert_eq!(status, DiagnosticStatus::Healthy);
+    }
 }
