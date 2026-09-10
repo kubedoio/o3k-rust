@@ -2,7 +2,7 @@
 
 Base: `ed0648e799b23e619a27d5ec94cee3dec6108393` (protected `main`).
 Original PR head: `b488de655e40763542bc0c483ac8021ebec844f9`.
-Evidence implementation revision: `368135ca5f223cd1df6f179877ea1cdf9103cc1b` (quota persistence hardening revision; final branch also contains the documentation update below).
+Evidence implementation revision: `78945f354e475874a3c49b3a1b4068b3243bba57` (final reviewed branch head).
 
 The implementation projects the existing SQLite/PostgreSQL `QuotaRepository`
 and SQL usage counters through the versioned native `/quota` contract. It does
@@ -16,8 +16,8 @@ advanced exactly once by an atomic compare-and-set. Clear/reset is an explicit
 `Unlimited` replacement and requires `expected_generation`. SQLite coverage
 includes two independent store instances, stale-writer rejection, and a
 database-trigger failure proving quota and required Audit rollback together.
-The PostgreSQL conformance test was run against disposable PostgreSQL 16 in a
-localhost container: independent writers had one success/one stale conflict,
+The PostgreSQL conformance test was run against a disposable role and database
+on the local PostgreSQL 16.15 daemon (localhost only): independent writers had one success/one stale conflict,
 restart preserved generation, and the audit migration/conformance suite passed.
 No adapter-local generation lock or shadow quota state remains.
 
