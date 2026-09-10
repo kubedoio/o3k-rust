@@ -495,6 +495,34 @@ pub struct PlacementReconcileRecord {
     pub abandoned_intents: Vec<PlacementIntentRecord>,
 }
 
+/// One repository-computed capacity aggregate row, keyed by resource class.
+///
+/// This is a durable-authority projection, not a scheduler view. `allocatable`
+/// is `Σ floor(total × allocation_ratio)` across providers, `reserved` is
+/// `Σ reserved`, and `allocated` is `Σ used`. `available` is derived by the
+/// caller as the saturating remainder so overflow can never wrap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementCapacityClassRecord {
+    pub resource_class: String,
+    pub allocatable: u64,
+    pub reserved: u64,
+    pub allocated: u64,
+}
+
+/// Bounded capacity aggregate over the durable placement authority.
+///
+/// `classes` contains at most the caller's limit; the repository fails closed
+/// if the stored class set exceeds it rather than silently truncating.
+/// Provider counts are by canonical placement provider state.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlacementCapacitySummary {
+    pub classes: Vec<PlacementCapacityClassRecord>,
+    pub providers_enabled: u64,
+    pub providers_draining: u64,
+    pub providers_unavailable: u64,
+    pub providers_deleted: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolumeAttachmentRecord {
     pub id: Uuid,

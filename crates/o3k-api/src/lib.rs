@@ -608,6 +608,23 @@ pub fn router_with_state(state: AppState) -> Router {
             );
         router = router
             .route(
+                "/o3k/v1/operator/diagnostics",
+                get(o3k_native_api::diagnostics::summary),
+            )
+            .route(
+                "/o3k/v1/operator/diagnostics/services",
+                get(o3k_native_api::diagnostics::services),
+            )
+            .route(
+                "/o3k/v1/operator/diagnostics/providers",
+                get(o3k_native_api::diagnostics::providers),
+            )
+            .route(
+                "/o3k/v1/operator/diagnostics/capacity",
+                get(o3k_native_api::diagnostics::capacity),
+            );
+        router = router
+            .route(
                 "/o3k/v1/{namespace}/{collection}",
                 get(o3k_native_api::resource::list).post(o3k_native_api::resource::create),
             )

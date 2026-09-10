@@ -18,6 +18,7 @@ use std::sync::{Arc, RwLock};
 pub mod audit;
 pub mod auth;
 pub mod compute;
+pub mod diagnostics;
 pub mod error;
 pub mod governance;
 pub mod identity;
@@ -45,6 +46,7 @@ pub struct NativeApiState {
     pub audit_reader: Option<std::sync::Arc<dyn audit::AuditReader>>,
     pub quota_reader: Option<std::sync::Arc<dyn quota::QuotaReader>>,
     pub governance_reader: Option<std::sync::Arc<dyn governance::GovernanceReader>>,
+    pub diagnostics_reader: Option<std::sync::Arc<dyn diagnostics::DiagnosticsReader>>,
     /// Validated generic resource descriptors.  This is the northbound
     /// registry; applications below it are intentionally controller-agnostic.
     resource_index: resource::ResourceDispatcher,
@@ -90,6 +92,7 @@ impl NativeApiState {
             audit_reader: None,
             quota_reader: None,
             governance_reader: None,
+            diagnostics_reader: None,
             resource_index,
             resource_application: None,
             authorizer: None,
@@ -131,6 +134,15 @@ impl NativeApiState {
         reader: std::sync::Arc<dyn governance::GovernanceReader>,
     ) -> Self {
         self.governance_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_diagnostics_reader(
+        mut self,
+        reader: std::sync::Arc<dyn diagnostics::DiagnosticsReader>,
+    ) -> Self {
+        self.diagnostics_reader = Some(reader);
         self
     }
 
@@ -247,6 +259,16 @@ pub fn router(state: NativeApiState) -> Router {
             "/operator/governance/operator-assignments/{id}",
             axum::routing::delete(governance::delete_operator_assignment),
         )
+        .route("/operator/diagnostics", get(diagnostics::summary))
+        .route(
+            "/operator/diagnostics/services",
+            get(diagnostics::services),
+        )
+        .route(
+            "/operator/diagnostics/providers",
+            get(diagnostics::providers),
+        )
+        .route("/operator/diagnostics/capacity", get(diagnostics::capacity))
         .layer(DefaultBodyLimit::max(1_048_576))
         .with_state(state)
 }

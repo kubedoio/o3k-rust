@@ -445,6 +445,27 @@ impl StaticAuthorizer {
                 },
             );
         }
+
+        // Native Operator diagnostics (#903) is a bounded, read-only
+        // projection of canonical service/provider/capacity authority. It is
+        // explicit durable system/operator authority: never inferred from a
+        // tenant role name, route shape or IdP claim, and ordinary project
+        // scope must never satisfy it.
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("operator", "ReadDiagnostics"),
+            ResourceType::new("operator", "diagnostics"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: false,
+                    required_roles: vec!["operator".to_owned()],
+                },
+            );
+        }
     }
 }
 
@@ -473,6 +494,18 @@ impl Authorizer for StaticAuthorizer {
         }
 
         if request.action == ActionId::new_unchecked("operator", "ReadProfile")
+            && request.auth_context.effective_scope().kind() != ScopeKind::System
+        {
+            return AuthorizationDecision::Deny {
+                reason: DecisionReason::ScopeMismatch,
+            };
+        }
+
+        // Operator diagnostics is system-scoped by construction. A tenant or
+        // project-scoped caller carrying an `operator` role name must never
+        // satisfy it; only durable System authority plus the required
+        // operator role can (the role is checked in step 5).
+        if request.action == ActionId::new_unchecked("operator", "ReadDiagnostics")
             && request.auth_context.effective_scope().kind() != ScopeKind::System
         {
             return AuthorizationDecision::Deny {

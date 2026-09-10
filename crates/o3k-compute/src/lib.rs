@@ -4459,6 +4459,12 @@ mod tests {
         ) -> Result<Vec<o3k_store::PlacementProviderRecord>, o3k_store::StoreError> {
             self.inner.list_providers().await
         }
+        async fn capacity_summary(
+            &self,
+            limit: usize,
+        ) -> Result<o3k_store::PlacementCapacitySummary, o3k_store::StoreError> {
+            self.inner.capacity_summary(limit).await
+        }
         async fn register_provider(
             &self,
             node_id: &str,

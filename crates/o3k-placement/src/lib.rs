@@ -432,6 +432,23 @@ impl PlacementLedger {
             .map_err(map_store_error)?;
         records.iter().map(provider_from_record).collect()
     }
+
+    /// Bounded, database-computed capacity aggregate over the durable
+    /// placement authority.
+    ///
+    /// Operator diagnostics use this instead of [`Self::providers`] so a
+    /// refresh never materializes the whole provider fleet, its inventories
+    /// and its allocations. The repository fails closed when the stored
+    /// resource-class set exceeds `limit`.
+    pub async fn capacity_summary(
+        &self,
+        limit: usize,
+    ) -> Result<o3k_store::PlacementCapacitySummary, PlacementError> {
+        self.repository
+            .capacity_summary(limit)
+            .await
+            .map_err(map_store_error)
+    }
 }
 
 fn provider_state_as_str(state: ProviderState) -> &'static str {
@@ -1071,6 +1088,12 @@ mod tests {
             &self,
         ) -> Result<Vec<o3k_store::PlacementProviderRecord>, o3k_store::StoreError> {
             self.inner.list_providers().await
+        }
+        async fn capacity_summary(
+            &self,
+            limit: usize,
+        ) -> Result<o3k_store::PlacementCapacitySummary, o3k_store::StoreError> {
+            self.inner.capacity_summary(limit).await
         }
         async fn register_provider(
             &self,

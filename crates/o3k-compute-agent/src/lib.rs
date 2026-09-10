@@ -1047,6 +1047,17 @@ impl o3k_provider::AgentNodeRegistry for NodeRegistry {
         self.nodes.read().await.get(agent_id).map(agent_snapshot)
     }
 
+    async fn observed_at_unix_ms(&self, agent_id: &str) -> Option<i64> {
+        let nodes = self.nodes.read().await;
+        let node = nodes.get(agent_id)?;
+        // Registration seeds `last_heartbeat_at`, and every authenticated
+        // heartbeat replaces it, so a present value is a real observation.
+        node.last_heartbeat_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+    }
+
     async fn lease_current_epoch(
         &self,
         agent_id: &str,

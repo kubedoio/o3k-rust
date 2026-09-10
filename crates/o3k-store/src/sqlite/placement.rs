@@ -11,7 +11,8 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
-    ObservationUpdate, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    ObservationUpdate, PlacementAllocationRecord, PlacementCapacityClassRecord,
+    PlacementCapacitySummary, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository,
     PlacementResourceRecord, ResourceRecord, StoreError,
 };
@@ -53,6 +54,69 @@ impl SqliteStore {
             providers.push(provider);
         }
         Ok(providers)
+    }
+
+    async fn capacity_summary(
+        &self,
+        limit: usize,
+    ) -> Result<PlacementCapacitySummary, StoreError> {
+        let bound = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("placement aggregate limit out of range".to_owned()))?;
+        let rows = sqlx::query(
+            "SELECT resource_class, \
+                    COALESCE(SUM(CAST(total * allocation_ratio AS INTEGER)), 0) AS allocatable, \
+                    COALESCE(SUM(reserved), 0) AS reserved, \
+                    COALESCE(SUM(used), 0) AS allocated \
+             FROM placement_inventories \
+             GROUP BY resource_class \
+             ORDER BY resource_class \
+             LIMIT ?",
+        )
+        .bind(bound + 1)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if rows.len() > limit {
+            return Err(StoreError::Corrupt(
+                "placement resource class inventory exceeds the bounded aggregate limit"
+                    .to_owned(),
+            ));
+        }
+        let mut classes = Vec::with_capacity(rows.len());
+        for row in &rows {
+            classes.push(PlacementCapacityClassRecord {
+                resource_class: row.get("resource_class"),
+                allocatable: placement_u64(row.get("allocatable"))?,
+                reserved: placement_u64(row.get("reserved"))?,
+                allocated: placement_u64(row.get("allocated"))?,
+            });
+        }
+        let state_rows = sqlx::query(
+            "SELECT state, COUNT(*) AS provider_count FROM placement_providers GROUP BY state",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let mut summary = PlacementCapacitySummary {
+            classes,
+            ..PlacementCapacitySummary::default()
+        };
+        for row in &state_rows {
+            let state: String = row.get("state");
+            let count = placement_u64(row.get("provider_count"))?;
+            match state.as_str() {
+                "Enabled" => summary.providers_enabled = count,
+                "Draining" => summary.providers_draining = count,
+                "Unavailable" => summary.providers_unavailable = count,
+                "Deleted" => summary.providers_deleted = count,
+                other => {
+                    return Err(StoreError::Corrupt(format!(
+                        "unknown placement provider state in durable state: {other:?}"
+                    )));
+                }
+            }
+        }
+        Ok(summary)
     }
 
     async fn load_placement_inventories(
@@ -1083,6 +1147,13 @@ impl PlacementRepository for SqliteStore {
 
     async fn list_providers(&self) -> Result<Vec<PlacementProviderRecord>, StoreError> {
         self.list_providers().await
+    }
+
+    async fn capacity_summary(
+        &self,
+        limit: usize,
+    ) -> Result<PlacementCapacitySummary, StoreError> {
+        self.capacity_summary(limit).await
     }
 
     async fn register_provider(
