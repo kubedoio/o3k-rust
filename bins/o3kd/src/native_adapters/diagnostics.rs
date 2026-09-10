@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use o3k_kernel::{ControllerState, ManifestRegistry};
+use o3k_kernel::{ControllerRegistration, ControllerState, ManifestRegistry};
 use o3k_native_api::diagnostics::{
     CapacityDiagnostics, CapacityDimension, ComponentCounts, ControlPlaneStatus,
     ControllerDiagnostics, DIAGNOSTICS_VERSION, DiagnosticReason, DiagnosticStatus,
@@ -38,9 +38,23 @@ use o3k_store::{CoordinationRepository, PlacementRepository, StoreError};
 pub const AGENT_LEASE_MS: i64 = 15_000;
 
 /// Upper bound on the number of services projected in one pass. Service
-/// collections are registry-backed (process-internal and small), but the bound
-/// is retained for defense in depth.
+/// collections are registry-backed (process-internal and small). The bound is
+/// enforced fail-closed: a registry exceeding it yields a corrupt-state error
+/// rather than a silently truncated projection.
 pub const MAX_SERVICES: usize = 256;
+
+/// Freshness threshold for external-controller observation. The composition
+/// probe re-checks external controllers every 15s; a controller whose last
+/// confirmed observation is older than five probe intervals must not be
+/// reported healthy. In-process services are configuration-authoritative and
+/// are intentionally exempt from this gate.
+pub const SERVICE_OBSERVATION_THRESHOLD_MS: i64 = 75_000;
+
+/// Upper bound on the provider fleet the aggregate projection will read in one
+/// pass. Provider fleets are the set of hypervisors (bounded by the placement
+/// authority); the aggregate fails closed above this bound rather than
+/// truncating. A fleet larger than this is itself a scale anomaly.
+pub const MAX_PROVIDERS: usize = 65_536;
 
 /// Unix milliseconds since the UNIX epoch. Falls back to `0` only if the
 /// system clock precedes the epoch, which cannot happen on supported hosts.
@@ -143,6 +157,34 @@ fn service_status(state: ControllerState) -> (DiagnosticStatus, Option<Diagnosti
     }
 }
 
+/// Service status including the observation-freshness gate for external
+/// controllers.
+///
+/// In-process services are process-authoritative configuration: their
+/// readiness is a fact of the running composition, not an observation, so it
+/// cannot go stale here. External controllers are observation-probed; a
+/// controller that last reported Ready but has not been re-confirmed within
+/// the freshness threshold must be projected as `stale`, never as a
+/// last-known-good `healthy`.
+fn service_status_with_freshness(
+    registration: &ControllerRegistration,
+    observed_at: i64,
+    now: i64,
+) -> (DiagnosticStatus, Option<DiagnosticReason>) {
+    let (status, reason) = service_status(registration.state);
+    let is_external = registration.session.is_some();
+    if is_external
+        && status == DiagnosticStatus::Healthy
+        && now.saturating_sub(observed_at) > SERVICE_OBSERVATION_THRESHOLD_MS
+    {
+        return (
+            DiagnosticStatus::Stale,
+            Some(DiagnosticReason::ObservationStale),
+        );
+    }
+    (status, reason)
+}
+
 /// Tolerant parsing of a control-plane heartbeat timestamp: RFC3339 first,
 /// then the SQLite `datetime('now')` `%Y-%m-%d %H:%M:%S` (UTC) form. On
 /// failure returns `None` (the heartbeat is not projected).
@@ -224,16 +266,8 @@ impl DiagnosticsReaderAdapter {
         }
     }
 
-    /// Records the observation time of a service. Used by the composition
-    /// controller probe task to mark when a controller was last probed.
-    pub fn record_service_observation(&self, service_id: &str, unix_ms: i64) {
-        if let Ok(mut observations) = self.observations.write() {
-            observations.insert(service_id.to_owned(), unix_ms);
-        }
-    }
-
     /// Exposes the shared service-observation map to the composition probe
-    /// task.
+    /// task, which writes fresh observation timestamps for every controller.
     pub fn observations(&self) -> Arc<RwLock<HashMap<String, i64>>> {
         self.observations.clone()
     }
@@ -288,17 +322,26 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
 
         // Services: iterate the registry directly (bounded, process-internal)
         // and count by projected status. This deliberately does not call
-        // `services()` with pagination.
+        // `services()` with pagination. The bound is enforced fail-closed.
         let mut services = ComponentCounts::default();
         {
             let reg = self
                 .registry
                 .read()
                 .map_err(|_| DiagnosticsError::Corrupt)?;
+            if reg.all().len() > MAX_SERVICES {
+                return Err(DiagnosticsError::Corrupt);
+            }
             for manifest in reg.all() {
                 let (status, _) = reg
                     .controller(&manifest.service_id)
-                    .map(|registration| service_status(registration.state))
+                    .map(|registration| {
+                        service_status_with_freshness(
+                            registration,
+                            self.service_observed_at(&manifest.service_id),
+                            now,
+                        )
+                    })
                     .unwrap_or((
                         DiagnosticStatus::Unknown,
                         Some(DiagnosticReason::NeverObserved),
@@ -314,15 +357,29 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
             }
         }
 
-        // Providers: the agent registry is the observed set (in-memory and
-        // fleet-bounded). Durable placement providers without a live agent
-        // snapshot surface as `unknown` in the providers list, but are not
-        // counted here — the summary reports the observed agent population.
+        // Providers: iterate the durable placement provider set (the
+        // authority for "which providers exist") and overlay agent liveness,
+        // so a durably draining/deleted provider is never reported healthy.
+        // This mirrors `providers()` exactly; the durable state list is a
+        // lightweight id+state read and the agent registry is in-memory.
         let agents = self.agents.all().await;
-        let mut providers = ComponentCounts::default();
+        let mut agent_map: HashMap<&str, (&AgentNodeSnapshot, Option<i64>)> = HashMap::new();
         for agent in &agents {
             let observed = self.agents.observed_at_unix_ms(&agent.agent_id).await;
-            let (status, _) = provider_status(Some(agent), "Enabled", observed, now);
+            agent_map.insert(agent.agent_id.as_str(), (agent, observed));
+        }
+        let states = self
+            .store
+            .list_provider_states(None, MAX_PROVIDERS)
+            .await
+            .map_err(map_store_error)?;
+        let mut providers = ComponentCounts::default();
+        for record in &states {
+            let (snap, observed) = agent_map
+                .get(record.id.as_str())
+                .map(|(snap, observed)| (Some(*snap), *observed))
+                .unwrap_or((None, None));
+            let (status, _) = provider_status(snap, &record.state, observed, now);
             providers.total += 1;
             match status {
                 DiagnosticStatus::Healthy => providers.healthy += 1,
@@ -369,6 +426,10 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
             .registry
             .read()
             .map_err(|_| DiagnosticsError::Corrupt)?;
+        if reg.all().len() > MAX_SERVICES {
+            return Err(DiagnosticsError::Corrupt);
+        }
+        let now = now_unix_ms();
         let mut manifests = reg.all();
         manifests.sort_by(|left, right| left.service_id.cmp(&right.service_id));
 
@@ -387,11 +448,18 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
                 .map(|registration| registration.state.to_string())
                 .unwrap_or_else(|| "declared".to_owned());
             let (status, reason) = registration
-                .map(|registration| service_status(registration.state))
+                .map(|registration| {
+                    service_status_with_freshness(
+                        registration,
+                        self.service_observed_at(&manifest.service_id),
+                        now,
+                    )
+                })
                 .unwrap_or((
                     DiagnosticStatus::Unknown,
                     Some(DiagnosticReason::NeverObserved),
                 ));
+            let observed_at = Some(self.service_observed_at(&manifest.service_id));
             let controller = registration.map(|registration| {
                 let manifest_controller = manifest.controller.as_ref();
                 let protocol_version = registration
@@ -429,7 +497,7 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
                 ownership: manifest.ownership.to_string(),
                 lifecycle_state,
                 status,
-                observed_at_unix_ms: Some(self.service_observed_at(&manifest.service_id)),
+                observed_at_unix_ms: observed_at,
                 reason,
                 controller,
             });
@@ -527,14 +595,31 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
         let agents = self.agents.all().await;
         let now = now_unix_ms();
 
-        let mut max_observed: Option<i64> = None;
-        let mut fleet = ComponentCounts::default();
+        // Fleet status comes from the durable provider set plus agent
+        // liveness, exactly like the providers list and summary, so a durably
+        // draining/deleted provider can never be reported healthy here.
+        let mut agent_map: HashMap<&str, (&AgentNodeSnapshot, Option<i64>)> = HashMap::new();
         for agent in &agents {
             let observed = self.agents.observed_at_unix_ms(&agent.agent_id).await;
+            agent_map.insert(agent.agent_id.as_str(), (agent, observed));
+        }
+        let states = self
+            .store
+            .list_provider_states(None, MAX_PROVIDERS)
+            .await
+            .map_err(map_store_error)?;
+
+        let mut max_observed: Option<i64> = None;
+        let mut fleet = ComponentCounts::default();
+        for record in &states {
+            let (snap, observed) = agent_map
+                .get(record.id.as_str())
+                .map(|(snap, observed)| (Some(*snap), *observed))
+                .unwrap_or((None, None));
             if let Some(observed) = observed {
                 max_observed = Some(max_observed.map_or(observed, |max| max.max(observed)));
             }
-            let (status, _) = provider_status(Some(agent), "Enabled", observed, now);
+            let (status, _) = provider_status(snap, &record.state, observed, now);
             fleet.total += 1;
             match status {
                 DiagnosticStatus::Healthy => fleet.healthy += 1,
@@ -545,11 +630,30 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
             }
         }
 
-        let provider_total = summary.providers_enabled
-            + summary.providers_draining
-            + summary.providers_unavailable
-            + summary.providers_deleted;
-        let (status, reason) = if provider_total == 0 && agents.is_empty() {
+        // Dimensions, with `available` derived through the shared saturating
+        // helper. A negative remainder (drifted/corrupt durable state) is a
+        // capacity invariant violation and degrades the whole capacity status.
+        let mut dimensions: Vec<CapacityDimension> = summary
+            .classes
+            .iter()
+            .map(|class| {
+                CapacityDimension {
+                    resource_class: class.resource_class.clone(),
+                    unit: unit_for(&class.resource_class).to_owned(),
+                    allocatable: class.allocatable,
+                    reserved: class.reserved,
+                    allocated: class.allocated,
+                    available: 0,
+                }
+                .with_available()
+            })
+            .collect();
+        sort_dimensions(&mut dimensions);
+        let over_allocated = dimensions.iter().any(|dimension| {
+            dimension.allocated > dimension.allocatable.saturating_sub(dimension.reserved)
+        });
+
+        let (status, reason) = if states.is_empty() {
             // Capacity authority is not populated at all.
             (
                 DiagnosticStatus::Unknown,
@@ -563,6 +667,10 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
                 DiagnosticStatus::Stale,
                 Some(DiagnosticReason::ObservationStale),
             )
+        } else if over_allocated {
+            // The durable capacity invariant was violated; never present this
+            // as healthy.
+            (DiagnosticStatus::Degraded, None)
         } else if fleet.degraded > 0 || fleet.unavailable > 0 || fleet.stale > 0 {
             // Partial provider failure: at least one provider is down or stale
             // even though another produced a fresh observation.
@@ -570,23 +678,6 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
         } else {
             (DiagnosticStatus::Healthy, None)
         };
-
-        let mut dimensions: Vec<CapacityDimension> = summary
-            .classes
-            .iter()
-            .map(|class| CapacityDimension {
-                resource_class: class.resource_class.clone(),
-                unit: unit_for(&class.resource_class).to_owned(),
-                allocatable: class.allocatable,
-                reserved: class.reserved,
-                allocated: class.allocated,
-                available: class
-                    .allocatable
-                    .saturating_sub(class.reserved)
-                    .saturating_sub(class.allocated),
-            })
-            .collect();
-        sort_dimensions(&mut dimensions);
 
         Ok(CapacityDiagnostics {
             version: DIAGNOSTICS_VERSION.to_owned(),
@@ -1101,5 +1192,165 @@ mod tests {
         // Recovery -> healthy.
         let (status, _) = service_status(ControllerState::Ready);
         assert_eq!(status, DiagnosticStatus::Healthy);
+    }
+
+    fn external_session(service: &str, generation: u64) -> o3k_kernel::ControllerSession {
+        o3k_kernel::ControllerSession {
+            service_id: service.to_owned(),
+            namespace: service.to_owned(),
+            service_principal: o3k_kernel::ServicePrincipal::new(
+                o3k_kernel::PrincipalId::new_unchecked(format!("{service}-controller")),
+                format!("{service}-controller"),
+                service,
+            ),
+            session_id: uuid::Uuid::new_v4(),
+            session_generation: generation,
+            protocol_version: o3k_kernel::ProtocolVersion::new(1, 0),
+            manifest_digest: "digest".to_owned(),
+            manifest_generation: generation,
+            started_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn external_controller_with_stale_observation_is_not_healthy() {
+        // An external controller that last reported Ready but has not been
+        // re-confirmed within the freshness threshold is stale, never a
+        // last-known-good healthy.
+        let registration = ControllerRegistration {
+            service_id: "compute".to_owned(),
+            namespace: "compute".to_owned(),
+            session: Some(external_session("compute", 1)),
+            state: ControllerState::Ready,
+            health: None,
+        };
+        let (status, reason) = service_status_with_freshness(
+            &registration,
+            now_unix_ms() - SERVICE_OBSERVATION_THRESHOLD_MS - 1_000,
+            now_unix_ms(),
+        );
+        assert_eq!(status, DiagnosticStatus::Stale);
+        assert_eq!(reason, Some(DiagnosticReason::ObservationStale));
+    }
+
+    #[test]
+    fn in_process_service_readiness_is_configuration_not_observation() {
+        // In-process services (no transport session) are process-authoritative
+        // configuration; an old observation does not make them stale.
+        let registration = ControllerRegistration {
+            service_id: "compute".to_owned(),
+            namespace: "compute".to_owned(),
+            session: None,
+            state: ControllerState::Ready,
+            health: None,
+        };
+        let (status, reason) = service_status_with_freshness(
+            &registration,
+            now_unix_ms() - SERVICE_OBSERVATION_THRESHOLD_MS - 1_000,
+            now_unix_ms(),
+        );
+        assert_eq!(status, DiagnosticStatus::Healthy);
+        assert_eq!(reason, None);
+    }
+
+    #[tokio::test]
+    async fn summary_and_capacity_reflect_durable_draining() {
+        let store = Arc::new(
+            o3k_store::unified::O3kStore::connect_sqlite_memory()
+                .await
+                .expect("store"),
+        );
+        store
+            .register_provider("provider-a", &[inventory("VCPU", 8, 1, 1.0, 2)])
+            .await
+            .expect("register provider");
+        store
+            .set_provider_state("provider-a", "Draining")
+            .await
+            .expect("set state");
+        let agents = fake_agents(HashMap::from([(
+            "provider-a".to_owned(),
+            (
+                snapshot(
+                    "provider-a",
+                    AgentAvailability::Available,
+                    AgentAdministrativeState::Enabled,
+                ),
+                Some(now_unix_ms()),
+            ),
+        )]));
+        let adapter = DiagnosticsReaderAdapter::new(
+            Arc::new(RwLock::new(ManifestRegistry::new())),
+            agents,
+            store,
+            o3k_kernel::LocationRegistry::default(),
+        );
+
+        // A durably draining provider with a live agent must be degraded, not
+        // healthy, in the aggregate and in capacity.
+        let summary = adapter.summary().await.expect("summary");
+        assert_eq!(summary.counts.providers.total, 1);
+        assert_eq!(summary.counts.providers.degraded, 1);
+        assert_eq!(summary.counts.providers.healthy, 0);
+
+        let capacity = adapter.capacity().await.expect("capacity");
+        assert_eq!(capacity.status, DiagnosticStatus::Degraded);
+    }
+
+    #[tokio::test]
+    async fn capacity_over_allocated_is_degraded_not_healthy() {
+        let store = Arc::new(
+            o3k_store::unified::O3kStore::connect_sqlite_memory()
+                .await
+                .expect("store"),
+        );
+        store
+            .register_provider("provider-a", &[inventory("VCPU", 8, 0, 1.0, 0)])
+            .await
+            .expect("register provider");
+        // Over-allocate beyond allocatable (8) — a drift/corruption scenario.
+        store
+            .commit_allocation(
+                "provider-a",
+                1,
+                &o3k_store::PlacementAllocationRecord {
+                    id: "alloc-1".to_owned(),
+                    provider_id: "provider-a".to_owned(),
+                    consumer_id: "consumer-1".to_owned(),
+                    resources: vec![o3k_store::PlacementResourceRecord {
+                        resource_class: "VCPU".to_owned(),
+                        amount: 100,
+                    }],
+                },
+            )
+            .await
+            .expect("commit allocation");
+        let agents = fake_agents(HashMap::from([(
+            "provider-a".to_owned(),
+            (
+                snapshot(
+                    "provider-a",
+                    AgentAvailability::Available,
+                    AgentAdministrativeState::Enabled,
+                ),
+                Some(now_unix_ms()),
+            ),
+        )]));
+        let adapter = DiagnosticsReaderAdapter::new(
+            Arc::new(RwLock::new(ManifestRegistry::new())),
+            agents,
+            store,
+            o3k_kernel::LocationRegistry::default(),
+        );
+
+        let capacity = adapter.capacity().await.expect("capacity");
+        assert_eq!(capacity.status, DiagnosticStatus::Degraded);
+        let vcpu = capacity
+            .dimensions
+            .iter()
+            .find(|dimension| dimension.resource_class == "VCPU")
+            .expect("VCPU dimension");
+        // available must never be negative; over-allocation degrades the status.
+        assert_eq!(vcpu.available, 0);
     }
 }

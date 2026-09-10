@@ -449,6 +449,19 @@ impl PlacementLedger {
             .map_err(map_store_error)
     }
 
+    /// Bounded read of provider id + durable state only, used by diagnostics
+    /// aggregation. Never materializes inventories or allocations.
+    pub async fn provider_states(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<o3k_store::PlacementProviderStateRecord>, PlacementError> {
+        self.repository
+            .list_provider_states(after_id, limit)
+            .await
+            .map_err(map_store_error)
+    }
+
     /// Bounded, database-computed capacity aggregate over the durable
     /// placement authority.
     ///
@@ -1111,6 +1124,13 @@ mod tests {
             limit: usize,
         ) -> Result<Vec<o3k_store::PlacementProviderRecord>, o3k_store::StoreError> {
             self.inner.list_providers_bounded(after_id, limit).await
+        }
+        async fn list_provider_states(
+            &self,
+            after_id: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<o3k_store::PlacementProviderStateRecord>, o3k_store::StoreError> {
+            self.inner.list_provider_states(after_id, limit).await
         }
         async fn capacity_summary(
             &self,

@@ -4,7 +4,8 @@ use sqlx::Row;
 use crate::{
     PlacementAllocationRecord, PlacementCapacityClassRecord, PlacementCapacitySummary,
     PlacementIntentRecord, PlacementInventoryRecord, PlacementProviderRecord,
-    PlacementReconcileRecord, PlacementRepository, PlacementResourceRecord, StoreError,
+    PlacementProviderStateRecord, PlacementReconcileRecord, PlacementRepository,
+    PlacementResourceRecord, StoreError,
 };
 
 use super::PostgresStore;
@@ -100,6 +101,33 @@ impl PlacementRepository for PostgresStore {
             providers.push(provider);
         }
         Ok(providers)
+    }
+
+    async fn list_provider_states(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PlacementProviderStateRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("placement page limit out of range".to_owned()))?;
+        let rows = sqlx::query(
+            "SELECT id, state FROM placement_providers \
+             WHERE ($1::text IS NULL OR id > $1) \
+             ORDER BY id \
+             LIMIT $2",
+        )
+        .bind(after_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        Ok(rows
+            .iter()
+            .map(|row| PlacementProviderStateRecord {
+                id: row.get("id"),
+                state: row.get("state"),
+            })
+            .collect())
     }
 
     async fn capacity_summary(&self, limit: usize) -> Result<PlacementCapacitySummary, StoreError> {

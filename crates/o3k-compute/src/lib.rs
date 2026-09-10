@@ -4472,6 +4472,13 @@ mod tests {
         ) -> Result<Vec<o3k_store::PlacementProviderRecord>, o3k_store::StoreError> {
             self.inner.list_providers_bounded(after_id, limit).await
         }
+        async fn list_provider_states(
+            &self,
+            after_id: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<o3k_store::PlacementProviderStateRecord>, o3k_store::StoreError> {
+            self.inner.list_provider_states(after_id, limit).await
+        }
         async fn register_provider(
             &self,
             node_id: &str,

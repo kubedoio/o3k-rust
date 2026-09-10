@@ -12,9 +12,9 @@ use crate::domain::records::{
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
     NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, OperatorAssignmentRecord,
     PlacementAllocationRecord, PlacementCapacitySummary, PlacementIntentRecord,
-    PlacementInventoryRecord, PlacementProviderRecord, PlacementReconcileRecord, PortRecord,
-    ResourceRecord, SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord,
-    SubnetRecord, VolumeAttachmentRecord,
+    PlacementInventoryRecord, PlacementProviderRecord, PlacementProviderStateRecord,
+    PlacementReconcileRecord, PortRecord, ResourceRecord, SecurityGroupBindingRecord,
+    SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord, VolumeAttachmentRecord,
 };
 use crate::port::durable::DurableStore;
 use crate::quota::QuotaRepository;
@@ -640,6 +640,15 @@ pub trait PlacementRepository: Send + Sync {
         after_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<PlacementProviderRecord>, StoreError>;
+
+    /// Bounded read of provider id + durable state only, for operator
+    /// diagnostics aggregation. Ordered by id, at most `limit`, continuing
+    /// after `after_id`. Never materializes inventories or allocations.
+    async fn list_provider_states(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PlacementProviderStateRecord>, StoreError>;
 
     /// Bounded, repository-computed capacity aggregate over the durable
     /// placement authority.

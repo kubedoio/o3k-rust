@@ -523,6 +523,14 @@ pub struct PlacementCapacitySummary {
     pub providers_deleted: u64,
 }
 
+/// One provider id + durable state row, used by operator diagnostics to
+/// aggregate fleet status without materializing inventories or allocations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementProviderStateRecord {
+    pub id: String,
+    pub state: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolumeAttachmentRecord {
     pub id: Uuid,
