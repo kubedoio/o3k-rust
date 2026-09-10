@@ -2,7 +2,7 @@
 
 Base: `ed0648e799b23e619a27d5ec94cee3dec6108393` (protected `main`).
 Original PR head: `b488de655e40763542bc0c483ac8021ebec844f9`.
-Current implementation head: `963cc8f2` (this revision).
+Evidence implementation revision: `0f16c4c0075094a3f92c323ca3e9ad5f0a491034`.
 
 The implementation projects the existing SQLite/PostgreSQL `QuotaRepository`
 and SQL usage counters through the versioned native `/quota` contract. It does
@@ -26,6 +26,11 @@ operator quota routes, reads tenant-scoped dimensions and usage, observes
 usage after native Compute allocation and release, and rejects a tenant's
 foreign operator read. `network:address_allocations` usage is backed by the
 canonical allocation table in both stores.
+
+Compute create failure and compensation paths release pending quota
+reservations, and terminal `ERROR` compute resources are excluded from active
+usage counters. The regression is covered by
+`failed_create_releases_quota_reservation`.
 
 The complete local workspace gates and focused SQLite/PostgreSQL process
 journeys pass. GitHub CI for this revision is the final external gate; the
