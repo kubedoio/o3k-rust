@@ -2,8 +2,7 @@
 
 Base: `ed0648e799b23e619a27d5ec94cee3dec6108393` (protected `main`).
 Original PR head: `b488de655e40763542bc0c483ac8021ebec844f9`.
-Current implementation head: `32111ccece04920cb090368fe79e928d2741ffee` (prior to the
-follow-up route, usage, and failure-injection fixes in the working tree).
+Current implementation head: `8bc84af3` (this revision).
 
 The implementation projects the existing SQLite/PostgreSQL `QuotaRepository`
 and SQL usage counters through the versioned native `/quota` contract. It does
@@ -28,7 +27,8 @@ usage after native Compute allocation and release, and rejects a tenant's
 foreign operator read. `network:address_allocations` usage is backed by the
 canonical allocation table in both stores.
 
-The complete local workspace gates and the focused process journey pass. The
-remaining readiness gate is the required GitHub CI run for the final pushed
-HEAD; the prior CI run failed in a concurrent PostgreSQL audit migration fixture
-(`VersionMissing(25)`) and must be rerun/confirmed against the final revision.
+The complete local workspace gates and focused SQLite/PostgreSQL process
+journeys pass. GitHub CI for this revision is the final external gate; the
+preceding revision's failure was isolated to a concurrent PostgreSQL audit
+migration fixture (`VersionMissing(25)`) and is being rechecked on this
+revision.
