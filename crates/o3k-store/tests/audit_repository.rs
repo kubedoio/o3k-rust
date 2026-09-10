@@ -191,6 +191,7 @@ async fn unified_audit_query_pushes_supported_filters_and_scope() {
     let query = AuditQuery {
         scope: OwnershipScope::project(ScopeId::new_unchecked("project-a"), None, None),
         after_event_id: None,
+        event_id: None,
         limit: 10,
         service: Some("compute".into()),
         action: Some("compute:read".into()),
