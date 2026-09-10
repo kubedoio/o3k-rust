@@ -102,12 +102,10 @@ impl PlacementRepository for PostgresStore {
         Ok(providers)
     }
 
-    async fn capacity_summary(
-        &self,
-        limit: usize,
-    ) -> Result<PlacementCapacitySummary, StoreError> {
-        let bound = i64::try_from(limit)
-            .map_err(|_| StoreError::Corrupt("placement aggregate limit out of range".to_owned()))?;
+    async fn capacity_summary(&self, limit: usize) -> Result<PlacementCapacitySummary, StoreError> {
+        let bound = i64::try_from(limit).map_err(|_| {
+            StoreError::Corrupt("placement aggregate limit out of range".to_owned())
+        })?;
         let rows = sqlx::query(
             "SELECT resource_class, \
                     COALESCE(SUM(FLOOR(total * allocation_ratio)::BIGINT), 0)::BIGINT AS allocatable, \
@@ -124,8 +122,7 @@ impl PlacementRepository for PostgresStore {
         .map_err(StoreError::Database)?;
         if rows.len() > limit {
             return Err(StoreError::Corrupt(
-                "placement resource class inventory exceeds the bounded aggregate limit"
-                    .to_owned(),
+                "placement resource class inventory exceeds the bounded aggregate limit".to_owned(),
             ));
         }
         let mut classes = Vec::with_capacity(rows.len());

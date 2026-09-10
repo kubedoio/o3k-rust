@@ -648,8 +648,7 @@ pub trait PlacementRepository: Send + Sync {
     /// without materializing every provider, inventory row and allocation.
     /// The implementation must aggregate in the database and fail closed
     /// (never silently truncate) when the stored class set exceeds `limit`.
-    async fn capacity_summary(&self, limit: usize)
-    -> Result<PlacementCapacitySummary, StoreError>;
+    async fn capacity_summary(&self, limit: usize) -> Result<PlacementCapacitySummary, StoreError>;
     async fn register_provider(
         &self,
         node_id: &str,

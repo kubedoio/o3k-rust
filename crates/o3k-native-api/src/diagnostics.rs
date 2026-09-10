@@ -306,6 +306,7 @@ pub struct DiagnosticsQuery {
 
 impl DiagnosticsQuery {
     /// Validates and bounds `limit`, returning the requested page size.
+    #[allow(clippy::result_large_err)]
     pub fn page_size(&self) -> Result<usize, Response> {
         match self.limit {
             None => Ok(DEFAULT_PAGE_SIZE),
@@ -318,6 +319,7 @@ impl DiagnosticsQuery {
     /// Decodes the opaque continuation cursor into the after-id key, or
     /// `None` for the first page. Invalid cursors are a client error, not an
     /// escalation: they only affect which page the caller sees.
+    #[allow(clippy::result_large_err)]
     pub fn after_id(&self) -> Result<Option<String>, Response> {
         let Some(cursor) = self.cursor.as_deref() else {
             return Ok(None);
@@ -608,7 +610,10 @@ mod tests {
             limit: None,
             cursor: Some(encoded),
         };
-        assert_eq!(query.after_id().ok().flatten().as_deref(), Some("provider-42"));
+        assert_eq!(
+            query.after_id().ok().flatten().as_deref(),
+            Some("provider-42")
+        );
 
         let bad = DiagnosticsQuery {
             limit: None,

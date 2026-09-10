@@ -86,12 +86,10 @@ impl SqliteStore {
         Ok(providers)
     }
 
-    async fn capacity_summary(
-        &self,
-        limit: usize,
-    ) -> Result<PlacementCapacitySummary, StoreError> {
-        let bound = i64::try_from(limit)
-            .map_err(|_| StoreError::Corrupt("placement aggregate limit out of range".to_owned()))?;
+    async fn capacity_summary(&self, limit: usize) -> Result<PlacementCapacitySummary, StoreError> {
+        let bound = i64::try_from(limit).map_err(|_| {
+            StoreError::Corrupt("placement aggregate limit out of range".to_owned())
+        })?;
         let rows = sqlx::query(
             "SELECT resource_class, \
                     COALESCE(SUM(CAST(total * allocation_ratio AS INTEGER)), 0) AS allocatable, \
@@ -108,8 +106,7 @@ impl SqliteStore {
         .map_err(StoreError::Database)?;
         if rows.len() > limit {
             return Err(StoreError::Corrupt(
-                "placement resource class inventory exceeds the bounded aggregate limit"
-                    .to_owned(),
+                "placement resource class inventory exceeds the bounded aggregate limit".to_owned(),
             ));
         }
         let mut classes = Vec::with_capacity(rows.len());
@@ -1187,10 +1184,7 @@ impl PlacementRepository for SqliteStore {
         self.list_providers_bounded(after_id, limit).await
     }
 
-    async fn capacity_summary(
-        &self,
-        limit: usize,
-    ) -> Result<PlacementCapacitySummary, StoreError> {
+    async fn capacity_summary(&self, limit: usize) -> Result<PlacementCapacitySummary, StoreError> {
         self.capacity_summary(limit).await
     }
 

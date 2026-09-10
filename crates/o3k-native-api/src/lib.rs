@@ -260,10 +260,7 @@ pub fn router(state: NativeApiState) -> Router {
             axum::routing::delete(governance::delete_operator_assignment),
         )
         .route("/operator/diagnostics", get(diagnostics::summary))
-        .route(
-            "/operator/diagnostics/services",
-            get(diagnostics::services),
-        )
+        .route("/operator/diagnostics/services", get(diagnostics::services))
         .route(
             "/operator/diagnostics/providers",
             get(diagnostics::providers),

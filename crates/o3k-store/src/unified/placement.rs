@@ -38,10 +38,7 @@ impl PlacementRepository for O3kStore {
         }
     }
 
-    async fn capacity_summary(
-        &self,
-        limit: usize,
-    ) -> Result<PlacementCapacitySummary, StoreError> {
+    async fn capacity_summary(&self, limit: usize) -> Result<PlacementCapacitySummary, StoreError> {
         match self {
             Self::Sqlite(s) => s.capacity_summary(limit).await,
             Self::Postgres(s) => s.capacity_summary(limit).await,
