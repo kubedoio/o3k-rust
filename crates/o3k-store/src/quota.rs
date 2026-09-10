@@ -439,12 +439,23 @@ async fn reserve_quota_inner(
         if let LimitValue::Maximum(max) = limit {
             let in_use = query_in_use_usage(&mut *conn, scope, &req.key).await?;
             let reserved = query_reserved_usage(&mut *conn, scope, &req.key, None).await?;
-            let total = in_use.saturating_add(reserved).saturating_add(req.amount);
+            let used = in_use.checked_add(reserved).ok_or_else(|| {
+                StoreError::Corrupt(format!(
+                    "quota usage overflow for '{}' in durable storage",
+                    req.key
+                ))
+            })?;
+            let total = used.checked_add(req.amount).ok_or_else(|| {
+                StoreError::Corrupt(format!(
+                    "quota usage overflow for '{}' in reservation",
+                    req.key
+                ))
+            })?;
             if total > max {
                 return Err(StoreError::QuotaExceeded {
                     key: req.key.clone(),
                     limit,
-                    used: in_use.saturating_add(reserved),
+                    used,
                     requested: req.amount,
                 });
             }

@@ -250,8 +250,8 @@ impl Usage {
     }
 
     #[must_use]
-    pub fn total_consumed(&self) -> u64 {
-        self.in_use.saturating_add(self.reserved)
+    pub fn total_consumed(&self) -> Option<u64> {
+        self.in_use.checked_add(self.reserved)
     }
 }
 
@@ -366,22 +366,27 @@ impl QuotaDecision {
     pub fn evaluate(key: &LimitKey, limit: LimitValue, current_used: u64, requested: u64) -> Self {
         match limit {
             LimitValue::Unlimited => Self::Allowed,
-            LimitValue::Maximum(max) => {
-                let total = current_used.saturating_add(requested);
-                if total <= max {
-                    Self::Allowed
-                } else {
-                    Self::Denied {
-                        key: key.clone(),
-                        limit,
-                        used: current_used,
-                        requested,
-                        reason: format!(
-                            "Quota exceeded for '{key}': limit {max}, used {current_used}, requested {requested}"
-                        ),
-                    }
-                }
-            }
+            LimitValue::Maximum(max) => match current_used.checked_add(requested) {
+                Some(total) if total <= max => Self::Allowed,
+                Some(_) => Self::Denied {
+                    key: key.clone(),
+                    limit,
+                    used: current_used,
+                    requested,
+                    reason: format!(
+                        "Quota exceeded for '{key}': limit {max}, used {current_used}, requested {requested}"
+                    ),
+                },
+                None => Self::Denied {
+                    key: key.clone(),
+                    limit,
+                    used: current_used,
+                    requested,
+                    reason: format!(
+                        "Quota arithmetic overflow for '{key}': used {current_used}, requested {requested}"
+                    ),
+                },
+            },
         }
     }
 }
@@ -463,6 +468,13 @@ mod tests {
                 requested: 3,
                 ..
             } if k == key
+        ));
+
+        // Arithmetic overflow is denied rather than saturating into an
+        // apparently valid allocation at the u64 boundary.
+        assert!(matches!(
+            QuotaDecision::evaluate(&key, LimitValue::Maximum(u64::MAX), u64::MAX, 1),
+            QuotaDecision::Denied { reason, .. } if reason.contains("overflow")
         ));
     }
 
