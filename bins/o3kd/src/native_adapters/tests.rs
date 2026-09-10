@@ -172,12 +172,12 @@ mod native_compute_tests {
                 .expect("store"),
         );
         let provider = Arc::new(FakeComputeProvider::new());
-        let compute = Arc::new(o3k_compute::ComputeService::new(
+        let compute = Arc::new(o3k_compute::ComputeService::new_for_test(
             store.clone(),
             provider.clone(),
         ));
         let network_service = Arc::new(
-            o3k_network::NetworkService::open(
+            o3k_network::NetworkService::open_for_test(
                 std::env::temp_dir().join(format!("o3k-native-test-{}", Uuid::new_v4())),
                 store.clone(),
             )

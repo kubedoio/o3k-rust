@@ -49,7 +49,7 @@ pub use unified::O3kStore;
 // Re-exports from domain/ and port/ sub-modules
 pub use domain::error::StoreError;
 pub use domain::records::{
-    AgentCommandRecord, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
+    AgentCommandRecord, AuditEventRecord, CanonicalAddressPoolRecord, CanonicalAddressRealmRecord,
     CanonicalEndpointRecord, CanonicalL3GatewayAttachmentRecord, CanonicalL3GatewayRecord,
     CanonicalNetworkPolicyRecord, CanonicalNetworkPolicyRuleRecord, CanonicalNetworkRecord,
     CanonicalOperationLifecycleUpdate, CanonicalOperationRecord, CanonicalPolicyAttachmentRecord,
@@ -79,8 +79,8 @@ pub(crate) use port::durable::{
     RELATIONSHIP_UNKNOWN, relationship_from_row,
 };
 pub use port::service_repos::{
-    ComputeRepository, IdentityRepository, ImageRepository, KeypairRepository, NetworkRepository,
-    PlacementRepository, VolumeAttachmentRepository,
+    AuditRepository, ComputeRepository, IdentityRepository, ImageRepository, KeypairRepository,
+    NetworkRepository, PlacementRepository, VolumeAttachmentRepository,
 };
 /// Maximum attempts for an observation update contended by a concurrent
 /// SQLite writer. BEGIN IMMEDIATE makes the configured busy_timeout apply, so

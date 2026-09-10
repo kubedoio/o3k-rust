@@ -88,7 +88,7 @@ async fn harness(label: &str) -> Result<Harness, Box<dyn std::error::Error>> {
         )
         .await?;
     let provider = Arc::new(FakeComputeProvider::new());
-    let service = ComputeService::new(Arc::new(store.clone()), provider.clone())
+    let service = ComputeService::new_for_test(Arc::new(store.clone()), provider.clone())
         .with_scheduler(Scheduler::new(placement.clone()));
     Ok(Harness {
         service,
@@ -245,7 +245,7 @@ async fn crash_after_placement_commit_reconciles_orphan_and_retry_succeeds()
 
     // Retry the same logical request through the public create path.
     let restarted_provider = Arc::new(FakeComputeProvider::new());
-    let restarted_service = ComputeService::new(
+    let restarted_service = ComputeService::new_for_test(
         Arc::new(restarted_store.clone()) as Arc<dyn ComputeRepository>,
         restarted_provider.clone(),
     )
@@ -400,7 +400,7 @@ async fn restart_reconciliation_retains_live_consumer_allocation()
     // The unknown-outcome create converges through the normal path: one
     // dispatch, same host, no second allocation.
     let restarted_provider = Arc::new(FakeComputeProvider::new());
-    let restarted_service = ComputeService::new(
+    let restarted_service = ComputeService::new_for_test(
         Arc::new(restarted_store.clone()) as Arc<dyn ComputeRepository>,
         restarted_provider.clone(),
     )

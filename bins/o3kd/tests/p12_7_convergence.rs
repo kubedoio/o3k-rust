@@ -156,10 +156,10 @@ async fn build_http_runtime(
     )
     .await?;
     let provider = Arc::new(FakeComputeProvider::new());
-    let compute_service = ComputeService::new(store.clone(), provider.clone());
+    let compute_service = ComputeService::new_for_test(store.clone(), provider.clone());
     let compute = Arc::new(compute_service.clone());
     let network = Arc::new(
-        NetworkService::open(
+        NetworkService::open_for_test(
             std::env::temp_dir().join(format!(
                 "o3k-p12-7-restart-network-{}",
                 uuid::Uuid::new_v4()
@@ -276,10 +276,10 @@ async fn run_native_openstack_http_conformance(
     )
     .await?;
     let provider = Arc::new(FakeComputeProvider::new());
-    let compute_service = ComputeService::new(store.clone(), provider.clone());
+    let compute_service = ComputeService::new_for_test(store.clone(), provider.clone());
     let compute = Arc::new(compute_service.clone());
     let network = Arc::new(
-        NetworkService::open(
+        NetworkService::open_for_test(
             std::env::temp_dir().join(format!("o3k-p12-7-network-{}", uuid::Uuid::new_v4())),
             store.clone(),
         )

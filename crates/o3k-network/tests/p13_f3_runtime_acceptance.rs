@@ -19,7 +19,7 @@ async fn fresh_runtime_reconstructs_canonical_hierarchy_without_network_intent()
     let project = "p13-f3-runtime";
 
     let first_store = Arc::new(o3k_store::testkit::open_file(&db).await?);
-    let first = NetworkService::open(&service_root, first_store.clone()).await?;
+    let first = NetworkService::open_for_test(&service_root, first_store.clone()).await?;
     let network = first
         .create_canonical_network_for_project(project, "restart-proof".into())
         .await?;
@@ -87,7 +87,7 @@ async fn fresh_runtime_reconstructs_canonical_hierarchy_without_network_intent()
     drop(first_store);
 
     let second_store = Arc::new(o3k_store::testkit::open_file(&db).await?);
-    let second = NetworkService::open(&service_root, second_store.clone()).await?;
+    let second = NetworkService::open_for_test(&service_root, second_store.clone()).await?;
     let snapshot = second
         .reconstruct_canonical_network(project, network.id)
         .await?;
@@ -123,7 +123,7 @@ async fn fresh_runtime_reconstructs_canonical_hierarchy_without_network_intent()
     drop(second_store);
 
     let final_store = Arc::new(o3k_store::testkit::open_file(&db).await?);
-    let final_service = NetworkService::open(&service_root, final_store).await?;
+    let final_service = NetworkService::open_for_test(&service_root, final_store).await?;
     let final_snapshot = final_service
         .reconstruct_canonical_network(project, network.id)
         .await?;

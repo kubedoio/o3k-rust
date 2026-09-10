@@ -17,6 +17,7 @@ pub mod audit;
 pub mod auth_context;
 pub mod authorization;
 pub mod controller;
+pub mod durable_audit;
 pub mod envelope;
 pub mod error;
 pub mod location;
@@ -30,7 +31,8 @@ pub mod scope;
 
 pub use action::ActionId;
 pub use audit::{
-    AuditEvent, AuditOutcome, AuditSink, EventId, FnAuditSink, MemoryAuditSink, NoopAuditSink,
+    AuditEvent, AuditOutcome, AuditSink, DurableAuditSink, DurableFnAuditSink, EventId,
+    FnAuditSink, MemoryAuditSink, NoopAuditSink, RequiredAuditPublisher,
 };
 pub use auth_context::AuthContext;
 pub use authorization::{
@@ -43,6 +45,9 @@ pub use controller::{
     FailureCategory, Observation, ObserveOutcome, ObserveRequest, OperationContext,
     ProtocolVersion, ReconcileOutcome, ReconcileRequest, RelationshipOwnership, ResourceReference,
     ResourceRelationship, ResourceSnapshot,
+};
+pub use durable_audit::{
+    AuditQuery, DurableAuditPage, DurableAuditRepository, MAX_AUDIT_PAGE_SIZE,
 };
 pub use envelope::{ResourceEnvelope, ResourceMeta};
 pub use error::KernelError;

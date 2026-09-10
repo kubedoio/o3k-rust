@@ -207,17 +207,124 @@ impl fmt::Display for AuditEvent {
 }
 
 /// Sink port for recording canonical Cloud Kernel audit events.
+#[async_trait::async_trait]
 pub trait AuditSink: Send + Sync {
     /// Records a canonical audit event. Implementations must be fail-safe and bounded.
     fn record(&self, event: &AuditEvent);
+
+    /// Records an event whose durability is required for acknowledging the
+    /// enclosing operation. The default deliberately fails closed: a legacy
+    /// best-effort sink must never be mistaken for durable audit.
+    fn record_required(&self, _event: &AuditEvent) -> Result<(), crate::KernelError> {
+        Err(crate::KernelError::AuditUnavailable(
+            "sink does not provide durable persistence".into(),
+        ))
+    }
+
+    /// Asynchronous durability boundary for production sinks. Implementations
+    /// must not resolve successfully before their required persistence has
+    /// committed. The default preserves fail-closed behavior for legacy sinks.
+    async fn record_required_async(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        self.record_required(event)
+    }
+}
+
+/// Capability used by production mutation paths.  This is intentionally a
+/// separate trait from [`AuditSink`]: an arbitrary best-effort sink cannot be
+/// injected into a mandatory publication dependency by accident.
+#[async_trait::async_trait]
+pub trait RequiredAuditPublisher: Send + Sync {
+    async fn publish(&self, event: &AuditEvent) -> Result<(), crate::KernelError>;
+}
+
+/// Production sink backed directly by the durable Audit repository. The
+/// synchronous legacy methods intentionally do not acknowledge durability;
+/// mandatory callers must await `record_required_async`.
+pub struct DurableAuditSink<R: crate::DurableAuditRepository> {
+    repository: std::sync::Arc<R>,
+}
+
+impl<R: crate::DurableAuditRepository> DurableAuditSink<R> {
+    #[must_use]
+    pub fn new(repository: std::sync::Arc<R>) -> Self {
+        Self { repository }
+    }
+}
+
+#[async_trait::async_trait]
+impl<R: crate::DurableAuditRepository> AuditSink for DurableAuditSink<R> {
+    fn record(&self, _event: &AuditEvent) {
+        // Best-effort legacy callers cannot be allowed to imply durability.
+    }
+
+    fn record_required(&self, _event: &AuditEvent) -> Result<(), crate::KernelError> {
+        Err(crate::KernelError::AuditUnavailable(
+            "durable sink requires asynchronous publication".into(),
+        ))
+    }
+
+    async fn record_required_async(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        self.repository.append(event).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<R: crate::DurableAuditRepository> RequiredAuditPublisher for DurableAuditSink<R> {
+    async fn publish(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        self.repository.append(event).await
+    }
 }
 
 /// Audit sink that forwards recorded events to a closure or function.
 pub struct FnAuditSink<F: Fn(&AuditEvent) + Send + Sync>(pub F);
 
+#[async_trait::async_trait]
 impl<F: Fn(&AuditEvent) + Send + Sync> AuditSink for FnAuditSink<F> {
     fn record(&self, event: &AuditEvent) {
         (self.0)(event);
+    }
+
+    async fn record_required_async(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        (self.0)(event);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl<F: Fn(&AuditEvent) + Send + Sync> RequiredAuditPublisher for FnAuditSink<F> {
+    async fn publish(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        (self.0)(event);
+        Ok(())
+    }
+}
+
+/// Adapter for a synchronous, already-durable repository transaction. The
+/// callback must return only after the event is committed (or return an error);
+/// no in-memory queue is inserted by this adapter.
+pub struct DurableFnAuditSink<F: Fn(&AuditEvent) -> Result<(), crate::KernelError> + Send + Sync>(
+    pub F,
+);
+
+impl<F: Fn(&AuditEvent) -> Result<(), crate::KernelError> + Send + Sync> AuditSink
+    for DurableFnAuditSink<F>
+{
+    fn record(&self, event: &AuditEvent) {
+        // Best-effort callers retain the historical sink API. Required callers
+        // must use `record_required`, which propagates the commit failure.
+        let _ = (self.0)(event);
+    }
+
+    fn record_required(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        (self.0)(event)
+    }
+}
+
+#[async_trait::async_trait]
+impl<F: Fn(&AuditEvent) -> Result<(), crate::KernelError> + Send + Sync> RequiredAuditPublisher
+    for DurableFnAuditSink<F>
+{
+    async fn publish(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        (self.0)(event)
     }
 }
 
@@ -250,11 +357,25 @@ impl MemoryAuditSink {
     }
 }
 
+#[async_trait::async_trait]
 impl AuditSink for MemoryAuditSink {
     fn record(&self, event: &AuditEvent) {
         if let Ok(mut guard) = self.events.lock() {
             guard.push(event.clone());
         }
+    }
+
+    async fn record_required_async(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        self.record(event);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl RequiredAuditPublisher for MemoryAuditSink {
+    async fn publish(&self, event: &AuditEvent) -> Result<(), crate::KernelError> {
+        self.record(event);
+        Ok(())
     }
 }
 
@@ -271,6 +392,99 @@ pub(crate) fn now_rfc3339() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
     format_time(seconds)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::items_after_test_module,
+    clippy::expect_used,
+    clippy::unwrap_used
+)]
+mod tests {
+    use super::*;
+    use crate::{
+        AuthContext, KernelError,
+        durable_audit::{AuditQuery, DurableAuditPage, DurableAuditRepository},
+        principal::{Principal, PrincipalId, UserPrincipal},
+        registry::ServiceNamespace,
+        scope::{OwnershipScope, ScopeId},
+    };
+    use async_trait::async_trait;
+
+    #[derive(Default)]
+    struct RecordingRepository {
+        events: Mutex<Vec<AuditEvent>>,
+        fail: Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl DurableAuditRepository for RecordingRepository {
+        async fn append(&self, event: &AuditEvent) -> Result<(), KernelError> {
+            if *self.fail.lock().expect("test lock") {
+                return Err(KernelError::AuditUnavailable("injected failure".into()));
+            }
+            self.events.lock().expect("test lock").push(event.clone());
+            Ok(())
+        }
+
+        async fn page(&self, _query: &AuditQuery) -> Result<DurableAuditPage, KernelError> {
+            Ok(DurableAuditPage {
+                events: self.events.lock().expect("test lock").clone(),
+                has_more: false,
+                continuation_key: None,
+            })
+        }
+
+        async fn prune_before(&self, _cutoff: &str) -> Result<u64, KernelError> {
+            Ok(0)
+        }
+    }
+
+    fn event() -> AuditEvent {
+        let principal = Principal::User(UserPrincipal::new(
+            PrincipalId::new_unchecked("user-b0-sink"),
+            "user-b0-sink",
+            Some("default".into()),
+        ));
+        let auth = AuthContext::new(
+            principal,
+            OwnershipScope::project(ScopeId::new_unchecked("project-b0-sink"), None, None),
+            vec!["member".into()],
+            0,
+            u64::MAX,
+            "audit-b0-sink",
+            "request-b0-sink",
+            None,
+        );
+        AuditEvent::from_auth(
+            &auth,
+            ServiceNamespace::new_unchecked("compute".into()),
+            ActionId::new_unchecked("compute", "CreateServer"),
+            AuditOutcome::Succeeded,
+        )
+    }
+
+    #[tokio::test]
+    async fn durable_sink_waits_for_repository_commit() {
+        let repository = Arc::new(RecordingRepository::default());
+        let sink = DurableAuditSink::new(repository.clone());
+        sink.record_required_async(&event())
+            .await
+            .expect("durable append");
+        assert_eq!(repository.events.lock().expect("test lock").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_sink_propagates_required_failure() {
+        let repository = Arc::new(RecordingRepository::default());
+        *repository.fail.lock().expect("test lock") = true;
+        let sink = DurableAuditSink::new(repository);
+        let error = sink
+            .record_required_async(&event())
+            .await
+            .expect_err("failure must propagate");
+        assert!(matches!(error, KernelError::AuditUnavailable(_)));
+    }
 }
 
 fn format_time(seconds: u64) -> String {

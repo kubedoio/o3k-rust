@@ -1,15 +1,32 @@
 use super::{
     AgentNodeRegistry, Arc, AttachmentOrchestrator, ComputeError, ComputeService,
-    CreateInstanceRequest, Duration, NoopAuditSink, OperationJournal, PortBindingProjector,
-    ProviderBackend, Scheduler, StaticAuthorizer, Uuid, VolumeAttachmentProvider,
+    CreateInstanceRequest, Duration, OperationJournal, PortBindingProjector, ProviderBackend,
+    Scheduler, StaticAuthorizer, Uuid, VolumeAttachmentProvider,
 };
 
-use o3k_kernel::{AuditSink, Authorizer};
+use o3k_kernel::{Authorizer, MemoryAuditSink, RequiredAuditPublisher};
 use o3k_store::ComputeRepository;
 
 impl ComputeService {
+    /// Publish mandatory control-plane evidence before acknowledging an
+    /// authenticated mutation/action. Legacy synchronous sinks fail closed;
+    /// only the durable async boundary can satisfy this contract.
+    pub async fn record_required_audit(
+        &self,
+        event: &o3k_kernel::AuditEvent,
+    ) -> Result<(), ComputeError> {
+        self.audit_sink
+            .publish(event)
+            .await
+            .map_err(|_| ComputeError::Unavailable)
+    }
+
     #[must_use]
-    pub fn new<P>(store: Arc<dyn ComputeRepository>, provider: Arc<P>) -> Self
+    pub fn new<P>(
+        store: Arc<dyn ComputeRepository>,
+        provider: Arc<P>,
+        audit_sink: Arc<dyn RequiredAuditPublisher>,
+    ) -> Self
     where
         Arc<P>: Into<ProviderBackend>,
     {
@@ -27,9 +44,20 @@ impl ComputeService {
             binding_projector: None,
             config_drive_cleaner: None,
             authorizer: Arc::new(StaticAuthorizer::standard()),
-            audit_sink: Arc::new(NoopAuditSink),
+            audit_sink,
             coordination: None,
         }
+    }
+
+    /// Explicit test construction with an in-memory required publisher.
+    /// Production callers must use [`ComputeService::new`] and provide the
+    /// durable publisher explicitly.
+    #[doc(hidden)]
+    pub fn new_for_test<P>(store: Arc<dyn ComputeRepository>, provider: Arc<P>) -> Self
+    where
+        Arc<P>: Into<ProviderBackend>,
+    {
+        Self::new(store, provider, Arc::new(MemoryAuditSink::new()))
     }
 
     #[must_use]
@@ -50,7 +78,10 @@ impl ComputeService {
     }
 
     #[must_use]
-    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
+    pub fn with_required_audit_publisher(
+        mut self,
+        audit_sink: Arc<dyn RequiredAuditPublisher>,
+    ) -> Self {
         self.audit_sink = audit_sink;
         self
     }

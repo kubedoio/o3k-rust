@@ -15,6 +15,7 @@ use o3k_kernel::{LocationRegistry, ManifestRegistry, ServiceLifecycleState, Serv
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 
+pub mod audit;
 pub mod auth;
 pub mod compute;
 pub mod error;
@@ -39,6 +40,7 @@ pub struct NativeApiState {
     pub volume_reader: Option<std::sync::Arc<dyn volume::VolumeReader>>,
     pub network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
     pub operation_reader: Option<std::sync::Arc<dyn operation::OperationReader>>,
+    pub audit_reader: Option<std::sync::Arc<dyn audit::AuditReader>>,
     /// Validated generic resource descriptors.  This is the northbound
     /// registry; applications below it are intentionally controller-agnostic.
     resource_index: resource::ResourceDispatcher,
@@ -81,6 +83,7 @@ impl NativeApiState {
             volume_reader,
             network_reader,
             operation_reader: None,
+            audit_reader: None,
             resource_index,
             resource_application: None,
             authorizer: None,
@@ -101,6 +104,12 @@ impl NativeApiState {
         reader: std::sync::Arc<dyn operation::OperationReader>,
     ) -> Self {
         self.operation_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_audit_reader(mut self, reader: std::sync::Arc<dyn audit::AuditReader>) -> Self {
+        self.audit_reader = Some(reader);
         self
     }
 
@@ -170,6 +179,8 @@ pub fn router(state: NativeApiState) -> Router {
             post(resource::action),
         )
         .route("/operations", get(operation::list_operations))
+        .route("/audit", get(audit::list_audit))
+        .route("/audit/{id}", get(audit::show_audit))
         .route("/operations/{id}", get(operation::show_operation))
         .layer(DefaultBodyLimit::max(1_048_576))
         .with_state(state)
@@ -405,9 +416,9 @@ fn action_metadata(
             }
             })
             .collect();
-    for (name, action) in &descriptor.actions {
+    for action in descriptor.lifecycle_actions.values() {
         actions.push(ActionSchemaMetadata {
-            name: name.clone(),
+            name: action.action().to_owned(),
             action_id: action.to_string(),
             target: "instance".to_owned(),
             input: Some("https://o3k.io/schemas/native-action-input/v1".to_owned()),
@@ -1120,6 +1131,241 @@ mod tests {
                 .unwrap(),
             "application/problem+json"
         );
+    }
+
+    #[derive(Clone)]
+    struct TestAuditReader {
+        events: Arc<Vec<o3k_kernel::AuditEvent>>,
+        unavailable: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl audit::AuditReader for TestAuditReader {
+        async fn list_page(
+            &self,
+            auth: &AuthContext,
+            query: o3k_kernel::AuditQuery,
+        ) -> Result<pagination::RepositoryPage<o3k_kernel::AuditEvent>, audit::AuditReadError>
+        {
+            if self.unavailable {
+                return Err(audit::AuditReadError::Unavailable);
+            }
+            query
+                .validate()
+                .map_err(|_| audit::AuditReadError::InvalidPage)?;
+            let mut events: Vec<_> = self
+                .events
+                .iter()
+                .filter(|event| event.effective_scope == *auth.effective_scope())
+                .filter(|event| {
+                    query
+                        .service
+                        .as_deref()
+                        .is_none_or(|v| event.service_namespace.as_str() == v)
+                })
+                .filter(|event| {
+                    query
+                        .action
+                        .as_deref()
+                        .is_none_or(|v| event.action.as_str() == v)
+                })
+                .filter(|event| {
+                    query
+                        .outcome
+                        .as_deref()
+                        .is_none_or(|v| event.outcome.to_string() == v)
+                })
+                .filter(|event| {
+                    query
+                        .after_event_id
+                        .as_deref()
+                        .is_none_or(|v| event.event_id.as_str() > v)
+                })
+                .cloned()
+                .collect();
+            events.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+            let start = query.limit.min(events.len());
+            let has_more = events.len() > start;
+            let continuation = has_more.then(|| events[start - 1].event_id.as_str().to_owned());
+            events.truncate(start);
+            pagination::RepositoryPage::new(events, has_more, continuation, query.limit)
+                .map_err(|_| audit::AuditReadError::InvalidPage)
+        }
+
+        async fn show(
+            &self,
+            auth: &AuthContext,
+            id: &str,
+        ) -> Result<o3k_kernel::AuditEvent, audit::AuditReadError> {
+            if self.unavailable {
+                return Err(audit::AuditReadError::Unavailable);
+            }
+            self.events
+                .iter()
+                .find(|event| {
+                    event.event_id.as_str() == id
+                        && event.effective_scope == *auth.effective_scope()
+                })
+                .cloned()
+                .ok_or(audit::AuditReadError::NotFound)
+        }
+    }
+
+    fn audit_test_events() -> Arc<Vec<o3k_kernel::AuditEvent>> {
+        use o3k_kernel::{ActionId, AuditEvent, AuditOutcome, EventId, ServiceNamespace};
+        let auth = test_operator_context(false);
+        let scope = auth.effective_scope().clone();
+        let mut first = AuditEvent::from_auth(
+            &auth,
+            ServiceNamespace::new_unchecked("compute".to_owned()),
+            ActionId::new_unchecked("compute", "CreateServer"),
+            AuditOutcome::Succeeded,
+        )
+        .with_resource(
+            o3k_kernel::ResourceType::new_unchecked("compute", "server"),
+            Some(o3k_kernel::ResourceId::new_unchecked("server-1")),
+            Some(scope.clone()),
+        );
+        first.event_id = EventId::from_string("0001".to_owned());
+        let mut second = AuditEvent::from_auth(
+            &auth,
+            ServiceNamespace::new_unchecked("compute".to_owned()),
+            ActionId::new_unchecked("compute", "DeleteServer"),
+            AuditOutcome::Failed,
+        );
+        second.event_id = EventId::from_string("0002".to_owned());
+        let mut foreign = AuditEvent::from_auth(
+            &AuthContext::new(
+                auth.principal().clone(),
+                o3k_kernel::OwnershipScope::project(
+                    o3k_kernel::ScopeId::new_unchecked("project-b"),
+                    None,
+                    None,
+                ),
+                vec!["member".to_owned()],
+                1,
+                2,
+                "audit-b",
+                "request-b",
+                None,
+            ),
+            ServiceNamespace::new_unchecked("image".to_owned()),
+            ActionId::new_unchecked("image", "CreateImage"),
+            AuditOutcome::Denied,
+        );
+        foreign.event_id = EventId::from_string("0003".to_owned());
+        Arc::new(vec![first, second, foreign])
+    }
+
+    #[tokio::test]
+    async fn audit_api_b0_contract_matrix() {
+        let events = audit_test_events();
+        let issuer = Arc::new(TestIssuer(test_operator_context(false)));
+        let reader = Arc::new(TestAuditReader {
+            events,
+            unavailable: false,
+        });
+        let cursor = pagination::CursorConfig::new(vec![7; 32]).unwrap();
+        let state = NativeApiState::new(
+            Some(test_manifest_registry()),
+            cursor,
+            Some(issuer),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_audit_reader(reader);
+        let app = router(state);
+        let request = |uri: &str| {
+            axum::http::Request::builder()
+                .uri(uri)
+                .header("authorization", "Bearer test-token")
+                .header("x-request-id", "b0-request")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+
+        let response =
+            tower::ServiceExt::oneshot(app.clone(), request("/audit?limit=1&service=compute"))
+                .await
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::OK); // A03/A05/A09/A11
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert!(body["has_more"].as_bool().unwrap());
+        let cursor = body["next_cursor"].as_str().unwrap().to_owned();
+
+        let response = tower::ServiceExt::oneshot(
+            app.clone(),
+            request(&format!("/audit?limit=1&service=compute&cursor={cursor}")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK); // A04/A10/A12
+
+        let response = tower::ServiceExt::oneshot(
+            app.clone(),
+            request(&format!("/audit?limit=1&service=image&cursor={cursor}")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST); // A16 filter binding
+
+        for uri in [
+            "/audit?limit=0",
+            "/audit?limit=201",
+            "/audit?unknown=value",
+            "/audit?cursor=not-a-cursor",
+        ] {
+            let response = tower::ServiceExt::oneshot(app.clone(), request(uri))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST); // A15/A17/A18
+        }
+
+        let response = tower::ServiceExt::oneshot(app.clone(), request("/audit/0001"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK); // A06/A07/A13/A14
+        let response = tower::ServiceExt::oneshot(app.clone(), request("/audit/0003"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND); // A04 isolation
+
+        let response = tower::ServiceExt::oneshot(
+            router(NativeApiState::default()),
+            axum::http::Request::builder()
+                .uri("/audit")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED); // A03 auth
+
+        let unavailable_state = NativeApiState::new(
+            Some(test_manifest_registry()),
+            pagination::CursorConfig::new(vec![7; 32]).unwrap(),
+            Some(Arc::new(TestIssuer(test_operator_context(false)))),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_audit_reader(Arc::new(TestAuditReader {
+            events: Arc::new(Vec::new()),
+            unavailable: true,
+        }));
+        let response = tower::ServiceExt::oneshot(router(unavailable_state), request("/audit"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     // ── Location & placement discovery (issue #887) ────────────────────

@@ -7,8 +7,8 @@ use crate::{
 };
 use o3k_domain::{Ipv4Prefix, NetworkPlanIntent};
 use o3k_kernel::{
-    ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
-    DecisionReason, NoopAuditSink, OwnershipScope, ResourceId, ResourceTarget, ResourceType,
+    ActionId, AuditEvent, AuditOutcome, AuthContext, AuthorizationRequest, Authorizer,
+    DecisionReason, MemoryAuditSink, OwnershipScope, ResourceId, ResourceTarget, ResourceType,
     ScopeId, ServiceNamespace, StaticAuthorizer,
 };
 use std::{
@@ -573,6 +573,7 @@ impl NetworkService {
     pub async fn open(
         root: impl Into<PathBuf>,
         repository: Arc<dyn o3k_store::NetworkRepository>,
+        audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher>,
     ) -> Result<Self, NetworkError> {
         let root = root.into();
         fs::create_dir_all(&root).map_err(|source| {
@@ -594,10 +595,19 @@ impl NetworkService {
             inner,
             lock: Arc::new(tokio::sync::Mutex::new(())),
             authorizer: Arc::new(StaticAuthorizer::standard()),
-            audit_sink: Arc::new(NoopAuditSink),
+            audit_sink,
         };
         service.recover_realm_deletion_operations().await?;
         Ok(service)
+    }
+
+    /// Explicit test construction with an in-memory required publisher.
+    #[doc(hidden)]
+    pub async fn open_for_test(
+        root: impl Into<PathBuf>,
+        repository: Arc<dyn o3k_store::NetworkRepository>,
+    ) -> Result<Self, NetworkError> {
+        Self::open(root, repository, Arc::new(MemoryAuditSink::new())).await
     }
 
     /// Rebuilds one endpoint's effective policy from canonical reusable policy
@@ -673,7 +683,10 @@ impl NetworkService {
     }
 
     #[must_use]
-    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
+    pub fn with_required_audit_publisher(
+        mut self,
+        audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher>,
+    ) -> Self {
         self.audit_sink = audit_sink;
         self
     }
@@ -726,7 +739,14 @@ impl NetworkService {
             resource_target: target,
         });
         if !decision.is_allowed() {
-            self.audit_sink.record(
+            // Scope-concealed denials must not turn Audit into an existence
+            // oracle.  Preserve the target only for denials where the caller
+            // is already entitled to know which resource was addressed.
+            let audit_target = match decision.reason() {
+                DecisionReason::ScopeMismatch | DecisionReason::MissingOwnership => None,
+                _ => resource_id.and_then(|id| ResourceId::new(id.to_string()).ok()),
+            };
+            self.record_required_audit(
                 &AuditEvent::from_auth(
                     auth,
                     namespace.clone(),
@@ -735,12 +755,13 @@ impl NetworkService {
                 )
                 .with_resource(
                     resource_type.clone(),
-                    resource_id.and_then(|id| ResourceId::new(id.to_string()).ok()),
+                    audit_target,
                     Some(OwnershipScope::project(owner_scope, None, None)),
                 )
                 .with_decision(decision.clone())
                 .with_reason("unauthorized"),
-            );
+            )
+            .await?;
             return Err(match decision.reason() {
                 DecisionReason::ScopeMismatch | DecisionReason::MissingOwnership => {
                     NetworkError::NotFound
@@ -751,7 +772,7 @@ impl NetworkService {
         Ok((namespace, action, resource_type))
     }
 
-    pub(super) fn audit_canonical_result(
+    pub(super) async fn audit_canonical_result(
         &self,
         auth: &AuthContext,
         namespace: ServiceNamespace,
@@ -759,7 +780,7 @@ impl NetworkService {
         resource_type: ResourceType,
         resource_id: Option<Uuid>,
         result: Result<(), &NetworkError>,
-    ) {
+    ) -> Result<(), NetworkError> {
         let outcome = if result.is_ok() {
             AuditOutcome::Succeeded
         } else {
@@ -773,7 +794,8 @@ impl NetworkService {
         if let Err(error) = result {
             event = event.with_reason(error.to_string());
         }
-        self.audit_sink.record(&event);
+        self.record_required_audit(&event).await?;
+        Ok(())
     }
 
     async fn recover_realm_deletion_operations(&self) -> Result<(), NetworkError> {
@@ -948,7 +970,8 @@ impl NetworkService {
             .create_canonical_network_for_project(auth.effective_scope().id().as_str(), name)
             .await;
         let audit_result = result.as_ref().map(|_| ());
-        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
+        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result)
+            .await?;
         result
     }
 
@@ -983,7 +1006,8 @@ impl NetworkService {
             resource_type,
             Some(id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1015,7 +1039,8 @@ impl NetworkService {
             resource_type,
             None,
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1062,7 +1087,8 @@ impl NetworkService {
             resource_type,
             Some(id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1149,7 +1175,8 @@ impl NetworkService {
             )
             .await;
         let audit_result = result.as_ref().map(|_| ());
-        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
+        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result)
+            .await?;
         result
     }
 
@@ -1190,7 +1217,8 @@ impl NetworkService {
             .list_canonical_realms_for_project(auth.effective_scope().id().as_str(), network_id)
             .await;
         let audit_result = result.as_ref().map(|_| ());
-        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result);
+        self.audit_canonical_result(auth, namespace, action, resource_type, None, audit_result)
+            .await?;
         result
     }
 
@@ -1222,7 +1250,8 @@ impl NetworkService {
             resource_type,
             Some(realm_id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1301,7 +1330,8 @@ impl NetworkService {
             resource_type,
             Some(realm_id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1658,7 +1688,8 @@ impl NetworkService {
             resource_type,
             None,
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1689,7 +1720,8 @@ impl NetworkService {
             resource_type,
             None,
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1720,7 +1752,8 @@ impl NetworkService {
             resource_type,
             Some(pool_id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1793,7 +1826,8 @@ impl NetworkService {
             resource_type,
             None,
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1824,7 +1858,8 @@ impl NetworkService {
             resource_type,
             None,
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1850,7 +1885,8 @@ impl NetworkService {
             resource_type,
             Some(endpoint_id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -1875,7 +1911,8 @@ impl NetworkService {
             resource_type,
             Some(endpoint_id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 

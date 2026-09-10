@@ -186,16 +186,34 @@ impl CursorConfig {
     ) -> Result<ResourceQuery, QueryValidationError> {
         validate_identity(scope_id, MAX_SCOPE_LENGTH)?;
         validate_identity(resource_type, MAX_RESOURCE_TYPE_LENGTH)?;
+        self.validate_query_with_identity(
+            raw_limit,
+            raw_cursor,
+            scope_id,
+            resource_type,
+            &canonical_query_identity(),
+        )
+    }
+
+    /// Validate a bounded query with an application-supplied canonical identity.
+    /// The identity is authenticated into the cursor, binding continuation to
+    /// every accepted filter without exposing raw HTTP parameters to storage.
+    pub fn validate_query_with_identity(
+        &self,
+        raw_limit: Option<&str>,
+        raw_cursor: Option<&str>,
+        scope_id: &str,
+        resource_type: &str,
+        query_identity: &str,
+    ) -> Result<ResourceQuery, QueryValidationError> {
+        validate_identity(query_identity, MAX_QUERY_IDENTITY_LENGTH)?;
         let limit = parse_page_size_strict(raw_limit)?;
         if raw_cursor.is_some() {
-            // Missing signing authority is distinct from malformed input and
-            // must fail before attempting to parse attacker-controlled data.
             self.key()?;
         }
-        let query_identity = canonical_query_identity();
         let continuation_key = raw_cursor
             .map(|cursor| {
-                self.decode_cursor(cursor, scope_id, resource_type, &query_identity)
+                self.decode_cursor(cursor, scope_id, resource_type, query_identity)
                     .map(|payload| payload.continuation_key)
             })
             .transpose()?;
@@ -204,7 +222,7 @@ impl CursorConfig {
             resource_type: resource_type.to_owned(),
             limit,
             continuation_key,
-            query_identity,
+            query_identity: query_identity.to_owned(),
         })
     }
 

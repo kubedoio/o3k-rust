@@ -33,7 +33,7 @@ async fn build_app(
     store: Arc<TestStore>,
 ) -> Result<(axum::Router, String), Box<dyn std::error::Error>> {
     let provider = Arc::new(FakeComputeProvider::new());
-    let compute = ComputeService::new(store, provider);
+    let compute = ComputeService::new_for_test(store, provider);
     let identity = test_service("http://127.0.0.1:8080").await?;
     let state = AppState::new()
         .with_identity(identity)
@@ -79,7 +79,7 @@ async fn native_profile_does_not_expose_attachment_routes() -> Result<(), Box<dy
     )
     .await?;
     let provider = Arc::new(FakeComputeProvider::new());
-    let compute = ComputeService::new(store, provider);
+    let compute = ComputeService::new_for_test(store, provider);
     let state = AppState::new().with_compute(compute);
     state.set_ready(true);
     let app = o3k_api::router_with_state(state);
@@ -126,7 +126,7 @@ async fn attachment_routes_require_authentication_and_project_scope()
     let attachment_id =
         seed_server_and_attachment(&store, server_id, Uuid::now_v7(), "cinder-att-auth").await?;
     let provider = Arc::new(FakeComputeProvider::new());
-    let compute = ComputeService::new(store, provider);
+    let compute = ComputeService::new_for_test(store, provider);
     let identity = test_service("http://127.0.0.1:8080").await?;
     let state = AppState::new()
         .with_identity(identity)

@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use o3k_kernel::{AuditSink, Authorizer, LimitKey, LimitValue};
+use o3k_kernel::{Authorizer, LimitKey, LimitValue};
 use thiserror::Error;
 
 /// Canonical binding state of a port on its selected host.
@@ -69,6 +69,8 @@ pub enum NetworkError {
     Store(#[source] o3k_store::StoreError),
     #[error("network metadata is corrupt")]
     CorruptMetadata(#[source] serde_json::Error),
+    #[error("durable audit unavailable")]
+    AuditUnavailable,
 }
 
 fn map_store_error(error: o3k_store::StoreError) -> NetworkError {
@@ -102,7 +104,7 @@ pub struct NetworkService {
     inner: Arc<Inner>,
     lock: Arc<tokio::sync::Mutex<()>>,
     authorizer: Arc<dyn Authorizer>,
-    audit_sink: Arc<dyn AuditSink>,
+    audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher>,
 }
 
 struct Inner {
@@ -126,6 +128,16 @@ pub(crate) use helpers::{
 };
 
 impl NetworkService {
+    /// Publish a mandatory audit event through the durable asynchronous boundary.
+    pub(crate) async fn record_required_audit(
+        &self,
+        event: &o3k_kernel::AuditEvent,
+    ) -> Result<(), NetworkError> {
+        self.audit_sink
+            .publish(event)
+            .await
+            .map_err(|_| NetworkError::AuditUnavailable)
+    }
     pub(super) async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.lock.lock().await
     }

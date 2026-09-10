@@ -52,7 +52,7 @@ impl NetworkService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(NetworkError::Unauthorized);
         }
         match self
@@ -68,13 +68,13 @@ impl NetworkService {
                         ResourceId::new(record.id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Ok(record)
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Err(error)
             }
         }
@@ -793,7 +793,7 @@ impl NetworkService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(NetworkError::Unauthorized);
         }
         self.list_networks_for_project(auth.effective_scope().id().as_str())
@@ -842,7 +842,7 @@ impl NetworkService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(NetworkError::NotFound);
         }
         self.get_network_for_project(auth.effective_scope().id().as_str(), id)
@@ -900,7 +900,8 @@ impl NetworkService {
             resource_type,
             Some(id),
             result.as_ref().map(|_| ()),
-        );
+        )
+        .await?;
         result
     }
 
@@ -925,7 +926,7 @@ impl NetworkService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(NetworkError::NotFound);
         }
         match self
@@ -941,13 +942,13 @@ impl NetworkService {
                         ResourceId::new(id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Ok(())
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Err(error)
             }
         }

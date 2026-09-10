@@ -72,6 +72,18 @@ def validate(document: dict, artifact: Path) -> None:
         preserved = subprocess.run(
             ["git", "branch", "-r", "--contains", head], cwd=repository, capture_output=True, text=True
         ).stdout.strip()
+        if not preserved:
+            # CI checkouts are intentionally shallow and may not materialize
+            # the independently pushed evidence branch locally.  Query the
+            # remote refs directly before rejecting preserved provenance.
+            remote_refs = subprocess.run(
+                ["git", "ls-remote", "--heads", "origin"],
+                cwd=repository,
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.splitlines()
+            preserved = any(line.split(maxsplit=1)[0] == head for line in remote_refs if line)
         require(
             is_ancestor or preserved,
             "tested runtime head is neither an ancestor of the evidence/review head nor preserved in a pushed branch",

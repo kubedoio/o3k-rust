@@ -122,6 +122,11 @@ pub(crate) fn image_error(error: ImageError) -> axum::response::Response {
                 "image storage is unavailable",
             )
         }
+        ImageError::AuditUnavailable => keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "audit service is unavailable",
+        ),
     }
 }
 

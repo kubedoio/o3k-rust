@@ -7,9 +7,9 @@ use std::{
 };
 
 use o3k_kernel::{
-    ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
-    LimitKey, LimitValue, NoopAuditSink, OwnershipScope, ResourceAmount, ResourceId,
-    ResourceTarget, ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
+    ActionId, AuditEvent, AuditOutcome, AuthContext, AuthorizationRequest, Authorizer, LimitKey,
+    LimitValue, MemoryAuditSink, OwnershipScope, RequiredAuditPublisher, ResourceAmount,
+    ResourceId, ResourceTarget, ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
 };
 use o3k_store::{ImageMetadataRecord, ImageRepository, StoreError};
 use serde::{Deserialize, Serialize};
@@ -128,6 +128,8 @@ pub enum ImageError {
     OverlayFailed,
     #[error("image format verification failed")]
     FormatVerificationFailed,
+    #[error("required audit publication unavailable")]
+    AuditUnavailable,
 }
 
 #[derive(Clone)]
@@ -905,7 +907,7 @@ pub struct ImageService {
     lock: Arc<tokio::sync::Mutex<()>>,
     max_upload_bytes: usize,
     authorizer: Arc<dyn Authorizer>,
-    audit_sink: Arc<dyn AuditSink>,
+    audit_sink: Arc<dyn RequiredAuditPublisher>,
 }
 
 struct Inner {
@@ -918,6 +920,7 @@ impl ImageService {
         root: impl Into<PathBuf>,
         max_upload_bytes: usize,
         repository: Arc<dyn ImageRepository>,
+        audit_sink: Arc<dyn RequiredAuditPublisher>,
     ) -> Result<Self, ImageError> {
         let root = root.into();
         ensure_managed_directory(&root)?;
@@ -929,8 +932,23 @@ impl ImageService {
             lock: Arc::new(tokio::sync::Mutex::new(())),
             max_upload_bytes,
             authorizer: Arc::new(StaticAuthorizer::standard()),
-            audit_sink: Arc::new(NoopAuditSink),
+            audit_sink,
         })
+    }
+
+    #[doc(hidden)]
+    pub async fn open_for_test(
+        root: impl Into<PathBuf>,
+        max_upload_bytes: usize,
+        repository: Arc<dyn ImageRepository>,
+    ) -> Result<Self, ImageError> {
+        Self::open(
+            root,
+            max_upload_bytes,
+            repository,
+            Arc::new(MemoryAuditSink::new()),
+        )
+        .await
     }
 
     #[must_use]
@@ -940,7 +958,10 @@ impl ImageService {
     }
 
     #[must_use]
-    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
+    pub fn with_required_audit_publisher(
+        mut self,
+        audit_sink: Arc<dyn RequiredAuditPublisher>,
+    ) -> Self {
         self.audit_sink = audit_sink;
         self
     }
@@ -1008,7 +1029,7 @@ impl ImageService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ImageError::Unauthorized);
         }
         match self
@@ -1031,13 +1052,13 @@ impl ImageService {
                         ResourceId::new(record.id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Ok(record)
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Err(error)
             }
         }
@@ -1155,7 +1176,7 @@ impl ImageService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ImageError::Unauthorized);
         }
         self.list_for_project(auth.effective_scope().id().as_str())
@@ -1193,7 +1214,7 @@ impl ImageService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ImageError::NotFound);
         }
         self.get_for_project(auth.effective_scope().id().as_str(), id)
@@ -1239,7 +1260,7 @@ impl ImageService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ImageError::NotFound);
         }
         self.resolve_artifact_for_project(auth.effective_scope().id().as_str(), id)
@@ -1322,7 +1343,7 @@ impl ImageService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ImageError::NotFound);
         }
         match self
@@ -1338,13 +1359,13 @@ impl ImageService {
                         ResourceId::new(id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Ok(record)
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Err(error)
             }
         }
@@ -1470,7 +1491,7 @@ impl ImageService {
             let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
                 .with_decision(decision)
                 .with_reason("unauthorized");
-            self.audit_sink.record(&event);
+            self.record_required_audit(&event).await?;
             return Err(ImageError::NotFound);
         }
         match self
@@ -1486,13 +1507,13 @@ impl ImageService {
                         ResourceId::new(id.to_string()).ok(),
                         Some(auth.effective_scope().clone()),
                     );
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Ok(())
             }
             Err(error) => {
                 let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
                     .with_reason(error.to_string());
-                self.audit_sink.record(&event);
+                self.record_required_audit(&event).await?;
                 Err(error)
             }
         }
@@ -1520,6 +1541,13 @@ impl ImageService {
             .release_reservation_for_operation(&format!("o3k:image:upload:{}:{}", project_id, id))
             .await;
         Ok(())
+    }
+
+    async fn record_required_audit(&self, event: &AuditEvent) -> Result<(), ImageError> {
+        self.audit_sink
+            .publish(event)
+            .await
+            .map_err(|_| ImageError::AuditUnavailable)
     }
 
     fn map_store_error(error: StoreError) -> ImageError {
@@ -1607,7 +1635,8 @@ mod tests {
         let sqlite_path = format!("{}.sqlite", path.display());
         let store =
             Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
-        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone()).await?;
+        let service =
+            ImageService::open_for_test(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone()).await?;
         let image = service
             .create(
                 &auth("project-a"),
@@ -1629,7 +1658,8 @@ mod tests {
         drop(store);
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
-        let reopened = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, reopened_store).await?;
+        let reopened =
+            ImageService::open_for_test(&path, DEFAULT_MAX_UPLOAD_BYTES, reopened_store).await?;
         assert_eq!(reopened.get(&auth("project-a"), image.id).await?, uploaded);
         let artifact = reopened
             .resolve_artifact(&auth("project-a"), image.id)
@@ -1646,11 +1676,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_like_durable_audit_publisher_persists_image_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("durable-audit");
+        let database = path.with_extension("sqlite");
+        let store = Arc::new(o3k_store::testkit::open_file(&database).await?);
+        let durable_store = Arc::new(o3k_store::O3kStore::Sqlite((*store).clone()));
+        let publisher = Arc::new(o3k_kernel::DurableAuditSink::new(durable_store.clone()));
+        let service = ImageService::open(
+            &path,
+            DEFAULT_MAX_UPLOAD_BYTES,
+            store.clone(),
+            publisher.clone(),
+        )
+        .await?;
+
+        let owner = auth("project-a");
+        let image = service
+            .create(
+                &owner,
+                "audited".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+
+        let query = o3k_kernel::AuditQuery {
+            scope: owner.effective_scope().clone(),
+            after_event_id: None,
+            event_id: None,
+            limit: 10,
+            service: Some("image".to_owned()),
+            action: Some("image:CreateImage".to_owned()),
+            outcome: None,
+            resource_type: Some("image:image".to_owned()),
+            resource_id: Some(image.id.to_string()),
+            operation_id: None,
+            principal_id: None,
+            request_id: None,
+            audit_id: None,
+            from_timestamp: None,
+            until_timestamp: None,
+        };
+        let page = o3k_kernel::DurableAuditRepository::page(&*durable_store, &query).await?;
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(
+            page.events[0].resource_id.as_ref().map(ToString::to_string),
+            Some(image.id.to_string())
+        );
+        assert_eq!(page.events[0].outcome, o3k_kernel::AuditOutcome::Succeeded);
+
+        drop(service);
+        drop(durable_store);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_file(format!("{}-wal", database.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", database.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn artifact_resolution_rechecks_content_and_scope()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("artifact");
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let service = ImageService::open_for_test(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
                 &auth("project-a"),
@@ -1685,7 +1777,7 @@ mod tests {
     {
         let path = root("artifact-limit");
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = ImageService::open(&path, 3, store).await?;
+        let service = ImageService::open_for_test(&path, 3, store).await?;
         let image = service
             .create(
                 &auth("project-a"),
@@ -1714,7 +1806,8 @@ mod tests {
         let service_path = root("artifact-cache-service");
         let cache_path = root("artifact-cache-cache");
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = ImageService::open(&service_path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let service =
+            ImageService::open_for_test(&service_path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
                 &auth("project-a"),
@@ -1842,7 +1935,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("limits");
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = ImageService::open(&path, 3, store).await?;
+        let service = ImageService::open_for_test(&path, 3, store).await?;
         let image = service
             .create(
                 &auth("project-a"),
@@ -1880,7 +1973,7 @@ mod tests {
         fs::write(&stale, b"partial")?;
         fs::write(&unrelated, b"keep")?;
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let _service = ImageService::open(&path, 1024, store).await?;
+        let _service = ImageService::open_for_test(&path, 1024, store).await?;
         assert!(!stale.exists());
         assert_eq!(fs::read(&unrelated)?, b"keep");
         fs::remove_dir_all(path)?;
@@ -1896,7 +1989,8 @@ mod tests {
         let (image_id, uploaded) = {
             let store =
                 Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
-            let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+            let service =
+                ImageService::open_for_test(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
             let image = service
                 .create(
                     &auth("project-a"),
@@ -1913,7 +2007,8 @@ mod tests {
         };
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
-        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, reopened_store).await?;
+        let service =
+            ImageService::open_for_test(&path, DEFAULT_MAX_UPLOAD_BYTES, reopened_store).await?;
         assert_eq!(
             service.list(&auth("project-a")).await?,
             vec![uploaded.clone()]
@@ -1940,7 +2035,8 @@ mod tests {
             .collect::<Vec<_>>();
         let store =
             Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
-        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone()).await?;
+        let service =
+            ImageService::open_for_test(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone()).await?;
         let image = service
             .create(
                 &auth("project-a"),
@@ -1971,7 +2067,8 @@ mod tests {
         );
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
-        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, reopened_store).await?;
+        let service =
+            ImageService::open_for_test(&path, DEFAULT_MAX_UPLOAD_BYTES, reopened_store).await?;
         let artifact = service
             .resolve_artifact(&auth("project-a"), image.id)
             .await?;
@@ -1989,7 +2086,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("concurrent-upload");
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let service = ImageService::open_for_test(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
                 &auth("project-a"),
@@ -2037,7 +2134,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("missing-artifact");
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let service = ImageService::open_for_test(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
                 &auth("project-a"),
@@ -2068,7 +2165,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("corrupt-artifact");
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let service = ImageService::open_for_test(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
                 &auth("project-a"),
@@ -2772,7 +2869,7 @@ esac
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("upload-truncated-qcow2");
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let service = ImageService::open_for_test(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
                 &auth("project-a"),
@@ -2811,7 +2908,7 @@ esac
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("upload-valid-qcow2");
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let service = ImageService::open_for_test(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
                 &auth("project-a"),
@@ -3029,7 +3126,8 @@ esac
         let path = root("quota-isolation");
         let _ = fs::remove_dir_all(&path);
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone()).await?;
+        let service =
+            ImageService::open_for_test(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone()).await?;
 
         let scope_a = OwnershipScope::project(ScopeId::new_unchecked("proj-a"), None, None);
 
@@ -3103,7 +3201,7 @@ esac
         let path = root("image-byte-quota");
         let _ = fs::remove_dir_all(&path);
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
-        let service = ImageService::open(&path, 100_000, store.clone()).await?;
+        let service = ImageService::open_for_test(&path, 100_000, store.clone()).await?;
 
         let scope_a = OwnershipScope::project(ScopeId::new_unchecked("proj-byte"), None, None);
         let auth_a = auth("proj-byte");

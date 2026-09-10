@@ -127,12 +127,12 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     let store_path =
         std::env::temp_dir().join(format!("o3k-p12-6-store-{}.sqlite", uuid::Uuid::new_v4()));
     let store = Arc::new(O3kStore::connect_sqlite_file(&store_path).await?);
-    let compute = Arc::new(o3k_compute::ComputeService::new(
+    let compute = Arc::new(o3k_compute::ComputeService::new_for_test(
         store.clone(),
         Arc::new(FakeComputeProvider::new()),
     ));
     let network_service = Arc::new(
-        o3k_network::NetworkService::open(
+        o3k_network::NetworkService::open_for_test(
             std::env::temp_dir().join(format!("o3k-p12-6-{}", uuid::Uuid::new_v4())),
             store.clone(),
         )
@@ -752,12 +752,12 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
     // Build a second application object over the same durable store.  The
     // race below must exercise independent application state; two handlers
     // around one application would only prove transport concurrency.
-    let independent_compute = Arc::new(o3k_compute::ComputeService::new(
+    let independent_compute = Arc::new(o3k_compute::ComputeService::new_for_test(
         store.clone(),
         Arc::new(FakeComputeProvider::new()),
     ));
     let independent_network = Arc::new(
-        o3k_network::NetworkService::open(
+        o3k_network::NetworkService::open_for_test(
             std::env::temp_dir().join(format!("o3k-p12-6-independent-{}", uuid::Uuid::new_v4())),
             store.clone(),
         )
@@ -1265,12 +1265,13 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
         let mut registry = ManifestRegistry::new();
         registry.seed_core()?;
         registry.register_json_file(manifest_path)?;
-        let compute = Arc::new(o3k_compute::ComputeService::new(
+        let compute = Arc::new(o3k_compute::ComputeService::new_for_test(
             store.clone(),
             compute_provider.clone(),
         ));
-        let network =
-            Arc::new(o3k_network::NetworkService::open(network_path.clone(), store.clone()).await?);
+        let network = Arc::new(
+            o3k_network::NetworkService::open_for_test(network_path.clone(), store.clone()).await?,
+        );
         let application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
             Arc::new(o3kd::native_adapters::GenericResourceApplication {
                 compute: compute.clone(),
@@ -1474,12 +1475,13 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
             .register_controller("database-example", session_a.clone())
             .is_err()
     );
-    let compute_b = Arc::new(o3k_compute::ComputeService::new(
+    let compute_b = Arc::new(o3k_compute::ComputeService::new_for_test(
         store_b.clone(),
         compute_provider,
     ));
-    let network_b =
-        Arc::new(o3k_network::NetworkService::open(network_path.clone(), store_b.clone()).await?);
+    let network_b = Arc::new(
+        o3k_network::NetworkService::open_for_test(network_path.clone(), store_b.clone()).await?,
+    );
     let application_b: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
             compute: compute_b.clone(),
@@ -1719,23 +1721,23 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
         .await?;
     let right_store = Arc::new(O3kStore::connect_sqlite_file(&path).await?);
     let shared_compute_provider = Arc::new(FakeComputeProvider::new());
-    let left_compute = Arc::new(o3k_compute::ComputeService::new(
+    let left_compute = Arc::new(o3k_compute::ComputeService::new_for_test(
         left_store.clone(),
         shared_compute_provider.clone(),
     ));
-    let right_compute = Arc::new(o3k_compute::ComputeService::new(
+    let right_compute = Arc::new(o3k_compute::ComputeService::new_for_test(
         right_store.clone(),
         shared_compute_provider,
     ));
     let left_network = Arc::new(
-        o3k_network::NetworkService::open(
+        o3k_network::NetworkService::open_for_test(
             std::env::temp_dir().join(format!("o3k-p12-6-app-left-{}", uuid::Uuid::new_v4())),
             left_store.clone(),
         )
         .await?,
     );
     let right_network = Arc::new(
-        o3k_network::NetworkService::open(
+        o3k_network::NetworkService::open_for_test(
             std::env::temp_dir().join(format!("o3k-p12-6-app-right-{}", uuid::Uuid::new_v4())),
             right_store.clone(),
         )

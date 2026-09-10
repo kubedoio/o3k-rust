@@ -12,6 +12,7 @@ pub struct PostgresStore {
     pub(crate) pool: PgPool,
 }
 
+mod audit_store;
 mod compute;
 mod core;
 mod helpers;
