@@ -23,6 +23,7 @@ pub mod identity;
 pub mod network;
 pub mod operation;
 pub mod pagination;
+pub mod quota;
 pub mod resource;
 pub mod resource_contract;
 pub mod volume;
@@ -41,6 +42,7 @@ pub struct NativeApiState {
     pub network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
     pub operation_reader: Option<std::sync::Arc<dyn operation::OperationReader>>,
     pub audit_reader: Option<std::sync::Arc<dyn audit::AuditReader>>,
+    pub quota_reader: Option<std::sync::Arc<dyn quota::QuotaReader>>,
     /// Validated generic resource descriptors.  This is the northbound
     /// registry; applications below it are intentionally controller-agnostic.
     resource_index: resource::ResourceDispatcher,
@@ -84,6 +86,7 @@ impl NativeApiState {
             network_reader,
             operation_reader: None,
             audit_reader: None,
+            quota_reader: None,
             resource_index,
             resource_application: None,
             authorizer: None,
@@ -110,6 +113,12 @@ impl NativeApiState {
     #[must_use]
     pub fn with_audit_reader(mut self, reader: std::sync::Arc<dyn audit::AuditReader>) -> Self {
         self.audit_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_quota_reader(mut self, reader: std::sync::Arc<dyn quota::QuotaReader>) -> Self {
+        self.quota_reader = Some(reader);
         self
     }
 
@@ -181,6 +190,13 @@ pub fn router(state: NativeApiState) -> Router {
         .route("/operations", get(operation::list_operations))
         .route("/audit", get(audit::list_audit))
         .route("/audit/{id}", get(audit::show_audit))
+        .route("/quota", get(quota::list))
+        .route("/quota/{namespace}/{dimension}", get(quota::show))
+        .route("/operator/quotas/{project}", get(quota::operator_list))
+        .route(
+            "/operator/quotas/{project}/{namespace}/{dimension}",
+            axum::routing::put(quota::set).delete(quota::clear),
+        )
         .route("/operations/{id}", get(operation::show_operation))
         .layer(DefaultBodyLimit::max(1_048_576))
         .with_state(state)

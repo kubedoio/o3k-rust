@@ -133,6 +133,11 @@ impl StaticAuthorizer {
         reg("identity", "ValidateToken", "identity", "token", false);
         reg("identity", "RevokeToken", "identity", "token", false);
 
+        // Native quota projection: tenant reads are owner-scoped; administration
+        // is a distinct system/operator action and never inferred from routes.
+        reg("quota", "ReadQuota", "quota", "quota", true);
+        reg("quota", "ManageQuota", "quota", "quota", false);
+
         // Cloud Kernel operation visibility is explicitly permissioned; the
         // reader still applies durable owner-scope concealment below this
         // policy check.
@@ -441,8 +446,21 @@ impl Authorizer for StaticAuthorizer {
             };
         }
 
+        if request.action == ActionId::new_unchecked("quota", "ManageQuota")
+            && (request.auth_context.effective_scope().kind() != ScopeKind::System
+                || !request.auth_context.has_role("operator"))
+        {
+            return AuthorizationDecision::Deny {
+                reason: DecisionReason::ScopeMismatch,
+            };
+        }
+
         // 4. Validate ownership if required
-        if policy.require_ownership {
+        if policy.require_ownership
+            && !(request.action == ActionId::new_unchecked("quota", "ReadQuota")
+                && request.auth_context.effective_scope().kind() == ScopeKind::System
+                && request.auth_context.has_role("operator"))
+        {
             let caller_scope_id = request.auth_context.effective_scope().id();
             match request.resource_target.owner_scope() {
                 Some(target_scope) => {

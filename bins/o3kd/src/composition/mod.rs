@@ -474,7 +474,7 @@ pub async fn build_composition(
         controller_id.clone(),
         controller_epoch.clone(),
     );
-    compute_service = compute_service.with_required_audit_publisher(audit_sink);
+    compute_service = compute_service.with_required_audit_publisher(audit_sink.clone());
     if agent_control_enabled {
         compute_service = compute_service
             .with_scheduler(scheduler)
@@ -920,6 +920,9 @@ pub async fn build_composition(
     )?
     .with_locations(native_locations)
     .with_operation_reader(operation_reader)
+    .with_quota_reader(std::sync::Arc::new(
+        crate::native_adapters::QuotaReaderAdapter::new(store.clone(), audit_sink.clone()),
+    ))
     .with_audit_reader(std::sync::Arc::new(
         crate::native_adapters::AuditReaderAdapter {
             store: store.clone(),
