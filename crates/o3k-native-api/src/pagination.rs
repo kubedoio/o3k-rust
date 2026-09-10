@@ -186,7 +186,13 @@ impl CursorConfig {
     ) -> Result<ResourceQuery, QueryValidationError> {
         validate_identity(scope_id, MAX_SCOPE_LENGTH)?;
         validate_identity(resource_type, MAX_RESOURCE_TYPE_LENGTH)?;
-        self.validate_query_with_identity(raw_limit, raw_cursor, scope_id, resource_type, &canonical_query_identity())
+        self.validate_query_with_identity(
+            raw_limit,
+            raw_cursor,
+            scope_id,
+            resource_type,
+            &canonical_query_identity(),
+        )
     }
 
     /// Validate a bounded query with an application-supplied canonical identity.

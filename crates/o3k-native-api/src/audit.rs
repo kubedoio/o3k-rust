@@ -10,10 +10,10 @@ use axum::{
     extract::{Path, Query, State},
     response::{IntoResponse, Response},
 };
+use base64::Engine as _;
 use o3k_kernel::{AuditEvent, AuditQuery, AuthContext};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use base64::Engine as _;
 
 #[async_trait::async_trait]
 pub trait AuditReader: Send + Sync {
@@ -46,8 +46,19 @@ pub struct ListQuery {
 fn query_identity(q: &ListQuery) -> String {
     let mut h = Sha256::new();
     h.update(b"o3k/audit-query/v1\0");
-    for value in [&q.service, &q.action, &q.outcome, &q.resource_type, &q.resource_id,
-        &q.operation_id, &q.principal_id, &q.request_id, &q.audit_id, &q.from, &q.until] {
+    for value in [
+        &q.service,
+        &q.action,
+        &q.outcome,
+        &q.resource_type,
+        &q.resource_id,
+        &q.operation_id,
+        &q.principal_id,
+        &q.request_id,
+        &q.audit_id,
+        &q.from,
+        &q.until,
+    ] {
         h.update(value.as_deref().unwrap_or("").as_bytes());
         h.update([0]);
     }
