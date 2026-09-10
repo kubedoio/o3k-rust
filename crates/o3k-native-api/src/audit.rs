@@ -7,7 +7,7 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     response::{IntoResponse, Response},
 };
 use o3k_kernel::{AuditEvent, AuditQuery, AuthContext};
@@ -73,4 +73,24 @@ pub async fn list_audit(
         Err(_) => return ProblemDetails::new(ErrorCode::InternalError).into_response(),
     };
     Json(page).into_response()
+}
+
+pub async fn show_audit(
+    auth: BearerAuth,
+    Path(id): Path<String>,
+    State(state): State<NativeApiState>,
+) -> Response {
+    let Some(reader) = state.audit_reader.as_ref() else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
+    if id.is_empty() || id.len() > 256 || id.bytes().any(|b| b == 0) {
+        return ProblemDetails::new(ErrorCode::BadRequest).into_response();
+    }
+    match reader.show(&auth.0, &id).await {
+        Ok(event) => Json(event).into_response(),
+        Err(error) if error == "not found" => {
+            ProblemDetails::new(ErrorCode::ResourceNotFound).into_response()
+        }
+        Err(_) => ProblemDetails::new(ErrorCode::InternalError).into_response(),
+    }
 }

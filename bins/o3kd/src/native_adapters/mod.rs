@@ -1,3 +1,4 @@
+mod audit;
 mod composition;
 mod compute;
 mod helpers;
@@ -10,6 +11,7 @@ mod volume;
 #[cfg(test)]
 mod tests;
 
+pub use audit::AuditReaderAdapter;
 pub use composition::CompositionResourceHandler;
 pub use compute::ServerReaderAdapter;
 pub use network::NetworkReaderAdapter;

@@ -180,6 +180,7 @@ pub fn router(state: NativeApiState) -> Router {
         )
         .route("/operations", get(operation::list_operations))
         .route("/audit", get(audit::list_audit))
+        .route("/audit/{id}", get(audit::show_audit))
         .route("/operations/{id}", get(operation::show_operation))
         .layer(DefaultBodyLimit::max(1_048_576))
         .with_state(state)

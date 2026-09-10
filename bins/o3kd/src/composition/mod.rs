@@ -920,6 +920,11 @@ pub async fn build_composition(
     )?
     .with_locations(native_locations)
     .with_operation_reader(operation_reader)
+    .with_audit_reader(std::sync::Arc::new(
+        crate::native_adapters::AuditReaderAdapter {
+            store: store.clone(),
+        },
+    ))
     .with_resource_application(generic_application)
     .with_authorizer(std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard()));
     let native_lifecycle_registry = native_state.lifecycle_registry();
