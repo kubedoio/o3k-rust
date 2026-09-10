@@ -87,7 +87,10 @@ async fn postgres_pre_audit_schema_upgrades_without_losing_existing_state() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("CREATE SCHEMA public")
+    // Other integration-test processes may recreate the conventional schema
+    // while this fixture is being prepared.  IF NOT EXISTS keeps the upgrade
+    // fixture deterministic under that cross-process setup concurrency.
+    sqlx::query("CREATE SCHEMA IF NOT EXISTS public")
         .execute(&pool)
         .await
         .unwrap();

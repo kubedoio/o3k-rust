@@ -399,8 +399,11 @@ impl ResourceApplication for GenericResourceApplication {
         request: ActionRequest,
         idempotency_key: &str,
     ) -> Result<MutationResult, ResourceApplicationError> {
-        if descriptor.resource_type.to_string() != "compute:server" || !request.input.is_object() {
+        if descriptor.resource_type.to_string() != "compute:server" {
             return Err(ResourceApplicationError::UnsupportedOperation);
+        }
+        if !request.input.is_object() {
+            return Err(ResourceApplicationError::Validation);
         }
         let action_kind = match action.action() {
             "StartServer" => o3k_provider::InstanceAction::Start,
@@ -462,9 +465,6 @@ impl ResourceApplication for GenericResourceApplication {
             || existing.project_id != auth.effective_scope().id().as_str()
         {
             return Err(ResourceApplicationError::NotFound);
-        }
-        if existing.generation != expected_generation {
-            return Err(ResourceApplicationError::PreconditionConflict);
         }
         let name = request
             .spec
@@ -545,6 +545,9 @@ impl ResourceApplication for GenericResourceApplication {
                 });
             }
             o3k_store::CanonicalAcceptanceOutcome::Created { .. } => {}
+        }
+        if existing.generation != expected_generation {
+            return Err(ResourceApplicationError::PreconditionConflict);
         }
         let desired =
             serde_json::to_string(&desired).map_err(|_| ResourceApplicationError::Internal)?;
