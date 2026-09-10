@@ -628,7 +628,10 @@ pub async fn action(
         Ok(None) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
-    match application.action(descriptor, &auth.0, &id, action, request, key).await {
+    match application
+        .action(descriptor, &auth.0, &id, action, request, key)
+        .await
+    {
         Ok(result) if result.complete => (StatusCode::OK, Json(result)).into_response(),
         Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
         Err(error) => application_problem(error),

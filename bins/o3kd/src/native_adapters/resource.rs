@@ -408,7 +408,9 @@ impl ResourceApplication for GenericResourceApplication {
             "RebootServer" => o3k_provider::InstanceAction::Reboot,
             _ => return Err(ResourceApplicationError::UnsupportedOperation),
         };
-        let server_id = id.parse::<Uuid>().map(o3k_compute::ServerId::from_uuid)
+        let server_id = id
+            .parse::<Uuid>()
+            .map(o3k_compute::ServerId::from_uuid)
             .map_err(|_| ResourceApplicationError::NotFound)?;
         let context = o3k_reconciler::CanonicalMutationContext::new(
             action,
@@ -417,13 +419,20 @@ impl ResourceApplication for GenericResourceApplication {
             Some(auth.request_id().to_owned()),
             idempotency_key.to_owned(),
             request.input,
-        ).map_err(|_| ResourceApplicationError::Validation)?;
-        let receipt = self.compute.action_for_auth_canonical(auth, server_id, action_kind, context)
-            .await.map_err(compute_error)?;
+        )
+        .map_err(|_| ResourceApplicationError::Validation)?;
+        let receipt = self
+            .compute
+            .action_for_auth_canonical(auth, server_id, action_kind, context)
+            .await
+            .map_err(compute_error)?;
         Ok(MutationResult {
             operation_id: receipt.operation_id.to_string(),
             resource_id: Some(receipt.resource.to_string()),
-            complete: matches!(receipt.operation_state, o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed),
+            complete: matches!(
+                receipt.operation_state,
+                o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
+            ),
             resource: None,
         })
     }

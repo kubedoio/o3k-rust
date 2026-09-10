@@ -5,10 +5,7 @@ use crate::{
     compile_attachment_plan_with_defaults,
 };
 use o3k_domain::{NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent};
-use o3k_kernel::{
-    AuditOutcome, AuthContext, LimitKey, LimitValue, OwnershipScope,
-    ScopeId,
-};
+use o3k_kernel::{AuditOutcome, AuthContext, LimitKey, LimitValue, OwnershipScope, ScopeId};
 use o3k_store::DurableStore;
 use std::{
     collections::HashSet,
