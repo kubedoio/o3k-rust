@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use o3k_kernel::{
-    ActionId, AuditEvent, AuthContext, LimitKey, LimitValue, OwnershipScope, ServiceNamespace,
+    ActionId, AuditEvent, AuthContext, LimitKey, LimitValue, OwnershipScope, ResourceId,
+    ServiceNamespace,
 };
 use o3k_store::{AuditEventRecord, StoreError, quota::QuotaRepository};
 
@@ -91,7 +92,11 @@ impl o3k_native_api::quota::QuotaReader for QuotaReaderAdapter {
         )
         .with_resource(
             o3k_kernel::ResourceType::new_unchecked("quota", "quota"),
-            Some(format!("{}:{}", key.namespace(), key.resource())),
+            Some(ResourceId::new_unchecked(format!(
+                "{}:{}",
+                key.namespace(),
+                key.resource()
+            ))),
             Some(scope.clone()),
         )
         .with_reason(format!("dimension={}", key));
