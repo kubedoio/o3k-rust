@@ -17,7 +17,9 @@ so stale writers receive a conflict across restarts and independent processes.
 Quota state and its required audit record commit in the same SQLite/PostgreSQL
 transaction. Reserved amounts remain internal; `usage` is committed
 consumption only. Clear/reset is not an unconditional delete and therefore
-requires the same generation precondition as a finite limit. Effective tenant
+requires the same generation precondition as a finite limit; its request body
+contains only `expected_generation` and the server applies `Unlimited`.
+Effective tenant
 scope is always taken from `AuthContext`; a project path is accepted only for
 an authorized system/operator action.
 

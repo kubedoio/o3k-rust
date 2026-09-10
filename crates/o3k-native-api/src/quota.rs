@@ -45,6 +45,14 @@ pub struct LimitRequest {
     pub expected_generation: Option<u64>,
 }
 
+/// Reset requests carry only the optimistic-concurrency precondition.  The
+/// reset value is always the explicit `Unlimited` representation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClearRequest {
+    pub expected_generation: Option<u64>,
+}
+
 #[async_trait::async_trait]
 pub trait QuotaReader: Send + Sync {
     async fn list(&self, scope: &OwnershipScope) -> Result<Vec<QuotaDimension>, QuotaError>;
@@ -193,7 +201,7 @@ pub async fn clear(
     auth: BearerAuth,
     Path((project, namespace, dimension)): Path<(String, String, String)>,
     State(state): State<NativeApiState>,
-    Json(body): Json<LimitRequest>,
+    Json(body): Json<ClearRequest>,
 ) -> Response {
     mutate(
         auth,
