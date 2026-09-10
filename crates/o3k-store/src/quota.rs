@@ -1071,8 +1071,8 @@ mod tests {
         // Tenant A usage is 1, Tenant B usage is 2
         let usage_a = store.get_usage(&scope_a, &key).await?;
         let usage_b = store.get_usage(&scope_b, &key).await?;
-        assert_eq!(usage_a.total_consumed(), 1);
-        assert_eq!(usage_b.total_consumed(), 2);
+        assert_eq!(usage_a.total_consumed(), Some(1));
+        assert_eq!(usage_b.total_consumed(), Some(2));
 
         Ok(())
     }
@@ -1127,7 +1127,7 @@ mod tests {
             );
 
             let usage = store.get_usage(&scope, &key).await?;
-            assert_eq!(usage.total_consumed(), 1);
+            assert_eq!(usage.total_consumed(), Some(1));
 
             let _ = std::fs::remove_file(&path);
         }
@@ -1185,7 +1185,7 @@ mod tests {
             );
 
             let usage = store.get_usage(&scope, &key).await?;
-            assert_eq!(usage.total_consumed(), 1);
+            assert_eq!(usage.total_consumed(), Some(1));
 
             let _ = std::fs::remove_file(&path);
         }
@@ -1243,7 +1243,7 @@ mod tests {
             );
 
             let usage = store.get_usage(&scope, &key).await?;
-            assert_eq!(usage.total_consumed(), 60 * 1024 * 1024);
+            assert_eq!(usage.total_consumed(), Some(60 * 1024 * 1024));
 
             let _ = std::fs::remove_file(&path);
         }

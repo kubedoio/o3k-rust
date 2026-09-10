@@ -5923,7 +5923,7 @@ mod tests {
             .await?;
         assert_eq!(
             usage.total_consumed(),
-            0,
+            Some(0),
             "expected total consumed to be 0 after delete, got in_use={} reserved={}",
             usage.in_use,
             usage.reserved
@@ -6173,7 +6173,7 @@ mod tests {
         let usage_after_del = store
             .get_usage(&scope, &LimitKey::compute_servers())
             .await?;
-        assert_eq!(usage_after_del.total_consumed(), 0);
+        assert_eq!(usage_after_del.total_consumed(), Some(0));
 
         // SCENARIO E: Create server-2 / replacement -> must now succeed
         let replacement = service
@@ -6208,7 +6208,7 @@ mod tests {
             .await?;
         assert_eq!(
             final_usage.total_consumed(),
-            0,
+            Some(0),
             "final quota consumed must be 0"
         );
         let final_servers = service.list_servers_for_auth(&auth).await?;
