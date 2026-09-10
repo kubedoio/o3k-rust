@@ -2,6 +2,7 @@
 
 use o3k_kernel::{LimitKey, LimitValue, OwnershipScope, ScopeId};
 use o3k_store::{PostgresStore, StoreError, quota::QuotaRepository};
+use sqlx::postgres::PgPoolOptions;
 
 #[tokio::test]
 async fn postgres_quota_generation_is_durable_and_cas_safe() {
@@ -9,8 +10,28 @@ async fn postgres_quota_generation_is_durable_and_cas_safe() {
         eprintln!("skipping PostgreSQL quota CAS: O3K_DATABASE_URL unavailable");
         return;
     };
-    let store_a = PostgresStore::connect(&url).await.unwrap();
-    let store_b = PostgresStore::connect(&url).await.unwrap();
+    // Use a disposable database so concurrently running PostgreSQL integration
+    // binaries that reset the shared fixture schema cannot invalidate this
+    // test's migration or CAS authority.
+    let parsed = url::Url::parse(&url).unwrap();
+    let database = format!("o3k_quota_cas_{}", uuid::Uuid::now_v7().simple());
+    let mut admin_url = parsed.clone();
+    admin_url.set_path("/postgres");
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(admin_url.as_str())
+        .await
+        .unwrap();
+    sqlx::query(&format!("CREATE DATABASE {database}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+    let mut isolated_url = parsed;
+    isolated_url.set_path(&format!("/{database}"));
+    let isolated_url = isolated_url.to_string();
+    let store_a = PostgresStore::connect(&isolated_url).await.unwrap();
+    let store_b = PostgresStore::connect(&isolated_url).await.unwrap();
     let scope = OwnershipScope::project(
         ScopeId::new_unchecked(format!("quota-cas-{}", uuid::Uuid::now_v7())),
         None,
@@ -40,10 +61,21 @@ async fn postgres_quota_generation_is_durable_and_cas_safe() {
         LimitValue::Maximum(2) | LimitValue::Maximum(9)
     ));
     assert_eq!(generation, 1);
-    drop(store_a);
-    let restarted = PostgresStore::connect(&url).await.unwrap();
+    let restarted = PostgresStore::connect(&isolated_url).await.unwrap();
     assert_eq!(
         restarted.get_limit_state(&scope, &key).await.unwrap(),
         (limit, 1)
     );
+    store_a.pool().close().await;
+    store_b.pool().close().await;
+    restarted.pool().close().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(admin_url.as_str())
+        .await
+        .unwrap();
+    sqlx::query(&format!("DROP DATABASE {database}"))
+        .execute(&admin)
+        .await
+        .unwrap();
 }
