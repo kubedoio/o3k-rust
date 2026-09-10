@@ -106,9 +106,12 @@ impl QuotaRepository for PostgresStore {
         if result.rows_affected() != 1 {
             return Err(StoreError::QuotaGenerationConflict);
         }
-        sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(event_id) DO NOTHING")
+        let audit_result = sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(event_id) DO NOTHING")
             .bind(&audit.event_id).bind(&audit.timestamp).bind(&audit.request_id).bind(&audit.audit_id).bind(&audit.principal_id).bind(&audit.principal_kind).bind(&audit.effective_scope).bind(&audit.service).bind(&audit.action).bind(&audit.resource_type).bind(&audit.resource_id).bind(&audit.owner_scope).bind(&audit.operation_id).bind(&audit.outcome).bind(&audit.reason_category)
             .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if audit_result.rows_affected() != 1 {
+            return Err(StoreError::AuditEventConflict);
+        }
         tx.commit().await.map_err(StoreError::Database)?;
         Ok(next)
     }
@@ -258,7 +261,12 @@ impl QuotaRepository for PostgresStore {
                 let res: String = r.get("resource");
                 let amt: i64 = r.get("amount");
                 let k = LimitKey::new(&ns, &res).map_err(|e| StoreError::Corrupt(e.to_string()))?;
-                existing_amounts.push(ResourceAmount::new_unchecked(k, amt as u64));
+                let amount = u64::try_from(amt).map_err(|_| {
+                    StoreError::Corrupt(format!(
+                        "malformed negative reservation amount {amt} for '{ns}:{res}' in durable storage"
+                    ))
+                })?;
+                existing_amounts.push(ResourceAmount::new_unchecked(k, amount));
             }
 
             if state_str == "released" {
@@ -298,8 +306,20 @@ impl QuotaRepository for PostgresStore {
                     Some(operation_id),
                 )
                 .await?;
-                let current_consumed = in_use + reserved;
-                if current_consumed + amount.amount > max {
+                let current_consumed = in_use.checked_add(reserved).ok_or_else(|| {
+                    StoreError::Corrupt(format!(
+                        "quota usage overflow for '{}' in durable storage",
+                        amount.key
+                    ))
+                })?;
+                let requested_total =
+                    current_consumed.checked_add(amount.amount).ok_or_else(|| {
+                        StoreError::Corrupt(format!(
+                            "quota usage overflow for '{}' in reservation",
+                            amount.key
+                        ))
+                    })?;
+                if requested_total > max {
                     return Err(StoreError::QuotaExceeded {
                         key: amount.key.clone(),
                         limit,
@@ -453,7 +473,12 @@ impl QuotaRepository for PostgresStore {
             let res: String = r.get("resource");
             let amt: i64 = r.get("amount");
             let key = LimitKey::new(&ns, &res).map_err(|e| StoreError::Corrupt(e.to_string()))?;
-            amounts.push(ResourceAmount::new_unchecked(key, amt as u64));
+            let amount = u64::try_from(amt).map_err(|_| {
+                StoreError::Corrupt(format!(
+                    "malformed negative reservation amount {amt} for '{ns}:{res}' in durable storage"
+                ))
+            })?;
+            amounts.push(ResourceAmount::new_unchecked(key, amount));
         }
 
         let st = match state_str.as_str() {

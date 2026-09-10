@@ -164,6 +164,11 @@ impl QuotaRepository for SqliteStore {
         expected_generation: u64,
         audit: &AuditEventRecord,
     ) -> Result<u64, StoreError> {
+        if !key.is_known() {
+            return Err(StoreError::Corrupt(format!(
+                "unknown or unregistered limit key '{key}'"
+            )));
+        }
         let expected = i64::try_from(expected_generation)
             .map_err(|_| StoreError::Corrupt("quota generation overflow".into()))?;
         let next = expected_generation
@@ -185,9 +190,12 @@ impl QuotaRepository for SqliteStore {
         if result.rows_affected() != 1 {
             return Err(StoreError::QuotaGenerationConflict);
         }
-        sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING")
+        let audit_result = sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING")
             .bind(&audit.event_id).bind(&audit.timestamp).bind(&audit.request_id).bind(&audit.audit_id).bind(&audit.principal_id).bind(&audit.principal_kind).bind(&audit.effective_scope).bind(&audit.service).bind(&audit.action).bind(&audit.resource_type).bind(&audit.resource_id).bind(&audit.owner_scope).bind(&audit.operation_id).bind(&audit.outcome).bind(&audit.reason_category)
             .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if audit_result.rows_affected() != 1 {
+            return Err(StoreError::AuditEventConflict);
+        }
         tx.commit().await.map_err(StoreError::Database)?;
         Ok(next)
     }
@@ -1325,17 +1333,51 @@ mod tests {
         sqlx::query("DROP TRIGGER quota_test_fail_audit")
             .execute(&store.pool)
             .await?;
+        let successful_audit = audit_event(scope.id().as_str());
         let generation = store
             .set_limit_if_generation_with_audit(
                 &scope,
                 &key,
                 LimitValue::Maximum(3),
                 0,
-                &audit_event(scope.id().as_str()),
+                &successful_audit,
             )
             .await?;
         assert_eq!(generation, 1);
         assert_eq!(store.get_limit_state(&scope, &key).await?.1, 1);
+
+        // A pre-existing event identifier is not an acceptable audit success:
+        // the quota mutation must roll back rather than advance without a new
+        // durable event.
+        let duplicate = store
+            .set_limit_if_generation_with_audit(
+                &scope,
+                &key,
+                LimitValue::Maximum(4),
+                1,
+                &successful_audit,
+            )
+            .await;
+        assert!(matches!(duplicate, Err(StoreError::AuditEventConflict)));
+        assert_eq!(
+            store.get_limit_state(&scope, &key).await?,
+            (LimitValue::Maximum(3), 1)
+        );
+
+        let unknown = LimitKey::new_unchecked(
+            o3k_kernel::ServiceNamespace::new_unchecked("quota".to_owned()),
+            "not_declared".to_owned(),
+        );
+        let unknown_result = store
+            .set_limit_if_generation_with_audit(
+                &scope,
+                &unknown,
+                LimitValue::Maximum(1),
+                0,
+                &audit_event(scope.id().as_str()),
+            )
+            .await;
+        assert!(matches!(unknown_result, Err(StoreError::Corrupt(_))));
         Ok(())
     }
 }
