@@ -308,10 +308,7 @@ async fn authenticated_canonical_entry_points_enforce_scope_and_audit()
     assert!(events.iter().any(|event| {
         event.action.to_string() == "network:DeleteAddressRealm"
             && event.outcome == AuditOutcome::Denied
-            && event
-                .resource_id
-                .as_ref()
-                .is_some_and(|id| id.as_str() == realm.id.to_string())
+            && event.resource_id.is_none()
     }));
     Ok(())
 }

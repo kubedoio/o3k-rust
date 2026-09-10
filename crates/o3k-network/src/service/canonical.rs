@@ -739,6 +739,13 @@ impl NetworkService {
             resource_target: target,
         });
         if !decision.is_allowed() {
+            // Scope-concealed denials must not turn Audit into an existence
+            // oracle.  Preserve the target only for denials where the caller
+            // is already entitled to know which resource was addressed.
+            let audit_target = match decision.reason() {
+                DecisionReason::ScopeMismatch | DecisionReason::MissingOwnership => None,
+                _ => resource_id.and_then(|id| ResourceId::new(id.to_string()).ok()),
+            };
             self.record_required_audit(
                 &AuditEvent::from_auth(
                     auth,
@@ -748,7 +755,7 @@ impl NetworkService {
                 )
                 .with_resource(
                     resource_type.clone(),
-                    resource_id.and_then(|id| ResourceId::new(id.to_string()).ok()),
+                    audit_target,
                     Some(OwnershipScope::project(owner_scope, None, None)),
                 )
                 .with_decision(decision.clone())
