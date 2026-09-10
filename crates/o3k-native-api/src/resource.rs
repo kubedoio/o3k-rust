@@ -632,6 +632,15 @@ pub async fn action(
     State(state): State<NativeApiState>,
     Json(request): Json<ActionRequest>,
 ) -> Response {
+    if let Some(reason) = request
+        .input
+        .as_object()
+        .and_then(|input| input.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        && reason.len() > 256
+    {
+        return ProblemDetails::new(ErrorCode::BadRequest).into_response();
+    }
     let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
         return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
     };
