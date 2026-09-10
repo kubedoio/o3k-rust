@@ -1,6 +1,8 @@
 # #900 native quota evidence
 
 Base: `ed0648e799b23e619a27d5ec94cee3dec6108393` (protected `main`).
+Original PR head: `b488de655e40763542bc0c483ac8021ebec844f9`.
+Current implementation head: `4938ce8ff2d60d8f3b2596212f23db9410f3f7df`.
 
 The implementation projects the existing SQLite/PostgreSQL `QuotaRepository`
 and SQL usage counters through the versioned native `/quota` contract. It does
