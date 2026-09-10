@@ -17,22 +17,33 @@ async fn postgres_quota_generation_is_durable_and_cas_safe() {
         None,
     );
     let key = LimitKey::compute_servers();
-    let first = store_a
-        .set_limit_if_generation(&scope, &key, LimitValue::Maximum(2), 0)
-        .await
-        .unwrap();
-    assert_eq!(first, 1);
-    let stale = store_b
-        .set_limit_if_generation(&scope, &key, LimitValue::Maximum(9), 0)
-        .await;
-    assert!(matches!(stale, Err(StoreError::QuotaGenerationConflict)));
+    let (a, b) = tokio::join!(
+        store_a.set_limit_if_generation(&scope, &key, LimitValue::Maximum(2), 0),
+        store_b.set_limit_if_generation(&scope, &key, LimitValue::Maximum(9), 0),
+    );
+    let successes = [a.as_ref(), b.as_ref()]
+        .iter()
+        .filter(|result| result.is_ok())
+        .count();
+    assert_eq!(
+        successes, 1,
+        "exactly one independent writer must win: {a:?} / {b:?}"
+    );
+    assert!(matches!(
+        (&a, &b),
+        (Err(StoreError::QuotaGenerationConflict), Ok(1))
+            | (Ok(1), Err(StoreError::QuotaGenerationConflict))
+    ));
     let (limit, generation) = store_b.get_limit_state(&scope, &key).await.unwrap();
-    assert_eq!(limit, LimitValue::Maximum(2));
+    assert!(matches!(
+        limit,
+        LimitValue::Maximum(2) | LimitValue::Maximum(9)
+    ));
     assert_eq!(generation, 1);
     drop(store_a);
     let restarted = PostgresStore::connect(&url).await.unwrap();
     assert_eq!(
         restarted.get_limit_state(&scope, &key).await.unwrap(),
-        (LimitValue::Maximum(2), 1)
+        (limit, 1)
     );
 }
