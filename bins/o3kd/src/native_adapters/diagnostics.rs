@@ -1039,60 +1039,48 @@ mod tests {
         assert_eq!(page.items[0].reason, Some(DiagnosticReason::NeverObserved));
 
         // Agent registers with a fresh heartbeat -> healthy.
-        agents
-            .nodes
-            .lock()
-            .await
-            .insert(
-                "provider-a".to_owned(),
-                (
-                    snapshot(
-                        "provider-a",
-                        AgentAvailability::Available,
-                        AgentAdministrativeState::Enabled,
-                    ),
-                    Some(now_unix_ms()),
+        agents.nodes.lock().await.insert(
+            "provider-a".to_owned(),
+            (
+                snapshot(
+                    "provider-a",
+                    AgentAvailability::Available,
+                    AgentAdministrativeState::Enabled,
                 ),
-            );
+                Some(now_unix_ms()),
+            ),
+        );
         let page = adapter.providers(10, None).await.expect("providers");
         assert_eq!(page.items[0].status, DiagnosticStatus::Healthy);
 
         // Heartbeat stops -> the provider becomes stale, never stays healthy.
-        agents
-            .nodes
-            .lock()
-            .await
-            .insert(
-                "provider-a".to_owned(),
-                (
-                    snapshot(
-                        "provider-a",
-                        AgentAvailability::Unavailable,
-                        AgentAdministrativeState::Enabled,
-                    ),
-                    Some(now_unix_ms() - AGENT_LEASE_MS - 1_000),
+        agents.nodes.lock().await.insert(
+            "provider-a".to_owned(),
+            (
+                snapshot(
+                    "provider-a",
+                    AgentAvailability::Unavailable,
+                    AgentAdministrativeState::Enabled,
                 ),
-            );
+                Some(now_unix_ms() - AGENT_LEASE_MS - 1_000),
+            ),
+        );
         let page = adapter.providers(10, None).await.expect("providers");
         assert_eq!(page.items[0].status, DiagnosticStatus::Stale);
         assert_eq!(page.items[0].reason, Some(DiagnosticReason::HeartbeatLost));
 
         // Recovery: a fresh observation restores health through the same adapter.
-        agents
-            .nodes
-            .lock()
-            .await
-            .insert(
-                "provider-a".to_owned(),
-                (
-                    snapshot(
-                        "provider-a",
-                        AgentAvailability::Available,
-                        AgentAdministrativeState::Enabled,
-                    ),
-                    Some(now_unix_ms()),
+        agents.nodes.lock().await.insert(
+            "provider-a".to_owned(),
+            (
+                snapshot(
+                    "provider-a",
+                    AgentAvailability::Available,
+                    AgentAdministrativeState::Enabled,
                 ),
-            );
+                Some(now_unix_ms()),
+            ),
+        );
         let page = adapter.providers(10, None).await.expect("providers");
         assert_eq!(page.items[0].status, DiagnosticStatus::Healthy);
         assert_eq!(page.items[0].reason, None);
