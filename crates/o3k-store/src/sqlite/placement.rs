@@ -56,6 +56,36 @@ impl SqliteStore {
         Ok(providers)
     }
 
+    pub async fn list_providers_bounded(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PlacementProviderRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("placement page limit out of range".to_owned()))?;
+        let rows = sqlx::query(
+            "SELECT id, node_id, state, generation FROM placement_providers \
+             WHERE (?1 IS NULL OR id > ?1) \
+             ORDER BY id \
+             LIMIT ?2",
+        )
+        .bind(after_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let mut providers = Vec::with_capacity(rows.len());
+        for row in rows {
+            let provider_id: String = row.get("id");
+            let mut provider = placement_provider_from_row(&row)?;
+            // Inventories only: allocations are intentionally omitted (see
+            // the port contract). `used` already reflects durable allocation.
+            provider.inventories = self.load_placement_inventories(&provider_id).await?;
+            providers.push(provider);
+        }
+        Ok(providers)
+    }
+
     async fn capacity_summary(
         &self,
         limit: usize,
@@ -1147,6 +1177,14 @@ impl PlacementRepository for SqliteStore {
 
     async fn list_providers(&self) -> Result<Vec<PlacementProviderRecord>, StoreError> {
         self.list_providers().await
+    }
+
+    async fn list_providers_bounded(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PlacementProviderRecord>, StoreError> {
+        self.list_providers_bounded(after_id, limit).await
     }
 
     async fn capacity_summary(

@@ -68,6 +68,40 @@ impl PlacementRepository for PostgresStore {
         Ok(providers)
     }
 
+    async fn list_providers_bounded(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PlacementProviderRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("placement page limit out of range".to_owned()))?;
+        let rows = sqlx::query(
+            "SELECT id, node_id, state, generation FROM placement_providers \
+             WHERE ($1::text IS NULL OR id > $1) \
+             ORDER BY id \
+             LIMIT $2",
+        )
+        .bind(after_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let mut providers = Vec::with_capacity(rows.len());
+        for row in rows {
+            let provider_id: String = row.get("id");
+            let provider = PlacementProviderRecord {
+                id: row.get("id"),
+                node_id: row.get("node_id"),
+                state: row.get("state"),
+                generation: row.get::<i64, _>("generation") as u64,
+                inventories: self.load_placement_inventories(&provider_id).await?,
+                allocations: Vec::new(),
+            };
+            providers.push(provider);
+        }
+        Ok(providers)
+    }
+
     async fn capacity_summary(
         &self,
         limit: usize,

@@ -27,6 +27,17 @@ impl PlacementRepository for O3kStore {
         }
     }
 
+    async fn list_providers_bounded(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PlacementProviderRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_providers_bounded(after_id, limit).await,
+            Self::Postgres(s) => s.list_providers_bounded(after_id, limit).await,
+        }
+    }
+
     async fn capacity_summary(
         &self,
         limit: usize,

@@ -433,6 +433,22 @@ impl PlacementLedger {
         records.iter().map(provider_from_record).collect()
     }
 
+    /// Bounded, paginated provider read for operator diagnostics.
+    ///
+    /// Returns providers (with inventories, without allocations) ordered by
+    /// id, at most `limit`, continuing after `after_id`. Never materializes
+    /// the whole fleet or its allocations.
+    pub async fn providers_bounded(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<o3k_store::PlacementProviderRecord>, PlacementError> {
+        self.repository
+            .list_providers_bounded(after_id, limit)
+            .await
+            .map_err(map_store_error)
+    }
+
     /// Bounded, database-computed capacity aggregate over the durable
     /// placement authority.
     ///
@@ -1088,6 +1104,13 @@ mod tests {
             &self,
         ) -> Result<Vec<o3k_store::PlacementProviderRecord>, o3k_store::StoreError> {
             self.inner.list_providers().await
+        }
+        async fn list_providers_bounded(
+            &self,
+            after_id: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<o3k_store::PlacementProviderRecord>, o3k_store::StoreError> {
+            self.inner.list_providers_bounded(after_id, limit).await
         }
         async fn capacity_summary(
             &self,

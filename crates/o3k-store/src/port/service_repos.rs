@@ -629,6 +629,18 @@ pub trait PlacementRepository: Send + Sync {
     ) -> Result<Option<PlacementProviderRecord>, StoreError>;
     async fn list_providers(&self) -> Result<Vec<PlacementProviderRecord>, StoreError>;
 
+    /// Bounded, paginated provider read for operator diagnostics.
+    ///
+    /// Returns providers (with inventories but not allocations) whose id
+    /// sorts after `after_id`, at most `limit`, ordered by id. Allocations are
+    /// deliberately omitted: `Inventory.used` already reflects durable
+    /// allocation, and diagnostics must not materialize every allocation row.
+    async fn list_providers_bounded(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PlacementProviderRecord>, StoreError>;
+
     /// Bounded, repository-computed capacity aggregate over the durable
     /// placement authority.
     ///
