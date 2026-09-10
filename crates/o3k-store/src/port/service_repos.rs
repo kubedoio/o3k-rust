@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use o3k_kernel::AuditQuery;
 use uuid::Uuid;
 
 use crate::domain::error::StoreError;
@@ -33,6 +34,12 @@ pub trait AuditRepository: Send + Sync {
         scope: &str,
         after_event_id: Option<&str>,
         limit: usize,
+    ) -> Result<crate::RepositoryPage<AuditEventRecord>, StoreError>;
+    /// Execute the complete canonical AuditQuery at the concrete persistence
+    /// boundary. Implementations must push every supported predicate into SQL.
+    async fn list_audit_events_page_query(
+        &self,
+        query: &AuditQuery,
     ) -> Result<crate::RepositoryPage<AuditEventRecord>, StoreError>;
     async fn prune_audit_events_before(
         &self,

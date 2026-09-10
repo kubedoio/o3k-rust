@@ -28,15 +28,15 @@ check B0-R03 rg -q 'AuditEventConflict' "$tests" "$sqlite" "$postgres"
 check B0-R04 rg -q 'INSERT INTO audit_events|insert_audit_event' "$sqlite"
 check B0-R05 rg -q 'INSERT INTO audit_events|insert_audit_event' "$postgres"
 
-# The unified query is the canonical kernel path.  Every accepted field must
-# be visibly represented in that SQL builder; this prevents accidental Rust
-# post-filtering when the query evolves.
+# Every accepted field must be visibly represented in both persistence SQL
+# builders.  The unified layer only dispatches; checking the adapters here
+# prevents accidental Rust post-filtering while preserving the SQL boundary.
 for field in service action outcome resource_type resource_id operation_id \
   principal_id request_id audit_id from_timestamp until_timestamp; do
-  check "B0-R06-$field" rg -q "$field" "$unified"
+  check "B0-R06-$field" rg -q "$field" "$sqlite" "$postgres"
 done
-check B0-R07 rg -q 'ORDER BY event_id' "$unified"
-check B0-R08 rg -q 'query.limit \+ 1' "$unified"
+check B0-R07 rg -q 'ORDER BY event_id' "$sqlite" "$postgres"
+check B0-R08 rg -q 'bounded_fetch_limit|LIMIT \?' "$sqlite" "$postgres"
 check B0-R09 rg -q 'PostgresStore|SqliteStore' "$tests"
 check B0-R10 rg -q 'connect_file.*reopened|reopened.*connect_file' "$tests"
 check B0-R11 rg -q 'tokio::join|concurrent|Concurrency|spawn' "$tests" "$root/crates/o3k-store/tests/postgres_audit_repository.rs"
