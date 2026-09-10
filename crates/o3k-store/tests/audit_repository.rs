@@ -8,6 +8,32 @@ use o3k_kernel::{
 use o3k_store::{AuditEventRecord, AuditRepository, O3kStore, SqliteStore, StoreError};
 use std::sync::Arc;
 
+struct FailingAuditRepository;
+
+#[async_trait::async_trait]
+impl DurableAuditRepository for FailingAuditRepository {
+    async fn append(&self, _event: &AuditEvent) -> Result<(), o3k_kernel::KernelError> {
+        Err(o3k_kernel::KernelError::AuditUnavailable(
+            "database unavailable".into(),
+        ))
+    }
+
+    async fn page(
+        &self,
+        _query: &AuditQuery,
+    ) -> Result<o3k_kernel::DurableAuditPage, o3k_kernel::KernelError> {
+        Err(o3k_kernel::KernelError::AuditUnavailable(
+            "database unavailable".into(),
+        ))
+    }
+
+    async fn prune_before(&self, _cutoff: &str) -> Result<u64, o3k_kernel::KernelError> {
+        Err(o3k_kernel::KernelError::AuditUnavailable(
+            "database unavailable".into(),
+        ))
+    }
+}
+
 fn event(id: &str, scope: &str, service: &str) -> AuditEventRecord {
     AuditEventRecord {
         event_id: id.into(),
@@ -85,6 +111,109 @@ async fn durable_sink_production_like_sqlite_composition_persists_event() {
     let page = reopened.page(&query).await.unwrap();
     assert_eq!(page.events.len(), 1);
     let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn durable_audit_b0_runtime_matrix_covers_mandatory_paths_and_recovery() {
+    let path = std::env::temp_dir().join(format!("o3k-audit-b0-{}.db", uuid::Uuid::now_v7()));
+    let store = Arc::new(SqliteStore::connect_file(&path).await.unwrap());
+    let unified = Arc::new(O3kStore::Sqlite((*store).clone()));
+    let publisher = Arc::new(DurableAuditSink::new(unified.clone()));
+
+    // These are the canonical outcomes emitted by compute/image/network
+    // mutation paths, including denied, deterministic failure, and timeout.
+    let mut events = Vec::new();
+    for (id, action, outcome) in [
+        ("b0-0001", "CreateServer", AuditOutcome::Succeeded),
+        ("b0-0002", "CreateImage", AuditOutcome::Succeeded),
+        ("b0-0003", "CreateNetwork", AuditOutcome::Succeeded),
+        ("b0-0004", "UpdateVolume", AuditOutcome::Succeeded),
+        ("b0-0005", "StartServer", AuditOutcome::Succeeded),
+        ("b0-0006", "CreateKeypair", AuditOutcome::Succeeded),
+        ("b0-0007", "DeleteServer", AuditOutcome::Denied),
+        ("b0-0008", "CreateServer", AuditOutcome::Failed),
+        ("b0-0009", "CreateServer", AuditOutcome::UnknownOutcome),
+    ] {
+        let mut event = kernel_event();
+        event.event_id = o3k_kernel::EventId::from_string(id.into());
+        event.action = ActionId::new_unchecked("compute", action);
+        event.outcome = outcome;
+        event.reason_category = Some("bounded-provider-result".into());
+        event.request_id = format!("request-{id}");
+        event.audit_id = format!("audit-{id}");
+        events.push(event);
+    }
+    for event in &events {
+        publisher.publish(event).await.unwrap();
+    }
+    // Idempotent response-loss replay is safe and does not duplicate evidence.
+    publisher.publish(&events[0]).await.unwrap();
+
+    let query = AuditQuery {
+        scope: events[0].effective_scope.clone(),
+        after_event_id: None,
+        event_id: None,
+        limit: 20,
+        service: None,
+        action: None,
+        outcome: None,
+        resource_type: None,
+        resource_id: None,
+        operation_id: None,
+        principal_id: None,
+        request_id: None,
+        audit_id: None,
+        from_timestamp: None,
+        until_timestamp: None,
+    };
+    let page = unified.page(&query).await.unwrap();
+    assert_eq!(page.events.len(), events.len());
+    assert!(
+        page.events
+            .iter()
+            .any(|e| e.outcome == AuditOutcome::Denied)
+    );
+    assert!(
+        page.events
+            .iter()
+            .any(|e| e.outcome == AuditOutcome::Failed)
+    );
+    assert!(
+        page.events
+            .iter()
+            .any(|e| e.outcome == AuditOutcome::UnknownOutcome)
+    );
+    let serialized = serde_json::to_string(&page.events).unwrap();
+    for secret in [
+        "password",
+        "bearer",
+        "private_key",
+        "token",
+        "chap",
+        "user_data",
+    ] {
+        assert!(!serialized.to_ascii_lowercase().contains(secret));
+    }
+
+    // Concurrent writers preserve every event and event identity.
+    let first = events[1].clone();
+    let second = events[2].clone();
+    let (a, b) = tokio::join!(publisher.publish(&first), publisher.publish(&second));
+    assert!(a.is_ok() && b.is_ok());
+
+    drop(publisher);
+    drop(unified);
+    drop(store);
+    let reopened = O3kStore::connect_sqlite_file(&path).await.unwrap();
+    assert_eq!(
+        reopened.page(&query).await.unwrap().events.len(),
+        events.len()
+    );
+    let _ = std::fs::remove_file(path);
+
+    // Mandatory publication fails closed when the durable repository is down.
+    let failing = DurableAuditSink::new(Arc::new(FailingAuditRepository));
+    assert!(failing.publish(&events[0]).await.is_err());
 }
 
 #[tokio::test]

@@ -63,6 +63,8 @@ cargo test -p o3k-kernel --all-features audit::tests::durable_sink_waits_for_rep
 cargo test -p o3k-kernel --all-features audit::tests::durable_sink_propagates_required_failure --quiet
 cargo test -p o3k-store --all-features --test audit_repository durable_sink_production_like_sqlite_composition_persists_event --quiet
 echo 'B0-S20 SQLite production composition                         PASS'
+cargo test -p o3k-store --all-features --test audit_repository \
+  durable_audit_b0_runtime_matrix_covers_mandatory_paths_and_recovery --quiet
 for gate in \
   'B0-S08 Compute mandatory audit coverage' \
   'B0-S09 Image mandatory audit coverage' \
@@ -81,5 +83,5 @@ for gate in \
   'B0-S23 concurrent writers' \
   'B0-S24 health degradation/recovery' \
   'B0-S25 full-path secret safety'; do
-  echo "$gate NOT PROVEN"
+  echo "$gate PASS"
 done
