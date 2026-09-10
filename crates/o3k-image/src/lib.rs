@@ -1655,6 +1655,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_like_durable_audit_publisher_persists_image_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("durable-audit");
+        let database = path.with_extension("sqlite");
+        let store = Arc::new(o3k_store::testkit::open_file(&database).await?);
+        let durable_store = Arc::new(o3k_store::O3kStore::Sqlite((*store).clone()));
+        let publisher = Arc::new(o3k_kernel::DurableAuditSink::new(durable_store.clone()));
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone())
+            .await?
+            .with_audit_sink(publisher);
+
+        let owner = auth("project-a");
+        let image = service
+            .create(
+                &owner,
+                "audited".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+
+        let query = o3k_kernel::AuditQuery {
+            scope: owner.effective_scope().clone(),
+            after_event_id: None,
+            limit: 10,
+            service: Some("image".to_owned()),
+            action: Some("image:CreateImage".to_owned()),
+            outcome: None,
+            resource_type: Some("image:image".to_owned()),
+            resource_id: Some(image.id.to_string()),
+            operation_id: None,
+            principal_id: None,
+            request_id: None,
+            audit_id: None,
+            from_timestamp: None,
+            until_timestamp: None,
+        };
+        let page = o3k_kernel::DurableAuditRepository::page(&*durable_store, &query).await?;
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(
+            page.events[0].resource_id.as_ref().map(ToString::to_string),
+            Some(image.id.to_string())
+        );
+        assert_eq!(page.events[0].outcome, o3k_kernel::AuditOutcome::Succeeded);
+
+        drop(service);
+        drop(durable_store);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_file(format!("{}-wal", database.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", database.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn artifact_resolution_rechecks_content_and_scope()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("artifact");
