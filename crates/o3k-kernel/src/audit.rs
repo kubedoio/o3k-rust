@@ -394,6 +394,99 @@ pub(crate) fn now_rfc3339() -> String {
     format_time(seconds)
 }
 
+#[cfg(test)]
+#[allow(
+    clippy::items_after_test_module,
+    clippy::expect_used,
+    clippy::unwrap_used
+)]
+mod tests {
+    use super::*;
+    use crate::{
+        AuthContext, KernelError,
+        durable_audit::{AuditQuery, DurableAuditPage, DurableAuditRepository},
+        principal::{Principal, PrincipalId, UserPrincipal},
+        registry::ServiceNamespace,
+        scope::{OwnershipScope, ScopeId},
+    };
+    use async_trait::async_trait;
+
+    #[derive(Default)]
+    struct RecordingRepository {
+        events: Mutex<Vec<AuditEvent>>,
+        fail: Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl DurableAuditRepository for RecordingRepository {
+        async fn append(&self, event: &AuditEvent) -> Result<(), KernelError> {
+            if *self.fail.lock().expect("test lock") {
+                return Err(KernelError::AuditUnavailable("injected failure".into()));
+            }
+            self.events.lock().expect("test lock").push(event.clone());
+            Ok(())
+        }
+
+        async fn page(&self, _query: &AuditQuery) -> Result<DurableAuditPage, KernelError> {
+            Ok(DurableAuditPage {
+                events: self.events.lock().expect("test lock").clone(),
+                has_more: false,
+                continuation_key: None,
+            })
+        }
+
+        async fn prune_before(&self, _cutoff: &str) -> Result<u64, KernelError> {
+            Ok(0)
+        }
+    }
+
+    fn event() -> AuditEvent {
+        let principal = Principal::User(UserPrincipal::new(
+            PrincipalId::new_unchecked("user-b0-sink"),
+            "user-b0-sink",
+            Some("default".into()),
+        ));
+        let auth = AuthContext::new(
+            principal,
+            OwnershipScope::project(ScopeId::new_unchecked("project-b0-sink"), None, None),
+            vec!["member".into()],
+            0,
+            u64::MAX,
+            "audit-b0-sink",
+            "request-b0-sink",
+            None,
+        );
+        AuditEvent::from_auth(
+            &auth,
+            ServiceNamespace::new_unchecked("compute".into()),
+            ActionId::new_unchecked("compute", "CreateServer"),
+            AuditOutcome::Succeeded,
+        )
+    }
+
+    #[tokio::test]
+    async fn durable_sink_waits_for_repository_commit() {
+        let repository = Arc::new(RecordingRepository::default());
+        let sink = DurableAuditSink::new(repository.clone());
+        sink.record_required_async(&event())
+            .await
+            .expect("durable append");
+        assert_eq!(repository.events.lock().expect("test lock").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_sink_propagates_required_failure() {
+        let repository = Arc::new(RecordingRepository::default());
+        *repository.fail.lock().expect("test lock") = true;
+        let sink = DurableAuditSink::new(repository);
+        let error = sink
+            .record_required_async(&event())
+            .await
+            .expect_err("failure must propagate");
+        assert!(matches!(error, KernelError::AuditUnavailable(_)));
+    }
+}
+
 fn format_time(seconds: u64) -> String {
     let days = seconds / 86_400;
     let day_seconds = seconds % 86_400;

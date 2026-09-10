@@ -1,6 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use o3k_kernel::{AuditQuery, OwnershipScope, ScopeId};
+use o3k_kernel::{
+    ActionId, AuditEvent, AuditOutcome, AuditQuery, AuthContext, DurableAuditRepository,
+    DurableAuditSink, OwnershipScope, Principal, PrincipalId, RequiredAuditPublisher, ScopeId,
+    ServiceNamespace, UserPrincipal,
+};
 use o3k_store::{AuditEventRecord, AuditRepository, O3kStore, SqliteStore, StoreError};
 use std::sync::Arc;
 
@@ -22,6 +26,64 @@ fn event(id: &str, scope: &str, service: &str) -> AuditEventRecord {
         outcome: "succeeded".into(),
         reason_category: Some("ok".into()),
     }
+}
+
+fn kernel_event() -> AuditEvent {
+    let auth = AuthContext::new(
+        Principal::User(UserPrincipal::new(
+            PrincipalId::new_unchecked("production-user"),
+            "production-user",
+            Some("default".into()),
+        )),
+        OwnershipScope::project(ScopeId::new_unchecked("production-project"), None, None),
+        vec!["member".into()],
+        0,
+        u64::MAX,
+        "audit-production",
+        "request-production",
+        None,
+    );
+    AuditEvent::from_auth(
+        &auth,
+        ServiceNamespace::new_unchecked("compute".into()),
+        ActionId::new_unchecked("compute", "CreateServer"),
+        AuditOutcome::Succeeded,
+    )
+}
+
+#[tokio::test]
+async fn durable_sink_production_like_sqlite_composition_persists_event() {
+    let path = std::env::temp_dir().join(format!("o3k-audit-sink-{}.db", uuid::Uuid::now_v7()));
+    let store = Arc::new(SqliteStore::connect_file(&path).await.unwrap());
+    let unified = Arc::new(O3kStore::Sqlite((*store).clone()));
+    let publisher = DurableAuditSink::new(unified.clone());
+    let event = kernel_event();
+    publisher.publish(&event).await.unwrap();
+    let query = AuditQuery {
+        scope: event.effective_scope.clone(),
+        after_event_id: None,
+        limit: 10,
+        service: None,
+        action: None,
+        outcome: None,
+        resource_type: None,
+        resource_id: None,
+        operation_id: None,
+        principal_id: None,
+        request_id: None,
+        audit_id: None,
+        from_timestamp: None,
+        until_timestamp: None,
+    };
+    let page = unified.page(&query).await.unwrap();
+    assert_eq!(page.events, vec![event]);
+    drop(publisher);
+    drop(unified);
+    drop(store);
+    let reopened = O3kStore::connect_sqlite_file(&path).await.unwrap();
+    let page = reopened.page(&query).await.unwrap();
+    assert_eq!(page.events.len(), 1);
+    let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]

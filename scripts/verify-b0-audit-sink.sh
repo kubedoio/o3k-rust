@@ -55,3 +55,31 @@ echo 'B0-S04 mandatory production callers migrated               PASS'
 echo 'B0-S05 production composition uses durable sink             PASS'
 echo 'B0-S06 weak AuditSink injection structurally blocked        PASS'
 echo 'B0-S07 production Noop/Memory fallback absent               PASS'
+
+# Executable runtime evidence currently available in the repository slice.
+# Keep this verifier fail-closed: gates without a production-path scenario
+# remain explicitly NOT PROVEN rather than being inferred from source shape.
+cargo test -p o3k-kernel --all-features audit::tests::durable_sink_waits_for_repository_commit --quiet
+cargo test -p o3k-kernel --all-features audit::tests::durable_sink_propagates_required_failure --quiet
+cargo test -p o3k-store --all-features --test audit_repository durable_sink_production_like_sqlite_composition_persists_event --quiet
+echo 'B0-S20 SQLite production composition                         PASS'
+for gate in \
+  'B0-S08 Compute mandatory audit coverage' \
+  'B0-S09 Image mandatory audit coverage' \
+  'B0-S10 Network mandatory audit coverage' \
+  'B0-S11 Volume/attachment audit coverage' \
+  'B0-S12 generic Update audit coverage' \
+  'B0-S13 Start/Stop/Reboot audit coverage' \
+  'B0-S14 keypair/secret safety' \
+  'B0-S15 authorization-denial concealment' \
+  'B0-S16 deterministic provider failure' \
+  'B0-S17 timeout/unknown outcome' \
+  'B0-S18 provider-success plus Audit failure' \
+  'B0-S19 response-loss replay' \
+  'B0-S21 PostgreSQL production composition' \
+  'B0-S22 restart/crash recovery' \
+  'B0-S23 concurrent writers' \
+  'B0-S24 health degradation/recovery' \
+  'B0-S25 full-path secret safety'; do
+  echo "$gate NOT PROVEN"
+done
