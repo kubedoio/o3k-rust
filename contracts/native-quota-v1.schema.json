@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-quota-v1.schema.json",
+  "title": "O3K Native Quota v1",
+  "type": "object",
+  "required": ["version", "scope", "items"],
+  "properties": {
+    "version": { "const": "v1" },
+    "scope": { "type": "object" },
+    "items": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": ["key", "namespace", "unit", "scope", "limit", "usage", "generation"],
+        "properties": {
+          "key": { "type": "string", "minLength": 1 },
+          "namespace": { "type": "string", "minLength": 1 },
+          "unit": { "type": "string", "minLength": 1 },
+          "scope": { "enum": ["project", "domain", "system"] },
+          "limit": { "oneOf": [{ "const": { "kind": "unlimited" } }, { "type": "object", "required": ["kind", "value"], "properties": { "kind": { "const": "maximum" }, "value": { "type": "integer", "minimum": 0 } } }] },
+          "usage": { "type": "integer", "minimum": 0 },
+          "generation": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

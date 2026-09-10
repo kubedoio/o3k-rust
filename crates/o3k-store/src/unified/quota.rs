@@ -3,12 +3,62 @@ use o3k_kernel::{
     LimitKey, LimitValue, OwnershipScope, Reservation, ReservationId, ResourceAmount, Usage,
 };
 
-use crate::{StoreError, quota::QuotaRepository};
+use crate::{AuditEventRecord, StoreError, quota::QuotaRepository};
 
 use super::O3kStore;
 
 #[async_trait]
 impl QuotaRepository for O3kStore {
+    async fn get_limit_state(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+    ) -> Result<(LimitValue, u64), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_limit_state(scope, key).await,
+            Self::Postgres(s) => s.get_limit_state(scope, key).await,
+        }
+    }
+
+    async fn set_limit_if_generation(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+        limit: LimitValue,
+        expected_generation: u64,
+    ) -> Result<u64, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.set_limit_if_generation(scope, key, limit, expected_generation)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.set_limit_if_generation(scope, key, limit, expected_generation)
+                    .await
+            }
+        }
+    }
+
+    async fn set_limit_if_generation_with_audit(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+        limit: LimitValue,
+        expected_generation: u64,
+        audit: &AuditEventRecord,
+    ) -> Result<u64, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.set_limit_if_generation_with_audit(scope, key, limit, expected_generation, audit)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.set_limit_if_generation_with_audit(scope, key, limit, expected_generation, audit)
+                    .await
+            }
+        }
+    }
+
     async fn get_limit(
         &self,
         scope: &OwnershipScope,

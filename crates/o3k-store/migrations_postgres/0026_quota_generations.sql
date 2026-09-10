@@ -1,0 +1,1 @@
+ALTER TABLE quota_limits ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0);

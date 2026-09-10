@@ -5923,7 +5923,7 @@ mod tests {
             .await?;
         assert_eq!(
             usage.total_consumed(),
-            0,
+            Some(0),
             "expected total consumed to be 0 after delete, got in_use={} reserved={}",
             usage.in_use,
             usage.reserved
@@ -6173,7 +6173,7 @@ mod tests {
         let usage_after_del = store
             .get_usage(&scope, &LimitKey::compute_servers())
             .await?;
-        assert_eq!(usage_after_del.total_consumed(), 0);
+        assert_eq!(usage_after_del.total_consumed(), Some(0));
 
         // SCENARIO E: Create server-2 / replacement -> must now succeed
         let replacement = service
@@ -6208,7 +6208,7 @@ mod tests {
             .await?;
         assert_eq!(
             final_usage.total_consumed(),
-            0,
+            Some(0),
             "final quota consumed must be 0"
         );
         let final_servers = service.list_servers_for_auth(&auth).await?;
@@ -6221,6 +6221,47 @@ mod tests {
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_dir_all(&placement_path);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_create_releases_quota_reservation() -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_provider::FailureInjection;
+        use o3k_store::QuotaRepository;
+
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let provider = Arc::new(FakeComputeProvider::new());
+        provider.set_failure(FailureInjection::Terminal)?;
+        let service = ComputeService::new_for_test(store.clone(), provider);
+        let scope = OwnershipScope::project(ScopeId::new_unchecked("proj-failed"), None, None);
+        let auth = test_compute_auth("proj-failed", "user-failed", "member");
+        store
+            .set_limit(&scope, &LimitKey::compute_servers(), LimitValue::Maximum(1))
+            .await?;
+        let flavor_id = service.flavors_for_auth(&auth).await?[0].id;
+
+        let result = service
+            .create_server_for_user(ServerCreateInput {
+                user_id: "user-failed".to_owned(),
+                project_id: "proj-failed".to_owned(),
+                name: "failed-server".to_owned(),
+                image_id: "img-1".to_owned(),
+                flavor_id,
+                network_ids: vec!["net-1".to_owned()],
+                key_name: None,
+                config_drive: None,
+                idempotency_key: "failed-create".to_owned(),
+            })
+            .await;
+        assert!(
+            result.is_err(),
+            "terminal provider failure must fail create: {result:?}"
+        );
+
+        let usage = store
+            .get_usage(&scope, &LimitKey::compute_servers())
+            .await?;
+        assert_eq!(usage.reserved, 0);
         Ok(())
     }
 

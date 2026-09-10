@@ -163,7 +163,7 @@ impl IdentityRepository for PostgresStore {
         let row = sqlx::query(
             "SELECT b.id, b.trusted_issuer_id, b.issuer, b.subject, b.principal_id, b.principal_type, b.enabled, b.created_at, b.updated_at
              FROM federated_bindings b JOIN keystone_users u ON u.id = b.principal_id
-             WHERE b.trusted_issuer_id = $1 AND b.subject = $2 AND b.enabled = TRUE AND u.enabled = TRUE",
+             WHERE b.trusted_issuer_id = $1 AND b.subject = $2 AND b.enabled = TRUE AND u.enabled = 1",
         ).bind(trusted_issuer_id).bind(subject).fetch_optional(&self.pool).await
         .map_err(StoreError::Database)?;
         Ok(row.map(|r| FederatedBindingRecord {

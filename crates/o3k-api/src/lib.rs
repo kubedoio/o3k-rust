@@ -550,6 +550,20 @@ pub fn router_with_state(state: AppState) -> Router {
             );
         router = router.route("/o3k/v1/audit", get(o3k_native_api::audit::list_audit));
         router = router
+            .route("/o3k/v1/quota", get(o3k_native_api::quota::list))
+            .route(
+                "/o3k/v1/quota/{namespace}/{dimension}",
+                get(o3k_native_api::quota::show),
+            )
+            .route(
+                "/o3k/v1/operator/quotas/{project}",
+                get(o3k_native_api::quota::operator_list),
+            )
+            .route(
+                "/o3k/v1/operator/quotas/{project}/{namespace}/{dimension}",
+                put(o3k_native_api::quota::set).delete(o3k_native_api::quota::clear),
+            );
+        router = router
             .route(
                 "/o3k/v1/{namespace}/{collection}",
                 get(o3k_native_api::resource::list).post(o3k_native_api::resource::create),

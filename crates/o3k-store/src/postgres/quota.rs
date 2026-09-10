@@ -5,7 +5,7 @@ use o3k_kernel::{
 };
 use sqlx::Row;
 
-use crate::{StoreError, quota::QuotaRepository};
+use crate::{AuditEventRecord, StoreError, quota::QuotaRepository};
 
 use super::{
     PostgresStore,
@@ -14,6 +14,108 @@ use super::{
 
 #[async_trait]
 impl QuotaRepository for PostgresStore {
+    async fn get_limit_state(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+    ) -> Result<(LimitValue, u64), StoreError> {
+        if !key.is_known() {
+            return Err(StoreError::Corrupt(format!(
+                "unknown or unregistered limit key '{key}'"
+            )));
+        }
+        let row = sqlx::query("SELECT limit_value, generation FROM quota_limits WHERE scope_id = $1 AND scope_kind = $2 AND namespace = $3 AND resource = $4")
+            .bind(scope.id().as_str()).bind(scope.kind().as_str()).bind(key.namespace().as_str()).bind(key.resource())
+            .fetch_optional(&self.pool).await.map_err(StoreError::Database)?;
+        let Some(row) = row else {
+            return Ok((LimitValue::Unlimited, 0));
+        };
+        let value: Option<i64> = row.get("limit_value");
+        let generation: i64 = row.get("generation");
+        let generation = u64::try_from(generation)
+            .map_err(|_| StoreError::Corrupt(format!("negative quota generation for '{key}'")))?;
+        let limit = match value {
+            None => LimitValue::Unlimited,
+            Some(max) if max >= 0 => LimitValue::Maximum(max as u64),
+            Some(_) => {
+                return Err(StoreError::Corrupt(format!(
+                    "negative quota limit for '{key}'"
+                )));
+            }
+        };
+        Ok((limit, generation))
+    }
+
+    async fn set_limit_if_generation(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+        limit: LimitValue,
+        expected_generation: u64,
+    ) -> Result<u64, StoreError> {
+        if !key.is_known() {
+            return Err(StoreError::Corrupt(format!(
+                "unknown or unregistered limit key '{key}'"
+            )));
+        }
+        let next = expected_generation
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Corrupt("quota generation overflow".into()))?;
+        let value: Option<i64> = match limit {
+            LimitValue::Unlimited => None,
+            LimitValue::Maximum(max) => Some(i64::try_from(max).map_err(|_| {
+                StoreError::Corrupt(format!("limit maximum {max} exceeds signed 64-bit"))
+            })?),
+        };
+        let result = sqlx::query("INSERT INTO quota_limits (scope_id, scope_kind, namespace, resource, limit_value, generation) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (scope_id, scope_kind, namespace, resource) DO UPDATE SET limit_value = EXCLUDED.limit_value, generation = EXCLUDED.generation WHERE quota_limits.generation = $7")
+            .bind(scope.id().as_str()).bind(scope.kind().as_str()).bind(key.namespace().as_str()).bind(key.resource()).bind(value).bind(i64::try_from(next).map_err(|_| StoreError::Corrupt("quota generation overflow".into()))?).bind(i64::try_from(expected_generation).map_err(|_| StoreError::Corrupt("quota generation overflow".into()))?)
+            .execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::QuotaGenerationConflict);
+        }
+        Ok(next)
+    }
+
+    async fn set_limit_if_generation_with_audit(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+        limit: LimitValue,
+        expected_generation: u64,
+        audit: &AuditEventRecord,
+    ) -> Result<u64, StoreError> {
+        if !key.is_known() {
+            return Err(StoreError::Corrupt(format!(
+                "unknown or unregistered limit key '{key}'"
+            )));
+        }
+        let next = expected_generation
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Corrupt("quota generation overflow".into()))?;
+        let value = match limit {
+            LimitValue::Unlimited => None,
+            LimitValue::Maximum(max) => Some(
+                i64::try_from(max)
+                    .map_err(|_| StoreError::Corrupt("quota limit overflow".into()))?,
+            ),
+        };
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let result = sqlx::query("INSERT INTO quota_limits (scope_id, scope_kind, namespace, resource, limit_value, generation) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (scope_id, scope_kind, namespace, resource) DO UPDATE SET limit_value = EXCLUDED.limit_value, generation = EXCLUDED.generation WHERE quota_limits.generation = $7")
+            .bind(scope.id().as_str()).bind(scope.kind().as_str()).bind(key.namespace().as_str()).bind(key.resource()).bind(value).bind(i64::try_from(next).map_err(|_| StoreError::Corrupt("quota generation overflow".into()))?).bind(i64::try_from(expected_generation).map_err(|_| StoreError::Corrupt("quota generation overflow".into()))?)
+            .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::QuotaGenerationConflict);
+        }
+        let audit_result = sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(event_id) DO NOTHING")
+            .bind(&audit.event_id).bind(&audit.timestamp).bind(&audit.request_id).bind(&audit.audit_id).bind(&audit.principal_id).bind(&audit.principal_kind).bind(&audit.effective_scope).bind(&audit.service).bind(&audit.action).bind(&audit.resource_type).bind(&audit.resource_id).bind(&audit.owner_scope).bind(&audit.operation_id).bind(&audit.outcome).bind(&audit.reason_category)
+            .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if audit_result.rows_affected() != 1 {
+            return Err(StoreError::AuditEventConflict);
+        }
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(next)
+    }
+
     async fn get_limit(
         &self,
         scope: &OwnershipScope,
@@ -76,9 +178,9 @@ impl QuotaRepository for PostgresStore {
         };
 
         sqlx::query(
-            "INSERT INTO quota_limits (scope_id, scope_kind, namespace, resource, limit_value)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (scope_id, scope_kind, namespace, resource) DO UPDATE SET limit_value = EXCLUDED.limit_value",
+            "INSERT INTO quota_limits (scope_id, scope_kind, namespace, resource, limit_value, generation)
+             VALUES ($1, $2, $3, $4, $5, 1)
+             ON CONFLICT (scope_id, scope_kind, namespace, resource) DO UPDATE SET limit_value = EXCLUDED.limit_value, generation = quota_limits.generation + 1",
         )
         .bind(scope.id().as_str())
         .bind(scope.kind().as_str())
@@ -159,7 +261,12 @@ impl QuotaRepository for PostgresStore {
                 let res: String = r.get("resource");
                 let amt: i64 = r.get("amount");
                 let k = LimitKey::new(&ns, &res).map_err(|e| StoreError::Corrupt(e.to_string()))?;
-                existing_amounts.push(ResourceAmount::new_unchecked(k, amt as u64));
+                let amount = u64::try_from(amt).map_err(|_| {
+                    StoreError::Corrupt(format!(
+                        "malformed negative reservation amount {amt} for '{ns}:{res}' in durable storage"
+                    ))
+                })?;
+                existing_amounts.push(ResourceAmount::new_unchecked(k, amount));
             }
 
             if state_str == "released" {
@@ -199,8 +306,20 @@ impl QuotaRepository for PostgresStore {
                     Some(operation_id),
                 )
                 .await?;
-                let current_consumed = in_use + reserved;
-                if current_consumed + amount.amount > max {
+                let current_consumed = in_use.checked_add(reserved).ok_or_else(|| {
+                    StoreError::Corrupt(format!(
+                        "quota usage overflow for '{}' in durable storage",
+                        amount.key
+                    ))
+                })?;
+                let requested_total =
+                    current_consumed.checked_add(amount.amount).ok_or_else(|| {
+                        StoreError::Corrupt(format!(
+                            "quota usage overflow for '{}' in reservation",
+                            amount.key
+                        ))
+                    })?;
+                if requested_total > max {
                     return Err(StoreError::QuotaExceeded {
                         key: amount.key.clone(),
                         limit,
@@ -354,7 +473,12 @@ impl QuotaRepository for PostgresStore {
             let res: String = r.get("resource");
             let amt: i64 = r.get("amount");
             let key = LimitKey::new(&ns, &res).map_err(|e| StoreError::Corrupt(e.to_string()))?;
-            amounts.push(ResourceAmount::new_unchecked(key, amt as u64));
+            let amount = u64::try_from(amt).map_err(|_| {
+                StoreError::Corrupt(format!(
+                    "malformed negative reservation amount {amt} for '{ns}:{res}' in durable storage"
+                ))
+            })?;
+            amounts.push(ResourceAmount::new_unchecked(key, amount));
         }
 
         let st = match state_str.as_str() {
@@ -424,7 +548,7 @@ impl PostgresStore {
         match (ns, res) {
             ("compute", "servers") => {
                 let row = sqlx::query(
-                    "SELECT COUNT(*)::BIGINT FROM resources WHERE project_id = $1 AND kind = 'compute_instance' AND UPPER(observed_state) != 'DELETED'",
+                    "SELECT COUNT(*)::BIGINT FROM resources WHERE project_id = $1 AND kind = 'compute_instance' AND UPPER(observed_state) NOT IN ('DELETED', 'ERROR')",
                 )
                 .bind(scope_id)
                 .fetch_one(&mut **tx)
@@ -438,7 +562,7 @@ impl PostgresStore {
                     "SELECT COALESCE(SUM(r.amount), 0)::BIGINT FROM placement_allocations a
                      JOIN placement_allocation_resources r ON a.id = r.allocation_id
                      JOIN resources res ON a.consumer_id = res.id
-                     WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) != 'DELETED' AND r.resource_class = 'VCPU'",
+                     WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) NOT IN ('DELETED', 'ERROR') AND r.resource_class = 'VCPU'",
                 )
                 .bind(scope_id)
                 .fetch_one(&mut **tx)
@@ -452,7 +576,7 @@ impl PostgresStore {
                     "SELECT COALESCE(SUM(r.amount), 0)::BIGINT FROM placement_allocations a
                      JOIN placement_allocation_resources r ON a.id = r.allocation_id
                      JOIN resources res ON a.consumer_id = res.id
-                     WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) != 'DELETED' AND r.resource_class = 'MEMORY_MB'",
+                     WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) NOT IN ('DELETED', 'ERROR') AND r.resource_class = 'MEMORY_MB'",
                 )
                 .bind(scope_id)
                 .fetch_one(&mut **tx)
@@ -466,7 +590,7 @@ impl PostgresStore {
                     "SELECT COALESCE(SUM(r.amount), 0)::BIGINT FROM placement_allocations a
                      JOIN placement_allocation_resources r ON a.id = r.allocation_id
                      JOIN resources res ON a.consumer_id = res.id
-                     WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) != 'DELETED' AND r.resource_class = 'DISK_GB'",
+                     WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) NOT IN ('DELETED', 'ERROR') AND r.resource_class = 'DISK_GB'",
                 )
                 .bind(scope_id)
                 .fetch_one(&mut **tx)
@@ -528,6 +652,17 @@ impl PostgresStore {
                         .map_err(StoreError::Database)?;
                 let count: i64 = row.get(0);
                 parse_pg_non_negative_u64(count, "network:ports count")
+            }
+            ("network", "address_allocations") => {
+                let row = sqlx::query(
+                    "SELECT COUNT(*)::BIGINT FROM network_address_allocations WHERE project_id = $1",
+                )
+                .bind(scope_id)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(StoreError::Database)?;
+                let count: i64 = row.get(0);
+                parse_pg_non_negative_u64(count, "network:address_allocations count")
             }
             _ => Err(StoreError::Corrupt(format!(
                 "unknown or unregistered limit key '{key}'"

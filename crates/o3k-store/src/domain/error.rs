@@ -93,6 +93,8 @@ pub enum StoreError {
         used: u64,
         requested: u64,
     },
+    #[error("quota limit generation is stale")]
+    QuotaGenerationConflict,
     #[error("reservation conflict for operation {0}")]
     ReservationConflict(String),
     #[error("reservation not found")]

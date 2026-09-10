@@ -78,20 +78,35 @@ async fn postgres_pre_audit_schema_upgrades_without_losing_existing_state() {
         eprintln!("skipping PostgreSQL migration upgrade: O3K_DATABASE_URL unavailable");
         return;
     };
+    // Use an isolated disposable database.  The workspace runs PostgreSQL
+    // integration binaries concurrently, so dropping the shared `public`
+    // schema would race other conformance processes and make sqlx report a
+    // missing migration version.
+    let parsed = url::Url::parse(&url).unwrap();
+    let database = format!("o3k_quota_migration_{}", uuid::Uuid::now_v7().simple());
+    let admin_url = {
+        let mut admin = parsed.clone();
+        admin.set_path("/postgres");
+        admin.to_string()
+    };
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .unwrap();
+    sqlx::query(&format!("CREATE DATABASE {database}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+    let isolated_url = {
+        let mut target = parsed;
+        target.set_path(&format!("/{database}"));
+        target.to_string()
+    };
     let pool = PgPoolOptions::new()
         .max_connections(4)
-        .connect(&url)
-        .await
-        .unwrap();
-    sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")
-        .execute(&pool)
-        .await
-        .unwrap();
-    // Other integration-test processes may recreate the conventional schema
-    // while this fixture is being prepared.  IF NOT EXISTS keeps the upgrade
-    // fixture deterministic under that cross-process setup concurrency.
-    sqlx::query("CREATE SCHEMA IF NOT EXISTS public")
-        .execute(&pool)
+        .connect(&isolated_url)
         .await
         .unwrap();
     let all = sqlx::migrate!("./migrations_postgres");
@@ -111,7 +126,7 @@ async fn postgres_pre_audit_schema_upgrades_without_losing_existing_state() {
     sqlx::query("INSERT INTO resources (id,kind,project_id,generation,observed_generation,desired_state,observed_state) VALUES ('migration-resource','compute:server','project-a',1,0,'ACTIVE','UNKNOWN')")
         .execute(&pool).await.unwrap();
     pool.close().await;
-    let store = PostgresStore::connect(&url).await.unwrap();
+    let store = PostgresStore::connect(&isolated_url).await.unwrap();
     let event = event("migration-event", "project-a");
     store.insert_audit_event(&event).await.unwrap();
     assert!(
@@ -126,6 +141,16 @@ async fn postgres_pre_audit_schema_upgrades_without_losing_existing_state() {
         .unwrap();
     sqlx::query("DELETE FROM resources WHERE id = 'migration-resource'")
         .execute(store.pool())
+        .await
+        .unwrap();
+    store.pool().close().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .unwrap();
+    sqlx::query(&format!("DROP DATABASE {database}"))
+        .execute(&admin)
         .await
         .unwrap();
 }

@@ -12,8 +12,9 @@ use o3k_native_api::auth::TokenIssuer;
 use o3k_network::NetworkService;
 use o3k_provider::FakeComputeProvider;
 use o3k_store::DurableStore;
+use o3k_store::IdentityRepository;
 use serde_json::Value;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tower::ServiceExt;
 
 fn session(service: &str, namespace: &str, generation: u64) -> ControllerSession {
@@ -155,6 +156,14 @@ async fn build_http_runtime(
         ],
     )
     .await?;
+    build_http_runtime_with_identity(store, identity, None).await
+}
+
+async fn build_http_runtime_with_identity(
+    store: Arc<o3k_store::unified::O3kStore>,
+    identity: o3k_identity::TokenService,
+    oidc_validator: Option<Arc<o3k_identity::oidc::OidcValidator>>,
+) -> Result<(axum::Router, Arc<FakeComputeProvider>), Box<dyn std::error::Error>> {
     let provider = Arc::new(FakeComputeProvider::new());
     let compute_service = ComputeService::new_for_test(store.clone(), provider.clone());
     let compute = Arc::new(compute_service.clone());
@@ -206,7 +215,7 @@ async fn build_http_runtime(
         });
     let token_issuer: Arc<dyn TokenIssuer> = Arc::new(o3kd::native_adapters::TokenIssuerAdapter {
         service: Arc::new(identity.clone()),
-        oidc_validator: None,
+        oidc_validator,
     });
     let native = o3k_native_api::NativeApiState::new(
         Some(manifests),
@@ -220,6 +229,9 @@ async fn build_http_runtime(
         Some(network_reader),
     )?
     .with_resource_application(application)
+    .with_quota_reader(Arc::new(o3kd::native_adapters::QuotaReaderAdapter::new(
+        store.clone(),
+    )))
     .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
     Ok((
         o3k_api::router_with_state(
@@ -800,6 +812,26 @@ async fn run_http_restart_conformance(
         build_http_runtime(Arc::new(open_http_restart_store(&backend).await?)).await?;
     let token_a = issue_token_for(&app_a, "user-a", "password-a", "project-a").await?;
 
+    let quota = get_json(&app_a, "/o3k/v1/quota", &token_a).await?;
+    assert_eq!(quota["version"], "v1");
+    assert_eq!(quota["scope"]["id"], "project-a");
+    assert!(quota["items"].as_array().is_some());
+    let quota_dimension = get_json(&app_a, "/o3k/v1/quota/compute/servers", &token_a).await?;
+    assert_eq!(quota_dimension["namespace"], "compute");
+    assert_eq!(quota_dimension["key"], "servers");
+    // The tenant token cannot select a foreign project through the operator
+    // surface, and the native read has no caller-controlled scope parameter.
+    assert_eq!(
+        status_for(
+            &app_a,
+            Method::GET,
+            "/o3k/v1/operator/quotas/project-b",
+            &token_a
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+
     let network = app_a
         .clone()
         .oneshot(
@@ -887,6 +919,8 @@ async fn run_http_restart_conformance(
         .ok_or("native server id")?
         .to_owned();
     assert!(provider_a.instance_count() >= 2);
+    let quota_after_create = get_json(&app_a, "/o3k/v1/quota/compute/servers", &token_a).await?;
+    assert!(quota_after_create["usage"].as_u64().unwrap_or_default() >= 2);
     drop(app_a);
     drop(provider_a);
 
@@ -950,6 +984,8 @@ async fn run_http_restart_conformance(
         .await,
         StatusCode::NOT_FOUND
     );
+    let quota_after_release = get_json(&app_b, "/o3k/v1/quota/compute/servers", &token_b).await?;
+    assert!(quota_after_release["usage"].as_u64().unwrap_or_default() < 2);
     Ok(())
 }
 
@@ -1055,6 +1091,243 @@ async fn native_http_scope_like_request_fields_cannot_select_foreign_owner()
         .await?;
     assert!(rejected.status().is_client_error());
     assert_eq!(provider.instance_count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the real OIDC testbed started by tests/p12-iam-7-real-idp.sh"]
+async fn native_quota_operator_http_uses_real_iam_and_durable_cas()
+-> Result<(), Box<dyn std::error::Error>> {
+    fn required(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"))
+    }
+    let issuer = required("O3K_P12_7_ISSUER");
+    let discovery = url::Url::parse(&required("O3K_P12_7_DISCOVERY_URL"))?;
+    let issuer_url = url::Url::parse(&issuer)?;
+    let validator = Arc::new(o3k_identity::oidc::OidcValidator::new(
+        o3k_identity::oidc::TrustedIssuer::test_local(
+            "p12-7-keycloak",
+            issuer_url,
+            "o3k",
+            discovery,
+        ),
+    )?);
+    let store = Arc::new(if let Ok(url) = std::env::var("O3K_DATABASE_URL") {
+        o3k_store::unified::O3kStore::connect_postgres(&url).await?
+    } else {
+        o3k_store::unified::O3kStore::connect_sqlite_file(std::path::Path::new(&required(
+            "O3K_P12_7_SQLITE_PATH",
+        )))
+        .await?
+    });
+    o3k_identity::seed_identity_defaults(
+        store.as_ref(),
+        &o3k_identity::BootstrapConfig {
+            catalog_endpoint: "http://127.0.0.1:8080".to_owned(),
+            bootstrap_password: o3k_identity::Secret::new(required("O3K_P12_7_BOOTSTRAP_SECRET")),
+            cinder_password: None,
+            cinder_endpoint: None,
+            pbkdf2_iterations: 1_000,
+            extra_projects: vec![
+                o3k_identity::ExtraProjectSeed {
+                    project_id: "project-a".to_owned(),
+                    project_name: "project-a".to_owned(),
+                    user_id: "user-a".to_owned(),
+                    user_name: "alice".to_owned(),
+                    password: o3k_identity::Secret::new(required("O3K_P12_7_BOOTSTRAP_SECRET")),
+                },
+                o3k_identity::ExtraProjectSeed {
+                    project_id: "project-b".to_owned(),
+                    project_name: "project-b".to_owned(),
+                    user_id: "user-b".to_owned(),
+                    user_name: "bob".to_owned(),
+                    password: o3k_identity::Secret::new(required("O3K_P12_7_BOOTSTRAP_SECRET")),
+                },
+            ],
+        },
+    )
+    .await?;
+    let now = "2026-09-10T00:00:00Z".to_owned();
+    if store
+        .find_federated_binding("p12-7-keycloak", &required("O3K_P12_7_OPERATOR_SUBJECT"))
+        .await?
+        .is_none()
+    {
+        store
+            .insert_federated_binding(&o3k_store::FederatedBindingRecord {
+                id: "p12-7-quota-operator".to_owned(),
+                trusted_issuer_id: "p12-7-keycloak".to_owned(),
+                issuer: issuer.clone(),
+                subject: required("O3K_P12_7_OPERATOR_SUBJECT"),
+                principal_id: "bootstrap-user".to_owned(),
+                principal_type: "user".to_owned(),
+                enabled: true,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            })
+            .await?;
+    }
+    if store.list_operator_assignments().await?.is_empty() {
+        store
+            .insert_operator_assignment(&o3k_store::OperatorAssignmentRecord {
+                id: "p12-7-quota-operator-assignment".to_owned(),
+                user_id: "bootstrap-user".to_owned(),
+                profile: "operator-console".to_owned(),
+                enabled: true,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+            .await?;
+    }
+    let identity = o3k_identity::TokenService::load(
+        store.clone(),
+        o3k_identity::Secret::new("p12-7-real-evidence-signing-key-at-least-32-bytes".to_owned()),
+        Duration::from_secs(900),
+    )
+    .await?;
+    let (app, provider) =
+        build_http_runtime_with_identity(store.clone(), identity, Some(validator)).await?;
+    let body = serde_json::json!({"auth":{"method":"federated","federated":{"access_token":required("O3K_P12_7_OPERATOR_TOKEN"),"scope":{"kind":"system"}}}});
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/o3k/v1/identity/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&body)?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let native_token = response_json(response).await["token"]["id"]
+        .as_str()
+        .ok_or("native token")?
+        .to_owned();
+    let before = get_json(&app, "/o3k/v1/operator/quotas/project-a", &native_token).await?;
+    let generation = before["items"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|i| i["namespace"] == "compute" && i["key"] == "servers")
+        })
+        .and_then(|i| i["generation"].as_u64())
+        .ok_or("generation")?;
+    let update = serde_json::json!({"limit": {"kind": "maximum", "value": 1}, "expected_generation": generation});
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/o3k/v1/operator/quotas/project-a/compute/servers")
+                .header("authorization", format!("Bearer {native_token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&update)?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let changed = response_json(response).await;
+    assert_eq!(changed["generation"], generation + 1);
+    assert_eq!(changed["limit"]["kind"], "maximum");
+    assert_eq!(changed["limit"]["value"], 1);
+    let stale =
+        serde_json::json!({"limit": {"kind": "unlimited"}, "expected_generation": generation});
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/o3k/v1/operator/quotas/project-a/compute/servers")
+                .header("authorization", format!("Bearer {native_token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&stale)?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    // The same real HTTP composition now proves the configured limit is
+    // enforced before the execution provider is touched.
+    let tenant_body = serde_json::json!({"auth":{"method":"federated","project_id":"project-a","federated":{"access_token":required("O3K_P12_7_ALICE_TOKEN")}}});
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/o3k/v1/identity/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&tenant_body)?))?,
+        )
+        .await?;
+    if response.status() != StatusCode::CREATED {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await?;
+        panic!(
+            "tenant token failed: {status} {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let tenant_token = response_json(response).await["token"]["id"]
+        .as_str()
+        .ok_or("tenant token")?
+        .to_owned();
+    let network_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/o3k/v1/network/networks")
+                .header("authorization", format!("Bearer {tenant_token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"kind":"network:network","spec":{"name":"quota-http-network"}}).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(network_response.status(), StatusCode::CREATED);
+    let network_id = response_json(network_response).await["resource_id"]
+        .as_str()
+        .ok_or("quota network id")?
+        .to_owned();
+    let create_body = serde_json::json!({"kind":"compute:server","spec":{"name":"quota-http-server","image_id":"image-a","flavor_id":"00000000-0000-0000-0000-000000000001","network_ids":[network_id]}});
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/o3k/v1/compute/servers")
+                .header("authorization", format!("Bearer {tenant_token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "quota-http-server-1")
+                .body(Body::from(serde_json::to_vec(&create_body)?))?,
+        )
+        .await?;
+    if response.status() != StatusCode::CREATED {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await?;
+        panic!(
+            "quota create failed: {status} {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let before_provider = provider.instance_count();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/o3k/v1/compute/servers")
+                .header("authorization", format!("Bearer {tenant_token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "quota-http-server-2")
+                .body(Body::from(serde_json::to_vec(&create_body)?))?,
+        )
+        .await?;
+    assert!(
+        response.status().is_client_error(),
+        "quota rejection: {}",
+        response.status()
+    );
+    assert_eq!(provider.instance_count(), before_provider);
     Ok(())
 }
 
