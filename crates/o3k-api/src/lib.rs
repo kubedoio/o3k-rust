@@ -548,6 +548,7 @@ pub fn router_with_state(state: AppState) -> Router {
                 "/o3k/v1/operations/{id}",
                 get(o3k_native_api::operation::show_operation),
             );
+        router = router.route("/o3k/v1/audit", get(o3k_native_api::audit::list_audit));
         router = router
             .route(
                 "/o3k/v1/{namespace}/{collection}",

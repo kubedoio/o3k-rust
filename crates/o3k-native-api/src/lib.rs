@@ -15,6 +15,7 @@ use o3k_kernel::{LocationRegistry, ManifestRegistry, ServiceLifecycleState, Serv
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 
+pub mod audit;
 pub mod auth;
 pub mod compute;
 pub mod error;
@@ -39,6 +40,7 @@ pub struct NativeApiState {
     pub volume_reader: Option<std::sync::Arc<dyn volume::VolumeReader>>,
     pub network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
     pub operation_reader: Option<std::sync::Arc<dyn operation::OperationReader>>,
+    pub audit_reader: Option<std::sync::Arc<dyn audit::AuditReader>>,
     /// Validated generic resource descriptors.  This is the northbound
     /// registry; applications below it are intentionally controller-agnostic.
     resource_index: resource::ResourceDispatcher,
@@ -81,6 +83,7 @@ impl NativeApiState {
             volume_reader,
             network_reader,
             operation_reader: None,
+            audit_reader: None,
             resource_index,
             resource_application: None,
             authorizer: None,
@@ -101,6 +104,12 @@ impl NativeApiState {
         reader: std::sync::Arc<dyn operation::OperationReader>,
     ) -> Self {
         self.operation_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_audit_reader(mut self, reader: std::sync::Arc<dyn audit::AuditReader>) -> Self {
+        self.audit_reader = Some(reader);
         self
     }
 
@@ -170,6 +179,7 @@ pub fn router(state: NativeApiState) -> Router {
             post(resource::action),
         )
         .route("/operations", get(operation::list_operations))
+        .route("/audit", get(audit::list_audit))
         .route("/operations/{id}", get(operation::show_operation))
         .layer(DefaultBodyLimit::max(1_048_576))
         .with_state(state)
@@ -405,9 +415,9 @@ fn action_metadata(
             }
             })
             .collect();
-    for (name, action) in &descriptor.actions {
+    for action in descriptor.lifecycle_actions.values() {
         actions.push(ActionSchemaMetadata {
-            name: name.clone(),
+            name: action.action().to_owned(),
             action_id: action.to_string(),
             target: "instance".to_owned(),
             input: Some("https://o3k.io/schemas/native-action-input/v1".to_owned()),
