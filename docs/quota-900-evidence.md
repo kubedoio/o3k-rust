@@ -6,8 +6,17 @@ The implementation projects the existing SQLite/PostgreSQL `QuotaRepository`
 and SQL usage counters through the versioned native `/quota` contract. It does
 not count resources in the HTTP layer and does not expose reservations. Tenant
 scope is derived exclusively from `AuthContext`; operator reads/writes use the
-canonical `quota:ReadQuota` and `quota:ManageQuota` policies. Administrative
-writes publish through the production `RequiredAuditPublisher`.
+canonical `quota:ReadQuota` and `quota:ManageQuota` policies. Limit and audit
+event are committed atomically by the durable repository transaction.
 
-Validation run for this change: `cargo check -p o3k-native-api -p o3kd`.
-Full workspace gates and backend/process evidence remain required before merge.
+Durable generation is initialized to `0` (including migrated rows) and is
+advanced exactly once by an atomic compare-and-set. Clear/reset is an explicit
+`Unlimited` replacement and requires `expected_generation`. SQLite coverage
+includes two independent store instances and stale-writer rejection; the
+PostgreSQL conformance test is gated on `O3K_DATABASE_URL` and must run against
+the repository's real PostgreSQL service. No adapter-local generation lock or
+shadow quota state remains.
+
+At this checkpoint, package compilation and the SQLite CAS regression pass.
+Full workspace gates, real PostgreSQL execution, and the real `o3kd` process
+journey must be recorded from CI/runtime before this evidence can claim READY.

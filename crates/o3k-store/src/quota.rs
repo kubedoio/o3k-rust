@@ -5,11 +5,39 @@ use o3k_kernel::{
 };
 use sqlx::{Row, SqliteConnection};
 
+use crate::AuditEventRecord;
 use crate::{SqliteStore, StoreError};
 
 /// Narrow repository port for durable resource governance, limits, usage, and reservations.
 #[async_trait]
 pub trait QuotaRepository: Send + Sync {
+    /// Read the effective limit and its durable optimistic-concurrency generation.
+    async fn get_limit_state(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+    ) -> Result<(LimitValue, u64), StoreError>;
+
+    /// Atomically replace a limit iff the durable generation equals `expected_generation`.
+    /// A missing row has generation zero and a successful insert becomes generation one.
+    async fn set_limit_if_generation(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+        limit: LimitValue,
+        expected_generation: u64,
+    ) -> Result<u64, StoreError>;
+
+    /// Atomically change a limit and persist its required audit event.
+    async fn set_limit_if_generation_with_audit(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+        limit: LimitValue,
+        expected_generation: u64,
+        audit: &AuditEventRecord,
+    ) -> Result<u64, StoreError>;
+
     /// Look up the configured limit for a given scope and key (defaults to `Unlimited`).
     async fn get_limit(
         &self,
@@ -60,6 +88,110 @@ pub trait QuotaRepository: Send + Sync {
 
 #[async_trait]
 impl QuotaRepository for SqliteStore {
+    async fn get_limit_state(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+    ) -> Result<(LimitValue, u64), StoreError> {
+        if !key.is_known() {
+            return Err(StoreError::Corrupt(format!(
+                "unknown or unregistered limit key '{key}'"
+            )));
+        }
+        let row = sqlx::query("SELECT limit_value, generation FROM quota_limits WHERE scope_id = ? AND scope_kind = ? AND namespace = ? AND resource = ?")
+            .bind(scope.id().as_str()).bind(scope.kind().as_str()).bind(key.namespace().as_str()).bind(key.resource())
+            .fetch_optional(&self.pool).await.map_err(StoreError::Database)?;
+        let Some(row) = row else {
+            return Ok((LimitValue::Unlimited, 0));
+        };
+        let value: Option<i64> = row.get(0);
+        let generation: i64 = row.get(1);
+        let generation = u64::try_from(generation)
+            .map_err(|_| StoreError::Corrupt(format!("negative quota generation for '{key}'")))?;
+        let limit = match value {
+            None => LimitValue::Unlimited,
+            Some(max) if max >= 0 => LimitValue::Maximum(max as u64),
+            Some(_) => {
+                return Err(StoreError::Corrupt(format!(
+                    "negative quota limit for '{key}'"
+                )));
+            }
+        };
+        Ok((limit, generation))
+    }
+
+    async fn set_limit_if_generation(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+        limit: LimitValue,
+        expected_generation: u64,
+    ) -> Result<u64, StoreError> {
+        if !key.is_known() {
+            return Err(StoreError::Corrupt(format!(
+                "unknown or unregistered limit key '{key}'"
+            )));
+        }
+        let expected = i64::try_from(expected_generation)
+            .map_err(|_| StoreError::Corrupt("quota generation overflow".into()))?;
+        let next = expected_generation
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Corrupt("quota generation overflow".into()))?;
+        let next_i64 = i64::try_from(next)
+            .map_err(|_| StoreError::Corrupt("quota generation overflow".into()))?;
+        let value: Option<i64> = match limit {
+            LimitValue::Unlimited => None,
+            LimitValue::Maximum(max) => Some(i64::try_from(max).map_err(|_| {
+                StoreError::Corrupt(format!("limit maximum {max} exceeds signed 64-bit"))
+            })?),
+        };
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let result = sqlx::query("INSERT INTO quota_limits (scope_id, scope_kind, namespace, resource, limit_value, generation) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(scope_id, scope_kind, namespace, resource) DO UPDATE SET limit_value = excluded.limit_value, generation = excluded.generation WHERE quota_limits.generation = ?")
+            .bind(scope.id().as_str()).bind(scope.kind().as_str()).bind(key.namespace().as_str()).bind(key.resource()).bind(value).bind(next_i64).bind(expected)
+            .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::QuotaGenerationConflict);
+        }
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(next)
+    }
+
+    async fn set_limit_if_generation_with_audit(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+        limit: LimitValue,
+        expected_generation: u64,
+        audit: &AuditEventRecord,
+    ) -> Result<u64, StoreError> {
+        let expected = i64::try_from(expected_generation)
+            .map_err(|_| StoreError::Corrupt("quota generation overflow".into()))?;
+        let next = expected_generation
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Corrupt("quota generation overflow".into()))?;
+        let next_i64 = i64::try_from(next)
+            .map_err(|_| StoreError::Corrupt("quota generation overflow".into()))?;
+        let value = match limit {
+            LimitValue::Unlimited => None,
+            LimitValue::Maximum(max) => Some(
+                i64::try_from(max)
+                    .map_err(|_| StoreError::Corrupt("quota limit overflow".into()))?,
+            ),
+        };
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let result = sqlx::query("INSERT INTO quota_limits (scope_id, scope_kind, namespace, resource, limit_value, generation) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(scope_id, scope_kind, namespace, resource) DO UPDATE SET limit_value = excluded.limit_value, generation = excluded.generation WHERE quota_limits.generation = ?")
+            .bind(scope.id().as_str()).bind(scope.kind().as_str()).bind(key.namespace().as_str()).bind(key.resource()).bind(value).bind(next_i64).bind(expected)
+            .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::QuotaGenerationConflict);
+        }
+        sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING")
+            .bind(&audit.event_id).bind(&audit.timestamp).bind(&audit.request_id).bind(&audit.audit_id).bind(&audit.principal_id).bind(&audit.principal_kind).bind(&audit.effective_scope).bind(&audit.service).bind(&audit.action).bind(&audit.resource_type).bind(&audit.resource_id).bind(&audit.owner_scope).bind(&audit.operation_id).bind(&audit.outcome).bind(&audit.reason_category)
+            .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(next)
+    }
+
     async fn get_limit(
         &self,
         scope: &OwnershipScope,
@@ -120,9 +252,9 @@ impl QuotaRepository for SqliteStore {
         };
 
         sqlx::query(
-            "INSERT INTO quota_limits (scope_id, scope_kind, namespace, resource, limit_value)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT(scope_id, scope_kind, namespace, resource) DO UPDATE SET limit_value = excluded.limit_value",
+            "INSERT INTO quota_limits (scope_id, scope_kind, namespace, resource, limit_value, generation)
+             VALUES (?, ?, ?, ?, ?, 1)
+             ON CONFLICT(scope_id, scope_kind, namespace, resource) DO UPDATE SET limit_value = excluded.limit_value, generation = quota_limits.generation + 1",
         )
         .bind(scope.id().as_str())
         .bind(scope.kind().as_str())
@@ -1091,6 +1223,40 @@ mod tests {
         let res = store.reserve_quota(&scope, "op-migrated", &amounts).await?;
         assert_eq!(res.state, ReservationState::Pending);
 
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn durable_generation_compare_and_set_rejects_stale_writers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::path::PathBuf::from(format!(
+            "/tmp/o3k-quota-generation-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store_a = crate::testkit::open_file(&path).await?;
+        let store_b = crate::testkit::open_file(&path).await?;
+        let scope =
+            OwnershipScope::project(ScopeId::new_unchecked("generation-tenant"), None, None);
+        let key = LimitKey::compute_servers();
+        assert_eq!(
+            store_a.get_limit_state(&scope, &key).await?,
+            (LimitValue::Unlimited, 0)
+        );
+        let a = store_a
+            .set_limit_if_generation(&scope, &key, LimitValue::Maximum(2), 0)
+            .await?;
+        assert_eq!(a, 1);
+        let stale = store_b
+            .set_limit_if_generation(&scope, &key, LimitValue::Maximum(9), 0)
+            .await;
+        assert!(matches!(stale, Err(StoreError::QuotaGenerationConflict)));
+        let (limit, generation) = store_b.get_limit_state(&scope, &key).await?;
+        assert_eq!(limit, LimitValue::Maximum(2));
+        assert_eq!(generation, 1);
+        drop(store_a);
+        drop(store_b);
         let _ = std::fs::remove_file(&path);
         Ok(())
     }

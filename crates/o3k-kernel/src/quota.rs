@@ -42,6 +42,17 @@ impl LimitKey {
         Self::is_known_dimension(self.namespace.as_str(), &self.resource)
     }
 
+    /// Canonical public unit for this enforced dimension.
+    #[must_use]
+    pub fn unit(&self) -> &'static str {
+        match (self.namespace.as_str(), self.resource.as_str()) {
+            ("compute", "memory_mb") => "mebibytes",
+            ("compute", "disk_gb") => "gibibytes",
+            ("image", "bytes") => "bytes",
+            _ => "count",
+        }
+    }
+
     /// Creates a new validated limit key checked against the canonical registry inventory.
     pub fn new(namespace: &str, resource: &str) -> Result<Self, KernelError> {
         let ns = ServiceNamespace::new(namespace)?;

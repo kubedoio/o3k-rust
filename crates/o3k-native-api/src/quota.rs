@@ -27,6 +27,17 @@ pub struct QuotaDimension {
     pub generation: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaError {
+    Invalid,
+    StaleGeneration,
+    NotFound,
+    Forbidden,
+    Unavailable,
+    Corrupt,
+    AuditUnavailable,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitRequest {
@@ -36,7 +47,7 @@ pub struct LimitRequest {
 
 #[async_trait::async_trait]
 pub trait QuotaReader: Send + Sync {
-    async fn list(&self, scope: &OwnershipScope) -> Result<Vec<QuotaDimension>, ()>;
+    async fn list(&self, scope: &OwnershipScope) -> Result<Vec<QuotaDimension>, QuotaError>;
     async fn set(
         &self,
         auth: &AuthContext,
@@ -44,14 +55,28 @@ pub trait QuotaReader: Send + Sync {
         key: &LimitKey,
         limit: LimitValue,
         expected_generation: Option<u64>,
-    ) -> Result<QuotaDimension, ()>;
+    ) -> Result<QuotaDimension, QuotaError>;
     async fn clear(
         &self,
         auth: &AuthContext,
         scope: &OwnershipScope,
         key: &LimitKey,
         expected_generation: Option<u64>,
-    ) -> Result<QuotaDimension, ()>;
+    ) -> Result<QuotaDimension, QuotaError>;
+}
+
+fn quota_error(error: QuotaError, request_id: &str) -> Response {
+    let code = match error {
+        QuotaError::Invalid => ErrorCode::BadRequest,
+        QuotaError::StaleGeneration => ErrorCode::Conflict,
+        QuotaError::NotFound => ErrorCode::ResourceNotFound,
+        QuotaError::Forbidden => ErrorCode::Forbidden,
+        QuotaError::Unavailable | QuotaError::AuditUnavailable => ErrorCode::NotAvailable,
+        QuotaError::Corrupt => ErrorCode::InternalError,
+    };
+    ProblemDetails::new(code)
+        .with_request_id(request_id.to_owned())
+        .into_response()
 }
 
 fn authorize(
@@ -93,7 +118,7 @@ pub async fn list(auth: BearerAuth, State(state): State<NativeApiState>) -> Resp
             Json(serde_json::json!({"version":"v1","scope":auth.0.effective_scope(),"items":items}))
                 .into_response()
         }
-        Err(()) => ProblemDetails::new(ErrorCode::InternalError).into_response(),
+        Err(error) => quota_error(error, "quota-list"),
     }
 }
 
@@ -123,7 +148,7 @@ pub async fn show(
             .find(|item| item.namespace == key.namespace().as_str() && item.key == key.resource())
             .map(|item| Json(item).into_response())
             .unwrap_or_else(|| ProblemDetails::new(ErrorCode::ResourceNotFound).into_response()),
-        Err(()) => ProblemDetails::new(ErrorCode::InternalError).into_response(),
+        Err(error) => quota_error(error, "quota-show"),
     }
 }
 
@@ -151,7 +176,7 @@ pub async fn operator_list(
         Ok(items) => {
             Json(serde_json::json!({"version":"v1","scope":scope,"items":items})).into_response()
         }
-        Err(()) => ProblemDetails::new(ErrorCode::InternalError).into_response(),
+        Err(error) => quota_error(error, "quota-operator-list"),
     }
 }
 
@@ -168,6 +193,7 @@ pub async fn clear(
     auth: BearerAuth,
     Path((project, namespace, dimension)): Path<(String, String, String)>,
     State(state): State<NativeApiState>,
+    Json(body): Json<LimitRequest>,
 ) -> Response {
     mutate(
         auth,
@@ -177,7 +203,7 @@ pub async fn clear(
         state,
         LimitRequest {
             limit: LimitValue::Unlimited,
-            expected_generation: None,
+            expected_generation: body.expected_generation,
         },
         true,
     )
@@ -212,11 +238,14 @@ async fn mutate(
         Ok(k) => k,
         Err(_) => return ProblemDetails::new(ErrorCode::BadRequest).into_response(),
     };
+    if body.expected_generation.is_none() {
+        return ProblemDetails::new(ErrorCode::BadRequest).into_response();
+    }
     match reader
         .set(&auth.0, &scope, &key, body.limit, body.expected_generation)
         .await
     {
         Ok(item) => (axum::http::StatusCode::OK, Json(item)).into_response(),
-        Err(()) => ProblemDetails::new(ErrorCode::Conflict).into_response(),
+        Err(error) => quota_error(error, "quota-mutation"),
     }
 }
