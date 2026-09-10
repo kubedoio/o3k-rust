@@ -2,7 +2,7 @@
 
 Base: `ed0648e799b23e619a27d5ec94cee3dec6108393` (protected `main`).
 Original PR head: `b488de655e40763542bc0c483ac8021ebec844f9`.
-Evidence implementation revision: `f2d148202abb0e8ddf50941c315338a512ba3eda` (final reviewed branch revision).
+Evidence implementation revision: `a11a914df31c89e9343c9eab3be2e150d033c25e` (final reviewed branch revision).
 
 The implementation projects the existing SQLite/PostgreSQL `QuotaRepository`
 and SQL usage counters through the versioned native `/quota` contract. It does
