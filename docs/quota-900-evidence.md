@@ -2,7 +2,7 @@
 
 Base: `ed0648e799b23e619a27d5ec94cee3dec6108393` (protected `main`).
 Original PR head: `b488de655e40763542bc0c483ac8021ebec844f9`.
-Evidence implementation revision: `a11a914df31c89e9343c9eab3be2e150d033c25e` (final reviewed branch revision).
+Evidence implementation revision: `368135ca5f223cd1df6f179877ea1cdf9103cc1b` (quota persistence hardening revision; final branch also contains the documentation update below).
 
 The implementation projects the existing SQLite/PostgreSQL `QuotaRepository`
 and SQL usage counters through the versioned native `/quota` contract. It does
@@ -39,7 +39,7 @@ usage counters. The regression is covered by
 `failed_create_releases_quota_reservation`.
 
 The complete local workspace gates and focused SQLite/PostgreSQL process
-journeys pass. GitHub CI for this revision is the final external gate; the
-preceding revision's failure was isolated to a concurrent PostgreSQL audit
-migration fixture (`VersionMissing(25)`) and is being rechecked on this
-revision.
+journeys pass. GitHub CI for the final pushed revision is the external gate;
+the earlier PostgreSQL audit migration fixture failure (`VersionMissing(25)`)
+was isolated to concurrent shared-fixture setup and is covered by the
+disposable-database conformance path.
