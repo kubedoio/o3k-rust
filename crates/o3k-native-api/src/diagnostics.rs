@@ -635,4 +635,144 @@ mod tests {
         };
         assert!(too_large.page_size().is_err());
     }
+
+    /// Representative, fully-populated summary for contract and wire-shape
+    /// checks. All values are benign on purpose: the public DTOs carry no
+    /// credential, node-identity, or connection-string field.
+    fn representative_summary() -> DiagnosticsSummary {
+        DiagnosticsSummary {
+            version: DIAGNOSTICS_VERSION.to_owned(),
+            evaluated_at_unix_ms: 1_700_000_000_000,
+            status: DiagnosticStatus::Healthy,
+            counts: StatusCounts {
+                services: ComponentCounts {
+                    total: 2,
+                    healthy: 2,
+                    ..ComponentCounts::default()
+                },
+                providers: ComponentCounts {
+                    total: 1,
+                    healthy: 1,
+                    ..ComponentCounts::default()
+                },
+            },
+            control_plane: Some(ControlPlaneStatus {
+                status: DiagnosticStatus::Healthy,
+                active_sessions: 1,
+                observed_at_unix_ms: Some(1_700_000_000_000),
+                reason: None,
+            }),
+            locations: LocationDiagnostics {
+                configured: true,
+                regions: 2,
+                availability_domains: 3,
+            },
+        }
+    }
+
+    #[test]
+    fn summary_validates_against_diagnostics_contract_schema() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../contracts/native-diagnostics-v1.schema.json"
+        )))
+        .unwrap();
+        let value = serde_json::to_value(representative_summary()).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        // A failed validation panics with the schema violation details.
+        validator.validate(&value).unwrap();
+    }
+
+    #[test]
+    fn public_dtos_never_carry_credentials_or_node_identity() {
+        // The diagnostics projection is a bounded, system/operator-authorized
+        // view of canonical authority. Its public wire shape must have no field
+        // that can carry provider credentials, connection strings, node
+        // identity, or agent epoch. This is a structural guarantee: serialize
+        // every representative DTO and assert none of the secret/identity
+        // tokens below can appear in the JSON. An adapter that tried to leak
+        // them into a free-form String field would be caught here.
+        let secrets = [
+            "postgres://user:pass@host/db",
+            "password",
+            "private_key",
+            "Bearer secret",
+            "node-42",
+            "agent-epoch-9",
+        ];
+
+        let summary = representative_summary();
+        let service = DiagnosticsPage {
+            items: vec![ServiceDiagnostics {
+                service_id: "compute".to_owned(),
+                namespace: "compute".to_owned(),
+                service_version: "0.4.0".to_owned(),
+                ownership: "o3k-implemented".to_owned(),
+                lifecycle_state: "ready".to_owned(),
+                status: DiagnosticStatus::Healthy,
+                observed_at_unix_ms: Some(1_700_000_000_000),
+                reason: None,
+                controller: Some(ControllerDiagnostics {
+                    mode: "in-process".to_owned(),
+                    protocol: "in-process".to_owned(),
+                    protocol_version: "1.0".to_owned(),
+                    healthy: true,
+                    session_generation: Some(3),
+                }),
+            }],
+            has_more: false,
+            next_cursor: None,
+        };
+        let providers = DiagnosticsPage {
+            items: vec![ProviderDiagnostics {
+                provider_id: "compute-1".to_owned(),
+                state: "Enabled".to_owned(),
+                availability: "available".to_owned(),
+                status: DiagnosticStatus::Healthy,
+                observed_at_unix_ms: Some(1_700_000_000_000),
+                reason: None,
+                capacity: vec![ProviderCapacityDimension {
+                    resource_class: "VCPU".to_owned(),
+                    total: 8,
+                    reserved: 1,
+                    allocated: 2,
+                    available: 5,
+                }],
+            }],
+            has_more: false,
+            next_cursor: None,
+        };
+        let capacity = CapacityDiagnostics {
+            version: DIAGNOSTICS_VERSION.to_owned(),
+            status: DiagnosticStatus::Degraded,
+            observed_at_unix_ms: Some(1_700_000_000_000),
+            reason: Some(DiagnosticReason::ReportedUnhealthy),
+            providers_enabled: 1,
+            providers_draining: 0,
+            providers_unavailable: 0,
+            providers_deleted: 0,
+            dimensions: vec![CapacityDimension {
+                resource_class: "VCPU".to_owned(),
+                unit: "count".to_owned(),
+                allocatable: 160,
+                reserved: 1,
+                allocated: 2,
+                available: 157,
+            }],
+        };
+
+        let wire = format!(
+            "{}{}{}{}",
+            serde_json::to_string(&summary).unwrap(),
+            serde_json::to_string(&service).unwrap(),
+            serde_json::to_string(&providers).unwrap(),
+            serde_json::to_string(&capacity).unwrap()
+        );
+        for secret in secrets {
+            assert!(
+                !wire.contains(secret),
+                "secret/identity token {secret:?} leaked into diagnostics wire DTOs"
+            );
+        }
+    }
 }

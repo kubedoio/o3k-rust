@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-diagnostics-v1.schema.json",
+  "title": "O3K Native Operator Diagnostics v1",
+  "description": "Bounded, read-only, system/operator-authorized projection of canonical O3K service, provider, location and placement-capacity authority. Health and capacity truth originate from O3K authority; stale or never-observed sources are distinct from healthy. See SPEC-0045.",
+  "x-o3k-status": "accepted",
+  "type": "object",
+  "definitions": {
+    "status": {
+      "enum": ["healthy", "degraded", "unavailable", "stale", "unknown"]
+    },
+    "reason": {
+      "enum": [
+        "not_configured",
+        "never_observed",
+        "observation_stale",
+        "heartbeat_lost",
+        "administratively_disabled",
+        "draining",
+        "readiness_failed",
+        "protocol_incompatible",
+        "dependency_unavailable",
+        "reported_unhealthy",
+        "capacity_source_unavailable",
+        "unsupported"
+      ]
+    },
+    "componentCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "healthy", "degraded", "unavailable", "stale", "unknown"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "healthy": { "type": "integer", "minimum": 0 },
+        "degraded": { "type": "integer", "minimum": 0 },
+        "unavailable": { "type": "integer", "minimum": 0 },
+        "stale": { "type": "integer", "minimum": 0 },
+        "unknown": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "controlPlane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "active_sessions"],
+      "properties": {
+        "status": { "$ref": "#/definitions/status" },
+        "active_sessions": { "type": "integer", "minimum": 0 },
+        "observed_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "reason": { "anyOf": [{ "$ref": "#/definitions/reason" }, { "type": "null" }] }
+      }
+    },
+    "locationDiagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configured", "regions", "availability_domains"],
+      "properties": {
+        "configured": { "type": "boolean" },
+        "regions": { "type": "integer", "minimum": 0 },
+        "availability_domains": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "controllerDiagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "protocol", "protocol_version", "healthy"],
+      "properties": {
+        "mode": { "type": "string" },
+        "protocol": { "type": "string" },
+        "protocol_version": { "type": "string" },
+        "healthy": { "type": "boolean" },
+        "session_generation": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service_id", "namespace", "service_version", "ownership", "lifecycle_state", "status"],
+      "properties": {
+        "service_id": { "type": "string", "minLength": 1 },
+        "namespace": { "type": "string", "minLength": 1 },
+        "service_version": { "type": "string" },
+        "ownership": { "type": "string" },
+        "lifecycle_state": { "type": "string" },
+        "status": { "$ref": "#/definitions/status" },
+        "observed_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "reason": { "anyOf": [{ "$ref": "#/definitions/reason" }, { "type": "null" }] },
+        "controller": { "type": ["object", "null"], "$ref": "#/definitions/controllerDiagnostics" }
+      }
+    },
+    "providerCapacityDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource_class", "total", "reserved", "allocated", "available"],
+      "properties": {
+        "resource_class": { "type": "string", "minLength": 1 },
+        "total": { "type": "integer", "minimum": 0 },
+        "reserved": { "type": "integer", "minimum": 0 },
+        "allocated": { "type": "integer", "minimum": 0 },
+        "available": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_id", "state", "availability", "status", "capacity"],
+      "properties": {
+        "provider_id": { "type": "string", "minLength": 1 },
+        "state": { "type": "string" },
+        "availability": { "type": "string" },
+        "status": { "$ref": "#/definitions/status" },
+        "observed_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "reason": { "anyOf": [{ "$ref": "#/definitions/reason" }, { "type": "null" }] },
+        "capacity": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/definitions/providerCapacityDimension" }
+        }
+      }
+    },
+    "capacityDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource_class", "unit", "allocatable", "reserved", "allocated", "available"],
+      "properties": {
+        "resource_class": { "type": "string", "minLength": 1 },
+        "unit": { "type": "string", "minLength": 1 },
+        "allocatable": { "type": "integer", "minimum": 0 },
+        "reserved": { "type": "integer", "minimum": 0 },
+        "allocated": { "type": "integer", "minimum": 0 },
+        "available": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "capacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "status", "providers_enabled", "providers_draining", "providers_unavailable", "providers_deleted", "dimensions"],
+      "properties": {
+        "version": { "const": "v1" },
+        "status": { "$ref": "#/definitions/status" },
+        "observed_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "reason": { "anyOf": [{ "$ref": "#/definitions/reason" }, { "type": "null" }] },
+        "providers_enabled": { "type": "integer", "minimum": 0 },
+        "providers_draining": { "type": "integer", "minimum": 0 },
+        "providers_unavailable": { "type": "integer", "minimum": 0 },
+        "providers_deleted": { "type": "integer", "minimum": 0 },
+        "dimensions": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/definitions/capacityDimension" }
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "has_more", "next_cursor"],
+      "properties": {
+        "items": { "type": "array" },
+        "has_more": { "type": "boolean" },
+        "next_cursor": { "type": ["string", "null"] }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "description": "Diagnostics summary response",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "evaluated_at_unix_ms", "status", "counts", "control_plane", "locations"],
+      "properties": {
+        "version": { "const": "v1" },
+        "evaluated_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "status": { "$ref": "#/definitions/status" },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["services", "providers"],
+          "properties": {
+            "services": { "$ref": "#/definitions/componentCounts" },
+            "providers": { "$ref": "#/definitions/componentCounts" }
+          }
+        },
+        "control_plane": { "type": ["object", "null"], "$ref": "#/definitions/controlPlane" },
+        "locations": { "$ref": "#/definitions/locationDiagnostics" }
+      }
+    }
+  ]
+}
