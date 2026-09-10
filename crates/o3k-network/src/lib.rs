@@ -80,7 +80,7 @@ impl NetworkVocabulary {
     }
 
     pub fn quota_keys() -> Vec<LimitKey> {
-        ["networks", "ports", "address_allocations"]
+        ["networks", "ports"]
             .into_iter()
             .map(|name| LimitKey::new_unchecked(ServiceNamespace::network(), name.to_owned()))
             .collect()
@@ -96,7 +96,7 @@ mod vocabulary_tests {
     fn p9_vocabulary_is_typed_and_stable() {
         assert_eq!(NetworkVocabulary::actions().len(), 6);
         assert_eq!(NetworkVocabulary::resources().len(), 3);
-        assert_eq!(NetworkVocabulary::quota_keys().len(), 3);
+        assert_eq!(NetworkVocabulary::quota_keys().len(), 2);
         assert_eq!(
             NetworkVocabulary::actions()[0].to_string(),
             "network:CreateNetworkIntent"

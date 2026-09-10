@@ -24,8 +24,10 @@ No adapter-local generation lock or shadow quota state remains.
 The production-composition HTTP journey now mounts `/o3k/v1/quota` and the
 operator quota routes, reads tenant-scoped dimensions and usage, observes
 usage after native Compute allocation and release, and rejects a tenant's
-foreign operator read. `network:address_allocations` usage is backed by the
-canonical allocation table in both stores.
+foreign operator read. The delegated file-backed compatibility floating-IP
+allocator is intentionally not advertised as a native quota dimension because
+its allocation and quota state are not one transactional authority; native
+quota dimensions are limited to dimensions enforced by the Cloud Kernel.
 
 The real OIDC-backed process journey also exchanges a system/operator
 credential through `/o3k/v1/identity/tokens`, reads a foreign project's quota,

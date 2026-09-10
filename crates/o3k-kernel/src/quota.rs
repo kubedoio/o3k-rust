@@ -27,7 +27,6 @@ impl LimitKey {
         ("network", "networks"),
         ("network", "subnets"),
         ("network", "ports"),
-        ("network", "address_allocations"),
     ];
 
     #[must_use]
