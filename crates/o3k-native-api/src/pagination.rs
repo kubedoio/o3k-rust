@@ -213,7 +213,7 @@ impl CursorConfig {
         }
         let continuation_key = raw_cursor
             .map(|cursor| {
-                self.decode_cursor(cursor, scope_id, resource_type, &query_identity)
+                self.decode_cursor(cursor, scope_id, resource_type, query_identity)
                     .map(|payload| payload.continuation_key)
             })
             .transpose()?;
