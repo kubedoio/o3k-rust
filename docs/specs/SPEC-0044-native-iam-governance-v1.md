@@ -164,7 +164,11 @@ insufficient scope/role → `FORBIDDEN`; absent (or non-visible) record →
 `RESOURCE_NOT_FOUND`; invalid reference → `BAD_REQUEST`; unavailable/degraded
 storage or audit → `NOT_AVAILABLE`; internal/corrupt state → `INTERNAL_ERROR`.
 Responses never leak SQL, database URLs, tokens, credential material, provider
-details, or private paths.
+details, or private paths. Transport-level rejections that occur before handler
+logic (unknown or malformed JSON body fields, wrong content type) are answered
+by the axum extractor with `422 UNPROCESSABLE_ENTITY` outside the
+`problem+json` application contract, consistent with the rest of the native
+surface.
 
 ## Non-goals
 
