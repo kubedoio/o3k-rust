@@ -111,8 +111,12 @@ impl o3k_native_api::quota::QuotaReader for QuotaReaderAdapter {
             )
             .await
             .map_err(map_store)?;
-        let mut item = self.project(scope, key).await?;
-        item.generation = next_generation;
+        // Re-read the durable projection after the transaction.  A concurrent
+        // administrator may have advanced the generation again; returning the
+        // newer coherent limit/generation pair is preferable to overwriting
+        // the generation with a stale local value.
+        let item = self.project(scope, key).await?;
+        debug_assert!(item.generation >= next_generation);
         Ok(item)
     }
 
