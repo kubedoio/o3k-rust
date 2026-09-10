@@ -15,6 +15,7 @@ pub struct PostgresStore {
 mod audit_store;
 mod compute;
 mod core;
+mod governance;
 mod helpers;
 mod identity;
 mod image;

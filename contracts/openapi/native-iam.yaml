@@ -135,6 +135,365 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /operator/governance/projects:
+    get:
+      operationId: listGovernanceProjects
+      summary: List canonical O3K projects
+      description: >-
+        Bounded page of canonical durable projects ordered by stable id. Every
+        route requires the system-scoped governance:ReadGovernance action plus
+        the durable operator role; a project-scoped caller is denied even when
+        it holds an operator-named project role.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A bounded page of canonical projects.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
+  /operator/governance/projects/{id}:
+    get:
+      operationId: getGovernanceProject
+      summary: Read one canonical O3K project
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - name: id
+          in: path
+          required: true
+          description: Canonical project identifier.
+          schema: {type: string, minLength: 1, maxLength: 256}
+      responses:
+        '200':
+          description: The canonical project view.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
+  /operator/governance/principals:
+    get:
+      operationId: listGovernancePrincipals
+      summary: List canonical O3K principals
+      description: >-
+        Bounded page of canonical durable principals. Credential material such
+        as password hashes, tokens, private keys, and service secrets is
+        structurally absent from the projection.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A bounded page of canonical principals.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrincipalPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
+  /operator/governance/principals/{id}:
+    get:
+      operationId: getGovernancePrincipal
+      summary: Read one canonical O3K principal
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - name: id
+          in: path
+          required: true
+          description: Canonical principal identifier.
+          schema: {type: string, minLength: 1, maxLength: 256}
+      responses:
+        '200':
+          description: The canonical principal view.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrincipalView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
+  /operator/governance/roles:
+    get:
+      operationId: listGovernanceRoles
+      summary: List canonical O3K roles
+      description: >-
+        Bounded page of canonical role identity. Role names are display
+        identity only; permissions must be read from the capabilities
+        inventory, never inferred from role names.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A bounded page of canonical roles.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RolePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
+  /operator/governance/capabilities:
+    get:
+      operationId: listGovernanceCapabilities
+      summary: List the canonical authorization action inventory
+      description: >-
+        Projects the kernel Authorizer policy inventory so clients never infer
+        permissions from role display names. This is a single canonical
+        inventory, not a keyset-paginated collection, and has no limit or
+        cursor parameters.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: The canonical capability inventory.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapabilityList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
+  /operator/governance/assignments:
+    get:
+      operationId: listGovernanceAssignments
+      summary: List canonical project membership assignments
+      description: >-
+        Bounded page of canonical (principal, project, role) assignments,
+        optionally filtered by any of the three references. Filters are bound
+        into the opaque cursor identity.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/ProjectIdFilter'
+        - $ref: '#/components/parameters/PrincipalIdFilter'
+        - $ref: '#/components/parameters/RoleIdFilter'
+      responses:
+        '200':
+          description: A bounded page of canonical role assignments.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssignmentPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
+    post:
+      operationId: createGovernanceAssignment
+      summary: Create a canonical project membership assignment
+      description: >-
+        Idempotently creates the canonical assignment after validating that the
+        referenced principal, project, and role exist and are enabled. A
+        replay of an identical assignment returns the existing canonical
+        assignment and creates no new authority. Requires the system-scoped
+        governance:ManageAssignment action.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignmentCreate'
+      responses:
+        '200':
+          description: The existing or newly created canonical assignment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssignmentView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
+  /operator/governance/assignments/{id}:
+    delete:
+      operationId: deleteGovernanceAssignment
+      summary: Delete a canonical project membership assignment
+      description: >-
+        Removes the referenced canonical assignment and returns 204. An absent
+        assignment is RESOURCE_NOT_FOUND. Requires the system-scoped
+        governance:ManageAssignment action.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - name: id
+          in: path
+          required: true
+          description: Canonical assignment identifier.
+          schema: {type: string, minLength: 1, maxLength: 256}
+      responses:
+        '204':
+          description: The assignment was removed.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
+  /operator/governance/operator-assignments:
+    get:
+      operationId: listGovernanceOperatorAssignments
+      summary: List canonical durable operator assignments
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A bounded page of canonical operator assignments.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorAssignmentPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
+    post:
+      operationId: createGovernanceOperatorAssignment
+      summary: Create a canonical durable operator assignment
+      description: >-
+        Idempotently grants the recognized operator-console profile after
+        validating that the principal exists and is enabled. This is a distinct
+        action so operator authority can never be granted through the ordinary
+        assignment action. Requires the system-scoped
+        governance:ManageOperatorAssignment action.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OperatorAssignmentCreate'
+      responses:
+        '200':
+          description: The existing or newly created canonical operator assignment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorAssignmentView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
+  /operator/governance/operator-assignments/{id}:
+    delete:
+      operationId: deleteGovernanceOperatorAssignment
+      summary: Delete a canonical durable operator assignment
+      description: >-
+        Removes the referenced canonical operator assignment and returns 204.
+        An absent assignment is RESOURCE_NOT_FOUND. Requires the system-scoped
+        governance:ManageOperatorAssignment action.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - name: id
+          in: path
+          required: true
+          description: Canonical operator assignment identifier.
+          schema: {type: string, minLength: 1, maxLength: 256}
+      responses:
+        '204':
+          description: The operator assignment was removed.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/NotAvailable'
 components:
   parameters:
     RequestId:
@@ -147,6 +506,38 @@ components:
         minLength: 1
         maxLength: 128
         pattern: '^[A-Za-z0-9._:-]+$'
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum page size (1..=200; default 50).
+      schema: {type: integer, minimum: 1, maximum: 200}
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        Opaque HMAC-authenticated continuation cursor bound to the effective
+        scope, collection identity, and accepted filter set.
+      schema: {type: string, minLength: 1, maxLength: 4096}
+    ProjectIdFilter:
+      name: project_id
+      in: query
+      required: false
+      description: Restrict assignments to one canonical project identifier.
+      schema: {type: string, minLength: 1, maxLength: 256}
+    PrincipalIdFilter:
+      name: principal_id
+      in: query
+      required: false
+      description: Restrict assignments to one canonical principal identifier.
+      schema: {type: string, minLength: 1, maxLength: 256}
+    RoleIdFilter:
+      name: role_id
+      in: query
+      required: false
+      description: Restrict assignments to one canonical role identifier.
+      schema: {type: string, minLength: 1, maxLength: 256}
   securitySchemes:
     bearerAuth:
       type: http
@@ -300,6 +691,146 @@ components:
         detail: {type: string}
         request_id: {type: string}
         resource_id: {type: string}
+    ProjectView:
+      type: object
+      additionalProperties: false
+      required: [id, domain_id, name, enabled, created_at]
+      properties:
+        id: {type: string, minLength: 1}
+        domain_id: {type: string, minLength: 1}
+        name: {type: string}
+        description: {type: string}
+        enabled: {type: boolean}
+        created_at: {type: string, minLength: 1}
+    PrincipalView:
+      type: object
+      additionalProperties: false
+      required: [id, domain_id, name, kind, enabled, created_at]
+      properties:
+        id: {type: string, minLength: 1}
+        domain_id: {type: string, minLength: 1}
+        name: {type: string}
+        kind: {type: string, enum: [user, service]}
+        email: {type: string}
+        enabled: {type: boolean}
+        created_at: {type: string, minLength: 1}
+    RoleView:
+      type: object
+      additionalProperties: false
+      required: [id, name, created_at]
+      properties:
+        id: {type: string, minLength: 1}
+        name: {type: string}
+        description: {type: string}
+        created_at: {type: string, minLength: 1}
+    AssignmentView:
+      type: object
+      additionalProperties: false
+      required: [id, principal_id, project_id, role_id, created_at]
+      properties:
+        id: {type: string, minLength: 1}
+        principal_id: {type: string, minLength: 1}
+        project_id: {type: string, minLength: 1}
+        role_id: {type: string, minLength: 1}
+        created_at: {type: string, minLength: 1}
+    OperatorAssignmentView:
+      type: object
+      additionalProperties: false
+      required: [id, principal_id, profile, enabled, created_at, updated_at]
+      properties:
+        id: {type: string, minLength: 1}
+        principal_id: {type: string, minLength: 1}
+        profile: {type: string, minLength: 1}
+        enabled: {type: boolean}
+        created_at: {type: string, minLength: 1}
+        updated_at: {type: string, minLength: 1}
+    CapabilityView:
+      type: object
+      additionalProperties: false
+      required: [action, resource_type, required_roles, require_ownership]
+      properties:
+        action: {type: string, minLength: 1}
+        resource_type: {type: string, minLength: 1}
+        required_roles: {type: array, items: {type: string}}
+        require_ownership: {type: boolean}
+    ProjectPage:
+      type: object
+      additionalProperties: false
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: {$ref: '#/components/schemas/ProjectView'}
+        has_more: {type: boolean}
+        next_cursor: {type: string}
+    PrincipalPage:
+      type: object
+      additionalProperties: false
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: {$ref: '#/components/schemas/PrincipalView'}
+        has_more: {type: boolean}
+        next_cursor: {type: string}
+    RolePage:
+      type: object
+      additionalProperties: false
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: {$ref: '#/components/schemas/RoleView'}
+        has_more: {type: boolean}
+        next_cursor: {type: string}
+    AssignmentPage:
+      type: object
+      additionalProperties: false
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: {$ref: '#/components/schemas/AssignmentView'}
+        has_more: {type: boolean}
+        next_cursor: {type: string}
+    OperatorAssignmentPage:
+      type: object
+      additionalProperties: false
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: {$ref: '#/components/schemas/OperatorAssignmentView'}
+        has_more: {type: boolean}
+        next_cursor: {type: string}
+    CapabilityList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/CapabilityView'}
+    AssignmentCreate:
+      type: object
+      additionalProperties: false
+      required: [principal_id, project_id, role_id]
+      properties:
+        principal_id: {type: string, minLength: 1, maxLength: 256}
+        project_id: {type: string, minLength: 1, maxLength: 256}
+        role_id: {type: string, minLength: 1, maxLength: 256}
+    OperatorAssignmentCreate:
+      type: object
+      additionalProperties: false
+      required: [principal_id]
+      properties:
+        principal_id: {type: string, minLength: 1, maxLength: 256}
+        profile: {type: string, enum: [operator-console]}
   responses:
     BadRequest:
       description: Invalid or unsupported request.
@@ -313,6 +844,11 @@ components:
           schema: {$ref: '#/components/schemas/ProblemDetails'}
     Forbidden:
       description: Authenticated caller lacks the required authorization.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetails'}
+    NotFound:
+      description: The requested record does not exist or is not visible.
       content:
         application/problem+json:
           schema: {$ref: '#/components/schemas/ProblemDetails'}

@@ -61,6 +61,15 @@ impl AuthorizationDecision {
 pub trait Authorizer: Send + Sync {
     /// Evaluates an authorization request and returns a decision.
     fn authorize(&self, request: &AuthorizationRequest<'_>) -> AuthorizationDecision;
+
+    /// Returns the canonical action policies known to this authorizer.
+    ///
+    /// System/operator governance clients use this to reason about
+    /// authorization without inferring permissions from role display names.
+    /// Authorizers that do not expose a static inventory return an empty list.
+    fn capabilities(&self) -> Vec<ActionPolicy> {
+        Vec::new()
+    }
 }
 
 /// Static policy definition for an action in the authorization inventory.
@@ -396,6 +405,31 @@ impl StaticAuthorizer {
         reg("network", "ReadEndpoint", "network", "endpoint", true);
         reg("network", "DeleteEndpoint", "network", "endpoint", true);
 
+        // Native IAM governance administration is explicit system/operator
+        // authority over canonical O3K IAM state. It is never inferred from a
+        // tenant role name, route shape, or IdP claim, and ordinary project
+        // scope must never satisfy these actions.
+        let mut reg_system = |act: &str| {
+            if let (Ok(action), Ok(expected_resource_type)) = (
+                ActionId::new("governance", act),
+                ResourceType::new("governance", "governance"),
+            ) {
+                self.policies.insert(
+                    action.clone(),
+                    ActionPolicy {
+                        action,
+                        expected_resource_type,
+                        accepted_principals: vec![PrincipalKind::User],
+                        require_ownership: false,
+                        required_roles: vec!["operator".to_owned()],
+                    },
+                );
+            }
+        };
+        reg_system("ReadGovernance");
+        reg_system("ManageAssignment");
+        reg_system("ManageOperatorAssignment");
+
         if let (Ok(action), Ok(expected_resource_type)) = (
             ActionId::new("operator", "ReadProfile"),
             ResourceType::new("operator", "profile"),
@@ -455,6 +489,21 @@ impl Authorizer for StaticAuthorizer {
             };
         }
 
+        // The `governance` namespace is reserved for system/operator
+        // administration over canonical O3K IAM authority. Every action in it
+        // requires System scope; a tenant or project-scoped caller must never
+        // satisfy one even if it holds an `operator` role string inside a
+        // project. Gating by namespace (rather than a literal action list)
+        // means a newly registered governance action cannot accidentally omit
+        // this check.
+        if request.action.namespace() == "governance"
+            && request.auth_context.effective_scope().kind() != ScopeKind::System
+        {
+            return AuthorizationDecision::Deny {
+                reason: DecisionReason::ScopeMismatch,
+            };
+        }
+
         // 4. Validate ownership if required
         if policy.require_ownership
             && !(request.action == ActionId::new_unchecked("quota", "ReadQuota")
@@ -488,5 +537,11 @@ impl Authorizer for StaticAuthorizer {
         }
 
         AuthorizationDecision::Allow
+    }
+
+    fn capabilities(&self) -> Vec<ActionPolicy> {
+        let mut policies: Vec<ActionPolicy> = self.policies.values().cloned().collect();
+        policies.sort_by_key(|policy| policy.action.as_str());
+        policies
     }
 }

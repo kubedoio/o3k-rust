@@ -1156,3 +1156,597 @@ mod native_compute_tests {
         );
     }
 }
+
+/// Production-composition HTTP integration tests for the native IAM governance
+/// surface: a real durable store, a real `TokenService`, and the canonical
+/// `/operator/governance/...` router behind the standard authorizer.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod native_governance_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use o3k_identity::oidc::ValidatedExternalIdentity;
+    use o3k_identity::{BootstrapConfig, ExtraProjectSeed, Secret, TokenService};
+    use o3k_kernel::{
+        AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, ScopeKind, StaticAuthorizer,
+        UserPrincipal,
+    };
+    use o3k_native_api::auth::{NativeTokenRequestV1, TokenIssuer};
+    use o3k_native_api::error::ProblemDetails;
+    use o3k_native_api::pagination::CursorConfig;
+    use o3k_store::{
+        AuditRepository, FederatedBindingRecord, GovernanceRepository, IdentityRepository,
+    };
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    const EXTRA_PROJECT: &str = "8d1f3c4a-5b6e-4f2a-9c3d-1e2f3a4b5c6d";
+    const EXTRA_USER: &str = "a7c2e9d1-4f3b-4c8e-9d2a-3b4c5d6e7f8a";
+
+    struct GovernanceIssuer;
+
+    fn system_operator_context() -> AuthContext {
+        AuthContext::new(
+            Principal::User(UserPrincipal::new(
+                PrincipalId::new_unchecked("operator-1"),
+                "operator",
+                None,
+            )),
+            OwnershipScope::new(
+                ScopeId::new_unchecked("system"),
+                ScopeKind::System,
+                None,
+                None,
+            ),
+            vec!["operator".to_owned()],
+            1,
+            u64::MAX,
+            "audit-governance",
+            "request-governance",
+            None,
+        )
+    }
+
+    /// A project-scoped caller that carries the `operator` role name must still
+    /// never satisfy a system-scoped `governance:*` action.
+    fn project_operator_context() -> AuthContext {
+        AuthContext::new(
+            Principal::User(UserPrincipal::new(
+                PrincipalId::new_unchecked("project-operator"),
+                "project-operator",
+                None,
+            )),
+            OwnershipScope::new(
+                ScopeId::new_unchecked("service-project"),
+                ScopeKind::Project,
+                None,
+                None,
+            ),
+            vec!["operator".to_owned()],
+            1,
+            u64::MAX,
+            "audit-governance",
+            "request-governance",
+            None,
+        )
+    }
+
+    #[async_trait::async_trait]
+    impl TokenIssuer for GovernanceIssuer {
+        async fn issue_native(
+            &self,
+            _request: &NativeTokenRequestV1,
+        ) -> Result<(String, serde_json::Value), ProblemDetails> {
+            Err(ProblemDetails::bad_request(
+                "test issuer does not issue tokens",
+            ))
+        }
+
+        async fn auth_context(&self, token: &str) -> Result<AuthContext, ProblemDetails> {
+            match token {
+                "operator" => Ok(system_operator_context()),
+                "project-operator" => Ok(project_operator_context()),
+                _ => Err(ProblemDetails::unauthorized()),
+            }
+        }
+    }
+
+    struct GovernanceHarness {
+        router: axum::Router,
+        store: Arc<o3k_store::unified::O3kStore>,
+        identity: Arc<TokenService>,
+    }
+
+    async fn setup_harness(federated_binding: bool) -> GovernanceHarness {
+        let store = Arc::new(
+            o3k_store::unified::O3kStore::connect_sqlite_memory()
+                .await
+                .expect("store"),
+        );
+        o3k_identity::seed_identity_defaults(
+            store.as_ref(),
+            &BootstrapConfig {
+                catalog_endpoint: "http://127.0.0.1:18090".to_owned(),
+                bootstrap_password: Secret::new("bootstrap-password".to_owned()),
+                cinder_password: None,
+                cinder_endpoint: None,
+                pbkdf2_iterations: 1_000,
+                extra_projects: vec![ExtraProjectSeed {
+                    project_id: EXTRA_PROJECT.to_owned(),
+                    project_name: "tenant-b".to_owned(),
+                    user_id: EXTRA_USER.to_owned(),
+                    user_name: "tenant-b-user".to_owned(),
+                    password: Secret::new("tenant-b-password".to_owned()),
+                }],
+            },
+        )
+        .await
+        .expect("seed identity defaults");
+
+        if federated_binding {
+            store
+                .insert_federated_binding(&FederatedBindingRecord {
+                    id: "governance-federated-binding".to_owned(),
+                    trusted_issuer_id: "issuer-a".to_owned(),
+                    issuer: "https://idp.example.test".to_owned(),
+                    subject: "alice".to_owned(),
+                    principal_id: "bootstrap-user".to_owned(),
+                    principal_type: "user".to_owned(),
+                    enabled: true,
+                    created_at: "2026-09-06T00:00:00Z".to_owned(),
+                    updated_at: "2026-09-06T00:00:00Z".to_owned(),
+                })
+                .await
+                .expect("federated binding");
+        }
+
+        let identity = Arc::new(
+            TokenService::load(
+                store.clone(),
+                Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+                Duration::from_secs(3600),
+            )
+            .await
+            .expect("token service"),
+        );
+
+        let native = o3k_native_api::NativeApiState::new(
+            None,
+            CursorConfig::new(b"test-only-native-cursor-key-at-least-32-bytes".to_vec())
+                .expect("cursor key"),
+            Some(Arc::new(GovernanceIssuer)),
+            None,
+            None,
+            None,
+        )
+        .expect("native state")
+        .with_governance_reader(Arc::new(GovernanceReaderAdapter {
+            store: store.clone(),
+            identity: Some(identity.clone()),
+        }))
+        .with_authorizer(Arc::new(StaticAuthorizer::standard()));
+
+        GovernanceHarness {
+            router: o3k_native_api::router(native),
+            store,
+            identity,
+        }
+    }
+
+    fn federated_identity() -> ValidatedExternalIdentity {
+        ValidatedExternalIdentity {
+            trusted_issuer_id: "issuer-a".to_owned(),
+            issuer: "https://idp.example.test".to_owned(),
+            subject: "alice".to_owned(),
+            expires_at: u64::MAX,
+        }
+    }
+
+    async fn project_id_by_name(store: &o3k_store::unified::O3kStore, name: &str) -> String {
+        store
+            .list_governance_projects_page(None, 100)
+            .await
+            .expect("projects")
+            .items
+            .into_iter()
+            .find(|project| project.name == name)
+            .unwrap_or_else(|| panic!("seeded project {name} missing"))
+            .id
+    }
+
+    async fn principal_id_by_name(store: &o3k_store::unified::O3kStore, name: &str) -> String {
+        store
+            .list_governance_principals_page(None, 100)
+            .await
+            .expect("principals")
+            .items
+            .into_iter()
+            .find(|principal| principal.name == name)
+            .unwrap_or_else(|| panic!("seeded principal {name} missing"))
+            .id
+    }
+
+    async fn role_id_by_name(store: &o3k_store::unified::O3kStore, name: &str) -> String {
+        store
+            .list_governance_roles_page(None, 100)
+            .await
+            .expect("roles")
+            .items
+            .into_iter()
+            .find(|role| role.name == name)
+            .unwrap_or_else(|| panic!("seeded role {name} missing"))
+            .id
+    }
+
+    fn request(
+        method: &str,
+        uri: &str,
+        token: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"));
+        let body = match body {
+            Some(value) => {
+                builder = builder.header("content-type", "application/json");
+                Body::from(serde_json::to_vec(value).expect("json body"))
+            }
+            None => Body::empty(),
+        };
+        builder.body(body).expect("request")
+    }
+
+    async fn exec(router: &axum::Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let response = router.clone().oneshot(req).await.expect("request");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).expect("json")
+        };
+        (status, json)
+    }
+
+    fn assert_no_password_hash(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                assert!(
+                    !map.contains_key("password_hash"),
+                    "governance DTO leaked password_hash: {value}"
+                );
+                for nested in map.values() {
+                    assert_no_password_hash(nested);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for nested in items {
+                    assert_no_password_hash(nested);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Successful assignment creates under the system operator are recorded
+    /// under the actor's effective `system` scope.
+    async fn managed_assignment_audit_events(
+        store: &o3k_store::unified::O3kStore,
+    ) -> Vec<o3k_store::AuditEventRecord> {
+        let o3k_store::unified::O3kStore::Sqlite(sqlite) = store else {
+            panic!("test harness is sqlite-backed");
+        };
+        sqlite
+            .list_audit_events_page("system", None, 100)
+            .await
+            .expect("audit page")
+            .items
+            .into_iter()
+            .filter(|event| {
+                event.action == "governance:ManageAssignment" && event.outcome == "succeeded"
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn native_governance_operator_lifecycle_with_durable_audit() {
+        let harness = setup_harness(false).await;
+        let project_id = project_id_by_name(&harness.store, "service").await;
+        let principal_id = principal_id_by_name(&harness.store, "admin").await;
+        let role_id = role_id_by_name(&harness.store, "member").await;
+
+        let (status, projects) = exec(
+            &harness.router,
+            request("GET", "/operator/governance/projects", "operator", None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !projects["items"].as_array().expect("items").is_empty(),
+            "seeded projects must be visible: {projects}"
+        );
+        assert_no_password_hash(&projects);
+
+        let (status, principals) = exec(
+            &harness.router,
+            request("GET", "/operator/governance/principals", "operator", None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_no_password_hash(&principals);
+        for item in principals["items"].as_array().expect("items") {
+            assert!(
+                item["kind"].is_string(),
+                "principal kind must be present: {item}"
+            );
+        }
+
+        let body = serde_json::json!({
+            "principal_id": principal_id,
+            "project_id": project_id,
+            "role_id": role_id,
+        });
+        let (status, created) = exec(
+            &harness.router,
+            request(
+                "POST",
+                "/operator/governance/assignments",
+                "operator",
+                Some(&body),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "assignment create: {created}");
+        let id = created["id"].as_str().expect("assignment id").to_owned();
+
+        // Replaying the identical request must converge on the same durable
+        // assignment and create no duplicate authority.
+        let (status, replay) = exec(
+            &harness.router,
+            request(
+                "POST",
+                "/operator/governance/assignments",
+                "operator",
+                Some(&body),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "assignment replay: {replay}");
+        assert_eq!(replay["id"].as_str().expect("id"), id);
+        assert_eq!(replay["principal_id"], created["principal_id"]);
+        assert_eq!(replay["project_id"], created["project_id"]);
+        assert_eq!(replay["role_id"], created["role_id"]);
+
+        let uri = format!("/operator/governance/assignments?project_id={project_id}");
+        let (status, list) = exec(&harness.router, request("GET", &uri, "operator", None)).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = list["items"].as_array().expect("items");
+        assert_eq!(
+            items.len(),
+            1,
+            "expected exactly one assignment for the project: {list}"
+        );
+        assert_eq!(items[0]["id"].as_str().expect("id"), id);
+        assert_eq!(
+            items[0]["principal_id"].as_str().expect("principal"),
+            principal_id
+        );
+        assert_eq!(items[0]["role_id"].as_str().expect("role"), role_id);
+
+        let audit_events = managed_assignment_audit_events(&harness.store).await;
+        assert_eq!(
+            audit_events.len(),
+            1,
+            "replay must not create a second durable ManageAssignment audit event"
+        );
+        let event = &audit_events[0];
+        assert_eq!(event.effective_scope, "system");
+        let debug = format!("{event:?}");
+        assert!(!debug.contains("password"), "audit leaked secret: {debug}");
+        assert!(!debug.contains("secret"), "audit leaked secret: {debug}");
+        assert!(
+            !debug.contains("tenant-b-password"),
+            "audit leaked secret: {debug}"
+        );
+
+        let uri = format!("/operator/governance/assignments/{id}");
+        let (status, _) = exec(&harness.router, request("DELETE", &uri, "operator", None)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = exec(&harness.router, request("DELETE", &uri, "operator", None)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn native_governance_rejects_privilege_escalation() {
+        let harness = setup_harness(false).await;
+        let project_id = project_id_by_name(&harness.store, "service").await;
+        let principal_id = principal_id_by_name(&harness.store, "admin").await;
+        let role_id = role_id_by_name(&harness.store, "member").await;
+
+        let assignment_body = serde_json::json!({
+            "principal_id": principal_id,
+            "project_id": project_id,
+            "role_id": role_id,
+        });
+        let operator_body = serde_json::json!({ "principal_id": principal_id });
+
+        // A project-scoped caller carrying the `operator` role name is denied on
+        // every governance route.
+        for (method, uri, body) in [
+            ("GET", "/operator/governance/projects", None),
+            ("GET", "/operator/governance/assignments", None),
+            (
+                "POST",
+                "/operator/governance/assignments",
+                Some(&assignment_body),
+            ),
+            (
+                "POST",
+                "/operator/governance/operator-assignments",
+                Some(&operator_body),
+            ),
+        ] {
+            let (status, response) = exec(
+                &harness.router,
+                request(method, uri, "project-operator", body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {response}");
+        }
+
+        // The system operator can create the durable operator assignment.
+        let (status, created) = exec(
+            &harness.router,
+            request(
+                "POST",
+                "/operator/governance/operator-assignments",
+                "operator",
+                Some(&operator_body),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "operator assignment: {created}");
+        let id = created["id"].as_str().expect("id").to_owned();
+        assert_eq!(created["profile"], "operator-console");
+
+        let (status, list) = exec(
+            &harness.router,
+            request(
+                "GET",
+                "/operator/governance/operator-assignments",
+                "operator",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            list["items"]
+                .as_array()
+                .expect("items")
+                .iter()
+                .any(|item| item["id"] == id),
+            "created operator assignment must be listed: {list}"
+        );
+
+        let (status, replay) = exec(
+            &harness.router,
+            request(
+                "POST",
+                "/operator/governance/operator-assignments",
+                "operator",
+                Some(&operator_body),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "operator assignment replay: {replay}"
+        );
+        assert_eq!(replay["id"].as_str().expect("id"), id);
+
+        let unknown_role = serde_json::json!({
+            "principal_id": principal_id,
+            "project_id": project_id,
+            "role_id": "no-such-role",
+        });
+        let (status, _) = exec(
+            &harness.router,
+            request(
+                "POST",
+                "/operator/governance/assignments",
+                "operator",
+                Some(&unknown_role),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let unsupported_profile = serde_json::json!({
+            "principal_id": principal_id,
+            "profile": "root-console",
+        });
+        let (status, _) = exec(
+            &harness.router,
+            request(
+                "POST",
+                "/operator/governance/operator-assignments",
+                "operator",
+                Some(&unsupported_profile),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let uri = format!("/operator/governance/operator-assignments/{id}");
+        let (status, _) = exec(&harness.router, request("DELETE", &uri, "operator", None)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn native_governance_grant_and_revoke_converge_in_identity_snapshot() {
+        let harness = setup_harness(true).await;
+        let principal_id = principal_id_by_name(&harness.store, "admin").await;
+        assert_eq!(principal_id, "bootstrap-user");
+        let role_id = role_id_by_name(&harness.store, "member").await;
+        let identity = federated_identity();
+
+        let before = harness
+            .identity
+            .discover_federated_scopes(&identity)
+            .expect("scopes");
+        assert!(
+            before.iter().all(|scope| scope.id != EXTRA_PROJECT),
+            "target project unexpectedly discoverable before grant: {before:?}"
+        );
+
+        let body = serde_json::json!({
+            "principal_id": principal_id,
+            "project_id": EXTRA_PROJECT,
+            "role_id": role_id,
+        });
+        let (status, created) = exec(
+            &harness.router,
+            request(
+                "POST",
+                "/operator/governance/assignments",
+                "operator",
+                Some(&body),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "grant: {created}");
+        let id = created["id"].as_str().expect("id").to_owned();
+
+        // The HTTP mutation must have reloaded the shared identity snapshot:
+        // the project is discoverable without a process restart.
+        let after = harness
+            .identity
+            .discover_federated_scopes(&identity)
+            .expect("scopes");
+        assert!(
+            after.iter().any(|scope| scope.id == EXTRA_PROJECT),
+            "grant not visible in the identity snapshot: {after:?}"
+        );
+
+        let uri = format!("/operator/governance/assignments/{id}");
+        let (status, _) = exec(&harness.router, request("DELETE", &uri, "operator", None)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let after_delete = harness
+            .identity
+            .discover_federated_scopes(&identity)
+            .expect("scopes");
+        assert!(
+            after_delete.iter().all(|scope| scope.id != EXTRA_PROJECT),
+            "revoke not visible in the identity snapshot: {after_delete:?}"
+        );
+    }
+}

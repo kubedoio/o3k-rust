@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-governance-v1.schema.json",
+  "title": "Native IAM governance v1",
+  "description": "Versioned bounded native IAM governance projections over canonical O3K IAM authority. No credential material is representable.",
+  "oneOf": [
+    { "$ref": "#/$defs/projectPage" },
+    { "$ref": "#/$defs/principalPage" },
+    { "$ref": "#/$defs/rolePage" },
+    { "$ref": "#/$defs/assignmentPage" },
+    { "$ref": "#/$defs/operatorAssignmentPage" },
+    { "$ref": "#/$defs/capabilityList" },
+    { "$ref": "#/$defs/project" },
+    { "$ref": "#/$defs/principal" },
+    { "$ref": "#/$defs/role" },
+    { "$ref": "#/$defs/assignment" },
+    { "$ref": "#/$defs/operatorAssignment" }
+  ],
+  "$defs": {
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "domain_id", "name", "enabled", "created_at"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "domain_id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "created_at": { "type": "string", "minLength": 1 }
+      }
+    },
+    "principal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "domain_id", "name", "kind", "enabled", "created_at"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "domain_id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "kind": { "type": "string", "enum": ["user", "service"] },
+        "email": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "created_at": { "type": "string", "minLength": 1 }
+      }
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "created_at"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "created_at": { "type": "string", "minLength": 1 }
+      }
+    },
+    "assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "principal_id", "project_id", "role_id", "created_at"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "principal_id": { "type": "string", "minLength": 1 },
+        "project_id": { "type": "string", "minLength": 1 },
+        "role_id": { "type": "string", "minLength": 1 },
+        "created_at": { "type": "string", "minLength": 1 }
+      }
+    },
+    "operatorAssignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "principal_id", "profile", "enabled", "created_at", "updated_at"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "principal_id": { "type": "string", "minLength": 1 },
+        "profile": { "type": "string", "minLength": 1 },
+        "enabled": { "type": "boolean" },
+        "created_at": { "type": "string", "minLength": 1 },
+        "updated_at": { "type": "string", "minLength": 1 }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "resource_type", "required_roles", "require_ownership"],
+      "properties": {
+        "action": { "type": "string", "minLength": 1 },
+        "resource_type": { "type": "string", "minLength": 1 },
+        "required_roles": { "type": "array", "items": { "type": "string" } },
+        "require_ownership": { "type": "boolean" }
+      }
+    },
+    "projectPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "has_more"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/project" } },
+        "has_more": { "type": "boolean" },
+        "next_cursor": { "type": "string" }
+      }
+    },
+    "principalPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "has_more"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/principal" } },
+        "has_more": { "type": "boolean" },
+        "next_cursor": { "type": "string" }
+      }
+    },
+    "rolePage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "has_more"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/role" } },
+        "has_more": { "type": "boolean" },
+        "next_cursor": { "type": "string" }
+      }
+    },
+    "assignmentPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "has_more"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/assignment" } },
+        "has_more": { "type": "boolean" },
+        "next_cursor": { "type": "string" }
+      }
+    },
+    "operatorAssignmentPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "has_more"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 200,
+          "items": { "$ref": "#/$defs/operatorAssignment" }
+        },
+        "has_more": { "type": "boolean" },
+        "next_cursor": { "type": "string" }
+      }
+    },
+    "capabilityList": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items"],
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/capability" } }
+      }
+    }
+  }
+}

@@ -197,6 +197,174 @@ mod tests {
         Ok(())
     }
 
+    fn test_system_user_context_without_operator_role() -> AuthContext {
+        let principal = UserPrincipal::new(PrincipalId::new_unchecked("usr-2"), "plain-user", None);
+        AuthContext::new(
+            Principal::User(principal),
+            OwnershipScope::new(
+                ScopeId::new_unchecked("system"),
+                ScopeKind::System,
+                Some("System".to_owned()),
+                None,
+            ),
+            vec![],
+            1700000000,
+            1700003600,
+            "audit-plain",
+            "req-plain",
+            None,
+        )
+    }
+
+    #[test]
+    fn governance_actions_require_system_scope_and_operator_role() -> Result<(), KernelError> {
+        let auth = StaticAuthorizer::standard();
+        let target = ResourceTarget::collection(
+            ResourceType::new("governance", "governance")?,
+            Some(ScopeId::new("system")?),
+        );
+        let system = test_system_operator_context();
+
+        for action in [
+            ActionId::new("governance", "ReadGovernance")?,
+            ActionId::new("governance", "ManageAssignment")?,
+            ActionId::new("governance", "ManageOperatorAssignment")?,
+        ] {
+            let request = AuthorizationRequest {
+                auth_context: &system,
+                action: action.clone(),
+                resource_target: target.clone(),
+            };
+            assert!(
+                auth.authorize(&request).is_allowed(),
+                "system operator must satisfy {action}"
+            );
+
+            // A project-scoped caller, even one with an `operator` role string
+            // inside the project, must never satisfy a governance action.
+            let mut project = test_user_context("usr-1", "proj-1");
+            project = AuthContext::new(
+                project.principal().clone(),
+                project.effective_scope().clone(),
+                vec!["operator".to_owned()],
+                1700000000,
+                1700003600,
+                "audit-project",
+                "req-project",
+                None,
+            );
+            let request = AuthorizationRequest {
+                auth_context: &project,
+                action: action.clone(),
+                resource_target: target.clone(),
+            };
+            assert_eq!(
+                auth.authorize(&request).reason(),
+                &DecisionReason::ScopeMismatch,
+                "project scope must not satisfy {action}"
+            );
+
+            // System scope without the durable operator role is unauthorized.
+            let no_role = test_system_user_context_without_operator_role();
+            let request = AuthorizationRequest {
+                auth_context: &no_role,
+                action: action.clone(),
+                resource_target: target.clone(),
+            };
+            assert_eq!(
+                auth.authorize(&request).reason(),
+                &DecisionReason::UnauthorizedRole,
+                "system scope without operator role must not satisfy {action}"
+            );
+
+            let service = test_service_context("svc-1", "system");
+            let request = AuthorizationRequest {
+                auth_context: &service,
+                action,
+                resource_target: target.clone(),
+            };
+            assert_eq!(
+                auth.authorize(&request).reason(),
+                &DecisionReason::UnsupportedPrincipal
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn governance_capabilities_expose_canonical_policies() -> Result<(), KernelError> {
+        let auth = StaticAuthorizer::standard();
+        let capabilities = auth.capabilities();
+        assert!(!capabilities.is_empty());
+        let expected_resource_type = ResourceType::new("governance", "governance")?;
+        for action in [
+            "ReadGovernance",
+            "ManageAssignment",
+            "ManageOperatorAssignment",
+        ] {
+            let expected = ActionId::new_unchecked("governance", action);
+            let mut matched = false;
+            for policy in &capabilities {
+                if policy.action == expected {
+                    matched = true;
+                    assert_eq!(policy.expected_resource_type, expected_resource_type);
+                    assert_eq!(policy.required_roles, vec!["operator".to_owned()]);
+                }
+            }
+            assert!(matched, "missing capability for governance:{action}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn governance_namespace_is_system_gated_for_any_action() -> Result<(), KernelError> {
+        let mut auth = StaticAuthorizer::standard();
+        // Register a hypothetical future governance action that only declares
+        // the operator role, to prove the namespace scope gate cannot be
+        // accidentally omitted from new governance actions.
+        auth.register(ActionPolicy {
+            action: ActionId::new("governance", "FutureAdminAction")?,
+            expected_resource_type: ResourceType::new("governance", "governance")?,
+            accepted_principals: vec![PrincipalKind::User],
+            require_ownership: false,
+            required_roles: vec!["operator".to_owned()],
+        });
+        let target = ResourceTarget::collection(
+            ResourceType::new("governance", "governance")?,
+            Some(ScopeId::new("system")?),
+        );
+        // A project-scoped caller with an `operator` role string is denied.
+        let mut project = test_user_context("usr-1", "proj-1");
+        project = AuthContext::new(
+            project.principal().clone(),
+            project.effective_scope().clone(),
+            vec!["operator".to_owned()],
+            1700000000,
+            1700003600,
+            "audit-future",
+            "req-future",
+            None,
+        );
+        let request = AuthorizationRequest {
+            auth_context: &project,
+            action: ActionId::new("governance", "FutureAdminAction")?,
+            resource_target: target.clone(),
+        };
+        assert_eq!(
+            auth.authorize(&request).reason(),
+            &DecisionReason::ScopeMismatch
+        );
+        // A system-scoped operator is allowed.
+        let system = test_system_operator_context();
+        let request = AuthorizationRequest {
+            auth_context: &system,
+            action: ActionId::new("governance", "FutureAdminAction")?,
+            resource_target: target,
+        };
+        assert!(auth.authorize(&request).is_allowed());
+        Ok(())
+    }
+
     #[test]
     fn authorizer_standard_deny_cross_project() -> Result<(), KernelError> {
         let auth = StaticAuthorizer::standard();

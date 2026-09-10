@@ -118,6 +118,7 @@ APPROVED_SQL_PATHS = {
     "crates/o3k-store/src/coordination.rs",
     "crates/o3k-store/src/storage.rs",
     "crates/o3k-store/src/quota.rs",
+    "crates/o3k-store/src/governance.rs",
     "crates/o3k-store/src/reusable_policy.rs",
     "crates/o3k-store/src/artifact_transfer.rs",
     "crates/o3k-store/src/server_state.rs",

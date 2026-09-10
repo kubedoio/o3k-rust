@@ -12,6 +12,7 @@ mod audit;
 mod compute;
 mod coordination;
 mod core;
+mod governance;
 mod identity;
 mod image;
 mod network;
