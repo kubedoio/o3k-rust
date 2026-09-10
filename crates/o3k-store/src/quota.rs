@@ -647,6 +647,17 @@ async fn query_in_use_usage(
             let count: i64 = row.get(0);
             parse_non_negative_u64(count, "network:ports count")
         }
+        ("network", "address_allocations") => {
+            let row = sqlx::query(
+                "SELECT COUNT(*) FROM network_address_allocations WHERE project_id = ?",
+            )
+            .bind(scope_id)
+            .fetch_one(conn)
+            .await
+            .map_err(StoreError::Database)?;
+            let count: i64 = row.get(0);
+            parse_non_negative_u64(count, "network:address_allocations count")
+        }
         _ => Err(StoreError::Corrupt(format!(
             "unknown or unregistered limit key '{key}'"
         ))),
@@ -764,6 +775,26 @@ async fn query_reservation_by_op(
 mod tests {
     use super::*;
     use o3k_kernel::ScopeId;
+
+    fn audit_event(scope: &str) -> AuditEventRecord {
+        AuditEventRecord {
+            event_id: format!("quota-audit-{}", uuid::Uuid::now_v7()),
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            request_id: "quota-request".into(),
+            audit_id: "quota-audit".into(),
+            principal_id: "operator".into(),
+            principal_kind: "user".into(),
+            effective_scope: "system".into(),
+            service: "quota".into(),
+            action: "quota:ManageQuota".into(),
+            resource_type: Some("quota:limit".into()),
+            resource_id: Some("compute:servers".into()),
+            owner_scope: Some(scope.into()),
+            operation_id: None,
+            outcome: "succeeded".into(),
+            reason_category: Some("quota_update".into()),
+        }
+    }
 
     #[tokio::test]
     async fn quota_repository_lifecycle_and_enforcement() -> Result<(), StoreError> {
@@ -1258,6 +1289,53 @@ mod tests {
         drop(store_a);
         drop(store_b);
         let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quota_and_required_audit_roll_back_as_one_transaction()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = crate::testkit::open_memory().await?;
+        let scope = OwnershipScope::project(ScopeId::new_unchecked("audit-rollback"), None, None);
+        let key = LimitKey::compute_servers();
+
+        // A database-side failure stands in for an unavailable required Audit
+        // sink.  The quota repository must roll back both writes.
+        sqlx::query(
+            "CREATE TRIGGER quota_test_fail_audit BEFORE INSERT ON audit_events
+             BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END",
+        )
+        .execute(&store.pool)
+        .await?;
+        let failed = store
+            .set_limit_if_generation_with_audit(
+                &scope,
+                &key,
+                LimitValue::Maximum(3),
+                0,
+                &audit_event(scope.id().as_str()),
+            )
+            .await;
+        assert!(matches!(failed, Err(StoreError::Database(_))));
+        assert_eq!(
+            store.get_limit_state(&scope, &key).await?,
+            (LimitValue::Unlimited, 0)
+        );
+
+        sqlx::query("DROP TRIGGER quota_test_fail_audit")
+            .execute(&store.pool)
+            .await?;
+        let generation = store
+            .set_limit_if_generation_with_audit(
+                &scope,
+                &key,
+                LimitValue::Maximum(3),
+                0,
+                &audit_event(scope.id().as_str()),
+            )
+            .await?;
+        assert_eq!(generation, 1);
+        assert_eq!(store.get_limit_state(&scope, &key).await?.1, 1);
         Ok(())
     }
 }

@@ -220,6 +220,9 @@ async fn build_http_runtime(
         Some(network_reader),
     )?
     .with_resource_application(application)
+    .with_quota_reader(Arc::new(o3kd::native_adapters::QuotaReaderAdapter::new(
+        store.clone(),
+    )))
     .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
     Ok((
         o3k_api::router_with_state(
@@ -800,6 +803,26 @@ async fn run_http_restart_conformance(
         build_http_runtime(Arc::new(open_http_restart_store(&backend).await?)).await?;
     let token_a = issue_token_for(&app_a, "user-a", "password-a", "project-a").await?;
 
+    let quota = get_json(&app_a, "/o3k/v1/quota", &token_a).await?;
+    assert_eq!(quota["version"], "v1");
+    assert_eq!(quota["scope"]["id"], "project-a");
+    assert!(quota["items"].as_array().is_some());
+    let quota_dimension = get_json(&app_a, "/o3k/v1/quota/compute/servers", &token_a).await?;
+    assert_eq!(quota_dimension["namespace"], "compute");
+    assert_eq!(quota_dimension["key"], "servers");
+    // The tenant token cannot select a foreign project through the operator
+    // surface, and the native read has no caller-controlled scope parameter.
+    assert_eq!(
+        status_for(
+            &app_a,
+            Method::GET,
+            "/o3k/v1/operator/quotas/project-b",
+            &token_a
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+
     let network = app_a
         .clone()
         .oneshot(
@@ -887,6 +910,8 @@ async fn run_http_restart_conformance(
         .ok_or("native server id")?
         .to_owned();
     assert!(provider_a.instance_count() >= 2);
+    let quota_after_create = get_json(&app_a, "/o3k/v1/quota/compute/servers", &token_a).await?;
+    assert!(quota_after_create["usage"].as_u64().unwrap_or_default() >= 2);
     drop(app_a);
     drop(provider_a);
 
@@ -950,6 +975,8 @@ async fn run_http_restart_conformance(
         .await,
         StatusCode::NOT_FOUND
     );
+    let quota_after_release = get_json(&app_b, "/o3k/v1/quota/compute/servers", &token_b).await?;
+    assert!(quota_after_release["usage"].as_u64().unwrap_or_default() < 2);
     Ok(())
 }
 

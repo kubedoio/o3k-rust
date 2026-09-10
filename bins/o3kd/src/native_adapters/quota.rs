@@ -91,7 +91,7 @@ impl o3k_native_api::quota::QuotaReader for QuotaReaderAdapter {
         )
         .with_resource(
             o3k_kernel::ResourceType::new_unchecked("quota", "quota"),
-            None,
+            Some(format!("{}:{}", key.namespace(), key.resource())),
             Some(scope.clone()),
         )
         .with_reason(format!("dimension={}", key));

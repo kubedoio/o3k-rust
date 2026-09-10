@@ -628,6 +628,17 @@ impl PostgresStore {
                 let count: i64 = row.get(0);
                 parse_pg_non_negative_u64(count, "network:ports count")
             }
+            ("network", "address_allocations") => {
+                let row = sqlx::query(
+                    "SELECT COUNT(*)::BIGINT FROM network_address_allocations WHERE project_id = $1",
+                )
+                .bind(scope_id)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(StoreError::Database)?;
+                let count: i64 = row.get(0);
+                parse_pg_non_negative_u64(count, "network:address_allocations count")
+            }
             _ => Err(StoreError::Corrupt(format!(
                 "unknown or unregistered limit key '{key}'"
             ))),
