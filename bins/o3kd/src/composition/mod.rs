@@ -645,6 +645,12 @@ pub async fn build_composition(
                 oidc_validator: oidc_validator.clone(),
             }) as std::sync::Arc<dyn o3k_native_api::auth::TokenIssuer>
         });
+    // The governance adapter shares the same identity snapshot as the token
+    // issuer, so role/operator grant and revoke converge into subsequent token
+    // issuance and scope discovery without a process restart.
+    let governance_identity: Option<std::sync::Arc<o3k_identity::TokenService>> = identity
+        .as_ref()
+        .map(|id_service| std::sync::Arc::new(id_service.clone()));
     let external_controllers = external_controllers_from_config().await?;
     for (service_id, controller) in &external_controllers {
         let manifest = native_manifest_registry
@@ -926,6 +932,12 @@ pub async fn build_composition(
     .with_audit_reader(std::sync::Arc::new(
         crate::native_adapters::AuditReaderAdapter {
             store: store.clone(),
+        },
+    ))
+    .with_governance_reader(std::sync::Arc::new(
+        crate::native_adapters::GovernanceReaderAdapter {
+            store: native_api_store.clone(),
+            identity: governance_identity,
         },
     ))
     .with_resource_application(generic_application)

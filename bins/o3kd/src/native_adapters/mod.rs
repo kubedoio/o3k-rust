@@ -1,6 +1,7 @@
 mod audit;
 mod composition;
 mod compute;
+mod governance;
 mod helpers;
 mod network;
 mod operation;
@@ -15,6 +16,7 @@ mod tests;
 pub use audit::AuditReaderAdapter;
 pub use composition::CompositionResourceHandler;
 pub use compute::ServerReaderAdapter;
+pub use governance::GovernanceReaderAdapter;
 pub use network::NetworkReaderAdapter;
 pub use operation::OperationReaderAdapter;
 pub use quota::QuotaReaderAdapter;

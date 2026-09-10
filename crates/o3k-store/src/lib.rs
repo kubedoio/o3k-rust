@@ -29,6 +29,7 @@ use std::os::unix::fs::PermissionsExt;
 mod artifact_transfer;
 pub mod conformance;
 pub mod coordination;
+pub mod governance;
 pub mod postgres;
 pub mod quota;
 mod reusable_policy;
@@ -333,6 +334,10 @@ pub(crate) fn canonical_resource_type_for_record(
         .map_err(|e| StoreError::Corrupt(format!("invalid canonical resource type: {e}")))
 }
 
+pub use governance::{
+    CreateAssignmentOutcome, GovernanceAssignmentFilter, GovernancePrincipalRecord,
+    GovernanceReferences, GovernanceRepository, GovernanceRoleGrantRecord,
+};
 pub use quota::QuotaRepository;
 
 /// Test-only construction helpers for the SQLite adapter.

@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    sync::Arc,
+    sync::{Arc, RwLock, RwLockReadGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -272,9 +272,9 @@ pub struct SnapshotRegion {
 }
 
 /// Immutable identity universe loaded from the durable store. `TokenService`
-/// authenticates and validates against this snapshot; restarting the control
-/// plane reloads it from the durable records, so identity state survives
-/// restart.
+/// authenticates and validates against this snapshot and replaces it from the
+/// durable records via [`TokenService::reload`]; identity state also survives a
+/// control-plane restart.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IdentitySnapshot {
     pub domains: Vec<SnapshotDomain>,
@@ -803,17 +803,20 @@ fn now_rfc3339() -> String {
 
 #[derive(Clone)]
 pub struct TokenService {
-    snapshot: IdentitySnapshot,
+    snapshot: Arc<RwLock<IdentitySnapshot>>,
     signing_key: Secret,
     token_ttl: Duration,
     catalog_endpoint: String,
     registry: Option<o3k_kernel::KernelRegistry>,
+    /// Serializes snapshot reloads so a reload triggered by an earlier durable
+    /// commit can never overwrite one triggered by a later commit.
+    reload_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl TokenService {
     /// Loads the durable identity snapshot from the store. The snapshot is
-    /// authoritative for authentication, roles, and the catalog until the
-    /// control plane restarts.
+    /// authoritative for authentication, roles, and the catalog until it is
+    /// replaced by [`TokenService::reload`].
     pub async fn load(
         store: Arc<dyn IdentityRepository>,
         signing_key: Secret,
@@ -861,11 +864,12 @@ impl TokenService {
             })
             .unwrap_or_else(|| "http://127.0.0.1:8080".to_owned());
         Ok(Self {
-            snapshot,
+            snapshot: Arc::new(RwLock::new(snapshot)),
             signing_key,
             token_ttl,
             catalog_endpoint,
             registry: None,
+            reload_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -888,9 +892,36 @@ impl TokenService {
         &self.catalog_endpoint
     }
 
-    #[must_use]
-    pub fn snapshot(&self) -> &IdentitySnapshot {
-        &self.snapshot
+    pub fn snapshot(&self) -> RwLockReadGuard<'_, IdentitySnapshot> {
+        self.snapshot_guard()
+    }
+
+    fn snapshot_guard(&self) -> RwLockReadGuard<'_, IdentitySnapshot> {
+        self.snapshot
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Reloads the canonical identity snapshot from durable storage. This makes
+    /// governance mutations (role assignments, operator assignments) visible to
+    /// subsequent token issuance without a process restart. Already-issued
+    /// tokens keep their original lifetime; their effective authorization is
+    /// re-derived from the fresh snapshot on the next verification/refresh.
+    ///
+    /// The load+swap is serialized so a reload triggered by an earlier durable
+    /// commit can never overwrite one triggered by a later commit: the last
+    /// writer always loaded the most recent durable state.
+    pub async fn reload(&self, store: Arc<dyn IdentityRepository>) -> Result<(), AuthError> {
+        let _reload_guard = self.reload_lock.lock().await;
+        let snapshot = load_snapshot(store.as_ref()).await?;
+        if snapshot.domains.is_empty() {
+            return Err(AuthError::IdentityUnavailable);
+        }
+        *self
+            .snapshot
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = snapshot;
+        Ok(())
     }
 
     /// Returns only enabled project scopes currently assigned to the
@@ -900,30 +931,24 @@ impl TokenService {
         &self,
         identity: &oidc::ValidatedExternalIdentity,
     ) -> Result<Vec<DiscoverableScope>, AuthError> {
-        let binding = self
-            .snapshot
+        let snapshot = self.snapshot_guard();
+        let binding = snapshot
             .federated_binding_for(identity)
             .ok_or(AuthError::Unauthorized)?;
-        let user = self
-            .snapshot
+        let user = snapshot
             .user_by_id(&binding.principal_id)
             .filter(|user| user.enabled)
             .ok_or(AuthError::Unauthorized)?;
 
-        let mut scopes: Vec<DiscoverableScope> = self
-            .snapshot
+        let mut scopes: Vec<DiscoverableScope> = snapshot
             .projects
             .iter()
             .filter(|project| {
                 project.enabled
-                    && self
-                        .snapshot
+                    && snapshot
                         .domain_by_id(&project.domain_id)
                         .is_some_and(|domain| domain.enabled)
-                    && !self
-                        .snapshot
-                        .role_names_for(&user.id, &project.id)
-                        .is_empty()
+                    && !snapshot.role_names_for(&user.id, &project.id).is_empty()
             })
             .map(|project| DiscoverableScope {
                 id: project.id.clone(),
@@ -944,26 +969,23 @@ impl TokenService {
         identity: &oidc::ValidatedExternalIdentity,
         requested_scope_id: &str,
     ) -> Result<FederatedScopeAuthorization, AuthError> {
-        let binding = self
-            .snapshot
+        let snapshot = self.snapshot_guard();
+        let binding = snapshot
             .federated_binding_for(identity)
             .ok_or(AuthError::Unauthorized)?;
-        let user = self
-            .snapshot
+        let user = snapshot
             .user_by_id(&binding.principal_id)
             .filter(|user| user.enabled)
             .ok_or(AuthError::Unauthorized)?;
-        let project = self
-            .snapshot
+        let project = snapshot
             .project_by_id(requested_scope_id)
             .filter(|project| project.enabled)
             .ok_or(AuthError::Unauthorized)?;
-        let domain = self
-            .snapshot
+        let domain = snapshot
             .domain_by_id(&project.domain_id)
             .filter(|domain| domain.enabled)
             .ok_or(AuthError::Unauthorized)?;
-        let roles = self.snapshot.role_names_for(&user.id, &project.id);
+        let roles = snapshot.role_names_for(&user.id, &project.id);
         if roles.is_empty() {
             return Err(AuthError::Unauthorized);
         }
@@ -1023,8 +1045,8 @@ impl TokenService {
                     .ok_or(AuthError::InvalidRequest)?
                     .id;
                 let verified = self.verify(token_id, now)?;
-                let user = self
-                    .snapshot
+                let snapshot = self.snapshot_guard();
+                let user = snapshot
                     .user_by_id(&verified.user_id)
                     .ok_or(AuthError::InvalidToken)?;
                 if !user.enabled {
@@ -1046,7 +1068,7 @@ impl TokenService {
             return Err(AuthError::Unauthorized);
         }
 
-        let roles = self.snapshot.role_names_for(&user_id, &project.id);
+        let roles = self.snapshot_guard().role_names_for(&user_id, &project.id);
         if roles.is_empty() {
             // Cross-project scoping fails closed before any token is issued.
             return Err(AuthError::Unauthorized);
@@ -1098,16 +1120,15 @@ impl TokenService {
         &self,
         identity: &oidc::ValidatedExternalIdentity,
     ) -> Result<FederatedSystemAuthorization, AuthError> {
-        let binding = self
-            .snapshot
+        let snapshot = self.snapshot_guard();
+        let binding = snapshot
             .federated_binding_for(identity)
             .ok_or(AuthError::Unauthorized)?;
-        let user = self
-            .snapshot
+        let user = snapshot
             .user_by_id(&binding.principal_id)
             .filter(|user| user.enabled)
             .ok_or(AuthError::Unauthorized)?;
-        self.snapshot
+        snapshot
             .operator_assignment_for(&user.id, "operator-console")
             .ok_or(AuthError::Unauthorized)?;
         Ok(FederatedSystemAuthorization {
@@ -1208,15 +1229,15 @@ impl TokenService {
 
         // Validation is fail-closed against the durable identity universe:
         // the subject user and scoped project must still exist and be enabled.
-        let user = self.snapshot.user_by_id(&claims.sub);
-        let project = self.snapshot.project_by_id(&claims.project);
+        let snapshot = self.snapshot_guard();
+        let user = snapshot.user_by_id(&claims.sub);
+        let project = snapshot.project_by_id(&claims.project);
         match (user, project) {
             (Some(user), Some(project)) if user.enabled && project.enabled => {}
             (Some(user), None)
                 if claims.project == "system"
                     && user.enabled
-                    && self
-                        .snapshot
+                    && snapshot
                         .operator_assignment_for(&user.id, "operator-console")
                         .is_some() => {}
             _ => return Err(AuthError::InvalidToken),
@@ -1237,7 +1258,7 @@ impl TokenService {
         let roles = if verified.project_id == "system" {
             vec![("operator-console".to_owned(), "operator".to_owned())]
         } else {
-            self.snapshot
+            self.snapshot_guard()
                 .role_names_for(&verified.user_id, &verified.project_id)
         };
         let issued_at = format_time(verified.issued)?;
@@ -1256,12 +1277,17 @@ impl TokenService {
 
     pub fn auth_context(&self, token: &str, now: SystemTime) -> Result<AuthContext, AuthError> {
         let verified = self.verify(token, now)?;
-        let user = self
-            .snapshot
+        let snapshot = self.snapshot_guard();
+        let user = snapshot
             .user_by_id(&verified.user_id)
             .ok_or(AuthError::InvalidToken)?;
         if verified.project_id == "system" {
             let principal_id = PrincipalId::new(&user.id).map_err(|_| AuthError::InvalidToken)?;
+            // The durable operator-console assignment is enforced by `verify`
+            // above; the `operator` role here is the canonical projection that
+            // system-scoped policies match on. The real gate is the System
+            // scope, so do not remove the verify-side assignment check and
+            // assume this role string alone authorizes system actions.
             return Ok(AuthContext::new(
                 Principal::User(UserPrincipal::new(principal_id, &user.name, None)),
                 OwnershipScope::new(
@@ -1278,16 +1304,13 @@ impl TokenService {
                 None,
             ));
         }
-        let project = self
-            .snapshot
+        let project = snapshot
             .project_by_id(&verified.project_id)
             .ok_or(AuthError::InvalidToken)?;
-        let domain = self
-            .snapshot
+        let domain = snapshot
             .domain_by_id(&project.domain_id)
             .ok_or(AuthError::InvalidToken)?;
-        let role_names: Vec<String> = self
-            .snapshot
+        let role_names: Vec<String> = snapshot
             .role_names_for(&user.id, &project.id)
             .into_iter()
             .map(|(_id, name)| name)
@@ -1336,27 +1359,24 @@ impl TokenService {
         &self,
         reference: Option<&DomainReference>,
     ) -> Result<SnapshotDomain, AuthError> {
+        let snapshot = self.snapshot_guard();
         let Some(reference) = reference else {
-            return self
-                .snapshot
+            return snapshot
                 .domain_by_name("Default")
-                .or_else(|| self.snapshot.domain_by_id("default"))
+                .or_else(|| snapshot.domain_by_id("default"))
                 .cloned()
                 .ok_or(AuthError::Unauthorized);
         };
         match (&reference.id, &reference.name) {
-            (Some(id), None) => self
-                .snapshot
+            (Some(id), None) => snapshot
                 .domain_by_id(id)
                 .cloned()
                 .ok_or(AuthError::Unauthorized),
-            (None, Some(name)) => self
-                .snapshot
+            (None, Some(name)) => snapshot
                 .domain_by_name(name)
                 .cloned()
                 .ok_or(AuthError::Unauthorized),
-            (Some(id), Some(name)) => self
-                .snapshot
+            (Some(id), Some(name)) => snapshot
                 .domain_by_id(id)
                 .filter(|domain| domain.name == *name)
                 .cloned()
@@ -1367,11 +1387,11 @@ impl TokenService {
 
     fn resolve_user(&self, reference: &UserReference) -> Result<SnapshotUser, AuthError> {
         let domain = self.resolve_domain(reference.domain.as_ref())?;
+        let snapshot = self.snapshot_guard();
         let user = match (&reference.id, &reference.name) {
-            (Some(id), None) => self.snapshot.user_by_id(id),
-            (None, Some(name)) => self.snapshot.user_by_name(domain.id.as_str(), name),
-            (Some(id), Some(name)) => self
-                .snapshot
+            (Some(id), None) => snapshot.user_by_id(id),
+            (None, Some(name)) => snapshot.user_by_name(domain.id.as_str(), name),
+            (Some(id), Some(name)) => snapshot
                 .user_by_id(id)
                 .filter(|user| user.name == *name && user.domain_id == domain.id),
             (None, None) => None,
@@ -1389,11 +1409,11 @@ impl TokenService {
 
     fn resolve_project(&self, reference: &ProjectReference) -> Result<SnapshotProject, AuthError> {
         let domain = self.resolve_domain(reference.domain.as_ref())?;
+        let snapshot = self.snapshot_guard();
         let project = match (&reference.id, &reference.name) {
-            (Some(id), None) => self.snapshot.project_by_id(id),
-            (None, Some(name)) => self.snapshot.project_by_name(domain.id.as_str(), name),
-            (Some(id), Some(name)) => self
-                .snapshot
+            (Some(id), None) => snapshot.project_by_id(id),
+            (None, Some(name)) => snapshot.project_by_name(domain.id.as_str(), name),
+            (Some(id), Some(name)) => snapshot
                 .project_by_id(id)
                 .filter(|project| project.name == *name && project.domain_id == domain.id),
             (None, None) => None,
@@ -1420,8 +1440,9 @@ impl TokenService {
         expires_at: String,
     ) -> Result<TokenDetails, AuthError> {
         let user = self
-            .snapshot
+            .snapshot_guard()
             .user_by_id(user_id)
+            .cloned()
             .ok_or(AuthError::InvalidToken)?;
         if project_id == "system" {
             let role_details = roles
@@ -1457,16 +1478,19 @@ impl TokenService {
             });
         }
         let project = self
-            .snapshot
+            .snapshot_guard()
             .project_by_id(project_id)
+            .cloned()
             .ok_or(AuthError::InvalidToken)?;
         let user_domain = self
-            .snapshot
+            .snapshot_guard()
             .domain_by_id(&user.domain_id)
+            .cloned()
             .ok_or(AuthError::InvalidToken)?;
         let project_domain = self
-            .snapshot
+            .snapshot_guard()
             .domain_by_id(&project.domain_id)
+            .cloned()
             .ok_or(AuthError::InvalidToken)?;
 
         let mut role_details: Vec<RoleDetails> = roles
@@ -1508,8 +1532,8 @@ impl TokenService {
     /// URLs are validated configuration and never derived from request
     /// headers. The `{project_id}` placeholder is substituted per token scope.
     fn catalog(&self, project_id: &str) -> Vec<ServiceDetails> {
-        let cinder_url = self
-            .snapshot
+        let snapshot = self.snapshot_guard();
+        let cinder_url = snapshot
             .endpoints
             .iter()
             .find(|ep| ep.service_id == "cinder")
@@ -1519,8 +1543,7 @@ impl TokenService {
             o3k_kernel::KernelRegistry::standard(&self.catalog_endpoint, cinder_url.as_deref())
         });
 
-        let enabled_services: std::collections::HashSet<&str> = self
-            .snapshot
+        let enabled_services: std::collections::HashSet<&str> = snapshot
             .services
             .iter()
             .filter(|s| s.enabled)
@@ -2072,7 +2095,7 @@ mod tests {
         assert_eq!(alice_scopes[0].kind, ScopeKind::Project);
         assert!(alice_scopes[0].can_request_token);
 
-        let mut bob = service.snapshot.clone();
+        let mut bob = service.snapshot().clone();
         bob.projects.push(SnapshotProject {
             id: "project-b".to_owned(),
             domain_id: "default".to_owned(),
@@ -2139,7 +2162,7 @@ mod tests {
 
     #[test]
     fn federated_rescoping_rechecks_disabled_and_removed_assignments() -> Result<(), AuthError> {
-        let mut snapshot = service_with_snapshot()?.snapshot;
+        let mut snapshot = service_with_snapshot()?.snapshot().clone();
         let project_id = "eba29e2d-53de-461d-ae91-ede7402713cb";
         let identity = alice_identity();
         let Some(project) = snapshot
@@ -2234,7 +2257,7 @@ mod tests {
         assert_eq!(context.effective_scope().id().as_str(), "system");
         assert_eq!(context.roles(), &["operator"]);
 
-        let mut no_operator = service.snapshot.clone();
+        let mut no_operator = service.snapshot().clone();
         no_operator.operator_assignments.clear();
         let no_operator = TokenService::from_snapshot(
             no_operator,
@@ -2246,7 +2269,7 @@ mod tests {
             Err(AuthError::Unauthorized)
         ));
 
-        let mut service_binding = service.snapshot.clone();
+        let mut service_binding = service.snapshot().clone();
         service_binding.federated_bindings[0].principal_id = "cinder".to_owned();
         service_binding.federated_bindings[0].principal_type = "service".to_owned();
         service_binding
@@ -2783,6 +2806,126 @@ mod tests {
             .map_err(|_| AuthError::IdentityUnavailable)?;
         assert!(service_roles.contains(&"admin".to_owned()));
         assert!(service_roles.contains(&"service".to_owned()));
+        Ok(())
+    }
+
+    async fn reloadable_service() -> Result<(Arc<dyn IdentityRepository>, TokenService), AuthError>
+    {
+        let store: Arc<dyn IdentityRepository> = Arc::new(
+            o3k_store::testkit::open_memory()
+                .await
+                .map_err(|_| AuthError::IdentityUnavailable)?,
+        );
+        seed_identity_defaults(
+            store.as_ref(),
+            &BootstrapConfig {
+                catalog_endpoint: "http://127.0.0.1:18080".to_owned(),
+                bootstrap_password: Secret::new("password".to_owned()),
+                cinder_password: None,
+                cinder_endpoint: None,
+                pbkdf2_iterations: 1_000,
+                extra_projects: Vec::new(),
+            },
+        )
+        .await
+        .map_err(|_| AuthError::IdentityUnavailable)?;
+        store
+            .insert_federated_binding(&FederatedBindingRecord {
+                id: "reload-binding".to_owned(),
+                trusted_issuer_id: "issuer-a".to_owned(),
+                issuer: "https://idp.example.test".to_owned(),
+                subject: "alice".to_owned(),
+                principal_id: "bootstrap-user".to_owned(),
+                principal_type: "user".to_owned(),
+                enabled: true,
+                created_at: "2026-09-06T00:00:00Z".to_owned(),
+                updated_at: "2026-09-06T00:00:00Z".to_owned(),
+            })
+            .await
+            .map_err(|_| AuthError::IdentityUnavailable)?;
+        let service = TokenService::load(
+            store.clone(),
+            Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+            Duration::from_secs(3600),
+        )
+        .await?;
+        Ok((store, service))
+    }
+
+    #[tokio::test]
+    async fn reload_picks_up_new_role_assignment() -> Result<(), AuthError> {
+        let (store, service) = reloadable_service().await?;
+        let identity = alice_identity();
+        let before = service.discover_federated_scopes(&identity)?;
+        assert!(before.iter().all(|scope| scope.id != "service-project"));
+
+        store
+            .insert_keystone_role_assignment(&o3k_store::KeystoneRoleAssignmentRecord {
+                id: "assignment-governance-1".to_owned(),
+                user_id: "bootstrap-user".to_owned(),
+                project_id: "service-project".to_owned(),
+                role_id: "member".to_owned(),
+                created_at: "2026-09-06T00:00:00Z".to_owned(),
+            })
+            .await
+            .map_err(|_| AuthError::IdentityUnavailable)?;
+
+        service.reload(store.clone()).await?;
+        let after = service.discover_federated_scopes(&identity)?;
+        assert!(after.iter().any(|scope| scope.id == "service-project"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reload_picks_up_removed_operator_assignment() -> Result<(), AuthError> {
+        let (store, service) = reloadable_service().await?;
+        let identity = alice_identity();
+        assert!(service.authorize_federated_system(&identity).is_err());
+
+        store
+            .insert_operator_assignment(&OperatorAssignmentRecord {
+                id: "operator-governance-1".to_owned(),
+                user_id: "bootstrap-user".to_owned(),
+                profile: "operator-console".to_owned(),
+                enabled: true,
+                created_at: "2026-09-06T00:00:00Z".to_owned(),
+                updated_at: "2026-09-06T00:00:00Z".to_owned(),
+            })
+            .await
+            .map_err(|_| AuthError::IdentityUnavailable)?;
+        service.reload(store.clone()).await?;
+        assert!(service.authorize_federated_system(&identity).is_ok());
+
+        store
+            .set_operator_assignment_enabled("operator-governance-1", false)
+            .await
+            .map_err(|_| AuthError::IdentityUnavailable)?;
+        service.reload(store.clone()).await?;
+        assert!(service.authorize_federated_system(&identity).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reload_preserves_existing_token_verification() -> Result<(), AuthError> {
+        let (store, service) = reloadable_service().await?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (token, _) = service.issue(&admin_request(), now)?;
+
+        store
+            .insert_keystone_role_assignment(&o3k_store::KeystoneRoleAssignmentRecord {
+                id: "assignment-governance-2".to_owned(),
+                user_id: "bootstrap-user".to_owned(),
+                project_id: "service-project".to_owned(),
+                role_id: "member".to_owned(),
+                created_at: "2026-09-06T00:00:00Z".to_owned(),
+            })
+            .await
+            .map_err(|_| AuthError::IdentityUnavailable)?;
+        service.reload(store.clone()).await?;
+
+        let verified = service.verify(&token, now)?;
+        assert_eq!(verified.user_id, "bootstrap-user");
+        assert_eq!(verified.project_id, "eba29e2d-53de-461d-ae91-ede7402713cb");
         Ok(())
     }
 }

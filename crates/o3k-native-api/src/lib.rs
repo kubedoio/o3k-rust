@@ -19,6 +19,7 @@ pub mod audit;
 pub mod auth;
 pub mod compute;
 pub mod error;
+pub mod governance;
 pub mod identity;
 pub mod network;
 pub mod operation;
@@ -43,6 +44,7 @@ pub struct NativeApiState {
     pub operation_reader: Option<std::sync::Arc<dyn operation::OperationReader>>,
     pub audit_reader: Option<std::sync::Arc<dyn audit::AuditReader>>,
     pub quota_reader: Option<std::sync::Arc<dyn quota::QuotaReader>>,
+    pub governance_reader: Option<std::sync::Arc<dyn governance::GovernanceReader>>,
     /// Validated generic resource descriptors.  This is the northbound
     /// registry; applications below it are intentionally controller-agnostic.
     resource_index: resource::ResourceDispatcher,
@@ -87,6 +89,7 @@ impl NativeApiState {
             operation_reader: None,
             audit_reader: None,
             quota_reader: None,
+            governance_reader: None,
             resource_index,
             resource_application: None,
             authorizer: None,
@@ -119,6 +122,15 @@ impl NativeApiState {
     #[must_use]
     pub fn with_quota_reader(mut self, reader: std::sync::Arc<dyn quota::QuotaReader>) -> Self {
         self.quota_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_governance_reader(
+        mut self,
+        reader: std::sync::Arc<dyn governance::GovernanceReader>,
+    ) -> Self {
+        self.governance_reader = Some(reader);
         self
     }
 
@@ -198,6 +210,43 @@ pub fn router(state: NativeApiState) -> Router {
             axum::routing::put(quota::set).delete(quota::clear),
         )
         .route("/operations/{id}", get(operation::show_operation))
+        .route(
+            "/operator/governance/projects",
+            get(governance::list_projects),
+        )
+        .route(
+            "/operator/governance/projects/{id}",
+            get(governance::show_project),
+        )
+        .route(
+            "/operator/governance/principals",
+            get(governance::list_principals),
+        )
+        .route(
+            "/operator/governance/principals/{id}",
+            get(governance::show_principal),
+        )
+        .route("/operator/governance/roles", get(governance::list_roles))
+        .route(
+            "/operator/governance/capabilities",
+            get(governance::list_capabilities),
+        )
+        .route(
+            "/operator/governance/assignments",
+            get(governance::list_assignments).post(governance::create_assignment),
+        )
+        .route(
+            "/operator/governance/assignments/{id}",
+            axum::routing::delete(governance::delete_assignment),
+        )
+        .route(
+            "/operator/governance/operator-assignments",
+            get(governance::list_operator_assignments).post(governance::create_operator_assignment),
+        )
+        .route(
+            "/operator/governance/operator-assignments/{id}",
+            axum::routing::delete(governance::delete_operator_assignment),
+        )
         .layer(DefaultBodyLimit::max(1_048_576))
         .with_state(state)
 }
@@ -230,6 +279,20 @@ pub(crate) fn assert_location_discovery_schema(value: &serde_json::Value) {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+pub(crate) fn assert_governance_schema(value: &serde_json::Value) {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/native-governance-v1.schema.json"
+    )))
+    .expect("valid native governance schema");
+    let validator = jsonschema::validator_for(&schema).expect("compiled native governance schema");
+    if let Err(errors) = validator.validate(value) {
+        panic!("native governance schema violation: {errors}");
+    }
+}
+
 // ── API root ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -254,6 +317,16 @@ pub async fn api_root() -> Json<ApiRootResponse> {
             "/o3k/v1/volume/volumes",
             "/o3k/v1/network/address-realms",
             "/o3k/v1/operations/{id}",
+            "/o3k/v1/operator/governance/projects",
+            "/o3k/v1/operator/governance/projects/{id}",
+            "/o3k/v1/operator/governance/principals",
+            "/o3k/v1/operator/governance/principals/{id}",
+            "/o3k/v1/operator/governance/roles",
+            "/o3k/v1/operator/governance/capabilities",
+            "/o3k/v1/operator/governance/assignments",
+            "/o3k/v1/operator/governance/assignments/{id}",
+            "/o3k/v1/operator/governance/operator-assignments",
+            "/o3k/v1/operator/governance/operator-assignments/{id}",
         ],
     })
 }

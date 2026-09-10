@@ -565,6 +565,49 @@ pub fn router_with_state(state: AppState) -> Router {
             );
         router = router
             .route(
+                "/o3k/v1/operator/governance/projects",
+                get(o3k_native_api::governance::list_projects),
+            )
+            .route(
+                "/o3k/v1/operator/governance/projects/{id}",
+                get(o3k_native_api::governance::show_project),
+            )
+            .route(
+                "/o3k/v1/operator/governance/principals",
+                get(o3k_native_api::governance::list_principals),
+            )
+            .route(
+                "/o3k/v1/operator/governance/principals/{id}",
+                get(o3k_native_api::governance::show_principal),
+            )
+            .route(
+                "/o3k/v1/operator/governance/roles",
+                get(o3k_native_api::governance::list_roles),
+            )
+            .route(
+                "/o3k/v1/operator/governance/capabilities",
+                get(o3k_native_api::governance::list_capabilities),
+            )
+            .route(
+                "/o3k/v1/operator/governance/assignments",
+                get(o3k_native_api::governance::list_assignments)
+                    .post(o3k_native_api::governance::create_assignment),
+            )
+            .route(
+                "/o3k/v1/operator/governance/assignments/{id}",
+                axum::routing::delete(o3k_native_api::governance::delete_assignment),
+            )
+            .route(
+                "/o3k/v1/operator/governance/operator-assignments",
+                get(o3k_native_api::governance::list_operator_assignments)
+                    .post(o3k_native_api::governance::create_operator_assignment),
+            )
+            .route(
+                "/o3k/v1/operator/governance/operator-assignments/{id}",
+                axum::routing::delete(o3k_native_api::governance::delete_operator_assignment),
+            );
+        router = router
+            .route(
                 "/o3k/v1/{namespace}/{collection}",
                 get(o3k_native_api::resource::list).post(o3k_native_api::resource::create),
             )
