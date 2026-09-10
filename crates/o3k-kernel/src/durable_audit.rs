@@ -16,6 +16,7 @@ pub struct AuditQuery {
     /// The effective scope, already derived from AuthContext by the caller.
     pub scope: OwnershipScope,
     pub after_event_id: Option<String>,
+    pub event_id: Option<String>,
     pub limit: usize,
     pub service: Option<String>,
     pub action: Option<String>,
@@ -48,6 +49,7 @@ impl AuditQuery {
             self.from_timestamp.as_deref(),
             self.until_timestamp.as_deref(),
             self.after_event_id.as_deref(),
+            self.event_id.as_deref(),
         ]
         .into_iter()
         .flatten()

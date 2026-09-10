@@ -93,6 +93,7 @@ impl AuditRepository for PostgresStore {
             binds.push(after);
             index += 1;
         }
+        eq_filter!(query.event_id, "event_id");
         eq_filter!(query.service, "service");
         eq_filter!(query.action, "action");
         eq_filter!(query.outcome, "outcome");

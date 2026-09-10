@@ -1705,6 +1705,7 @@ mod tests {
         let query = o3k_kernel::AuditQuery {
             scope: owner.effective_scope().clone(),
             after_event_id: None,
+            event_id: None,
             limit: 10,
             service: Some("image".to_owned()),
             action: Some("image:CreateImage".to_owned()),

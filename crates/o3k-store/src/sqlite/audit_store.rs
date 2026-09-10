@@ -96,6 +96,7 @@ impl AuditRepository for SqliteStore {
             sql.push_str(" AND event_id > ?");
             binds.push(after);
         }
+        eq_filter!(query.event_id, "event_id");
         eq_filter!(query.service, "service");
         eq_filter!(query.action, "action");
         eq_filter!(query.outcome, "outcome");

@@ -62,6 +62,7 @@ async fn durable_sink_production_like_sqlite_composition_persists_event() {
     let query = AuditQuery {
         scope: event.effective_scope.clone(),
         after_event_id: None,
+        event_id: None,
         limit: 10,
         service: None,
         action: None,

@@ -77,6 +77,7 @@ pub async fn list_audit(
     let query = AuditQuery {
         scope,
         after_event_id: validated.continuation_key().map(str::to_owned),
+        event_id: None,
         limit: validated.limit(),
         service: q.service,
         action: q.action,

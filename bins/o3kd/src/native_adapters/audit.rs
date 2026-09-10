@@ -30,6 +30,7 @@ impl o3k_native_api::audit::AuditReader for AuditReaderAdapter {
         let query = AuditQuery {
             scope: auth.effective_scope().clone(),
             after_event_id: None,
+            event_id: Some(id.to_owned()),
             limit: 1,
             service: None,
             action: None,
@@ -39,7 +40,7 @@ impl o3k_native_api::audit::AuditReader for AuditReaderAdapter {
             operation_id: None,
             principal_id: None,
             request_id: None,
-            audit_id: Some(id.to_owned()),
+            audit_id: None,
             from_timestamp: None,
             until_timestamp: None,
         };
