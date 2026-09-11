@@ -612,6 +612,20 @@ fn placement_for_service(
     (scope, regions, availability_domain_selection)
 }
 
+/// Mirrors the generic create handler's reachability rule (`resource::create`):
+/// a create is executable only when a public create contract exists for the
+/// descriptor, or the resource is owned by an external controller that
+/// validates its own contract at its boundary. A manifest declaration alone
+/// must not advertise a create that the runtime fails closed with 503.
+fn create_reachable(descriptor: &ResourceDescriptor) -> bool {
+    crate::resource_contract::ContractKind::for_resource(
+        &descriptor.resource_type.to_string(),
+        &descriptor.schema_version,
+    )
+    .is_some()
+        || descriptor.ownership == o3k_kernel::ServiceOwnership::ExternalController
+}
+
 pub async fn discover_resource_types(State(state): State<NativeApiState>) -> impl IntoResponse {
     if state.lifecycle_registry.is_none() {
         return (
@@ -632,7 +646,20 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
             });
         let mut actions = std::collections::HashMap::new();
         for (op, action) in &descriptor.lifecycle_actions {
-            if *op == LifecycleOperation::List && (!live_ready || !collection_supported) {
+            // Every advertised operation must be executable in the live
+            // composition: readiness gates all operations (a not-ready
+            // resource must not advertise show/create/delete either), list
+            // additionally requires bounded collection support, and create
+            // additionally requires a reachable create contract. Advertising
+            // an operation the runtime would reject violates the
+            // advertised-implies-executable discovery contract (#907).
+            if !live_ready {
+                continue;
+            }
+            if *op == LifecycleOperation::List && !collection_supported {
+                continue;
+            }
+            if *op == LifecycleOperation::Create && !create_reachable(descriptor) {
                 continue;
             }
             actions.insert(format!("{op:?}").to_lowercase(), action.to_string());
@@ -822,7 +849,7 @@ pub async fn discover_regions(State(state): State<NativeApiState>) -> impl IntoR
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use o3k_kernel::manifest::{ManifestController, RegisteredResourceType, ResourceScope};
@@ -1159,6 +1186,103 @@ mod tests {
         assert!(kinds.iter().any(|kind| kind == "compute:server"));
         assert!(kinds.iter().any(|kind| kind == "network:address_realm"));
         assert!(kinds.iter().any(|kind| kind == "volume:volume"));
+    }
+
+    #[tokio::test]
+    async fn discovery_advertises_only_reachable_lifecycle_operations() {
+        let mut registry = ManifestRegistry::new();
+        registry.seed_core().unwrap();
+        // Compute and network have ready controllers in this composition;
+        // volume deliberately has none (mirrors a profile without a native
+        // storage provider).
+        registry
+            .register_in_process_controller("compute", true, None)
+            .unwrap();
+        registry
+            .register_in_process_controller("network", true, None)
+            .unwrap();
+        let state = NativeApiState::new(
+            Some(registry),
+            pagination::CursorConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let app = router(state);
+        let response = axum::http::Request::builder()
+            .uri("/resource-types")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = axum::response::Response::from(
+            tower::ServiceExt::oneshot(app, response).await.unwrap(),
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let find = |namespace: &str, name: &str| {
+            body["resource_types"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|item| item["namespace"] == namespace && item["name"] == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("missing {namespace}:{name}"))
+        };
+        let lifecycle_of = |item: &serde_json::Value| -> Vec<String> {
+            item["lifecycle_actions"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(key, _)| key.clone())
+                .collect()
+        };
+        // Contract-backed native creates stay advertised; list needs an
+        // application (absent here), so only show/update/delete appear.
+        let compute = find("compute", "server");
+        let compute_ops = lifecycle_of(&compute);
+        for op in ["create", "show", "update", "delete"] {
+            assert!(
+                compute_ops.iter().any(|key| key == op),
+                "compute:server must advertise {op}: {compute}"
+            );
+        }
+        assert!(
+            !compute_ops.iter().any(|key| key == "list"),
+            "list must not be advertised without collection support: {compute}"
+        );
+        // network:network has a create contract; network:subnet does not and
+        // is o3k-implemented, so advertising its create would promise a route
+        // that fails closed with 503 at runtime.
+        let network = find("network", "network");
+        assert!(
+            lifecycle_of(&network).iter().any(|key| key == "create"),
+            "network:network has a public create contract: {network}"
+        );
+        let subnet = find("network", "subnet");
+        assert!(
+            !lifecycle_of(&subnet).iter().any(|key| key == "create"),
+            "network:subnet create is not reachable; it must not be advertised: {subnet}"
+        );
+        for op in ["show", "delete"] {
+            assert!(
+                lifecycle_of(&subnet).iter().any(|key| key == op),
+                "network:subnet must still advertise reachable {op}: {subnet}"
+            );
+        }
+        // A service without a ready controller advertises no lifecycle
+        // operations at all (previously only list was readiness-gated).
+        let volume = find("volume", "volume");
+        assert_eq!(volume["ready"], false, "{volume}");
+        assert!(
+            lifecycle_of(&volume).is_empty(),
+            "a not-ready resource must advertise no lifecycle operations: {volume}"
+        );
     }
 
     #[tokio::test]
