@@ -116,7 +116,11 @@ The following tests were added by the implementation and must pass:
   - `in_process_service_readiness_is_configuration_not_observation`
   - `summary_and_capacity_reflect_durable_draining`
   - `capacity_over_allocated_is_degraded_not_healthy`
-- `crates/o3k-store` (bounded placement reads exercised by the adapter tests against the real SQLite adapter): `list_providers_bounded`, `capacity_summary` fail-closed at 64 classes, and the direct store test `sqlite_list_provider_states_pagination_and_narrow_read` for `list_provider_states`.
+  - `capacity_with_never_observed_provider_is_not_healthy`
+  - `provider_durably_unavailable_is_not_healthy_even_with_live_agent`
+  - `capacity_masked_provider_over_allocation_is_degraded`
+  - `provider_status_unrecognized_durable_state_is_never_healthy`
+- `crates/o3k-store` (bounded placement reads exercised by the adapter tests against the real SQLite adapter): `list_providers_bounded`, `capacity_summary` fail-closed at 64 classes, and the direct store tests `sqlite_list_provider_states_pagination_and_narrow_read` and `sqlite_placement_diagnostics_capacity_and_bounded_providers` for `list_provider_states`/`capacity_summary` (including `providers_over_allocated`).
 - `bins/o3kd/tests/native_diagnostics_process.rs` (real-adapter process tests): cover the adapter leak boundary that the DTO structural check cannot.
 
 ## CI / evidence not yet run
