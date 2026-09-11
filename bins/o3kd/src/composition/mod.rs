@@ -1112,7 +1112,6 @@ fn spawn_diagnostics_controller_probe(
         interval.tick().await;
         loop {
             interval.tick().await;
-            let now = crate::native_adapters::diagnostics::now_unix_ms();
             let controller_ids: Vec<String> = match registry.read() {
                 Ok(reg) => reg
                     .all_controllers()
@@ -1136,8 +1135,14 @@ fn spawn_diagnostics_controller_probe(
                 }
                 // In-process services re-observe configuration without I/O;
                 // external controllers record an observation after their probe.
+                // The timestamp is taken at the moment of observation, not at
+                // the loop start: a serial probe pass over a large fleet can
+                // otherwise record an observation far older than the
+                // 75 s freshness threshold for controllers that were just
+                // confirmed healthy.
                 if let Ok(mut observations) = observations.write() {
-                    observations.insert(service_id, now);
+                    let observed_at = crate::native_adapters::diagnostics::now_unix_ms();
+                    observations.insert(service_id, observed_at);
                 }
             }
         }
