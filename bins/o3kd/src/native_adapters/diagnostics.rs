@@ -1624,4 +1624,88 @@ mod tests {
             .expect("summary");
         assert_eq!(summary.providers_over_allocated, 1);
     }
+
+    #[tokio::test]
+    async fn capacity_only_advertises_canonical_classes_but_non_canonical_over_allocation_still_degrades()
+     {
+        let store = Arc::new(
+            o3k_store::unified::O3kStore::connect_sqlite_memory()
+                .await
+                .expect("store"),
+        );
+        // One canonical class plus one non-canonical class in the durable
+        // authority. Only the canonical class may be advertised.
+        store
+            .register_provider(
+                "provider-a",
+                &[
+                    inventory("VCPU", 8, 1, 1.0, 2),
+                    inventory("GPU", 4, 0, 1.0, 0),
+                ],
+            )
+            .await
+            .expect("register provider");
+        let agents = fake_agents(HashMap::from([(
+            "provider-a".to_owned(),
+            (
+                snapshot(
+                    "provider-a",
+                    AgentAvailability::Available,
+                    AgentAdministrativeState::Enabled,
+                ),
+                Some(now_unix_ms()),
+            ),
+        )]));
+        let adapter = DiagnosticsReaderAdapter::new(
+            Arc::new(RwLock::new(ManifestRegistry::new())),
+            agents,
+            store.clone(),
+            o3k_kernel::LocationRegistry::default(),
+        );
+
+        let capacity = adapter.capacity().await.expect("capacity");
+        assert!(
+            capacity
+                .dimensions
+                .iter()
+                .all(|d| d.resource_class == "VCPU"),
+            "non-canonical class must not be advertised"
+        );
+        assert!(
+            capacity
+                .dimensions
+                .iter()
+                .any(|d| d.resource_class == "VCPU")
+        );
+
+        let page = adapter.providers(10, None).await.expect("providers");
+        assert!(
+            page.items[0]
+                .capacity
+                .iter()
+                .all(|d| d.resource_class == "VCPU"),
+            "non-canonical class must not appear in provider capacity"
+        );
+
+        // A non-canonical class over-allocated beyond its allocatable is still
+        // a corrupt durable invariant and must degrade the whole capacity.
+        store
+            .commit_allocation(
+                "provider-a",
+                1,
+                &o3k_store::PlacementAllocationRecord {
+                    id: "alloc-gpu".to_owned(),
+                    provider_id: "provider-a".to_owned(),
+                    consumer_id: "consumer-1".to_owned(),
+                    resources: vec![o3k_store::PlacementResourceRecord {
+                        resource_class: "GPU".to_owned(),
+                        amount: 100,
+                    }],
+                },
+            )
+            .await
+            .expect("commit allocation");
+        let capacity = adapter.capacity().await.expect("capacity");
+        assert_eq!(capacity.status, DiagnosticStatus::Degraded);
+    }
 }
