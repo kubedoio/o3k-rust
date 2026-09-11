@@ -2071,6 +2071,7 @@ dependencies = [
  "o3k-service-sdk",
  "o3k-storage",
  "o3k-store",
+ "reqwest",
  "rustix 0.38.44",
  "serde",
  "serde_json",
