@@ -34,7 +34,7 @@ Bounded pages accept `limit` (default 50; an explicit `limit=0` is treated as th
 
 ## 4. Authorization
 
-All four endpoints require a single canonical action, `operator:ReadDiagnostics`, against the `operator/diagnostics` resource type with System scope. The Cloud Kernel `StaticAuthorizer` registers the policy with accepted principal `User`, `require_ownership` false, and required role `operator`, and the authorize gate additionally requires effective System scope; a tenant or project-scoped caller carrying an `operator` role name, route shape, or IdP claim never satisfies it (denied with `ScopeMismatch`). A request without the reader configured is `NotAvailable`; an unauthorized caller is `Forbidden`.
+All four endpoints require a single canonical action, `operator:ReadDiagnostics`, against the `operator/diagnostics` resource type with System scope. The Cloud Kernel `StaticAuthorizer` registers the policy with accepted principal `User`, `require_ownership` false, and required role `operator`, and the authorize gate additionally requires effective System scope; a tenant or project-scoped caller carrying an `operator` role name, route shape, or IdP claim never satisfies it (denied with `ScopeMismatch`). Authorization resolves before the authority-presence check, so an unauthorized caller is always `Forbidden` and never learns whether the projection is configured; a request without the reader configured is `NotAvailable`.
 
 ## 5. Source authority map
 

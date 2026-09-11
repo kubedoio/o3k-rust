@@ -412,14 +412,16 @@ fn authorize(state: &NativeApiState, auth: &o3k_kernel::AuthContext) -> bool {
 // ── Handlers ──────────────────────────────────────────────────────────────
 
 pub async fn summary(auth: BearerAuth, State(state): State<NativeApiState>) -> Response {
-    let Some(reader) = state.diagnostics_reader.as_ref() else {
-        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
-    };
+    // Authorization precedes the authority-presence check so an unauthorized
+    // caller learns nothing about configuration (matches governance.rs).
     if !authorize(&state, &auth.0) {
         return ProblemDetails::new(ErrorCode::Forbidden)
             .with_request_id(auth.0.request_id().to_owned())
             .into_response();
     }
+    let Some(reader) = state.diagnostics_reader.as_ref() else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
     match reader.summary().await {
         Ok(summary) => Json(summary).into_response(),
         Err(error) => diagnostics_error(error, auth.0.request_id()),
@@ -431,14 +433,16 @@ pub async fn services(
     Query(query): Query<DiagnosticsQuery>,
     State(state): State<NativeApiState>,
 ) -> Response {
-    let Some(reader) = state.diagnostics_reader.as_ref() else {
-        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
-    };
+    // Authorization precedes the authority-presence check so an unauthorized
+    // caller learns nothing about configuration (matches governance.rs).
     if !authorize(&state, &auth.0) {
         return ProblemDetails::new(ErrorCode::Forbidden)
             .with_request_id(auth.0.request_id().to_owned())
             .into_response();
     }
+    let Some(reader) = state.diagnostics_reader.as_ref() else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
     let limit = match query.page_size() {
         Ok(limit) => limit,
         Err(response) => return response,
@@ -458,14 +462,16 @@ pub async fn providers(
     Query(query): Query<DiagnosticsQuery>,
     State(state): State<NativeApiState>,
 ) -> Response {
-    let Some(reader) = state.diagnostics_reader.as_ref() else {
-        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
-    };
+    // Authorization precedes the authority-presence check so an unauthorized
+    // caller learns nothing about configuration (matches governance.rs).
     if !authorize(&state, &auth.0) {
         return ProblemDetails::new(ErrorCode::Forbidden)
             .with_request_id(auth.0.request_id().to_owned())
             .into_response();
     }
+    let Some(reader) = state.diagnostics_reader.as_ref() else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
     let limit = match query.page_size() {
         Ok(limit) => limit,
         Err(response) => return response,
@@ -481,14 +487,16 @@ pub async fn providers(
 }
 
 pub async fn capacity(auth: BearerAuth, State(state): State<NativeApiState>) -> Response {
-    let Some(reader) = state.diagnostics_reader.as_ref() else {
-        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
-    };
+    // Authorization precedes the authority-presence check so an unauthorized
+    // caller learns nothing about configuration (matches governance.rs).
     if !authorize(&state, &auth.0) {
         return ProblemDetails::new(ErrorCode::Forbidden)
             .with_request_id(auth.0.request_id().to_owned())
             .into_response();
     }
+    let Some(reader) = state.diagnostics_reader.as_ref() else {
+        return ProblemDetails::new(ErrorCode::NotAvailable).into_response();
+    };
     match reader.capacity().await {
         Ok(capacity) => Json(capacity).into_response(),
         Err(error) => diagnostics_error(error, auth.0.request_id()),
