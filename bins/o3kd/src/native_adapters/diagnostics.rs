@@ -370,9 +370,14 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
         }
         let states = self
             .store
-            .list_provider_states(None, MAX_PROVIDERS)
+            .list_provider_states(None, MAX_PROVIDERS + 1)
             .await
             .map_err(map_store_error)?;
+        if states.len() > MAX_PROVIDERS {
+            // The provider aggregate would exceed the fleet bound; fail closed
+            // rather than silently truncate the aggregate.
+            return Err(DiagnosticsError::Corrupt);
+        }
         let mut providers = ComponentCounts::default();
         for record in &states {
             let (snap, observed) = agent_map
@@ -605,9 +610,14 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
         }
         let states = self
             .store
-            .list_provider_states(None, MAX_PROVIDERS)
+            .list_provider_states(None, MAX_PROVIDERS + 1)
             .await
             .map_err(map_store_error)?;
+        if states.len() > MAX_PROVIDERS {
+            // The capacity aggregate would exceed the fleet bound; fail closed
+            // rather than silently truncate.
+            return Err(DiagnosticsError::Corrupt);
+        }
 
         let mut max_observed: Option<i64> = None;
         let mut fleet = ComponentCounts::default();
