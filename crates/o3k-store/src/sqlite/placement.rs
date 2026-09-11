@@ -170,6 +170,18 @@ impl SqliteStore {
                 }
             }
         }
+        // Providers with at least one resource class over-allocated beyond
+        // allocatable (a drifted/corrupt durable invariant). This lets the
+        // diagnostics projection degrade capacity even when one provider's
+        // over-allocation is masked by another provider's slack.
+        let over_allocated: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT provider_id) FROM placement_inventories \
+             WHERE used > MAX(CAST(total * allocation_ratio AS INTEGER) - reserved, 0)",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        summary.providers_over_allocated = placement_u64(over_allocated)?;
         Ok(summary)
     }
 

@@ -1664,6 +1664,8 @@ mod tests {
         let summary = store.capacity_summary(64).await?;
         assert_eq!(class(&summary, "MEMORY_MB")?.allocated, 1024);
         assert_eq!(class(&summary, "VCPU")?.allocated, 2);
+        // A normal allocation is not over-allocated.
+        assert_eq!(summary.providers_over_allocated, 0);
         Ok(())
     }
 

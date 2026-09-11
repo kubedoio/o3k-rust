@@ -56,7 +56,8 @@ From most to least severe, and never reporting `healthy` from durable placement 
 4. durable `Draining` or agent `Draining` → `degraded` / `draining`;
 5. agent `Unavailable` → `stale` / `heartbeat_lost` when the last heartbeat is older than the lease, else `unavailable` / `heartbeat_lost`;
 6. last heartbeat older than the lease → `stale` / `observation_stale`;
-7. otherwise → `healthy`.
+7. durable state `Unavailable` (scheduler out-of-service) while the agent reports healthy → `unavailable` / `administratively_disabled` (the durable authority dominates a healthy-looking agent);
+8. otherwise → `healthy`.
 
 ### Service status mapping
 
@@ -72,7 +73,7 @@ The agent lease is 15 seconds (`AGENT_LEASE_MS = 15_000` in the production adapt
 
 ## 7. Capacity
 
-Capacity reports only placement-authoritative dimensions: `VCPU`, `MEMORY_MB`, and `DISK_GB`. Per provider, `total`, `reserved`, `allocated`, and `available` are exposed; in the aggregate, `allocatable`, `reserved`, `allocated`, and `available`. `available = allocatable − reserved − allocated` uses saturating arithmetic so it is never negative and never wraps; a drifted or corrupt remainder surfaces as zero. An over-allocated dimension (`allocated > allocatable − reserved`, i.e. a drifted/corrupt durable invariant) makes the whole capacity status `degraded` rather than `healthy`, while `available` stays saturating (never negative). Unit labels are `count` (VCPU), `mib` (MEMORY_MB), and `gib` (DISK_GB). Storage, network, Ceph, and quota are deliberately not placement-authoritative and are not exposed; an unsupported dimension/class is not claimed and not present.
+Capacity reports only placement-authoritative dimensions: `VCPU`, `MEMORY_MB`, and `DISK_GB`. Per provider, `total`, `reserved`, `allocated`, and `available` are exposed; in the aggregate, `allocatable`, `reserved`, `allocated`, and `available`. `available = allocatable − reserved − allocated` uses saturating arithmetic so it is never negative and never wraps; a drifted or corrupt remainder surfaces as zero. An over-allocated dimension (`allocated > allocatable − reserved`, i.e. a drifted/corrupt durable invariant) makes the whole capacity status `degraded` rather than `healthy`, detected both in the aggregate and per-provider (a per-provider over-allocation is reported even when masked by another provider's slack via `providers_over_allocated`), while `available` stays saturating (never negative). Unit labels are `count` (VCPU), `mib` (MEMORY_MB), and `gib` (DISK_GB). Storage, network, Ceph, and quota are deliberately not placement-authoritative and are not exposed; an unsupported dimension/class is not claimed and not present.
 
 ## 8. Location aggregation
 

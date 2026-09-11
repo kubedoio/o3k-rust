@@ -521,6 +521,9 @@ pub struct PlacementCapacitySummary {
     pub providers_draining: u64,
     pub providers_unavailable: u64,
     pub providers_deleted: u64,
+    /// Providers that have at least one resource class where
+    /// `used > allocatable - reserved` (a drifted/corrupt durable invariant).
+    pub providers_over_allocated: u64,
 }
 
 /// One provider id + durable state row, used by operator diagnostics to

@@ -25,7 +25,7 @@ use o3k_native_api::diagnostics::{
     ControllerDiagnostics, DIAGNOSTICS_VERSION, DiagnosticReason, DiagnosticStatus,
     DiagnosticsError, DiagnosticsPage, DiagnosticsReader, DiagnosticsSummary, LocationDiagnostics,
     MAX_CAPACITY_CLASSES, ProviderCapacityDimension, ProviderDiagnostics, ServiceDiagnostics,
-    StatusCounts, encode_cursor, sort_dimensions,
+    StatusCounts, encode_cursor, sort_dimensions, validate_capacity_class_count,
 };
 use o3k_provider::{
     AgentAdministrativeState, AgentAvailability, AgentNodeRegistry, AgentNodeSnapshot,
@@ -83,7 +83,10 @@ fn availability_str(availability: AgentAvailability) -> &'static str {
 /// 5. agent Unavailable        -> Stale / HeartbeatLost when the last
 ///    heartbeat is older than the lease, else Unavailable / HeartbeatLost;
 /// 6. last heartbeat stale     -> Stale / ObservationStale;
-/// 7. otherwise                -> Healthy.
+/// 7. durable state `Unavailable` (scheduler out-of-service) while the agent
+///    reports healthy -> Unavailable / AdministrativelyDisabled (the durable
+///    authority dominates a healthy-looking agent);
+/// 8. otherwise                -> Healthy.
 #[allow(clippy::needless_pass_by_value)]
 fn provider_status(
     snap: Option<&AgentNodeSnapshot>,
@@ -129,6 +132,14 @@ fn provider_status(
         return (
             DiagnosticStatus::Stale,
             Some(DiagnosticReason::ObservationStale),
+        );
+    }
+    // A durable out-of-service state is authoritative even when the agent
+    // currently reports healthy (e.g. operator drain via set_state).
+    if record_state == "Unavailable" {
+        return (
+            DiagnosticStatus::Unavailable,
+            Some(DiagnosticReason::AdministrativelyDisabled),
         );
     }
     (DiagnosticStatus::Healthy, None)
@@ -541,6 +552,11 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
 
         let mut items = Vec::with_capacity(take);
         for record in records.into_iter().take(take) {
+            if !validate_capacity_class_count(record.inventories.len()) {
+                // A provider with more resource classes than the contract
+                // bound would violate the schema and is corrupt durable state.
+                return Err(DiagnosticsError::Corrupt);
+            }
             let provider_id = record.id.clone();
             let snap = self.agents.snapshot(&provider_id).await;
             let observed = self.agents.observed_at_unix_ms(&provider_id).await;
@@ -677,13 +693,20 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
                 DiagnosticStatus::Stale,
                 Some(DiagnosticReason::ObservationStale),
             )
-        } else if over_allocated {
-            // The durable capacity invariant was violated; never present this
-            // as healthy.
+        } else if over_allocated || summary.providers_over_allocated > 0 {
+            // The durable capacity invariant was violated (either in the
+            // aggregate, or on an individual provider masked by another
+            // provider's slack); never present this as healthy.
             (DiagnosticStatus::Degraded, None)
-        } else if fleet.degraded > 0 || fleet.unavailable > 0 || fleet.stale > 0 {
-            // Partial provider failure: at least one provider is down or stale
-            // even though another produced a fresh observation.
+        } else if fleet.degraded > 0
+            || fleet.unavailable > 0
+            || fleet.stale > 0
+            || fleet.unknown > 0
+        {
+            // Partial provider failure: at least one provider is down, stale,
+            // or never observed even though another produced a fresh
+            // observation. A never-observed provider means the fleet is not
+            // fully healthy, so capacity is never reported healthy.
             (DiagnosticStatus::Degraded, None)
         } else {
             (DiagnosticStatus::Healthy, None)
@@ -1362,5 +1385,170 @@ mod tests {
             .expect("VCPU dimension");
         // available must never be negative; over-allocation degrades the status.
         assert_eq!(vcpu.available, 0);
+    }
+
+    #[tokio::test]
+    async fn capacity_with_never_observed_provider_is_not_healthy() {
+        let store = Arc::new(
+            o3k_store::unified::O3kStore::connect_sqlite_memory()
+                .await
+                .expect("store"),
+        );
+        store
+            .register_provider("provider-a", &[inventory("VCPU", 8, 1, 1.0, 2)])
+            .await
+            .expect("register a");
+        store
+            .register_provider("provider-b", &[inventory("VCPU", 4, 1, 1.0, 1)])
+            .await
+            .expect("register b");
+        // Only provider-a is observed; provider-b is never observed.
+        let agents = fake_agents(HashMap::from([(
+            "provider-a".to_owned(),
+            (
+                snapshot(
+                    "provider-a",
+                    AgentAvailability::Available,
+                    AgentAdministrativeState::Enabled,
+                ),
+                Some(now_unix_ms()),
+            ),
+        )]));
+        let adapter = DiagnosticsReaderAdapter::new(
+            Arc::new(RwLock::new(ManifestRegistry::new())),
+            agents,
+            store,
+            o3k_kernel::LocationRegistry::default(),
+        );
+
+        // A fresh provider alongside a never-observed provider must not make
+        // the fleet (or capacity) healthy.
+        let summary = adapter.summary().await.expect("summary");
+        assert_eq!(summary.counts.providers.total, 2);
+        assert_eq!(summary.counts.providers.healthy, 1);
+        assert_eq!(summary.counts.providers.unknown, 1);
+        assert_ne!(
+            summary.counts.providers.aggregate(),
+            DiagnosticStatus::Healthy
+        );
+
+        let capacity = adapter.capacity().await.expect("capacity");
+        assert_ne!(capacity.status, DiagnosticStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn provider_durably_unavailable_is_not_healthy_even_with_live_agent() {
+        let store = Arc::new(
+            o3k_store::unified::O3kStore::connect_sqlite_memory()
+                .await
+                .expect("store"),
+        );
+        store
+            .register_provider("provider-a", &[inventory("VCPU", 8, 1, 1.0, 2)])
+            .await
+            .expect("register provider");
+        store
+            .set_provider_state("provider-a", "Unavailable")
+            .await
+            .expect("set state");
+        let agents = fake_agents(HashMap::from([(
+            "provider-a".to_owned(),
+            (
+                snapshot(
+                    "provider-a",
+                    AgentAvailability::Available,
+                    AgentAdministrativeState::Enabled,
+                ),
+                Some(now_unix_ms()),
+            ),
+        )]));
+        let adapter = DiagnosticsReaderAdapter::new(
+            Arc::new(RwLock::new(ManifestRegistry::new())),
+            agents,
+            store,
+            o3k_kernel::LocationRegistry::default(),
+        );
+
+        let page = adapter.providers(10, None).await.expect("providers");
+        assert_eq!(page.items[0].status, DiagnosticStatus::Unavailable);
+        assert_eq!(
+            page.items[0].reason,
+            Some(DiagnosticReason::AdministrativelyDisabled)
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_masked_provider_over_allocation_is_degraded() {
+        let store = Arc::new(
+            o3k_store::unified::O3kStore::connect_sqlite_memory()
+                .await
+                .expect("store"),
+        );
+        // provider-a has huge slack; provider-b is over-allocated beyond its
+        // own allocatable. In the aggregate the slack masks provider-b, so
+        // only the per-provider over-allocation signal can catch it.
+        store
+            .register_provider("provider-a", &[inventory("VCPU", 1000, 1, 1.0, 2)])
+            .await
+            .expect("register a");
+        store
+            .register_provider("provider-b", &[inventory("VCPU", 4, 0, 1.0, 0)])
+            .await
+            .expect("register b");
+        store
+            .commit_allocation(
+                "provider-b",
+                1,
+                &o3k_store::PlacementAllocationRecord {
+                    id: "alloc-b".to_owned(),
+                    provider_id: "provider-b".to_owned(),
+                    consumer_id: "consumer-b".to_owned(),
+                    resources: vec![o3k_store::PlacementResourceRecord {
+                        resource_class: "VCPU".to_owned(),
+                        amount: 100,
+                    }],
+                },
+            )
+            .await
+            .expect("commit allocation");
+        let agents = fake_agents(HashMap::from([
+            (
+                "provider-a".to_owned(),
+                (
+                    snapshot(
+                        "provider-a",
+                        AgentAvailability::Available,
+                        AgentAdministrativeState::Enabled,
+                    ),
+                    Some(now_unix_ms()),
+                ),
+            ),
+            (
+                "provider-b".to_owned(),
+                (
+                    snapshot(
+                        "provider-b",
+                        AgentAvailability::Available,
+                        AgentAdministrativeState::Enabled,
+                    ),
+                    Some(now_unix_ms()),
+                ),
+            ),
+        ]));
+        let adapter = DiagnosticsReaderAdapter::new(
+            Arc::new(RwLock::new(ManifestRegistry::new())),
+            agents,
+            store.clone(),
+            o3k_kernel::LocationRegistry::default(),
+        );
+
+        let capacity = adapter.capacity().await.expect("capacity");
+        assert_eq!(capacity.status, DiagnosticStatus::Degraded);
+        // The durable aggregate must report the over-allocated provider.
+        let summary = store
+            .capacity_summary(MAX_CAPACITY_CLASSES)
+            .await
+            .expect("summary");
+        assert_eq!(summary.providers_over_allocated, 1);
     }
 }

@@ -187,6 +187,17 @@ impl PlacementRepository for PostgresStore {
                 }
             }
         }
+        // Providers with at least one over-allocated class (drifted/corrupt
+        // durable invariant), so diagnostics can degrade capacity even when an
+        // over-allocation is masked by another provider's slack.
+        let over_allocated: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT provider_id) FROM placement_inventories \
+             WHERE used > GREATEST(FLOOR(total * allocation_ratio)::BIGINT - reserved, 0)",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        summary.providers_over_allocated = pg_placement_u64(over_allocated)?;
         Ok(summary)
     }
 
