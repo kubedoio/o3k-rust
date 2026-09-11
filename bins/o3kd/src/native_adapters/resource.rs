@@ -168,6 +168,11 @@ fn compute_error(error: o3k_compute::ComputeError) -> ResourceApplicationError {
         o3k_compute::ComputeError::NotFound => ResourceApplicationError::NotFound,
         o3k_compute::ComputeError::InvalidRequest => ResourceApplicationError::Validation,
         o3k_compute::ComputeError::Conflict => ResourceApplicationError::Conflict,
+        // A quota rejection is a caller-visible allocation denial, not an
+        // internal failure: the OpenStack-compatible surface maps the same
+        // ComputeError to 403, and a 500 here would hide the limit from the
+        // tenant and mislead operators.
+        o3k_compute::ComputeError::QuotaExceeded { .. } => ResourceApplicationError::Forbidden,
         _ => ResourceApplicationError::Internal,
     }
 }
@@ -1498,30 +1503,36 @@ impl ResourceApplication for GenericResourceApplication {
                 )
                 .await
                 .map_err(|_| ResourceApplicationError::Conflict)?;
-            let canonical = self
-                .network_service
-                .get_canonical_network(auth, network.id)
+            // The generic native ledger must reflect every natively created
+            // network, not only migration envelopes: the generic
+            // list/show/delete routes read this row, so without it a network
+            // created through the native route is invisible to the native
+            // collection and cannot be deleted through it either. The row's
+            // observed state deliberately uses the canonical network state
+            // vocabulary ("active", matching the canonical record this row
+            // shadows) rather than the migration-envelope "READY" convention:
+            // composition consumers observe children through this projection,
+            // and the canonical vocabulary is what they accept as ready.
+            let record = o3k_store::ResourceRecord {
+                id: network.id,
+                kind: "network:network".to_owned(),
+                project_id: auth.effective_scope().id().as_str().to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::to_string(&request.spec)
+                    .map_err(|_| ResourceApplicationError::Internal)?,
+                observed_state: "active".to_owned(),
+                provider_id: None,
+            };
+            self.store
+                .insert_resource(&record)
                 .await
-                .map_err(|_| ResourceApplicationError::Internal)?;
-            if request.spec.get("migration_id").is_some()
-                || request.spec.get("source_key").is_some()
-            {
-                let record = o3k_store::ResourceRecord {
-                    id: network.id,
-                    kind: "network:network".to_owned(),
-                    project_id: auth.effective_scope().id().as_str().to_owned(),
-                    generation: 1,
-                    observed_generation: 1,
-                    desired_state: serde_json::to_string(&request.spec)
-                        .map_err(|_| ResourceApplicationError::Internal)?,
-                    observed_state: "READY".to_owned(),
-                    provider_id: None,
-                };
-                self.store
-                    .insert_resource(&record)
-                    .await
-                    .map_err(|_| ResourceApplicationError::Internal)?;
-            }
+                .map_err(|error| match error {
+                    o3k_store::StoreError::ResourceAlreadyExists => {
+                        ResourceApplicationError::Conflict
+                    }
+                    _ => ResourceApplicationError::Internal,
+                })?;
             return Ok(MutationResult {
                 operation_id: Uuid::new_v5(
                     &Uuid::NAMESPACE_URL,
@@ -1530,17 +1541,7 @@ impl ResourceApplication for GenericResourceApplication {
                 .to_string(),
                 resource_id: Some(network.id.to_string()),
                 complete: true,
-                resource: Some(if request.spec.get("migration_id").is_some() {
-                    generic_external_json(
-                        &self
-                            .store
-                            .get_resource(network.id)
-                            .await
-                            .map_err(|_| ResourceApplicationError::Internal)?,
-                    )
-                } else {
-                    network_json(&canonical)
-                }),
+                resource: Some(generic_external_json(&record)),
             });
         }
         if descriptor.resource_type.to_string() == "network:subnet" {

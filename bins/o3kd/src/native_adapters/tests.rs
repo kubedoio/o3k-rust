@@ -153,6 +153,75 @@ mod native_compute_tests {
             },
         );
         let _ = reg.activate_controller("compute");
+        let mut network_ops = HashMap::new();
+        network_ops.insert(
+            "list".to_owned(),
+            ActionId::new_unchecked("network", "ListNetworks"),
+        );
+        network_ops.insert(
+            "show".to_owned(),
+            ActionId::new_unchecked("network", "ReadNetwork"),
+        );
+        network_ops.insert(
+            "create".to_owned(),
+            ActionId::new_unchecked("network", "CreateNetwork"),
+        );
+        network_ops.insert(
+            "delete".to_owned(),
+            ActionId::new_unchecked("network", "DeleteNetwork"),
+        );
+        let network_manifest = o3k_kernel::ServiceManifest {
+            manifest_version: 1,
+            service_id: "network".to_owned(),
+            namespace: "network".to_owned(),
+            service_version: "0.4.0".to_owned(),
+            ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
+            resource_types: vec![o3k_kernel::RegisteredResourceType {
+                resource_type: o3k_kernel::ResourceType::new_unchecked("network", "network"),
+                schema_version: "v1".to_owned(),
+                collection: Some("networks".to_owned()),
+                scope: o3k_kernel::ResourceScope::Tenant,
+                operations: network_ops,
+            }],
+            actions: vec![
+                "network:ListNetworks".to_owned(),
+                "network:CreateNetwork".to_owned(),
+                "network:ReadNetwork".to_owned(),
+                "network:DeleteNetwork".to_owned(),
+            ],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: Some(o3k_kernel::ManifestController {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            }),
+            health: None,
+        };
+        let _ = reg.register(network_manifest);
+        let _ = reg.register_controller(
+            "network",
+            o3k_kernel::controller::ControllerSession {
+                service_id: "network".to_owned(),
+                namespace: "network".to_owned(),
+                service_principal: o3k_kernel::ServicePrincipal::new(
+                    o3k_kernel::PrincipalId::new_unchecked("test-network-controller"),
+                    "test-network-controller",
+                    "network",
+                ),
+                session_id: uuid::Uuid::new_v4(),
+                session_generation: 1,
+                protocol_version: o3k_kernel::controller::ProtocolVersion::new(1, 0),
+                manifest_digest: "test-digest".to_owned(),
+                manifest_generation: 1,
+                started_at: "2026-01-01T00:00:00Z".to_owned(),
+            },
+        );
+        let _ = reg.activate_controller("network");
         reg
     }
 
@@ -449,6 +518,103 @@ mod native_compute_tests {
         )
         .await;
         assert_eq!(stale_status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn native_compute_quota_exceeded_is_forbidden_without_provider_side_effect() {
+        let (router, store, provider, _) = setup().await;
+        let router = &router;
+        use o3k_kernel::{LimitKey, LimitValue};
+        use o3k_store::QuotaRepository;
+        let scope_a = OwnershipScope::project(ScopeId::new_unchecked("project-a"), None, None);
+        store
+            .set_limit(
+                &scope_a,
+                &LimitKey::compute_servers(),
+                LimitValue::Maximum(1),
+            )
+            .await
+            .expect("quota limit");
+
+        let spec = |name: &str| {
+            serde_json::json!({
+                "spec": {
+                    "name": name,
+                    "image_id": "image-a",
+                    "flavor_id": "00000000-0000-0000-0000-000000000001",
+                    "network_ids": ["net-a"]
+                }
+            })
+        };
+        let (status, json) = exec(
+            router,
+            authed_post("/compute/servers", "a", "quota-create-1", spec("one")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{json}");
+
+        // Regression: the durable quota denial from the compute authority used
+        // to surface as a 500 through the generic native route; it is a
+        // caller-visible 403, and the provider must not observe the mutation.
+        let (status, problem) = exec(
+            router,
+            authed_post("/compute/servers", "a", "quota-create-2", spec("two")),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "quota denial must not map to an internal error: {problem}"
+        );
+        assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_network_create_is_listed_and_deletable_through_generic_collection() {
+        let (router, _, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({"spec": {"name": "tenant-network"}});
+        let (status, created) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-create", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let network_id = created["resource_id"]
+            .as_str()
+            .expect("network id")
+            .to_owned();
+
+        // Regression: the generic native collection must list a natively
+        // created network. The durable resource-ledger row used to be written
+        // only for migration envelopes, leaving native creates invisible to
+        // the native list and undeletable through the generic delete route.
+        let (status, listed) = exec(router, authed("/network/networks", "a")).await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        let ids: Vec<&str> = listed["items"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item["metadata"]["id"].as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            ids.contains(&network_id.as_str()),
+            "native network missing from the generic collection: {listed}"
+        );
+
+        let delete_response = router
+            .clone()
+            .oneshot(authed_delete(
+                &format!("/network/networks/{network_id}"),
+                "a",
+                "net-delete",
+            ))
+            .await
+            .expect("delete request");
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
