@@ -86,7 +86,9 @@ fn availability_str(availability: AgentAvailability) -> &'static str {
 /// 7. durable state `Unavailable` (scheduler out-of-service) while the agent
 ///    reports healthy -> Unavailable / AdministrativelyDisabled (the durable
 ///    authority dominates a healthy-looking agent);
-/// 8. otherwise                -> Healthy.
+/// 8. unrecognized durable state (corrupt authority) -> Unknown / no reason
+///    (mirrors the store's corrupt-state handling; never reported healthy);
+/// 9. otherwise                -> Healthy.
 #[allow(clippy::needless_pass_by_value)]
 fn provider_status(
     snap: Option<&AgentNodeSnapshot>,
@@ -141,6 +143,14 @@ fn provider_status(
             DiagnosticStatus::Unavailable,
             Some(DiagnosticReason::AdministrativelyDisabled),
         );
+    }
+    // Any durable state outside the four canonical values is corrupt; never
+    // report it healthy (mirrors capacity_summary's corrupt-state handling).
+    if !matches!(
+        record_state,
+        "Enabled" | "Draining" | "Unavailable" | "Deleted"
+    ) {
+        return (DiagnosticStatus::Unknown, None);
     }
     (DiagnosticStatus::Healthy, None)
 }
@@ -1128,6 +1138,24 @@ mod tests {
         let (status, reason) = provider_status(None, "Enabled", Some(now_unix_ms()), now_unix_ms());
         assert_eq!(status, DiagnosticStatus::Unknown);
         assert_eq!(reason, Some(DiagnosticReason::NeverObserved));
+    }
+
+    #[test]
+    fn provider_status_unrecognized_durable_state_is_never_healthy() {
+        // A corrupt durable state (outside the four canonical values) must
+        // never be projected healthy, mirroring the store's corrupt handling.
+        let (status, reason) = provider_status(
+            Some(&snapshot(
+                "provider-a",
+                AgentAvailability::Available,
+                AgentAdministrativeState::Enabled,
+            )),
+            "BogusState",
+            Some(now_unix_ms()),
+            now_unix_ms(),
+        );
+        assert_eq!(status, DiagnosticStatus::Unknown);
+        assert_eq!(reason, None);
     }
 
     #[test]
