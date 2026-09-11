@@ -111,6 +111,7 @@ services:
       - "compute:ListServers"
       - "compute:CreateServer"
       - "compute:ReadServer"
+      - "compute:UpdateServer"
       - "compute:DeleteServer"
       - "compute:StopServer"
       - "compute:StartServer"

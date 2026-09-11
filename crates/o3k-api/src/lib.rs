@@ -544,6 +544,7 @@ pub fn router_with_state(state: AppState) -> Router {
             .route(
                 "/o3k/v1/compute/servers/{id}",
                 get(o3k_native_api::compute::show_server)
+                    .put(o3k_native_api::resource::update_compute)
                     .delete(o3k_native_api::resource::delete_fixed),
             )
             .route(
@@ -569,6 +570,7 @@ pub fn router_with_state(state: AppState) -> Router {
                 get(o3k_native_api::operation::show_operation),
             );
         router = router.route("/o3k/v1/audit", get(o3k_native_api::audit::list_audit));
+        router = router.route("/o3k/v1/audit/{id}", get(o3k_native_api::audit::show_audit));
         router = router
             .route("/o3k/v1/quota", get(o3k_native_api::quota::list))
             .route(

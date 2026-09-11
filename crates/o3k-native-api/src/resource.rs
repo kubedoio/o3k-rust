@@ -697,6 +697,48 @@ pub async fn update(
     State(state): State<NativeApiState>,
     Json(request): Json<UpdateRequest>,
 ) -> Response {
+    update_for(
+        auth,
+        headers,
+        namespace,
+        collection,
+        id,
+        State(state),
+        Json(request),
+    )
+    .await
+}
+
+/// Concrete routes must bind their canonical descriptor explicitly. They do
+/// not derive namespace/collection from the request URI.
+pub async fn update_compute(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<NativeApiState>,
+    Json(request): Json<UpdateRequest>,
+) -> Response {
+    update_for(
+        auth,
+        headers,
+        "compute".to_owned(),
+        "servers".to_owned(),
+        id,
+        State(state),
+        Json(request),
+    )
+    .await
+}
+
+async fn update_for(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    namespace: String,
+    collection: String,
+    id: String,
+    State(state): State<NativeApiState>,
+    Json(request): Json<UpdateRequest>,
+) -> Response {
     let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
         return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
     };
