@@ -11,10 +11,10 @@ use crate::domain::records::{
     KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
     NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, OperatorAssignmentRecord,
-    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
-    PlacementProviderRecord, PlacementReconcileRecord, PortRecord, ResourceRecord,
-    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord,
-    VolumeAttachmentRecord,
+    PlacementAllocationRecord, PlacementCapacitySummary, PlacementIntentRecord,
+    PlacementInventoryRecord, PlacementProviderRecord, PlacementProviderStateRecord,
+    PlacementReconcileRecord, PortRecord, ResourceRecord, SecurityGroupBindingRecord,
+    SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord, VolumeAttachmentRecord,
 };
 use crate::port::durable::DurableStore;
 use crate::quota::QuotaRepository;
@@ -628,6 +628,36 @@ pub trait PlacementRepository: Send + Sync {
         provider_id: &str,
     ) -> Result<Option<PlacementProviderRecord>, StoreError>;
     async fn list_providers(&self) -> Result<Vec<PlacementProviderRecord>, StoreError>;
+
+    /// Bounded, paginated provider read for operator diagnostics.
+    ///
+    /// Returns providers (with inventories but not allocations) whose id
+    /// sorts after `after_id`, at most `limit`, ordered by id. Allocations are
+    /// deliberately omitted: `Inventory.used` already reflects durable
+    /// allocation, and diagnostics must not materialize every allocation row.
+    async fn list_providers_bounded(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PlacementProviderRecord>, StoreError>;
+
+    /// Bounded read of provider id + durable state only, for operator
+    /// diagnostics aggregation. Ordered by id, at most `limit`, continuing
+    /// after `after_id`. Never materializes inventories or allocations.
+    async fn list_provider_states(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PlacementProviderStateRecord>, StoreError>;
+
+    /// Bounded, repository-computed capacity aggregate over the durable
+    /// placement authority.
+    ///
+    /// This exists so operator diagnostics can read authoritative capacity
+    /// without materializing every provider, inventory row and allocation.
+    /// The implementation must aggregate in the database and fail closed
+    /// (never silently truncate) when the stored class set exceeds `limit`.
+    async fn capacity_summary(&self, limit: usize) -> Result<PlacementCapacitySummary, StoreError>;
     async fn register_provider(
         &self,
         node_id: &str,

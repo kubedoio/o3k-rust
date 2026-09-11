@@ -432,6 +432,52 @@ impl PlacementLedger {
             .map_err(map_store_error)?;
         records.iter().map(provider_from_record).collect()
     }
+
+    /// Bounded, paginated provider read for operator diagnostics.
+    ///
+    /// Returns providers (with inventories, without allocations) ordered by
+    /// id, at most `limit`, continuing after `after_id`. Never materializes
+    /// the whole fleet or its allocations.
+    pub async fn providers_bounded(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<o3k_store::PlacementProviderRecord>, PlacementError> {
+        self.repository
+            .list_providers_bounded(after_id, limit)
+            .await
+            .map_err(map_store_error)
+    }
+
+    /// Bounded read of provider id + durable state only, used by diagnostics
+    /// aggregation. Never materializes inventories or allocations.
+    pub async fn provider_states(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<o3k_store::PlacementProviderStateRecord>, PlacementError> {
+        self.repository
+            .list_provider_states(after_id, limit)
+            .await
+            .map_err(map_store_error)
+    }
+
+    /// Bounded, database-computed capacity aggregate over the durable
+    /// placement authority.
+    ///
+    /// Operator diagnostics use this instead of [`Self::providers`] so a
+    /// refresh never materializes the whole provider fleet, its inventories
+    /// and its allocations. The repository fails closed when the stored
+    /// resource-class set exceeds `limit`.
+    pub async fn capacity_summary(
+        &self,
+        limit: usize,
+    ) -> Result<o3k_store::PlacementCapacitySummary, PlacementError> {
+        self.repository
+            .capacity_summary(limit)
+            .await
+            .map_err(map_store_error)
+    }
 }
 
 fn provider_state_as_str(state: ProviderState) -> &'static str {
@@ -1071,6 +1117,26 @@ mod tests {
             &self,
         ) -> Result<Vec<o3k_store::PlacementProviderRecord>, o3k_store::StoreError> {
             self.inner.list_providers().await
+        }
+        async fn list_providers_bounded(
+            &self,
+            after_id: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<o3k_store::PlacementProviderRecord>, o3k_store::StoreError> {
+            self.inner.list_providers_bounded(after_id, limit).await
+        }
+        async fn list_provider_states(
+            &self,
+            after_id: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<o3k_store::PlacementProviderStateRecord>, o3k_store::StoreError> {
+            self.inner.list_provider_states(after_id, limit).await
+        }
+        async fn capacity_summary(
+            &self,
+            limit: usize,
+        ) -> Result<o3k_store::PlacementCapacitySummary, o3k_store::StoreError> {
+            self.inner.capacity_summary(limit).await
         }
         async fn register_provider(
             &self,

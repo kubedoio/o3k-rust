@@ -1093,4 +1093,124 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
+
+    // ── Operator diagnostics authorization (Phase 27) ────────────────────
+
+    struct FakeDiagnosticsReader;
+
+    #[async_trait::async_trait]
+    impl crate::diagnostics::DiagnosticsReader for FakeDiagnosticsReader {
+        async fn summary(
+            &self,
+        ) -> Result<crate::diagnostics::DiagnosticsSummary, crate::diagnostics::DiagnosticsError>
+        {
+            Ok(crate::diagnostics::DiagnosticsSummary {
+                version: crate::diagnostics::DIAGNOSTICS_VERSION.to_owned(),
+                evaluated_at_unix_ms: 1_700_000_000_000,
+                status: crate::diagnostics::DiagnosticStatus::Healthy,
+                counts: crate::diagnostics::StatusCounts::default(),
+                control_plane: None,
+                locations: crate::diagnostics::LocationDiagnostics {
+                    configured: true,
+                    regions: 1,
+                    availability_domains: 1,
+                },
+            })
+        }
+
+        async fn services(
+            &self,
+            _limit: usize,
+            _after: Option<&str>,
+        ) -> Result<
+            crate::diagnostics::DiagnosticsPage<crate::diagnostics::ServiceDiagnostics>,
+            crate::diagnostics::DiagnosticsError,
+        > {
+            Ok(crate::diagnostics::DiagnosticsPage {
+                items: vec![],
+                has_more: false,
+                next_cursor: None,
+            })
+        }
+
+        async fn providers(
+            &self,
+            _limit: usize,
+            _after: Option<&str>,
+        ) -> Result<
+            crate::diagnostics::DiagnosticsPage<crate::diagnostics::ProviderDiagnostics>,
+            crate::diagnostics::DiagnosticsError,
+        > {
+            Ok(crate::diagnostics::DiagnosticsPage {
+                items: vec![],
+                has_more: false,
+                next_cursor: None,
+            })
+        }
+
+        async fn capacity(
+            &self,
+        ) -> Result<crate::diagnostics::CapacityDiagnostics, crate::diagnostics::DiagnosticsError>
+        {
+            Ok(crate::diagnostics::CapacityDiagnostics {
+                version: crate::diagnostics::DIAGNOSTICS_VERSION.to_owned(),
+                status: crate::diagnostics::DiagnosticStatus::Unknown,
+                observed_at_unix_ms: None,
+                reason: None,
+                providers_enabled: 0,
+                providers_draining: 0,
+                providers_unavailable: 0,
+                providers_deleted: 0,
+                dimensions: vec![],
+            })
+        }
+    }
+
+    fn diagnostics_app(system: bool) -> axum::Router {
+        let state = NativeApiState::new(
+            None,
+            CursorConfig::new(vec![9u8; 32]).unwrap(),
+            Some(Arc::new(TestIssuer(context(system)))),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_diagnostics_reader(Arc::new(FakeDiagnosticsReader))
+        .with_authorizer(Arc::new(StaticAuthorizer::standard()));
+        router(state)
+    }
+
+    #[tokio::test]
+    async fn diagnostics_endpoints_require_system_operator_scope() {
+        let endpoints = [
+            "/operator/diagnostics",
+            "/operator/diagnostics/services",
+            "/operator/diagnostics/providers",
+            "/operator/diagnostics/capacity",
+        ];
+
+        // A project-scoped caller that merely holds an `operator` role name is
+        // denied on every diagnostics route (authorization is scope-based, not
+        // role-string-based).
+        for uri in endpoints {
+            let (status, _) = get(diagnostics_app(false), uri).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+        }
+
+        // A system-scoped operator is allowed on all four routes. The summary
+        // and capacity routes carry the version/status envelope; the services
+        // and providers routes return a bounded page (no version/status field).
+        for uri in endpoints {
+            let (status, body) = get(diagnostics_app(true), uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            if uri.ends_with("services") || uri.ends_with("providers") {
+                assert!(body.get("items").is_some(), "{uri}");
+                assert!(body.get("has_more").is_some(), "{uri}");
+            } else {
+                assert_eq!(body["version"], serde_json::json!("v1"), "{uri}");
+                assert!(body.get("status").is_some(), "{uri}");
+            }
+        }
+    }
 }

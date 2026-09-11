@@ -1559,6 +1559,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_placement_diagnostics_capacity_and_bounded_providers() -> Result<(), StoreError>
+    {
+        let store = O3kStore::connect_sqlite_memory().await?;
+
+        let inventory =
+            |class: &str, total: u64, reserved: u64, ratio: f64| PlacementInventoryRecord {
+                resource_class: class.to_owned(),
+                total,
+                reserved,
+                allocation_ratio: ratio,
+                used: 0,
+            };
+
+        // Two providers with overlapping resource classes, both Enabled.
+        store
+            .register_provider(
+                "compute-1",
+                &[
+                    inventory("MEMORY_MB", 4096, 256, 1.5),
+                    inventory("VCPU", 8, 1, 16.0),
+                ],
+            )
+            .await?;
+        store
+            .register_provider(
+                "compute-2",
+                &[
+                    inventory("MEMORY_MB", 2048, 128, 1.0),
+                    inventory("VCPU", 4, 0, 8.0),
+                ],
+            )
+            .await?;
+
+        // capacity_summary aggregates allocatable/reserved/allocated across
+        // providers and reports provider counts by canonical state.
+        let summary = store.capacity_summary(64).await?;
+        assert_eq!(summary.providers_enabled, 2);
+        assert_eq!(summary.providers_draining, 0);
+        assert_eq!(summary.providers_unavailable, 0);
+        assert_eq!(summary.providers_deleted, 0);
+
+        let memory = class(&summary, "MEMORY_MB")?;
+        // allocatable = floor(4096*1.5) + floor(2048*1.0) = 6144 + 2048 = 8192.
+        assert_eq!(memory.allocatable, 8192);
+        assert_eq!(memory.reserved, 256 + 128);
+        assert_eq!(memory.allocated, 0);
+
+        let vcpu = class(&summary, "VCPU")?;
+        // allocatable = floor(8*16.0) + floor(4*8.0) = 128 + 32 = 160.
+        assert_eq!(vcpu.allocatable, 160);
+        assert_eq!(vcpu.reserved, 1);
+        assert_eq!(vcpu.allocated, 0);
+
+        // The aggregate fails closed (Corrupt) when the stored class set
+        // exceeds the caller's limit rather than silently truncating.
+        assert!(matches!(
+            store.capacity_summary(1).await,
+            Err(StoreError::Corrupt(_))
+        ));
+
+        // list_providers_bounded paginates by id with after_id and honours limit.
+        let page1 = store.list_providers_bounded(None, 1).await?;
+        assert_eq!(page1.len(), 1);
+        assert_eq!(page1[0].id, "compute-1");
+
+        let page2 = store.list_providers_bounded(Some("compute-1"), 1).await?;
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2[0].id, "compute-2");
+
+        assert!(
+            store
+                .list_providers_bounded(Some("compute-2"), 10)
+                .await?
+                .is_empty()
+        );
+        assert_eq!(store.list_providers_bounded(None, 10).await?.len(), 2);
+
+        // Bounded reads carry inventories but deliberately omit allocations.
+        let bounded = store.list_providers_bounded(None, 10).await?;
+        for provider in bounded {
+            assert!(!provider.inventories.is_empty());
+            assert!(provider.allocations.is_empty());
+        }
+
+        // Commit an allocation so the `allocated` aggregate is exercised.
+        let allocation = PlacementAllocationRecord {
+            id: "alloc-1".to_owned(),
+            provider_id: "compute-1".to_owned(),
+            consumer_id: "consumer-1".to_owned(),
+            resources: vec![
+                PlacementResourceRecord {
+                    resource_class: "MEMORY_MB".to_owned(),
+                    amount: 1024,
+                },
+                PlacementResourceRecord {
+                    resource_class: "VCPU".to_owned(),
+                    amount: 2,
+                },
+            ],
+        };
+        store.commit_allocation("compute-1", 1, &allocation).await?;
+
+        let summary = store.capacity_summary(64).await?;
+        assert_eq!(class(&summary, "MEMORY_MB")?.allocated, 1024);
+        assert_eq!(class(&summary, "VCPU")?.allocated, 2);
+        // A normal allocation is not over-allocated.
+        assert_eq!(summary.providers_over_allocated, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_list_provider_states_pagination_and_narrow_read() -> Result<(), StoreError> {
+        let store = O3kStore::connect_sqlite_memory().await?;
+        let inventory = PlacementInventoryRecord {
+            resource_class: "VCPU".to_owned(),
+            total: 8,
+            reserved: 1,
+            allocation_ratio: 1.0,
+            used: 0,
+        };
+        store
+            .register_provider("compute-1", std::slice::from_ref(&inventory))
+            .await?;
+        store.register_provider("compute-2", &[inventory]).await?;
+
+        // Returns id+state rows ordered by id; both default to `Enabled`.
+        let all = store.list_provider_states(None, 10).await?;
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all.iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["compute-1", "compute-2"]
+        );
+        assert!(all.iter().all(|record| record.state == "Enabled"));
+
+        // Honors `after_id` pagination and `limit`.
+        let page1 = store.list_provider_states(None, 1).await?;
+        assert_eq!(page1.len(), 1);
+        assert_eq!(page1[0].id, "compute-1");
+
+        let page2 = store.list_provider_states(Some("compute-1"), 1).await?;
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2[0].id, "compute-2");
+
+        assert!(
+            store
+                .list_provider_states(Some("compute-2"), 10)
+                .await?
+                .is_empty()
+        );
+
+        // The aggregate read is deliberately narrow: it carries only the
+        // provider id + durable state, never inventories or allocations.
+        // The record type structurally prevents those fields from appearing.
+        for record in store.list_provider_states(None, 10).await? {
+            assert!(matches!(
+                record,
+                PlacementProviderStateRecord { id: _, state: _ }
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns a single capacity aggregate class by name, or a corrupt-state
+    /// error if it is absent (a test invariant failure).
+    fn class<'a>(
+        summary: &'a PlacementCapacitySummary,
+        name: &str,
+    ) -> Result<&'a PlacementCapacityClassRecord, StoreError> {
+        summary
+            .classes
+            .iter()
+            .find(|class| class.resource_class == name)
+            .ok_or_else(|| {
+                StoreError::Corrupt(format!("{name} class missing from capacity summary"))
+            })
+    }
+
+    #[tokio::test]
     async fn sqlite_federated_binding_survives_restart() -> Result<(), Box<dyn Error>> {
         let path =
             std::env::temp_dir().join(format!("o3k-federated-binding-{}.sqlite", Uuid::now_v7()));

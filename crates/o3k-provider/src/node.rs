@@ -78,6 +78,20 @@ pub trait AgentNodeRegistry: Send + Sync {
         agent_epoch: &str,
     ) -> Option<Box<dyn AgentEpochLease>>;
     fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<AgentEvent>;
+
+    /// Unix milliseconds of the most recent authenticated heartbeat observed
+    /// for an agent, or `None` when no heartbeat has ever been observed by
+    /// this registry.
+    ///
+    /// This is the observation clock for provider diagnostics. `AgentAvailability`
+    /// already encodes lease-based staleness for scheduling; diagnostics need
+    /// the timestamp as well so a last-known-good observation can be reported
+    /// as `stale` rather than silently presented as current truth. Registries
+    /// that cannot supply an observation time return `None`, which diagnostics
+    /// project as `unknown` — never as healthy.
+    async fn observed_at_unix_ms(&self, _agent_id: &str) -> Option<i64> {
+        None
+    }
 }
 
 /// Artifact kinds the agent realizes on a host. Wire `Unspecified` has no

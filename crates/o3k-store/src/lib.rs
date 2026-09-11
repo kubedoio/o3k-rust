@@ -61,11 +61,12 @@ pub use domain::records::{
     KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
     NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, ObservationUpdate,
-    OperationRecord, OperatorAssignmentRecord, PlacementAllocationRecord, PlacementIntentRecord,
-    PlacementInventoryRecord, PlacementProviderRecord, PlacementReconcileRecord,
-    PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord,
-    SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord, SubnetRecord,
-    VolumeAttachmentRecord,
+    OperationRecord, OperatorAssignmentRecord, PlacementAllocationRecord,
+    PlacementCapacityClassRecord, PlacementCapacitySummary, PlacementIntentRecord,
+    PlacementInventoryRecord, PlacementProviderRecord, PlacementProviderStateRecord,
+    PlacementReconcileRecord, PlacementResourceRecord, PortRecord, ProviderReference,
+    ResourceRecord, SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord,
+    SubnetRecord, VolumeAttachmentRecord,
 };
 pub(crate) use domain::records::{legacy_policy_records, validate_canonical_lifecycle_update};
 pub use domain::state::{

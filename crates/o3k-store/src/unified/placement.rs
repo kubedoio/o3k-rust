@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 
 use crate::{
-    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
-    PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository, StoreError,
+    PlacementAllocationRecord, PlacementCapacitySummary, PlacementIntentRecord,
+    PlacementInventoryRecord, PlacementProviderRecord, PlacementProviderStateRecord,
+    PlacementReconcileRecord, PlacementRepository, StoreError,
 };
 
 use super::O3kStore;
@@ -23,6 +24,35 @@ impl PlacementRepository for O3kStore {
         match self {
             Self::Sqlite(s) => s.list_providers().await,
             Self::Postgres(s) => s.list_providers().await,
+        }
+    }
+
+    async fn list_providers_bounded(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PlacementProviderRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_providers_bounded(after_id, limit).await,
+            Self::Postgres(s) => s.list_providers_bounded(after_id, limit).await,
+        }
+    }
+
+    async fn list_provider_states(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PlacementProviderStateRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_provider_states(after_id, limit).await,
+            Self::Postgres(s) => s.list_provider_states(after_id, limit).await,
+        }
+    }
+
+    async fn capacity_summary(&self, limit: usize) -> Result<PlacementCapacitySummary, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.capacity_summary(limit).await,
+            Self::Postgres(s) => s.capacity_summary(limit).await,
         }
     }
 

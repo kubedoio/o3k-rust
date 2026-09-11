@@ -175,6 +175,7 @@ pub struct Composition {
     native_storage_recovery_task: Option<tokio::task::JoinHandle<()>>,
     control_task: Option<tokio::task::JoinHandle<()>>,
     inspect_probe_task: Option<tokio::task::JoinHandle<()>>,
+    diagnostics_probe_task: tokio::task::JoinHandle<()>,
 }
 
 impl Composition {
@@ -219,6 +220,8 @@ impl Composition {
         }
         self.session_heartbeat_task.abort();
         let _ = self.session_heartbeat_task.await;
+        self.diagnostics_probe_task.abort();
+        let _ = self.diagnostics_probe_task.await;
         let _ = self
             .coordination_store
             .drain_controller_session(&self.controller_id, &self.controller_epoch)
@@ -652,6 +655,10 @@ pub async fn build_composition(
         .as_ref()
         .map(|id_service| std::sync::Arc::new(id_service.clone()));
     let external_controllers = external_controllers_from_config().await?;
+    // The diagnostics controller probe needs the same external-controller set
+    // that is later moved into the generic resource application, so keep a
+    // private clone for it.
+    let probe_external_controllers = external_controllers.clone();
     for (service_id, controller) in &external_controllers {
         let manifest = native_manifest_registry
             .get(service_id)
@@ -924,7 +931,7 @@ pub async fn build_composition(
         volume_reader,
         network_reader,
     )?
-    .with_locations(native_locations)
+    .with_locations(native_locations.clone())
     .with_operation_reader(operation_reader)
     .with_quota_reader(std::sync::Arc::new(
         crate::native_adapters::QuotaReaderAdapter::new(store.clone()),
@@ -942,7 +949,28 @@ pub async fn build_composition(
     ))
     .with_resource_application(generic_application)
     .with_authorizer(std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard()));
-    let native_lifecycle_registry = native_state.lifecycle_registry();
+    let native_lifecycle_registry = native_state
+        .lifecycle_registry()
+        .ok_or_else(|| "lifecycle registry not configured".to_owned())?;
+    // Diagnostics reader adapter: projects canonical authority (lifecycle
+    // registry, agent registry, placement store, location registry) into the
+    // operator diagnostics contract. The same lifecycle registry is shared so
+    // the projection always reflects the canonical controller state.
+    let diagnostics_agents: std::sync::Arc<dyn o3k_provider::AgentNodeRegistry> =
+        Arc::new(registry.clone());
+    let diagnostics_adapter =
+        std::sync::Arc::new(crate::native_adapters::DiagnosticsReaderAdapter::new(
+            native_lifecycle_registry.clone(),
+            diagnostics_agents,
+            store.clone(),
+            native_locations.clone(),
+        ));
+    let diagnostics_probe_task = spawn_diagnostics_controller_probe(
+        native_lifecycle_registry.clone(),
+        probe_external_controllers,
+        diagnostics_adapter.observations(),
+    );
+    let native_state = native_state.with_diagnostics_reader(diagnostics_adapter);
     state = state.with_native_api(native_state);
     state = state.with_storage_store(store.clone());
     if let Some(provider) = native_storage_provider {
@@ -1016,9 +1044,7 @@ pub async fn build_composition(
                 let result = server.serve(control_shutdown_signal()).await;
                 if let Err(error) = &result {
                     readiness.set_ready(false);
-                    if let Some(registry) = lifecycle_readiness
-                        && let Ok(mut registry) = registry.write()
-                    {
+                    if let Ok(mut registry) = lifecycle_readiness.write() {
                         let _ = registry.update_controller_health(
                             "compute",
                             o3k_kernel::controller::ControllerHealth {
@@ -1058,6 +1084,68 @@ pub async fn build_composition(
         native_storage_recovery_task,
         control_task,
         inspect_probe_task,
+        diagnostics_probe_task,
+    })
+}
+
+/// Spawns the periodic external-controller re-probe task for operator
+/// diagnostics.
+///
+/// Every 15 seconds it walks the controllers present in the shared lifecycle
+/// registry. For each service backed by an external controller it issues a
+/// bounded health probe (5s timeout): on success it records the reported
+/// health and on timeout it synthesizes an unhealthy health so a dead external
+/// controller can never stay `healthy` forever. In-process services have no
+/// transport I/O; they are simply re-observed. Every probe records a fresh
+/// observation timestamp so the projection can distinguish "observed" from
+/// "stale" services.
+fn spawn_diagnostics_controller_probe(
+    registry: std::sync::Arc<std::sync::RwLock<o3k_kernel::ManifestRegistry>>,
+    external_controllers: std::collections::BTreeMap<
+        String,
+        std::sync::Arc<o3k_service_sdk::GrpcControllerAdapter>,
+    >,
+    observations: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, i64>>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let controller_ids: Vec<String> = match registry.read() {
+                Ok(reg) => reg
+                    .all_controllers()
+                    .into_iter()
+                    .map(|registration| registration.service_id.clone())
+                    .collect(),
+                Err(_) => continue,
+            };
+            for service_id in controller_ids {
+                if let Some(controller) = external_controllers.get(&service_id) {
+                    let health = tokio::time::timeout(Duration::from_secs(5), controller.health())
+                        .await
+                        .unwrap_or(o3k_kernel::controller::ControllerHealth {
+                            healthy: false,
+                            detail: None,
+                            protocol_version: o3k_kernel::controller::ProtocolVersion::V1,
+                        });
+                    if let Ok(mut reg) = registry.write() {
+                        let _ = reg.update_controller_health(&service_id, health);
+                    }
+                }
+                // In-process services re-observe configuration without I/O;
+                // external controllers record an observation after their probe.
+                // The timestamp is taken at the moment of observation, not at
+                // the loop start: a serial probe pass over a large fleet can
+                // otherwise record an observation far older than the
+                // 75 s freshness threshold for controllers that were just
+                // confirmed healthy.
+                if let Ok(mut observations) = observations.write() {
+                    let observed_at = crate::native_adapters::diagnostics::now_unix_ms();
+                    observations.insert(service_id, observed_at);
+                }
+            }
+        }
     })
 }
 

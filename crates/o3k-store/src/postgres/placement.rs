@@ -2,12 +2,20 @@ use async_trait::async_trait;
 use sqlx::Row;
 
 use crate::{
-    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
-    PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository,
+    PlacementAllocationRecord, PlacementCapacityClassRecord, PlacementCapacitySummary,
+    PlacementIntentRecord, PlacementInventoryRecord, PlacementProviderRecord,
+    PlacementProviderStateRecord, PlacementReconcileRecord, PlacementRepository,
     PlacementResourceRecord, StoreError,
 };
 
 use super::PostgresStore;
+
+/// PostgreSQL returns placement quantities as signed `BIGINT`. A negative
+/// aggregate is corruption, not a valid capacity, so it fails closed.
+fn pg_placement_u64(value: i64) -> Result<u64, StoreError> {
+    u64::try_from(value)
+        .map_err(|_| StoreError::Corrupt("negative placement value in durable state".to_owned()))
+}
 
 #[async_trait]
 impl PlacementRepository for PostgresStore {
@@ -59,6 +67,138 @@ impl PlacementRepository for PostgresStore {
             providers.push(provider);
         }
         Ok(providers)
+    }
+
+    async fn list_providers_bounded(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PlacementProviderRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("placement page limit out of range".to_owned()))?;
+        let rows = sqlx::query(
+            "SELECT id, node_id, state, generation FROM placement_providers \
+             WHERE ($1::text IS NULL OR id > $1) \
+             ORDER BY id \
+             LIMIT $2",
+        )
+        .bind(after_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let mut providers = Vec::with_capacity(rows.len());
+        for row in rows {
+            let provider_id: String = row.get("id");
+            let provider = PlacementProviderRecord {
+                id: row.get("id"),
+                node_id: row.get("node_id"),
+                state: row.get("state"),
+                generation: row.get::<i64, _>("generation") as u64,
+                inventories: self.load_placement_inventories(&provider_id).await?,
+                allocations: Vec::new(),
+            };
+            providers.push(provider);
+        }
+        Ok(providers)
+    }
+
+    async fn list_provider_states(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PlacementProviderStateRecord>, StoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::Corrupt("placement page limit out of range".to_owned()))?;
+        let rows = sqlx::query(
+            "SELECT id, state FROM placement_providers \
+             WHERE ($1::text IS NULL OR id > $1) \
+             ORDER BY id \
+             LIMIT $2",
+        )
+        .bind(after_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        Ok(rows
+            .iter()
+            .map(|row| PlacementProviderStateRecord {
+                id: row.get("id"),
+                state: row.get("state"),
+            })
+            .collect())
+    }
+
+    async fn capacity_summary(&self, limit: usize) -> Result<PlacementCapacitySummary, StoreError> {
+        let bound = i64::try_from(limit).map_err(|_| {
+            StoreError::Corrupt("placement aggregate limit out of range".to_owned())
+        })?;
+        let rows = sqlx::query(
+            "SELECT resource_class, \
+                    COALESCE(SUM(FLOOR(total * allocation_ratio)::BIGINT), 0)::BIGINT AS allocatable, \
+                    COALESCE(SUM(reserved), 0)::BIGINT AS reserved, \
+                    COALESCE(SUM(used), 0)::BIGINT AS allocated \
+             FROM placement_inventories \
+             GROUP BY resource_class \
+             ORDER BY resource_class \
+             LIMIT $1",
+        )
+        .bind(bound + 1)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if rows.len() > limit {
+            return Err(StoreError::Corrupt(
+                "placement resource class inventory exceeds the bounded aggregate limit".to_owned(),
+            ));
+        }
+        let mut classes = Vec::with_capacity(rows.len());
+        for row in &rows {
+            classes.push(PlacementCapacityClassRecord {
+                resource_class: row.get("resource_class"),
+                allocatable: pg_placement_u64(row.get("allocatable"))?,
+                reserved: pg_placement_u64(row.get("reserved"))?,
+                allocated: pg_placement_u64(row.get("allocated"))?,
+            });
+        }
+        let state_rows = sqlx::query(
+            "SELECT state, COUNT(*) AS provider_count FROM placement_providers GROUP BY state",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let mut summary = PlacementCapacitySummary {
+            classes,
+            ..PlacementCapacitySummary::default()
+        };
+        for row in &state_rows {
+            let state: String = row.get("state");
+            let count = pg_placement_u64(row.get("provider_count"))?;
+            match state.as_str() {
+                "Enabled" => summary.providers_enabled = count,
+                "Draining" => summary.providers_draining = count,
+                "Unavailable" => summary.providers_unavailable = count,
+                "Deleted" => summary.providers_deleted = count,
+                other => {
+                    return Err(StoreError::Corrupt(format!(
+                        "unknown placement provider state in durable state: {other:?}"
+                    )));
+                }
+            }
+        }
+        // Providers with at least one over-allocated class (drifted/corrupt
+        // durable invariant), so diagnostics can degrade capacity even when an
+        // over-allocation is masked by another provider's slack.
+        let over_allocated: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT provider_id) FROM placement_inventories \
+             WHERE used > FLOOR(total * allocation_ratio)::BIGINT - reserved",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        summary.providers_over_allocated = pg_placement_u64(over_allocated)?;
+        Ok(summary)
     }
 
     async fn register_provider(
