@@ -157,6 +157,8 @@ pub enum ReconcileError {
     RetryExhausted,
     #[error("agent operation evidence is stale")]
     StaleAgentEvidence,
+    #[error("metering projection failed: {0}")]
+    Metering(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

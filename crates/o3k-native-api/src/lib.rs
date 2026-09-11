@@ -22,6 +22,7 @@ pub mod diagnostics;
 pub mod error;
 pub mod governance;
 pub mod identity;
+pub mod metering;
 pub mod network;
 pub mod operation;
 pub mod pagination;
@@ -47,6 +48,7 @@ pub struct NativeApiState {
     pub quota_reader: Option<std::sync::Arc<dyn quota::QuotaReader>>,
     pub governance_reader: Option<std::sync::Arc<dyn governance::GovernanceReader>>,
     pub diagnostics_reader: Option<std::sync::Arc<dyn diagnostics::DiagnosticsReader>>,
+    pub metering_reader: Option<std::sync::Arc<dyn metering::MeteringReader>>,
     /// Validated generic resource descriptors.  This is the northbound
     /// registry; applications below it are intentionally controller-agnostic.
     resource_index: resource::ResourceDispatcher,
@@ -93,6 +95,7 @@ impl NativeApiState {
             quota_reader: None,
             governance_reader: None,
             diagnostics_reader: None,
+            metering_reader: None,
             resource_index,
             resource_application: None,
             authorizer: None,
@@ -143,6 +146,15 @@ impl NativeApiState {
         reader: std::sync::Arc<dyn diagnostics::DiagnosticsReader>,
     ) -> Self {
         self.diagnostics_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_metering_reader(
+        mut self,
+        reader: std::sync::Arc<dyn metering::MeteringReader>,
+    ) -> Self {
+        self.metering_reader = Some(reader);
         self
     }
 
@@ -266,6 +278,8 @@ pub fn router(state: NativeApiState) -> Router {
             get(diagnostics::providers),
         )
         .route("/operator/diagnostics/capacity", get(diagnostics::capacity))
+        .route("/metering/definitions", get(metering::definitions))
+        .route("/metering/usage", get(metering::usage))
         .layer(DefaultBodyLimit::max(1_048_576))
         .with_state(state)
 }

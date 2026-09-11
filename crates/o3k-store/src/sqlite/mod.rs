@@ -11,6 +11,7 @@ mod core;
 mod helpers;
 mod identity;
 mod image;
+mod metering;
 mod network;
 mod placement;
 mod relationship;

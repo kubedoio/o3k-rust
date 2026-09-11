@@ -224,6 +224,7 @@ mod native_compute_tests {
             public_address_workflow: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            metering: None,
         };
 
         let native = o3k_native_api::NativeApiState::new(

@@ -19,6 +19,7 @@ mod governance;
 mod helpers;
 mod identity;
 mod image;
+mod metering;
 mod network;
 mod placement;
 mod quota;
@@ -101,6 +102,7 @@ impl PostgresStore {
                 placement_providers, placement_inventories, placement_allocations,
                 placement_allocation_resources, placement_allocation_intents, placement_allocation_intent_resources,
                 quota_limits, quota_reservations, quota_reservation_amounts,
+                metering_authority, metering_intervals, metering_aggregates,
                 controller_sessions, work_leases
             CASCADE",
         )

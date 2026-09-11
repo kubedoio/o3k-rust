@@ -3614,4 +3614,768 @@ mod reconciler_tests {
         );
         Ok(())
     }
+
+    type MeteringObservations = Vec<(String, String, String, String)>;
+
+    /// Recording observer that captures every projected lifecycle state in
+    /// order, so tests can assert the exact sequence the authority saw.
+    #[derive(Clone, Default)]
+    struct RecordingMeteringObserver {
+        observed: Arc<Mutex<MeteringObservations>>,
+    }
+
+    #[async_trait::async_trait]
+    impl o3k_kernel::LifecycleMeteringObserver for RecordingMeteringObserver {
+        async fn observe_resource_state(
+            &self,
+            kind: &str,
+            project_id: &str,
+            resource_id: &str,
+            observed_state: &str,
+        ) -> Result<(), o3k_kernel::KernelError> {
+            if let Ok(mut observed) = self.observed.lock() {
+                observed.push((
+                    kind.to_owned(),
+                    project_id.to_owned(),
+                    resource_id.to_owned(),
+                    observed_state.to_owned(),
+                ));
+            }
+            Ok(())
+        }
+
+        async fn observe_allocation(
+            &self,
+            _meter_key: &str,
+            _project_id: &str,
+            _resource_id: &str,
+            _quantity: u64,
+            _consuming: bool,
+        ) -> Result<(), o3k_kernel::KernelError> {
+            Ok(())
+        }
+    }
+
+    struct FailingMeteringObserver;
+
+    #[async_trait::async_trait]
+    impl o3k_kernel::LifecycleMeteringObserver for FailingMeteringObserver {
+        async fn observe_resource_state(
+            &self,
+            _kind: &str,
+            _project_id: &str,
+            _resource_id: &str,
+            _observed_state: &str,
+        ) -> Result<(), o3k_kernel::KernelError> {
+            Err(o3k_kernel::KernelError::MeteringUnavailable(
+                "observer down".to_owned(),
+            ))
+        }
+
+        async fn observe_allocation(
+            &self,
+            _meter_key: &str,
+            _project_id: &str,
+            _resource_id: &str,
+            _quantity: u64,
+            _consuming: bool,
+        ) -> Result<(), o3k_kernel::KernelError> {
+            Ok(())
+        }
+    }
+
+    /// Durable lifecycle projections must reach metering authority in the
+    /// order the resource state actually changes, and replaying a converged
+    /// drive must not project a second distinct state change.
+    #[tokio::test]
+    async fn metering_observer_receives_lifecycle_projection_sequence() -> Result<(), ReconcileError>
+    {
+        let observer = RecordingMeteringObserver::default();
+        let (journal, store, _provider) = journal("metering-lifecycle", 2).await?;
+        let journal = journal.with_metering_observer(Arc::new(observer.clone()));
+
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let delete_operation = Uuid::now_v7();
+        journal
+            .begin_lifecycle(resource.id, delete_operation, LifecycleAction::Delete)
+            .await?;
+        assert_eq!(
+            journal.reconcile_lifecycle_once(delete_operation).await?,
+            OperationState::Succeeded
+        );
+
+        let projected = match observer.observed.lock() {
+            Ok(entries) => entries.clone(),
+            Err(_) => Vec::new(),
+        };
+        let states: Vec<&str> = projected.iter().map(|entry| entry.3.as_str()).collect();
+        assert_eq!(states, vec!["ACTIVE", "DELETED"]);
+        for (kind, project_id, resource_id, _) in &projected {
+            assert_eq!(kind, "compute_instance");
+            assert_eq!(project_id, "project");
+            assert_eq!(resource_id, &request.o3k_server_id.to_string());
+        }
+
+        assert_eq!(
+            journal.reconcile_lifecycle_once(delete_operation).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let replayed: Vec<String> = match observer.observed.lock() {
+            Ok(entries) => entries.iter().map(|entry| entry.3.clone()).collect(),
+            Err(_) => Vec::new(),
+        };
+        assert_eq!(replayed, vec!["ACTIVE", "DELETED"]);
+        Ok(())
+    }
+
+    /// A metering authority failure during a durable projection must surface,
+    /// never be silently dropped.
+    #[tokio::test]
+    async fn failing_metering_observer_surfaces_reconcile_error() -> Result<(), ReconcileError> {
+        let (journal, _store, _provider) = journal("metering-failure", 2).await?;
+        let journal = journal.with_metering_observer(Arc::new(FailingMeteringObserver));
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        let result = journal.reconcile_once(create_operation).await;
+        assert!(
+            matches!(result, Err(ReconcileError::Metering(_))),
+            "expected a surfaced metering failure, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// Fails the first projection and succeeds every later one, so a test can
+    /// prove a crashed/failed observation is repaired by re-driving the step.
+    struct FailOnceMeteringObserver {
+        failed: std::sync::atomic::AtomicBool,
+    }
+
+    impl FailOnceMeteringObserver {
+        fn new() -> Self {
+            Self {
+                failed: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl o3k_kernel::LifecycleMeteringObserver for FailOnceMeteringObserver {
+        async fn observe_resource_state(
+            &self,
+            _kind: &str,
+            _project_id: &str,
+            _resource_id: &str,
+            _observed_state: &str,
+        ) -> Result<(), o3k_kernel::KernelError> {
+            if !self.failed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Err(o3k_kernel::KernelError::MeteringUnavailable(
+                    "first projection fails".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+
+        async fn observe_allocation(
+            &self,
+            _meter_key: &str,
+            _project_id: &str,
+            _resource_id: &str,
+            _quantity: u64,
+            _consuming: bool,
+        ) -> Result<(), o3k_kernel::KernelError> {
+            Ok(())
+        }
+    }
+
+    /// The observation must precede the step's durable writes: when it fails,
+    /// the operation stays non-terminal and the resource is not yet projected,
+    /// so the same idempotent drive repairs it on retry instead of losing the
+    /// observation behind a terminal operation.
+    #[tokio::test]
+    async fn metering_observation_precedes_durable_writes() -> Result<(), ReconcileError> {
+        let (journal, store, _provider) = journal("metering-ordering", 2).await?;
+        let journal = journal.with_metering_observer(Arc::new(FailOnceMeteringObserver::new()));
+
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        let result = journal.reconcile_once(create_operation).await;
+        assert!(
+            matches!(result, Err(ReconcileError::Metering(_))),
+            "expected the first projection to surface, got {result:?}"
+        );
+        let operation = store.get_operation(create_operation).await?;
+        assert!(
+            !matches!(
+                operation.state,
+                OperationState::Succeeded | OperationState::Failed
+            ),
+            "a failed projection must leave the step retriable, got {:?}",
+            operation.state
+        );
+        assert_ne!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ACTIVE",
+            "the resource must not be projected before the observation lands"
+        );
+
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded,
+            "the same drive must converge once the observer recovers"
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ACTIVE"
+        );
+        Ok(())
+    }
+
+    /// Delegating durable store that fails exactly one
+    /// `update_resource_from_observation` call with `StaleGeneration`, so a
+    /// test can prove a lost generation CAS records no metering observation.
+    /// Every other call passes through to the real store.
+    struct StaleObservationStore {
+        inner: TestStore,
+        stale_observation: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl StaleObservationStore {
+        fn new(inner: TestStore) -> Self {
+            Self {
+                inner,
+                stale_observation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+
+        fn fail_next_observation(&self) {
+            self.stale_observation
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DurableStore for StaleObservationStore {
+        async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError> {
+            self.inner.insert_resource(resource).await
+        }
+
+        async fn get_resource(&self, id: Uuid) -> Result<ResourceRecord, StoreError> {
+            self.inner.get_resource(id).await
+        }
+
+        async fn list_resources(
+            &self,
+            project_id: &str,
+            kind: &str,
+        ) -> Result<Vec<ResourceRecord>, StoreError> {
+            self.inner.list_resources(project_id, kind).await
+        }
+
+        async fn list_resources_page(
+            &self,
+            project_id: &str,
+            kind: &str,
+            after_id: Option<&str>,
+            limit: usize,
+        ) -> Result<o3k_store::RepositoryPage<ResourceRecord>, StoreError> {
+            self.inner
+                .list_resources_page(project_id, kind, after_id, limit)
+                .await
+        }
+
+        async fn update_resource(
+            &self,
+            id: Uuid,
+            expected_generation: i64,
+            desired_state: &str,
+            observed_state: &str,
+            observed_generation: i64,
+            provider_id: Option<&str>,
+        ) -> Result<ResourceRecord, StoreError> {
+            self.inner
+                .update_resource(
+                    id,
+                    expected_generation,
+                    desired_state,
+                    observed_state,
+                    observed_generation,
+                    provider_id,
+                )
+                .await
+        }
+
+        async fn update_resource_and_complete_operation(
+            &self,
+            resource_id: Uuid,
+            expected_generation: i64,
+            desired_state: &str,
+            observed_state: &str,
+            observed_generation: i64,
+            provider_id: Option<&str>,
+            operation_id: Uuid,
+            lifecycle: &o3k_store::CanonicalOperationLifecycleUpdate,
+        ) -> Result<ResourceRecord, StoreError> {
+            self.inner
+                .update_resource_and_complete_operation(
+                    resource_id,
+                    expected_generation,
+                    desired_state,
+                    observed_state,
+                    observed_generation,
+                    provider_id,
+                    operation_id,
+                    lifecycle,
+                )
+                .await
+        }
+
+        async fn update_resource_from_observation(
+            &self,
+            id: Uuid,
+            update: &ObservationUpdate<'_>,
+        ) -> Result<ResourceRecord, StoreError> {
+            if self
+                .stale_observation
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(StoreError::StaleGeneration);
+            }
+            self.inner
+                .update_resource_from_observation(id, update)
+                .await
+        }
+
+        async fn insert_operation(&self, operation: &OperationRecord) -> Result<(), StoreError> {
+            self.inner.insert_operation(operation).await
+        }
+
+        async fn reserve_idempotent_operation(
+            &self,
+            request: &IdempotencyReservationRequest,
+        ) -> Result<o3k_store::IdempotencyReservation, StoreError> {
+            self.inner.reserve_idempotent_operation(request).await
+        }
+
+        async fn create_or_replay_idempotent_operation(
+            &self,
+            operation: &OperationRecord,
+            request: &IdempotencyReservationRequest,
+        ) -> Result<o3k_store::IdempotencyReservation, StoreError> {
+            self.inner
+                .create_or_replay_idempotent_operation(operation, request)
+                .await
+        }
+
+        async fn create_or_replay_canonical_idempotent_operation(
+            &self,
+            operation: &OperationRecord,
+            canonical: &CanonicalOperationRecord,
+            request: &IdempotencyReservationRequest,
+        ) -> Result<o3k_store::IdempotencyReservation, StoreError> {
+            self.inner
+                .create_or_replay_canonical_idempotent_operation(operation, canonical, request)
+                .await
+        }
+
+        async fn create_or_replay_canonical_scoped_operation(
+            &self,
+            operation: &OperationRecord,
+            canonical: &CanonicalOperationRecord,
+            request: &IdempotencyReservationRequest,
+        ) -> Result<o3k_store::IdempotencyReservation, StoreError> {
+            self.inner
+                .create_or_replay_canonical_scoped_operation(operation, canonical, request)
+                .await
+        }
+
+        async fn create_or_replay_canonical_resource_operation(
+            &self,
+            resource: &ResourceRecord,
+            operation: &OperationRecord,
+            canonical: &CanonicalOperationRecord,
+            request: &IdempotencyReservationRequest,
+            expected_placement_allocation_id: Option<&str>,
+        ) -> Result<CanonicalAcceptanceOutcome, StoreError> {
+            self.inner
+                .create_or_replay_canonical_resource_operation(
+                    resource,
+                    operation,
+                    canonical,
+                    request,
+                    expected_placement_allocation_id,
+                )
+                .await
+        }
+
+        async fn create_or_replay_canonical_lifecycle_operation(
+            &self,
+            operation: &OperationRecord,
+            canonical: &CanonicalOperationRecord,
+            request: &IdempotencyReservationRequest,
+        ) -> Result<CanonicalAcceptanceOutcome, StoreError> {
+            self.inner
+                .create_or_replay_canonical_lifecycle_operation(operation, canonical, request)
+                .await
+        }
+
+        async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError> {
+            self.inner.get_operation(id).await
+        }
+
+        async fn get_canonical_operation(
+            &self,
+            id: Uuid,
+        ) -> Result<CanonicalOperationRecord, StoreError> {
+            self.inner.get_canonical_operation(id).await
+        }
+
+        async fn list_canonical_operations_page(
+            &self,
+            owner_scope: &str,
+            after_id: Option<Uuid>,
+            limit: u32,
+        ) -> Result<Vec<CanonicalOperationRecord>, StoreError> {
+            self.inner
+                .list_canonical_operations_page(owner_scope, after_id, limit)
+                .await
+        }
+
+        async fn update_canonical_operation_lifecycle(
+            &self,
+            id: Uuid,
+            update: &o3k_store::CanonicalOperationLifecycleUpdate,
+        ) -> Result<CanonicalOperationRecord, StoreError> {
+            self.inner
+                .update_canonical_operation_lifecycle(id, update)
+                .await
+        }
+
+        async fn update_operation(
+            &self,
+            id: Uuid,
+            state: OperationState,
+            provider_operation_id: Option<&str>,
+            error_category: Option<&str>,
+            error_message: Option<&str>,
+        ) -> Result<OperationRecord, StoreError> {
+            self.inner
+                .update_operation(
+                    id,
+                    state,
+                    provider_operation_id,
+                    error_category,
+                    error_message,
+                )
+                .await
+        }
+
+        async fn list_non_terminal_lifecycle_operations(
+            &self,
+        ) -> Result<Vec<OperationRecord>, StoreError> {
+            self.inner.list_non_terminal_lifecycle_operations().await
+        }
+
+        async fn attach_provider_reference(
+            &self,
+            reference: &ProviderReference,
+        ) -> Result<(), StoreError> {
+            self.inner.attach_provider_reference(reference).await
+        }
+
+        async fn get_provider_reference(
+            &self,
+            resource_id: Uuid,
+            provider_name: &str,
+        ) -> Result<ProviderReference, StoreError> {
+            self.inner
+                .get_provider_reference(resource_id, provider_name)
+                .await
+        }
+
+        async fn insert_agent_command(
+            &self,
+            command: &AgentCommandRecord,
+        ) -> Result<AgentCommandRecord, StoreError> {
+            self.inner.insert_agent_command(command).await
+        }
+
+        async fn get_agent_command(
+            &self,
+            command_id: &str,
+        ) -> Result<AgentCommandRecord, StoreError> {
+            self.inner.get_agent_command(command_id).await
+        }
+
+        async fn get_agent_command_by_idempotency_key(
+            &self,
+            idempotency_key: &str,
+        ) -> Result<AgentCommandRecord, StoreError> {
+            self.inner
+                .get_agent_command_by_idempotency_key(idempotency_key)
+                .await
+        }
+
+        async fn get_agent_command_by_operation(
+            &self,
+            operation_id: Uuid,
+        ) -> Result<AgentCommandRecord, StoreError> {
+            self.inner
+                .get_agent_command_by_operation(operation_id)
+                .await
+        }
+
+        async fn update_agent_command(
+            &self,
+            command_id: &str,
+            state: AgentCommandState,
+            accepted_sequence: u64,
+            last_sequence: u64,
+            provider_operation_id: Option<&str>,
+            provider_resource_id: Option<&str>,
+        ) -> Result<AgentCommandRecord, StoreError> {
+            self.inner
+                .update_agent_command(
+                    command_id,
+                    state,
+                    accepted_sequence,
+                    last_sequence,
+                    provider_operation_id,
+                    provider_resource_id,
+                )
+                .await
+        }
+
+        async fn list_recoverable_agent_commands(
+            &self,
+        ) -> Result<Vec<AgentCommandRecord>, StoreError> {
+            self.inner.list_recoverable_agent_commands().await
+        }
+
+        async fn insert_artifact_transfer(
+            &self,
+            transfer: &o3k_store::ArtifactTransferRecord,
+        ) -> Result<o3k_store::ArtifactTransferRecord, StoreError> {
+            self.inner.insert_artifact_transfer(transfer).await
+        }
+
+        async fn get_artifact_transfer(
+            &self,
+            transfer_id: &str,
+        ) -> Result<o3k_store::ArtifactTransferRecord, StoreError> {
+            self.inner.get_artifact_transfer(transfer_id).await
+        }
+
+        async fn rebind_artifact_transfer_epoch(
+            &self,
+            transfer_id: &str,
+            expected_agent_epoch: &str,
+            new_agent_epoch: &str,
+        ) -> Result<o3k_store::ArtifactTransferRecord, StoreError> {
+            self.inner
+                .rebind_artifact_transfer_epoch(transfer_id, expected_agent_epoch, new_agent_epoch)
+                .await
+        }
+
+        async fn update_artifact_transfer(
+            &self,
+            transfer_id: &str,
+            expected_agent_epoch: &str,
+            update: o3k_store::ArtifactTransferUpdate,
+        ) -> Result<o3k_store::ArtifactTransferRecord, StoreError> {
+            self.inner
+                .update_artifact_transfer(transfer_id, expected_agent_epoch, update)
+                .await
+        }
+
+        async fn list_recoverable_artifact_transfers(
+            &self,
+        ) -> Result<Vec<o3k_store::ArtifactTransferRecord>, StoreError> {
+            self.inner.list_recoverable_artifact_transfers().await
+        }
+
+        async fn expire_transfers_of_terminal_operations(&self) -> Result<u64, StoreError> {
+            self.inner.expire_transfers_of_terminal_operations().await
+        }
+
+        async fn insert_image_overlay(
+            &self,
+            overlay: &o3k_store::ImageOverlayOwnershipRecord,
+        ) -> Result<o3k_store::ImageOverlayOwnershipRecord, StoreError> {
+            self.inner.insert_image_overlay(overlay).await
+        }
+
+        async fn get_image_overlay(
+            &self,
+            overlay_id: &str,
+        ) -> Result<o3k_store::ImageOverlayOwnershipRecord, StoreError> {
+            self.inner.get_image_overlay(overlay_id).await
+        }
+
+        async fn update_image_overlay(
+            &self,
+            overlay_id: &str,
+            expected_identity: &o3k_store::ImageOverlayIdentity,
+            update: o3k_store::ImageOverlayUpdate,
+        ) -> Result<o3k_store::ImageOverlayOwnershipRecord, StoreError> {
+            self.inner
+                .update_image_overlay(overlay_id, expected_identity, update)
+                .await
+        }
+
+        async fn list_image_overlays(
+            &self,
+            resource_id: Uuid,
+        ) -> Result<Vec<o3k_store::ImageOverlayOwnershipRecord>, StoreError> {
+            self.inner.list_image_overlays(resource_id).await
+        }
+
+        async fn count_image_overlay_references(
+            &self,
+            base_sha256: &str,
+            base_format: &str,
+        ) -> Result<u64, StoreError> {
+            self.inner
+                .count_image_overlay_references(base_sha256, base_format)
+                .await
+        }
+
+        async fn delete_image_overlay(
+            &self,
+            overlay_id: &str,
+            expected_identity: &o3k_store::ImageOverlayIdentity,
+        ) -> Result<o3k_store::ImageOverlayOwnershipRecord, StoreError> {
+            self.inner
+                .delete_image_overlay(overlay_id, expected_identity)
+                .await
+        }
+
+        async fn increment_operation_retry(&self, operation_id: Uuid) -> Result<u8, StoreError> {
+            self.inner.increment_operation_retry(operation_id).await
+        }
+
+        async fn insert_resource_and_operation(
+            &self,
+            resource: &ResourceRecord,
+            operation: &OperationRecord,
+            expected_placement_allocation_id: Option<&str>,
+        ) -> Result<(), StoreError> {
+            self.inner
+                .insert_resource_and_operation(
+                    resource,
+                    operation,
+                    expected_placement_allocation_id,
+                )
+                .await
+        }
+
+        async fn revive_resource_and_operation(
+            &self,
+            id: Uuid,
+            expected_generation: i64,
+            desired_state: &str,
+            observed_state: &str,
+            observed_generation: i64,
+            provider_id: Option<&str>,
+            operation: &OperationRecord,
+            expected_placement_allocation_id: Option<&str>,
+        ) -> Result<ResourceRecord, StoreError> {
+            self.inner
+                .revive_resource_and_operation(
+                    id,
+                    expected_generation,
+                    desired_state,
+                    observed_state,
+                    observed_generation,
+                    provider_id,
+                    operation,
+                    expected_placement_allocation_id,
+                )
+                .await
+        }
+
+        async fn readiness_check(&self) -> Result<(), StoreError> {
+            self.inner.readiness_check().await
+        }
+    }
+
+    /// A generation-CAS observation that loses the race must record no
+    /// metering observation: the loser's state never became durable, so
+    /// metering it would fabricate usage. The projection is applied only after
+    /// the CAS succeeds, using the state actually written.
+    #[tokio::test]
+    async fn stale_generation_observation_records_no_metering() -> Result<(), ReconcileError> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-reconciler-metering-stale-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let raw = o3k_store::testkit::open_file(&path).await?;
+        let store = Arc::new(StaleObservationStore::new(raw.clone()));
+        let observer = RecordingMeteringObserver::default();
+        let journal = OperationJournal::new(store.clone(), Arc::new(FakeComputeProvider::new()), 2)
+            .with_metering_observer(Arc::new(observer.clone()));
+
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        bind_observation_command(
+            &raw,
+            operation_id,
+            request.o3k_server_id,
+            "compute-1",
+            "epoch-1",
+        )
+        .await?;
+
+        store.fail_next_observation();
+        let observation = AgentObservation {
+            agent_id: "compute-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            resource_id: request.o3k_server_id,
+            provider_resource_id: None,
+            state: o3k_provider::InstanceState::Running,
+            operation_id,
+            operation_state: AgentOperationState::Succeeded,
+            observation_sequence: 1,
+            observed_at_unix_ms: 1,
+            redacted_message: None,
+            console_log_bytes: Vec::new(),
+            console_log_offset: 0,
+            console_log_complete: false,
+            console_log_truncated: false,
+            block_device: None,
+        };
+        let result = journal.apply_agent_observation(&observation).await;
+        assert!(
+            matches!(
+                result,
+                Err(ReconcileError::Store(StoreError::StaleGeneration))
+            ),
+            "expected the losing CAS to surface StaleGeneration, got {result:?}"
+        );
+        let observed = match observer.observed.lock() {
+            Ok(entries) => entries.clone(),
+            Err(_) => Vec::new(),
+        };
+        assert!(
+            observed.is_empty(),
+            "a losing generation CAS must record no observation, saw {observed:?}"
+        );
+        Ok(())
+    }
 }

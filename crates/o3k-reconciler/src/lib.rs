@@ -89,6 +89,11 @@ pub struct OperationJournal<S: ?Sized, P: ?Sized> {
     /// epoch. Without a registry the fence keeps the strict first-evidence
     /// anchor of the original behavior.
     agent_registry: Option<Arc<dyn AgentNodeRegistry>>,
+    /// Optional metering observer that projects each durably applied resource
+    /// lifecycle state into O3K metering authority. Wired by the composition
+    /// root; without it the projection is a no-op so direct fake-provider
+    /// operation is unchanged.
+    metering: Option<Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
 }
 
 impl<S: ?Sized, P: ?Sized> Clone for OperationJournal<S, P> {
@@ -101,6 +106,7 @@ impl<S: ?Sized, P: ?Sized> Clone for OperationJournal<S, P> {
             agent_evidence: self.agent_evidence.clone(),
             observation_evidence: self.observation_evidence.clone(),
             agent_registry: self.agent_registry.clone(),
+            metering: self.metering.clone(),
         }
     }
 }
@@ -119,6 +125,7 @@ where
             agent_evidence: Arc::new(Mutex::new(HashMap::new())),
             observation_evidence: Arc::new(Mutex::new(HashMap::new())),
             agent_registry: None,
+            metering: None,
         }
     }
 
@@ -131,6 +138,44 @@ where
     pub fn with_agent_registry(mut self, registry: Arc<dyn AgentNodeRegistry>) -> Self {
         self.agent_registry = Some(registry);
         self
+    }
+
+    /// Attaches the metering observer that projects every durably applied
+    /// resource lifecycle state into O3K metering authority. Wired by the
+    /// composition root; the observer is intentionally optional so direct
+    /// fake-provider operation projects no usage.
+    #[must_use]
+    pub fn with_metering_observer(
+        mut self,
+        observer: Arc<dyn o3k_kernel::LifecycleMeteringObserver>,
+    ) -> Self {
+        self.metering = Some(observer);
+        self
+    }
+
+    /// Projects the lifecycle state a step is about to durably apply into
+    /// metering authority, before that step's durable writes. Projecting first
+    /// keeps the step retriable: a crash between the two writes is repaired by
+    /// the idempotent re-drive instead of losing the observation, and the
+    /// observation itself is idempotent so re-applying it converges. No-op
+    /// without an observer; a metering failure is surfaced, never dropped.
+    async fn project_metering(
+        &self,
+        resource: &ResourceRecord,
+        observed_state: &str,
+    ) -> Result<(), ReconcileError> {
+        let Some(observer) = self.metering.as_ref() else {
+            return Ok(());
+        };
+        observer
+            .observe_resource_state(
+                &resource.kind,
+                &resource.project_id,
+                &resource.id.to_string(),
+                observed_state,
+            )
+            .await
+            .map_err(|error| ReconcileError::Metering(error.to_string()))
     }
 
     async fn fence_agent_evidence(
@@ -535,6 +580,21 @@ where
         ) {
             return Ok(operation.state);
         }
+        // A terminally failed create must not leave the resource in its
+        // pre-creation state: clients polling the server would otherwise wait
+        // forever. Its metering observation is projected here, before the
+        // operation terminalizes below, so a failed or crashed projection
+        // leaves the step retriable instead of losing the observation.
+        let failed_create_resource =
+            if durable_state == OperationState::Failed && operation.kind == "create" {
+                let resource = self.store.get_resource(update.resource_id).await?;
+                self.project_metering(&resource, server_state_to_storage(ServerState::Error))
+                    .await?;
+                Some(resource)
+            } else {
+                None
+            };
+
         let provider_operation_id = operation.provider_operation_id.as_deref();
         self.store
             .update_operation(
@@ -546,12 +606,9 @@ where
             )
             .await?;
 
-        if durable_state == OperationState::Failed && operation.kind == "create" {
-            // A terminally failed create must not leave the resource in its
-            // pre-creation state: clients polling the server would otherwise
-            // wait forever. Projecting ERROR keeps the failure durable and
-            // visible while observations remain the only success projection.
-            let resource = self.store.get_resource(update.resource_id).await?;
+        if let Some(resource) = failed_create_resource {
+            // Projecting ERROR keeps the failure durable and visible while
+            // observations remain the only success projection.
             self.store
                 .update_resource(
                     update.resource_id,
@@ -856,6 +913,14 @@ where
                 );
                 e
             })?;
+        // Project after the CAS write, using the state actually durably applied.
+        // A competing observation can win the generation CAS; projecting the
+        // loser's input state would meter a state that never became durable,
+        // which is worse than this narrow window between the write and the
+        // projection (agent observations/evidence are re-driven, so the window
+        // is repaired). The applied observation is idempotent on re-application.
+        self.project_metering(&updated, &updated.observed_state)
+            .await?;
         tracing::debug!(
             operation_id=%observation.operation_id,
             resource_id=%observation.resource_id,
@@ -1373,6 +1438,9 @@ where
                 Err(error) => return Err(ReconcileError::Provider(error)),
             }
         };
+        // Project before the terminalizing write so the observation lands while
+        // the lifecycle is still retriable; the observation is idempotent.
+        self.project_metering(&resource, &observed_state).await?;
         self.store
             .update_operation(
                 operation_id,
@@ -2026,6 +2094,10 @@ where
         operation: OperationRecord,
         resource: ResourceRecord,
     ) -> Result<OperationState, ReconcileError> {
+        // Project before the terminalizing write so the observation lands while
+        // the step is still retriable.
+        self.project_metering(&resource, server_state_to_storage(ServerState::Error))
+            .await?;
         self.store
             .update_operation(
                 operation.id,
@@ -2075,6 +2147,21 @@ where
         let provider_resource_id = provider_resource_id.ok_or(ReconcileError::InvalidIntent)?;
         let instance = self.provider.get_instance(&provider_resource_id).await?;
         let observed_state = server_state_to_storage(ServerState::from(instance.state));
+        if instance.state == o3k_provider::InstanceState::Running {
+            return self
+                .finish(
+                    operation_id,
+                    resource,
+                    provider_operation_id,
+                    Some(provider_resource_id),
+                )
+                .await;
+        }
+        // The three non-Running outcomes below all durably project exactly this
+        // observed_state, so project it once before any of their writes: the
+        // observation must land while the step is still retriable, and the
+        // observation is idempotent if a later write fails and re-drives.
+        self.project_metering(&resource, observed_state).await?;
         if instance.state == o3k_provider::InstanceState::Error {
             self.store
                 .update_operation(
@@ -2097,16 +2184,6 @@ where
                 .await?;
             self.event(operation_id, resource.id, JournalEventKind::Failed);
             return Ok(OperationState::Failed);
-        }
-        if instance.state == o3k_provider::InstanceState::Running {
-            return self
-                .finish(
-                    operation_id,
-                    resource,
-                    provider_operation_id,
-                    Some(provider_resource_id),
-                )
-                .await;
         }
         if instance.state == o3k_provider::InstanceState::Creating {
             // The create is still in flight at the execution boundary; keep
@@ -2223,6 +2300,12 @@ where
                 Err(error) => return Err(error.into()),
             }
         }
+        // The target state is the constant ACTIVE, so project once before the
+        // terminalizing write rather than inside the CAS retry loop (every
+        // attempt retries into the same state, never a different one). The
+        // observation must land while the step is still retriable.
+        self.project_metering(&resource, server_state_to_storage(ServerState::Active))
+            .await?;
         self.store
             .update_operation(
                 operation_id,

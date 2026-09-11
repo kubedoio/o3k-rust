@@ -50,7 +50,10 @@ mod placement;
 mod volume;
 mod volume_attachment;
 
-pub use volume::{realize_native_volume_create, recover_native_volumes, remove_native_volume};
+pub use volume::{
+    VOLUME_ALLOCATION_METER, observe_volume_allocation, realize_native_volume_create,
+    recover_native_volumes, remove_native_volume,
+};
 
 pub use network::recover_l3_gateway_operations;
 
@@ -127,6 +130,11 @@ pub struct AppState {
     storage_provider: Option<Arc<dyn o3k_storage::StorageProvider>>,
     native_attachment_workflow: Option<Arc<dyn NativeAttachmentWorkflow>>,
     native_api: Option<NativeApiState>,
+    /// Optional metering projection used by canonical volume recovery. Volume
+    /// create/delete already observe through the native adapter; startup
+    /// recovery completes deletes that a crash interrupted, so it must close
+    /// the same allocation interval instead of leaking an open one.
+    metering_observer: Option<Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
 }
 
 impl Default for AppState {
@@ -153,6 +161,7 @@ impl Default for AppState {
             storage_provider: None,
             native_attachment_workflow: None,
             native_api: None,
+            metering_observer: None,
         }
     }
 }
@@ -324,6 +333,16 @@ impl AppState {
     #[must_use]
     pub fn with_native_api(mut self, state: NativeApiState) -> Self {
         self.native_api = Some(state);
+        self
+    }
+
+    /// Installs the metering projection used by canonical volume recovery.
+    #[must_use]
+    pub fn with_metering_observer(
+        mut self,
+        observer: Arc<dyn o3k_kernel::LifecycleMeteringObserver>,
+    ) -> Self {
+        self.metering_observer = Some(observer);
         self
     }
 
@@ -622,6 +641,14 @@ pub fn router_with_state(state: AppState) -> Router {
             .route(
                 "/o3k/v1/operator/diagnostics/capacity",
                 get(o3k_native_api::diagnostics::capacity),
+            )
+            .route(
+                "/o3k/v1/metering/definitions",
+                get(o3k_native_api::metering::definitions),
+            )
+            .route(
+                "/o3k/v1/metering/usage",
+                get(o3k_native_api::metering::usage),
             );
         router = router
             .route(
