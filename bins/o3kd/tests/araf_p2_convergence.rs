@@ -1030,13 +1030,80 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
     )
     .await;
 
-    // 3/6. Relationships: bounded canonical projection. The durable
-    // relationship write authority in this profile is the external-controller
-    // composition path (p12_6 store evidence); no northbound canonical API in
-    // the in-process TestLab profile produces compute->network rows, so the
-    // honest projection here is an empty bounded page — the gate asserts the
-    // projection contract (bounded shape, canonical vocabulary, no
-    // provider-private IDs) instead of fabricating a writer.
+    // 3/6. Relationships: bounded canonical projection over a real durable
+    // row. The relationship WRITE authority in this profile is the
+    // external-controller composition path (CompositionResourceHandler,
+    // opt-in O3K_COMPOSITION_*), exercised at store level by
+    // bins/o3kd/tests/p12_6_process.rs; there is no northbound writer. As
+    // documented environment setup through that same canonical durable
+    // authority, seed one canonical relationship row (parent = the Tenant A
+    // server, child = the Tenant A network created above) so the gate proves
+    // the northbound READ projection through the real production router.
+    let server_a_uuid = uuid::Uuid::parse_str(&server_a_id).expect("server uuid");
+    let network_uuid = uuid::Uuid::parse_str(&network_id).expect("network uuid");
+    let parent_operation_uuid = server_a.json["operation_id"]
+        .as_str()
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        .unwrap_or_else(|| {
+            uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("araf-p2-rel-parent:{server_a_id}").as_bytes(),
+            )
+        });
+    let child_operation_uuid = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("araf-p2-rel-child:{network_id}").as_bytes(),
+    );
+    {
+        let store = open_store(&backend).await?;
+        // Vocabulary mirrors CompositionResourceHandler::relationship_record:
+        // "exclusive" ownership, "reserved" at reserve time (the store forces
+        // the canonical state constant), then bound via bind_relationship.
+        let record = o3k_store::ResourceRelationshipRecord {
+            parent_resource_id: server_a_uuid,
+            parent_resource_type: "compute:server".to_owned(),
+            slot: "network-primary".to_owned(),
+            expected_child_resource_type: "network:network".to_owned(),
+            child_resource_id: Some(network_uuid),
+            ownership: "exclusive".to_owned(),
+            parent_operation_id: parent_operation_uuid,
+            child_operation_id: Some(child_operation_uuid),
+            owner_scope: "project-a".to_owned(),
+            state: "reserved".to_owned(),
+            fingerprint: format!("araf-p2-relationship:{run_tag}"),
+        };
+        // Bounded retry: on SQLite the running binary holds the same file,
+        // so a writer lock can briefly bounce the seeding insert.
+        let mut last_error = None;
+        let mut seeded = false;
+        for _ in 0..20 {
+            match store.reserve_relationship(&record).await {
+                Ok(_) | Err(o3k_store::StoreError::IdempotencyConflict) => {
+                    // IdempotencyConflict is the replay-safe duplicate shape:
+                    // the row is already reserved from an earlier attempt.
+                    seeded = true;
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+        assert!(
+            seeded,
+            "relationship seeding through the canonical authority failed: {last_error:?}"
+        );
+        store
+            .bind_relationship(
+                server_a_uuid,
+                "network-primary",
+                network_uuid,
+                child_operation_uuid,
+            )
+            .await?;
+    }
+
     let relationships = api
         .get(
             &format!("/o3k/v1/compute/servers/{server_a_id}/relationships"),
@@ -1044,21 +1111,36 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
         )
         .await;
     assert_eq!(relationships.status, 200, "{}", relationships.body);
-    assert!(
-        relationships.json["items"].is_array(),
+    assert_eq!(
+        relationships.json["has_more"], false,
         "{}",
         relationships.body
     );
-    assert!(
-        relationships.json["has_more"].is_boolean(),
-        "{}",
-        relationships.body
-    );
-    for item in relationships.json["items"]
+    let rel_items = relationships.json["items"]
         .as_array()
         .cloned()
-        .unwrap_or_default()
-    {
+        .unwrap_or_default();
+    let seeded_rel = rel_items
+        .iter()
+        .find(|item| item["slot"] == "network-primary");
+    let seeded_rel = match seeded_rel {
+        Some(item) => item,
+        None => panic!("seeded relationship not projected: {}", relationships.body),
+    };
+    assert_eq!(
+        seeded_rel["resource_type"], "network:network",
+        "{seeded_rel}"
+    );
+    assert_eq!(seeded_rel["state"], "bound", "{seeded_rel}");
+    assert_eq!(seeded_rel["ownership"], "exclusive", "{seeded_rel}");
+    // The child is surfaced under its canonical public UUID — never a
+    // provider-private identifier.
+    assert_eq!(
+        seeded_rel["resource_id"],
+        Value::from(network_id.clone()),
+        "{seeded_rel}"
+    );
+    for item in &rel_items {
         let resource_type = item["resource_type"].as_str().unwrap_or_default();
         assert!(
             resource_type.chars().filter(|c| *c == ':').count() == 1
@@ -1074,7 +1156,8 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
             );
         }
     }
-    // Foreign probing of the relationships route conceals like show.
+    // Foreign probing conceals the seeded row: with real durable rows present,
+    // Tenant B still receives 404 — genuine concealment, not an empty page.
     let bob_relationships = api
         .get(
             &format!("/o3k/v1/compute/servers/{server_a_id}/relationships"),
