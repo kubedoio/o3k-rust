@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 //! Regression: the production composition router must expose the SPEC-0030
 //! generic lifecycle update on the canonical compute collection. The generic
 //! `PUT /o3k/v1/{namespace}/{collection}/{id}` route cannot serve
