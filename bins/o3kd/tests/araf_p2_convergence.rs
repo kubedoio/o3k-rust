@@ -119,7 +119,13 @@ fn spawn_o3kd(port: u16, data_dir: &std::path::Path, backend: &Backend) -> Child
     }
     let mut command = Command::new(env!("CARGO_BIN_EXE_o3kd"));
     let log_path = data_dir.join("o3kd.log");
-    let log_file = std::fs::File::create(&log_path).expect("create o3kd log");
+    // Append rather than truncate: both process generations of the restart
+    // journey must remain available for the item-13 log secret scan.
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .expect("open o3kd log");
     command
         .args(["--listen-addr", &format!("{LISTEN}:{port}")])
         .stdout(log_file.try_clone().expect("clone o3kd stdout"))
@@ -227,9 +233,34 @@ async fn seed_store(backend: &Backend) -> Result<(), Box<dyn std::error::Error>>
                 profile: "operator-console".to_owned(),
                 enabled: true,
                 created_at: now.clone(),
-                updated_at: now,
+                updated_at: now.clone(),
             })
             .await?;
+    }
+    // Provenance: the operator principal the federated binding maps to must
+    // carry the canonical durable operator assignment — fail loudly here if a
+    // shared store lacks the expected authority instead of deriving a system
+    // token from whatever assignment happens to exist.
+    let assignment = store
+        .list_operator_assignments()
+        .await?
+        .into_iter()
+        .find(|assignment| assignment.user_id == "bootstrap-user")
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no durable operator assignment for the operator principal bootstrap-user",
+            )
+        })?;
+    if !assignment.enabled || assignment.profile != "operator-console" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "operator assignment for bootstrap-user is not the canonical enabled operator-console authority: {:?}",
+                assignment
+            ),
+        )
+        .into());
     }
     Ok(())
 }
@@ -594,6 +625,26 @@ async fn terminate(o3kd: &mut Child) {
 
 const HONEST_STATUS: [&str; 5] = ["healthy", "degraded", "unavailable", "stale", "unknown"];
 
+/// Item-13 log surface: the o3kd process logs (both generations, appended to
+/// `<data_dir>/o3kd.log` by `spawn_o3kd`) must not contain any secret marker.
+fn scan_o3kd_log(data_dir: &std::path::Path, secrets: &[(&str, String)]) {
+    let log_path = data_dir.join("o3kd.log");
+    let content = std::fs::read_to_string(&log_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", log_path.display()));
+    for (label, secret) in secrets {
+        assert!(
+            !content.contains(secret.as_str()),
+            "secret scan failed ({label}) leaked into the o3kd log {}",
+            log_path.display()
+        );
+    }
+    assert!(
+        !content.contains("-----BEGIN"),
+        "private-key marker leaked into the o3kd log {}",
+        log_path.display()
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires the Keycloak testbed + durable store started by tests/araf-p2-convergence.sh"]
 async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Error>> {
@@ -646,6 +697,9 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
     let operator_token = get_token(&operator_exchange);
 
     // Negatives: unbound subject, foreign project scope, tenant system scope.
+    // The canonical federated-exchange denial is 401 Unauthorized (the
+    // composition token issuer maps every federated validation/scope denial
+    // to ProblemDetails::unauthorized).
     let unbound = api
         .exchange(
             &required("O3K_P12_7_UNBOUND_TOKEN"),
@@ -653,19 +707,15 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
             false,
         )
         .await;
-    assert!(unbound.status.is_client_error(), "{}", unbound.body);
+    assert_eq!(unbound.status, 401, "{}", unbound.body);
     let bob_in_a = api
         .exchange(&required("O3K_P12_7_BOB_TOKEN"), Some("project-a"), false)
         .await;
-    assert!(bob_in_a.status.is_client_error(), "{}", bob_in_a.body);
+    assert_eq!(bob_in_a.status, 401, "{}", bob_in_a.body);
     let alice_system = api
         .exchange(&required("O3K_P12_7_ALICE_TOKEN"), None, true)
         .await;
-    assert!(
-        alice_system.status.is_client_error(),
-        "{}",
-        alice_system.body
-    );
+    assert_eq!(alice_system.status, 401, "{}", alice_system.body);
     let me = api.get("/o3k/v1/identity/me", Some(&alice_token)).await;
     assert_eq!(me.status, 200, "{}", me.body);
     assert_eq!(me.json["effective_scope_id"], "project-a");
@@ -707,10 +757,25 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
         .as_object()
         .map(|m| m.keys().map(String::as_str).collect())
         .unwrap_or_default();
-    for capability in ["create", "show", "list", "delete"] {
+    for capability in ["create", "show", "list", "update", "delete"] {
         assert!(
             lifecycle.contains(&capability),
             "compute:server advertises {capability}"
+        );
+    }
+    // The `actions` array projects the canonical lifecycle action metadata
+    // (SPEC-0040: clients never infer undeclared actions; domain actions are
+    // manifest-declared and exercised by this journey's stop/start/reboot
+    // steps rather than part of this metadata projection).
+    let action_names: Vec<&str> = compute["actions"]
+        .as_array()
+        .map(|items| items.iter().filter_map(|a| a["name"].as_str()).collect())
+        .unwrap_or_default();
+    for wanted in ["CreateServer", "ReadServer", "UpdateServer", "DeleteServer"] {
+        assert!(
+            action_names.contains(&wanted),
+            "compute:server must advertise the {wanted} lifecycle action metadata: {}",
+            compute["actions"]
         );
     }
     let schema = api
@@ -871,6 +936,46 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
         .as_i64()
         .expect("generation");
 
+    // 12 (live-resource probes): Tenant B is concealed from server A while it
+    // is ACTIVE — a 404 here cannot be explained by the resource being
+    // deleted, so the scoping denial is genuine.
+    let bob_live_show = api
+        .get(
+            &format!("/o3k/v1/compute/servers/{server_a_id}"),
+            Some(&bob_token),
+        )
+        .await;
+    assert_eq!(bob_live_show.status, 404, "{}", bob_live_show.body);
+    let bob_live_action = api
+        .action(
+            "compute/servers",
+            &server_a_id,
+            "StopServer",
+            &bob_token,
+            "bob-live-stop",
+        )
+        .await;
+    assert_eq!(bob_live_action.status, 404, "{}", bob_live_action.body);
+    // Tenant A's resource is unaffected by the foreign probes.
+    let srv_a_untouched = api
+        .get(
+            &format!("/o3k/v1/compute/servers/{server_a_id}"),
+            Some(&alice_token),
+        )
+        .await;
+    assert_eq!(srv_a_untouched.status, 200, "{}", srv_a_untouched.body);
+    assert!(
+        ["active", "running"].contains(
+            &srv_a_untouched.json["status"]["state"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .as_str()
+        ),
+        "foreign probes must not disturb the live server: {}",
+        srv_a_untouched.body
+    );
+
     // 16. OpenStack-compatible convergence: Nova lists the natively-created
     // server (same canonical resource and ID), and Neutron shows the network
     // that was created natively — one shared authority, two protocol surfaces.
@@ -921,9 +1026,9 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
         flavor_id,
     )
     .await;
-    assert!(
-        server_b_rejected.status.is_client_error(),
-        "expected quota rejection: {}",
+    assert_eq!(
+        server_b_rejected.status, 403,
+        "quota exhaustion must reject with the canonical 403: {}",
         server_b_rejected.body
     );
     let quota_after_rejected = api
@@ -1183,12 +1288,19 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
         .get("/o3k/v1/operations?limit=1", Some(&alice_token))
         .await;
     assert_eq!(ops_first.status, 200, "{}", ops_first.body);
-    assert!(
-        ops_first.json["items"]
-            .as_array()
-            .is_some_and(|i| !i.is_empty())
-    );
+    let page1_ids: Vec<String> = ops_first.json["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item["id"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(!page1_ids.is_empty(), "{}", ops_first.body);
     if let Some(cursor) = ops_first.json["next_cursor"].as_str().map(str::to_owned) {
+        // A cursor is only offered when more rows exist; page 2 must then be
+        // non-empty and must not repeat page 1's item — a real page advance.
         let ops_second = api
             .get(
                 &format!("/o3k/v1/operations?limit=1&cursor={cursor}"),
@@ -1196,6 +1308,24 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
             )
             .await;
         assert_eq!(ops_second.status, 200, "{}", ops_second.body);
+        let page2_ids: Vec<String> = ops_second.json["items"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item["id"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !page2_ids.is_empty(),
+            "a continuation cursor was offered but page 2 is empty: {}",
+            ops_second.body
+        );
+        assert!(
+            page1_ids.iter().all(|id| !page2_ids.contains(id)),
+            "cursor continuation must advance the page: {page1_ids:?} vs {page2_ids:?}"
+        );
     }
 
     // 3. Update via PUT with If-Match generation (#905). The domain actions
@@ -1284,6 +1414,10 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
     let server_b_id = server_b.json["resource_id"]
         .as_str()
         .expect("server id")
+        .to_owned();
+    let server_b_op = server_b.json["operation_id"]
+        .as_str()
+        .expect("server b create operation id")
         .to_owned();
     wait_server_state(
         &mut api,
@@ -1380,19 +1514,49 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
         usage_before.json[0]["meter_key"],
         "compute:instance_seconds"
     );
-    for field in ["start", "end", "observed_through", "authority_started_at"] {
-        let text = usage_before.json[0][field].as_str().expect(field);
+    // RFC3339 UTC instants: start/end/observed_through are always present;
+    // authority_started_at is non-null once the metering authority exists
+    // (it does in this journey).
+    for field in ["start", "end", "observed_through"] {
+        let text = usage_before.json[0][field].as_str().unwrap_or_default();
         assert!(
-            text.ends_with('Z') || text == "null",
-            "{field} not UTC: {text}"
+            text.ends_with('Z'),
+            "{field} must be a non-null UTC instant: {text}"
         );
     }
+    let authority_started_at = usage_before.json[0]["authority_started_at"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        authority_started_at.ends_with('Z'),
+        "authority_started_at must be a non-null UTC instant once authority exists: {authority_started_at}"
+    );
+    // The evaluation watermark must not exceed the requested window end.
+    let observed_through_ms = chrono::DateTime::parse_from_rfc3339(
+        usage_before.json[0]["observed_through"]
+            .as_str()
+            .unwrap_or_default(),
+    )
+    .map(|instant| instant.timestamp_millis())
+    .expect("observed_through parses");
+    assert!(
+        observed_through_ms <= end,
+        "observed_through must not exceed the requested end: {observed_through_ms} vs {end}"
+    );
     let frozen_before = api.get(&usage_frozen_uri, Some(&alice_token)).await;
     assert_eq!(frozen_before.status, 200, "{}", frozen_before.body);
     let total_before = frozen_before.json[0]["total"]
         .as_str()
         .expect("total")
         .to_owned();
+    // A never-accruing meter would read "0.000" and make the restart
+    // comparison vacuous: server B genuinely ran for real wall-clock seconds
+    // in this journey, so the frozen total must be a finite positive decimal.
+    let total_before_value: f64 = total_before.parse().expect("total is a decimal string");
+    assert!(
+        total_before_value.is_finite() && total_before_value > 0.0,
+        "frozen compute:instance_seconds total must be positive: {total_before}"
+    );
     // Cross-scope read denied for a tenant.
     let cross_scope = api
         .get(&format!("{usage_uri}&scope=project-b"), Some(&alice_token))
@@ -1488,100 +1652,179 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
     let bob_in_a_after_revoke = api
         .exchange(&required("O3K_P12_7_BOB_TOKEN"), Some("project-a"), false)
         .await;
-    assert!(
-        bob_in_a_after_revoke.status.is_client_error(),
+    assert_eq!(
+        bob_in_a_after_revoke.status, 401,
         "{}",
         bob_in_a_after_revoke.body
     );
 
     // 9. Audit: durable records for creation/action/quota/governance + show.
-    let audit_a = api.get("/o3k/v1/audit?limit=50", Some(&alice_token)).await;
-    assert_eq!(audit_a.status, 200, "{}", audit_a.body);
-    let audit_items = audit_a.json["items"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    let server_actions = [
-        "CreateServer",
-        "StopServer",
-        "StartServer",
-        "RebootServer",
-        "DeleteServer",
-    ];
-    for expected in server_actions {
-        assert!(
-            audit_items.iter().any(|item| item["action"]["action"]
-                .as_str()
-                .is_some_and(|a| a.ends_with(expected))),
-            "missing audit {expected}: {}",
-            audit_a.body
-        );
-    }
-    // Canonical actor/scope/target on the durable records.
-    for item in &audit_items {
-        assert!(item["principal_id"].is_string(), "{item}");
-        assert_eq!(item["effective_scope"]["id"], "project-a", "{item}");
-        assert!(item["owner_scope"]["id"].is_string(), "{item}");
-        assert!(item["resource_id"].is_string(), "{item}");
-    }
-    // Quota administration and governance mutations are audited in the
-    // operator's system scope (the audit store is strictly per effective
-    // scope, so the tenant projection can never show them).
-    let audit_operator = api
-        .get("/o3k/v1/audit?limit=50", Some(&operator_token))
-        .await;
-    assert_eq!(audit_operator.status, 200, "{}", audit_operator.body);
-    let operator_items = audit_operator.json["items"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    assert!(
-        operator_items.iter().any(|item| item["service_namespace"]
-            .as_str()
-            .is_some_and(|ns| ns == "quota")),
-        "no quota audit: {}",
-        audit_operator.body
-    );
-    assert!(
-        operator_items.iter().any(|item| item["service_namespace"]
-            .as_str()
-            .is_some_and(|ns| ns == "governance")),
-        "no governance audit: {}",
-        audit_operator.body
-    );
-    let first_event_id = audit_items[0]["event_id"].as_str().map(str::to_owned);
-    if let Some(event_id) = first_event_id {
-        // Regression: the production composition router must expose /audit/{id}.
-        let audit_show = api
-            .get(&format!("/o3k/v1/audit/{event_id}"), Some(&alice_token))
+    // Per-operation filtered queries are bounded and order-independent (a
+    // shared store may hold many events, and the unfiltered page would be);
+    // exactly one assertion pins the collection bound itself (malformed
+    // cursor -> 400).
+    let create_op = server_a.json["operation_id"]
+        .as_str()
+        .expect("create operation id")
+        .to_owned();
+    // The delete responses are 204 without a body, so the canonical delete
+    // operation ids are recovered black-box from the durable audit records:
+    // the resource-filtered query surfaces the DeleteServer event, which
+    // carries its operation id.
+    let delete_op = {
+        let page = api
+            .get(
+                &format!("/o3k/v1/audit?resource_id={server_a_id}&limit=10"),
+                Some(&alice_token),
+            )
             .await;
-        assert_eq!(
-            audit_show.status, 200,
-            "production /o3k/v1/audit/{{id}} route: {}",
-            audit_show.body
+        assert_eq!(page.status, 200, "{}", page.body);
+        page.json["items"]
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| {
+                        item["action"]["action"]
+                            .as_str()
+                            .is_some_and(|a| a.ends_with("DeleteServer"))
+                    })
+                    .and_then(|item| item["operation_id"].as_str().map(str::to_owned))
+            })
+            .expect("delete operation id for server A")
+    };
+    let delete_b_op_audit = {
+        let page = api
+            .get(
+                &format!("/o3k/v1/audit?resource_id={server_b_id}&limit=10"),
+                Some(&alice_token),
+            )
+            .await;
+        assert_eq!(page.status, 200, "{}", page.body);
+        page.json["items"]
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| {
+                        item["action"]["action"]
+                            .as_str()
+                            .is_some_and(|a| a.ends_with("DeleteServer"))
+                    })
+                    .and_then(|item| item["operation_id"].as_str().map(str::to_owned))
+            })
+            .expect("delete operation id for server B")
+    };
+    let action_ops = [
+        ("CreateServer", create_op.as_str()),
+        ("StopServer", stop_op.as_str()),
+        ("StartServer", start_op.as_str()),
+        ("RebootServer", reboot_op.as_str()),
+        ("DeleteServer", delete_op.as_str()),
+    ];
+    let mut audit_event_ids: Vec<String> = Vec::new();
+    for (action, operation_id) in action_ops {
+        let filtered = api
+            .get(
+                &format!("/o3k/v1/audit?operation_id={operation_id}&limit=10"),
+                Some(&alice_token),
+            )
+            .await;
+        assert_eq!(filtered.status, 200, "{}", filtered.body);
+        let items = filtered.json["items"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            items.iter().any(|item| item["action"]["action"]
+                .as_str()
+                .is_some_and(|a| a.ends_with(action))),
+            "missing audit {action} for operation {operation_id}: {}",
+            filtered.body
         );
-        assert_eq!(audit_show.json["event_id"], Value::from(event_id.clone()));
-    }
-    // Tenant scoping: bob sees no alice server events.
-    let audit_b = api.get("/o3k/v1/audit?limit=50", Some(&bob_token)).await;
-    assert_eq!(audit_b.status, 200, "{}", audit_b.body);
-    let bob_actions: Vec<String> = audit_b.json["items"]
-        .as_array()
-        .map(|items| {
+        // Canonical actor/scope/target on the durable records.
+        for item in &items {
+            assert!(item["principal_id"].is_string(), "{item}");
+            assert_eq!(item["effective_scope"]["id"], "project-a", "{item}");
+            assert!(item["owner_scope"]["id"].is_string(), "{item}");
+            assert!(item["resource_id"].is_string(), "{item}");
+        }
+        audit_event_ids.extend(
             items
                 .iter()
-                .filter_map(|item| item["action"]["action"].as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
-    for expected in server_actions {
-        assert!(
-            !bob_actions.iter().any(|a| a.ends_with(expected)),
-            "bob audit must not expose alice server actions: {}",
-            audit_b.body
+                .filter_map(|item| item["event_id"].as_str().map(str::to_owned)),
         );
     }
-    let audit_count_before = audit_items.len();
+    // The tenant collection itself stays bounded: malformed cursor rejected.
+    let audit_bad_cursor = api
+        .get(
+            "/o3k/v1/audit?cursor=not-a-valid-cursor",
+            Some(&alice_token),
+        )
+        .await;
+    assert_eq!(audit_bad_cursor.status, 400, "{}", audit_bad_cursor.body);
+    // Quota administration and governance mutations are audited in the
+    // operator's system scope (the audit store is strictly per effective
+    // scope, so the tenant projection can never show them). Per-service
+    // filtered queries keep this deterministic on a shared store.
+    for service in ["quota", "governance"] {
+        let filtered = api
+            .get(
+                &format!("/o3k/v1/audit?service={service}&limit=10"),
+                Some(&operator_token),
+            )
+            .await;
+        assert_eq!(filtered.status, 200, "{}", filtered.body);
+        assert!(
+            filtered.json["items"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty()),
+            "no {service} audit in the operator scope: {}",
+            filtered.body
+        );
+    }
+    // Regression: the production composition router must expose /audit/{id}.
+    let audit_show = api
+        .get(
+            &format!("/o3k/v1/audit/{}", audit_event_ids[0]),
+            Some(&alice_token),
+        )
+        .await;
+    assert_eq!(
+        audit_show.status, 200,
+        "production /o3k/v1/audit/{{id}} route: {}",
+        audit_show.body
+    );
+    assert_eq!(
+        audit_show.json["event_id"],
+        Value::from(audit_event_ids[0].clone())
+    );
+    // Tenant scoping: bob's operation-filtered view of alice's operations is
+    // empty of alice's events (no existence oracle).
+    for (_, operation_id) in &action_ops {
+        let bob_filtered = api
+            .get(
+                &format!("/o3k/v1/audit?operation_id={operation_id}&limit=10"),
+                Some(&bob_token),
+            )
+            .await;
+        assert_eq!(bob_filtered.status, 200, "{}", bob_filtered.body);
+        let leaked = bob_filtered.json["items"]
+            .as_array()
+            .map(|items| {
+                items.iter().any(|item| {
+                    item["event_id"]
+                        .as_str()
+                        .is_some_and(|id| audit_event_ids.contains(&id.to_owned()))
+                })
+            })
+            .unwrap_or(false);
+        assert!(
+            !leaked,
+            "bob audit must not expose alice events: {}",
+            bob_filtered.body
+        );
+    }
 
     // 10. Diagnostics.
     for path in [
@@ -1615,38 +1858,64 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
             Some(&operator_token),
         )
         .await;
+    // Capacity honesty (SPEC-0045): the fake-provider profile wires neither
+    // the scheduler nor the agent inventory publisher (both are gated on
+    // agent-control mTLS in the composition root), so there is NO capacity
+    // authority to observe. The honest report for that profile is
+    // unknown/never_observed with empty dimensions — pinned exactly, not
+    // treated as optional. A profile WITH inventory must project all three
+    // canonical classes; the two shapes are mutually exclusive, so a
+    // healthy/empty or fabricated-class report can never pass.
     assert_eq!(capacity.json["version"], "v1", "{}", capacity.body);
     let cap_status = capacity.json["status"].as_str().unwrap_or_default();
     assert!(
-        cap_status == "ok"
-            || cap_status == "nominal"
-            || HONEST_STATUS.contains(&cap_status)
-            || cap_status.is_empty(),
-        "honest capacity status: {}",
+        !cap_status.is_empty() && HONEST_STATUS.contains(&cap_status),
+        "capacity must carry a non-empty honest status: {}",
         capacity.body
     );
-    if let Some(dims) = capacity.json["dimensions"].as_array() {
-        for dim in dims {
-            let class = dim["resource_class"].as_str().unwrap_or_default();
+    let dim_classes: Vec<&str> = capacity.json["dimensions"]
+        .as_array()
+        .map(|dims| {
+            dims.iter()
+                .filter_map(|dim| dim["resource_class"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    if dim_classes.is_empty() {
+        assert_eq!(
+            cap_status, "unknown",
+            "empty capacity dimensions require the honest unknown status: {}",
+            capacity.body
+        );
+        assert_eq!(
+            capacity.json["reason"], "never_observed",
+            "empty capacity dimensions require the never_observed reason: {}",
+            capacity.body
+        );
+    } else {
+        for class in ["VCPU", "MEMORY_MB", "DISK_GB"] {
             assert!(
-                ["VCPU", "MEMORY_MB", "DISK_GB"].contains(&class),
-                "only canonical capacity classes may be advertised: {class}"
+                dim_classes.contains(&class),
+                "capacity with observations must project the canonical {class} dimension: {}",
+                capacity.body
             );
         }
+    }
+    for class in &dim_classes {
+        assert!(
+            ["VCPU", "MEMORY_MB", "DISK_GB"].contains(class),
+            "only canonical capacity classes may be advertised: {class}"
+        );
     }
     let tenant_diag = api
         .get("/o3k/v1/operator/diagnostics", Some(&alice_token))
         .await;
     assert_eq!(tenant_diag.status, 403, "{}", tenant_diag.body);
 
-    // 12. Cross-tenant isolation matrix.
-    let bob_show = api
-        .get(
-            &format!("/o3k/v1/compute/servers/{server_b_id}"),
-            Some(&bob_token),
-        )
-        .await;
-    assert_eq!(bob_show.status, 404, "{}", bob_show.body);
+    // 12. Cross-tenant isolation matrix. The live-resource show/action probes
+    // ran while server A was ACTIVE (above); this section covers the remaining
+    // surfaces. Server B is deleted by now, so list/governance/metering probes
+    // target collection-level concealment rather than a live instance.
     let bob_list = api.get("/o3k/v1/compute/servers", Some(&bob_token)).await;
     assert_eq!(bob_list.status, 200, "{}", bob_list.body);
     let bob_ids: Vec<&str> = bob_list.json["items"]
@@ -1674,54 +1943,68 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
         .get(&format!("/o3k/v1/operations/{stop_op}"), Some(&bob_token))
         .await;
     assert_eq!(bob_op.status, 404, "{}", bob_op.body);
-    let bob_action = api
-        .action(
-            "compute/servers",
-            &server_b_id,
-            "StopServer",
-            &bob_token,
-            "bob-stop",
-        )
-        .await;
-    assert_eq!(bob_action.status, 404, "{}", bob_action.body);
     let bob_quota = api
         .get("/o3k/v1/operator/quotas/project-a", Some(&bob_token))
         .await;
     assert_eq!(bob_quota.status, 403, "{}", bob_quota.body);
 
-    // 15. Bounded queries: invalid/tampered cursor and cross-scope cursor reuse.
-    let bad_cursor = api
+    // 15. Bounded queries. Cursor probes target the operations collection,
+    // which is guaranteed non-empty in this journey (independent of the
+    // generic resource ledger's finalized tombstone rows).
+    let ops_bad_cursor = api
         .get(
-            "/o3k/v1/compute/servers?limit=1&cursor=not-a-valid-cursor",
+            "/o3k/v1/operations?limit=1&cursor=not-a-valid-cursor",
             Some(&alice_token),
         )
         .await;
-    assert_eq!(bad_cursor.status, 400, "{}", bad_cursor.body);
-    let alice_page = api
-        .get("/o3k/v1/compute/servers?limit=1", Some(&alice_token))
+    assert_eq!(ops_bad_cursor.status, 400, "{}", ops_bad_cursor.body);
+    let ops_page = api
+        .get("/o3k/v1/operations?limit=1", Some(&alice_token))
         .await;
-    let alice_cursor = alice_page.json["next_cursor"].as_str().map(str::to_owned);
-    if let Some(cursor) = &alice_cursor {
-        let bob_cursor_reuse = api
-            .get(
-                &format!("/o3k/v1/compute/servers?limit=1&cursor={cursor}"),
-                Some(&bob_token),
-            )
-            .await;
-        assert_eq!(bob_cursor_reuse.status, 400, "{}", bob_cursor_reuse.body);
-        let tampered = api
-            .get(
-                &format!("/o3k/v1/compute/servers?limit=1&cursor={cursor}x"),
-                Some(&alice_token),
-            )
-            .await;
-        assert_eq!(tampered.status, 400, "{}", tampered.body);
-    }
+    assert_eq!(ops_page.status, 200, "{}", ops_page.body);
+    let ops_cursor = ops_page.json["next_cursor"]
+        .as_str()
+        .map(str::to_owned)
+        .expect("operations continuation cursor");
+    let bob_ops_reuse = api
+        .get(
+            &format!("/o3k/v1/operations?limit=1&cursor={ops_cursor}"),
+            Some(&bob_token),
+        )
+        .await;
+    assert_eq!(bob_ops_reuse.status, 400, "{}", bob_ops_reuse.body);
+    let tampered_ops = api
+        .get(
+            &format!("/o3k/v1/operations?limit=1&cursor={ops_cursor}x"),
+            Some(&alice_token),
+        )
+        .await;
+    assert_eq!(tampered_ops.status, 400, "{}", tampered_ops.body);
+    // Page-size bound per SPEC-0030 pagination: above MAX_PAGE_SIZE (200) is
+    // rejected with 400, not clamped.
+    let oversized_page = api
+        .get("/o3k/v1/compute/servers?limit=500", Some(&alice_token))
+        .await;
+    assert_eq!(oversized_page.status, 400, "{}", oversized_page.body);
+    // Metering alignment contract: an unaligned start instant is rejected
+    // with 400 rather than silently repaired.
+    let unaligned_usage = api
+        .get(
+            &format!(
+                "/o3k/v1/metering/usage?meter=compute:instance_seconds&start={}&end={}",
+                rfc3339(start + 1),
+                rfc3339(end)
+            ),
+            Some(&alice_token),
+        )
+        .await;
+    assert_eq!(unaligned_usage.status, 400, "{}", unaligned_usage.body);
 
     // 13. Secret scan over every retained response body.
-    let secrets: Vec<(&str, String)> = vec![
+    let mut secrets: Vec<(&str, String)> = vec![
         ("bootstrap password", required("O3K_P12_7_BOOTSTRAP_SECRET")),
         ("token signing key", SIGNING_KEY.to_owned()),
+        ("native cursor signing key", CURSOR_KEY.to_owned()),
         ("alice access token", required("O3K_P12_7_ALICE_TOKEN")),
         ("bob access token", required("O3K_P12_7_BOB_TOKEN")),
         (
@@ -1730,6 +2013,17 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
         ),
         ("unbound access token", required("O3K_P12_7_UNBOUND_TOKEN")),
     ];
+    // When PostgreSQL is the durable backend, its DSN password is a secret
+    // the process holds; it must never surface in any response or log.
+    if let Ok(url) = std::env::var("O3K_DATABASE_URL")
+        && let Some(password) = url
+            .split("://")
+            .nth(1)
+            .and_then(|authority| authority.rsplit('@').next())
+            .and_then(|userinfo| userinfo.split(':').nth(1))
+    {
+        secrets.push(("database password", password.to_owned()));
+    }
     for (label, secret) in &secrets {
         for body in &api.bodies {
             assert!(
@@ -1749,6 +2043,9 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
             "agent epoch internals leaked: {body}"
         );
     }
+    // The o3kd process logs are part of the evidence surface: no marker may
+    // appear there either (both generations, appended to one file).
+    scan_o3kd_log(&data_dir, &secrets);
 
     // ── Phase 2: SIGTERM, restart against the same durable store ──────────
     drop(api);
@@ -1772,8 +2069,10 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
     assert_eq!(operator2.status, 201, "{}", operator2.body);
     let operator_token2 = get_token(&operator2);
 
-    // 14. Re-verify durable state: resources, operations, quota, governance,
-    // audit, metering, and honest diagnostics all survive restart.
+    // 14. Re-verify durable state: every operation id collected pre-restart
+    // is still show-able, audit events survive by exact event id, the quota
+    // limit AND freed usage persist, metering totals are unchanged (and still
+    // positive), and diagnostics return honest status.
     let networks2 = api2
         .get("/o3k/v1/network/networks", Some(&alice_token2))
         .await;
@@ -1793,11 +2092,34 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
         networks2.body
     );
 
-    let ops2 = api2
-        .get("/o3k/v1/operations?limit=20", Some(&alice_token2))
-        .await;
-    assert_eq!(ops2.status, 200, "{}", ops2.body);
-    assert!(ops2.json["items"].as_array().is_some_and(|i| !i.is_empty()));
+    let collected_ops = [
+        ("create", create_op.as_str()),
+        ("stop", stop_op.as_str()),
+        ("start", start_op.as_str()),
+        ("reboot", reboot_op.as_str()),
+        ("delete", delete_op.as_str()),
+        ("create-b", server_b_op.as_str()),
+        ("delete-b", delete_b_op_audit.as_str()),
+    ];
+    for (label, operation_id) in collected_ops {
+        let shown = api2
+            .get(
+                &format!("/o3k/v1/operations/{operation_id}"),
+                Some(&alice_token2),
+            )
+            .await;
+        assert_eq!(
+            shown.status, 200,
+            "operation {label} ({operation_id}) must survive restart: {}",
+            shown.body
+        );
+        assert_eq!(
+            shown.json["id"],
+            Value::from(operation_id),
+            "{}",
+            shown.body
+        );
+    }
 
     let quota2 = api2
         .get("/o3k/v1/operator/quotas/project-a", Some(&operator_token2))
@@ -1816,31 +2138,70 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
         "quota limit not preserved: {}",
         quota2.body
     );
+    // The freed slot is still free after restart: usage is back to the
+    // pre-journey baseline, not just the limit.
+    let quota2_usage = api2
+        .get("/o3k/v1/quota/compute/servers", Some(&alice_token2))
+        .await;
+    assert_eq!(quota2_usage.status, 200, "{}", quota2_usage.body);
+    assert_eq!(
+        quota2_usage.json["usage"], initial_usage,
+        "quota usage not preserved across restart: {}",
+        quota2_usage.body
+    );
 
     // Governance revocation persisted: bob still cannot enter project-a.
     let bob_in_a2 = api2
         .exchange(&required("O3K_P12_7_BOB_TOKEN"), Some("project-a"), false)
         .await;
-    assert!(bob_in_a2.status.is_client_error(), "{}", bob_in_a2.body);
+    assert_eq!(bob_in_a2.status, 401, "{}", bob_in_a2.body);
 
-    let audit2 = api2
-        .get("/o3k/v1/audit?limit=50", Some(&alice_token2))
-        .await;
-    assert_eq!(audit2.status, 200, "{}", audit2.body);
-    assert!(
-        audit2.json["items"].as_array().map_or(0, |i| i.len()) >= audit_count_before,
-        "audit must be preserved across restart: {}",
-        audit2.body
+    // Audit: the exact pre-restart event ids for the server actions survive.
+    let mut surviving_events = 0_usize;
+    for (_, operation_id) in &collected_ops[..5] {
+        let filtered = api2
+            .get(
+                &format!("/o3k/v1/audit?operation_id={operation_id}&limit=10"),
+                Some(&alice_token2),
+            )
+            .await;
+        assert_eq!(filtered.status, 200, "{}", filtered.body);
+        let post_ids: Vec<String> = filtered.json["items"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item["event_id"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for event_id in &audit_event_ids {
+            if post_ids.contains(event_id) {
+                surviving_events += 1;
+            }
+        }
+    }
+    assert_eq!(
+        surviving_events,
+        audit_event_ids.len(),
+        "every pre-restart server-action audit event must survive restart"
     );
 
     let usage2 = api2.get(&usage_uri, Some(&alice_token2)).await;
     assert_eq!(usage2.status, 200, "{}", usage2.body);
+    assert_eq!(usage2.json[0]["unit"], "instance_second");
+    assert_eq!(usage2.json[0]["meter_key"], "compute:instance_seconds");
     let frozen2 = api2.get(&usage_frozen_uri, Some(&alice_token2)).await;
     assert_eq!(frozen2.status, 200, "{}", frozen2.body);
     let total_after = frozen2.json[0]["total"].as_str().expect("total").to_owned();
     assert_eq!(
         total_after, total_before,
         "metering totals must not double-fold across restart: {total_before} vs {total_after}"
+    );
+    let total_after_value: f64 = total_after.parse().expect("total is a decimal string");
+    assert!(
+        total_after_value.is_finite() && total_after_value > 0.0,
+        "frozen compute:instance_seconds total must stay positive across restart: {total_after}"
     );
 
     let diag2 = api2
@@ -1861,6 +2222,8 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
             );
         }
     }
+    // Final log scan: both process generations accumulated in the same file.
+    scan_o3kd_log(&data_dir, &secrets);
 
     child2.terminate().await;
     std::fs::remove_dir_all(&data_dir).ok();

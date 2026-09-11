@@ -59,12 +59,20 @@ start_postgres() {
 
 # Each AFTER_HOOK runs the Rust gate with the env the p12-iam-7 script has
 # already exported (tokens, subjects, issuer, discovery URL, bootstrap secret).
+# The hook asserts the gate actually ran: cargo exits 0 with "0 passed" when
+# the test is renamed or loses #[ignore], which would otherwise print PASS with
+# no evidence.
 cat >"${workdir}/run-gate.sh" <<HOOK
 #!/usr/bin/env bash
 set -euo pipefail
 cd '${repo_root}'
-cargo test --locked -p o3kd --test araf_p2_convergence --all-features -- \
-  araf_p2_northbound_convergence --ignored --nocapture
+gate_output="\$(cargo test --locked -p o3kd --test araf_p2_convergence --all-features -- \
+  araf_p2_northbound_convergence --ignored --nocapture 2>&1)"
+if ! grep -q "test result: ok. 1 passed" <<<"\${gate_output}"; then
+  echo "Araf P2 gate did not report exactly one passed test:" >&2
+  echo "\${gate_output}" >&2
+  exit 1
+fi
 HOOK
 chmod +x "${workdir}/run-gate.sh"
 
