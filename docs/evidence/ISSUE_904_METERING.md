@@ -90,7 +90,7 @@ Focused tests added by this change:
   fail-closed, accumulator merging, quantity formatting, query bound and
   alignment rejection, observation validation, full-range single-series
   admission, aggregate-row and distinct-series bounds.
-- `crates/o3k-store/tests/metering_repository.rs` (32, SQLite): exact interval
+- `crates/o3k-store/tests/metering_repository.rs` (33, SQLite): exact interval
   arithmetic, stopped intervals not accruing, idempotent replay of open and of
   close, replay of an open whose interval already closed, duplicate consume,
   close-without-open, zero-duration close, clock regression, pre-anchor
@@ -103,7 +103,14 @@ Focused tests added by this change:
   colon-bearing series identity, future-end partiality, snapshot mechanism,
   concurrent reads, two writers folding once, cancelled write keeps the pool
   usable, dropped write rolls back.
-- `crates/o3k-store/tests/postgres_metering.rs` (21, real PostgreSQL): the
+The deterministic crash-window pins are
+  `mid_fold_rollback_keeps_interval_open_and_converges` (SQLite) and
+  `postgres_mid_fold_rollback_keeps_interval_open_and_converges` (PostgreSQL),
+  and the reconciler safety nets are
+  `observation_close_failure_is_healed_by_surfaced_lifecycle_close` and
+  `surfaced_lifecycle_close_retries_until_the_interval_closes`.
+
+- `crates/o3k-store/tests/postgres_metering.rs` (22, real PostgreSQL): the
   PostgreSQL parity of the above, plus concurrent release folding exactly once.
 - `crates/o3k-store/tests/metering_migration_upgrade.rs` (1): a pre-metering
   schema upgrades with usable metering tables and the open-series index.
@@ -133,14 +140,17 @@ Focused tests added by this change:
   volume allocation exactness and replay safety, Cinder-compatible volume
   create/delete metering, recovery closing an interrupted volume delete,
   recovery deferring the mutation when the projection fails, capability hiding.
-- `crates/o3k-reconciler` (9): ordered lifecycle projection, replay does not
+- `crates/o3k-reconciler` (11): ordered lifecycle projection, replay does not
   duplicate the projected sequence, a failed projection surfaces and leaves the
   step retriable, a losing compare-and-set records no observation, a failing
   observer does not drop an agent observation, a duplicate observation repairs a
   lost projection, a dispatch-rejected create accrues no compute metering,
   a retried create terminal failure accrues no compute metering, and retry
   exhaustion accrues no compute metering — each through the real durable
-  authority with restart and replay checks.
+  authority with restart and replay checks; a lost best-effort observation
+  close is healed by the surfaced `finish_lifecycle` projection retried until
+  terminalization, in both the heal-on-first-drive and the retry-until-close
+  shapes.
 - `crates/o3k-compute` (4): delete projects `DELETED`, a failing observer
   surfaces on the mutation path, a read-path projection failure does not fail
   `GET /servers/{id}`, and the read-path repair only opens/refreshing consuming
