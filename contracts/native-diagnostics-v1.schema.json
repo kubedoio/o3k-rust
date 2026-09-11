@@ -84,7 +84,7 @@
         "status": { "$ref": "#/definitions/status" },
         "observed_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
         "reason": { "anyOf": [{ "$ref": "#/definitions/reason" }, { "type": "null" }] },
-        "controller": { "type": ["object", "null"], "$ref": "#/definitions/controllerDiagnostics" }
+        "controller": { "anyOf": [{ "$ref": "#/definitions/controllerDiagnostics" }, { "type": "null" }] }
       }
     },
     "providerCapacityDimension": {
@@ -180,7 +180,7 @@
             "providers": { "$ref": "#/definitions/componentCounts" }
           }
         },
-        "control_plane": { "type": ["object", "null"], "$ref": "#/definitions/controlPlane" },
+        "control_plane": { "anyOf": [{ "$ref": "#/definitions/controlPlane" }, { "type": "null" }] },
         "locations": { "$ref": "#/definitions/locationDiagnostics" }
       }
     }

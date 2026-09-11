@@ -701,6 +701,16 @@ mod tests {
         let validator = jsonschema::validator_for(&schema).unwrap();
         // A failed validation panics with the schema violation details.
         validator.validate(&value).unwrap();
+
+        // `control_plane` is nullable; the schema must accept null (draft
+        // 2020-12: use anyOf, not a `type` sibling of `$ref`).
+        let no_control_plane = DiagnosticsSummary {
+            control_plane: None,
+            ..representative_summary()
+        };
+        validator
+            .validate(&serde_json::to_value(no_control_plane).unwrap())
+            .unwrap();
     }
 
     /// Validates a single serialized DTO against one `definitions` entry of
@@ -740,7 +750,16 @@ mod tests {
                 session_generation: Some(3),
             }),
         };
-        validate_against_definition(&serde_json::to_value(service).unwrap(), "service");
+        validate_against_definition(&serde_json::to_value(&service).unwrap(), "service");
+
+        // A service without a controller registration serializes `controller`
+        // as null; the schema must accept it (draft 2020-12: use anyOf, not a
+        // `type` sibling of `$ref`).
+        let no_controller = ServiceDiagnostics {
+            controller: None,
+            ..service
+        };
+        validate_against_definition(&serde_json::to_value(no_controller).unwrap(), "service");
     }
 
     #[test]
