@@ -157,8 +157,13 @@ On a mutation path a projection failure is surfaced to the caller and the step i
 retried. Where a projection cannot be retried behind a transition that already
 committed, the projection is repaired by re-projecting the resource's durable
 state — which is idempotent and derived from truth — on the next observation or
-read of that same resource. The read-path repair projection is best-effort: it
-logs, because a metering hiccup must not fail a read.
+read of that same resource. A repair never emits a consuming=`false` close:
+repairs only open or refresh consuming intervals, and closing belongs to the
+authoritative transition paths (`remove_native_volume`, provider-absence
+recovery, and the surfaced mutation projections), because a close must carry
+the transition's own instant rather than a later read instant. The read-path
+repair projection is best-effort: it logs, because a metering hiccup must not
+fail a read.
 
 ## 7. Time semantics
 
@@ -209,8 +214,7 @@ Because recording is synchronous with the lifecycle authority, and because open
 intervals are evaluated live at query time rather than folded, a returned series
 is current as of `observed_through`. A requested period that extends beyond the
 evaluation instant is not yet fully observed and is therefore `partial`, never
-`complete`. `last_observed_at` is the whole authority's watermark, not this
-scope's, so it must not be read as per-scope completeness evidence.
+`complete`.
 
 `stale` is deliberately absent from the vocabulary rather than synthesized:
 metering has no asynchronous processing pipeline, so there is no observation lag

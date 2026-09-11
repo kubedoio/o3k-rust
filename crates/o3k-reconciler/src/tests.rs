@@ -6,6 +6,7 @@ mod reconciler_tests {
     use o3k_provider::{FailureInjection, FakeComputeProvider};
     use o3k_store::testkit::TestStore;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
     #[test]
     fn test_fault_pause_guard_accepts_only_positive_numeric_durations() {
@@ -4513,17 +4514,45 @@ mod reconciler_tests {
     /// Test metering authority: forwards compute-instance lifecycle
     /// observations into the durable store through the real
     /// [`MeteringRepository`], using the single shared state→consuming mapping.
+    ///
+    /// It carries a deterministic clock (`set_observed_at_ms`) and a one-shot
+    /// injected projection failure (`fail_next_projection`), so tests can prove
+    /// that a lost best-effort observation close is still healed by the
+    /// surfaced `finish_lifecycle` projection — without sleeping on wall-clock
+    /// timing.
     struct AuthorityMeteringObserver {
         store: Arc<TestStore>,
-        observed_at_ms: i64,
+        observed_at_ms: Arc<AtomicI64>,
+        fail_next: Arc<AtomicBool>,
+        failure_count: Arc<AtomicUsize>,
+        record_count: Arc<AtomicUsize>,
     }
 
     impl AuthorityMeteringObserver {
         fn new(store: Arc<TestStore>, observed_at_ms: i64) -> Self {
             Self {
                 store,
-                observed_at_ms,
+                observed_at_ms: Arc::new(AtomicI64::new(observed_at_ms)),
+                fail_next: Arc::new(AtomicBool::new(false)),
+                failure_count: Arc::new(AtomicUsize::new(0)),
+                record_count: Arc::new(AtomicUsize::new(0)),
             }
+        }
+
+        fn set_observed_at_ms(&self, observed_at_ms: i64) {
+            self.observed_at_ms.store(observed_at_ms, Ordering::SeqCst);
+        }
+
+        fn fail_next_projection(&self) {
+            self.fail_next.store(true, Ordering::SeqCst);
+        }
+
+        fn failed_projections(&self) -> usize {
+            self.failure_count.load(Ordering::SeqCst)
+        }
+
+        fn recorded_projections(&self) -> usize {
+            self.record_count.load(Ordering::SeqCst)
         }
     }
 
@@ -4539,22 +4568,33 @@ mod reconciler_tests {
             if kind != "compute_instance" {
                 return Ok(());
             }
+            if self.fail_next.swap(false, Ordering::SeqCst) {
+                self.failure_count.fetch_add(1, Ordering::SeqCst);
+                return Err(o3k_kernel::KernelError::MeteringUnavailable(
+                    "injected metering projection failure".to_owned(),
+                ));
+            }
             let Some(consuming) = crate::compute_instance_state_consuming(observed_state) else {
                 return Err(o3k_kernel::KernelError::MeteringCorrupt(format!(
                     "unknown compute instance state `{observed_state}`"
                 )));
             };
-            self.store
+            let result = self
+                .store
                 .record_observation(&o3k_kernel::MeterObservation {
                     meter_key: "compute:instance_seconds".to_owned(),
                     scope: project_id.to_owned(),
                     resource_id: resource_id.to_owned(),
                     quantity: if consuming { 1 } else { 0 },
                     consuming,
-                    observed_at_ms: self.observed_at_ms,
+                    observed_at_ms: self.observed_at_ms.load(Ordering::SeqCst),
                     authority: "test-lifecycle".to_owned(),
                 })
-                .await
+                .await;
+            if result.is_ok() {
+                self.record_count.fetch_add(1, Ordering::SeqCst);
+            }
+            result
         }
 
         async fn observe_allocation(
@@ -4748,6 +4788,238 @@ mod reconciler_tests {
                 "retry exhaustion must not open an interval that survives a restart"
             );
         }
+        Ok(())
+    }
+
+    /// A file-backed journal with the authority observer attached, the
+    /// observer shared with the test for clock control and projection counts.
+    async fn metered_journal(
+        label: &str,
+        observed_at_ms: i64,
+    ) -> Result<
+        (
+            OperationJournal<TestStore, FakeComputeProvider>,
+            Arc<TestStore>,
+            Arc<AuthorityMeteringObserver>,
+        ),
+        ReconcileError,
+    > {
+        let (journal, store, _provider) = journal(label, 2).await?;
+        let observer = Arc::new(AuthorityMeteringObserver::new(
+            store.clone(),
+            observed_at_ms,
+        ));
+        let journal = journal.with_metering_observer(observer.clone());
+        Ok((journal, store, observer))
+    }
+
+    fn stopped_observation(operation_id: Uuid, resource_id: Uuid) -> AgentObservation {
+        AgentObservation {
+            agent_id: "compute-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            resource_id,
+            provider_resource_id: None,
+            state: o3k_provider::InstanceState::Stopped,
+            operation_id,
+            operation_state: AgentOperationState::Succeeded,
+            observation_sequence: 1,
+            observed_at_unix_ms: 1,
+            redacted_message: None,
+            console_log_bytes: Vec::new(),
+            console_log_offset: 0,
+            console_log_complete: false,
+            console_log_truncated: false,
+            block_device: None,
+        }
+    }
+
+    /// The safety net for a best-effort agent-observation close: the surfaced
+    /// `finish_lifecycle` projection still closes the interval exactly once at
+    /// the transitioned instant, and no replay double-counts or reopens it.
+    ///
+    /// The observer fails ONLY on the `apply_agent_observation` best-effort
+    /// projection (a one-shot injected failure) while the `finish_lifecycle`
+    /// surfaced projection succeeds.
+    #[tokio::test]
+    async fn observation_close_failure_is_healed_by_surfaced_lifecycle_close()
+    -> Result<(), ReconcileError> {
+        let (journal, store, observer) =
+            metered_journal("metering-observation-close-healed", METERING_BASE_MS).await?;
+        let request = request();
+
+        // The create completes ACTIVE and opens the interval at BASE.
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(observer.recorded_projections(), 1);
+
+        // A Stopped observation carries the close, but its best-effort
+        // projection fails and is swallowed: the close is lost while the
+        // durable projection still moves to SHUTOFF.
+        bind_observation_command(
+            &store,
+            create_operation,
+            request.o3k_server_id,
+            "compute-1",
+            "epoch-1",
+        )
+        .await?;
+        observer.fail_next_projection();
+        journal
+            .apply_agent_observation(&stopped_observation(
+                create_operation,
+                request.o3k_server_id,
+            ))
+            .await?;
+        assert_eq!(observer.failed_projections(), 1);
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "SHUTOFF"
+        );
+        let still_open = authority_usage(&store, METERING_BASE_MS + METERING_HOUR_MS)
+            .await?
+            .meters[0]
+            .total
+            .clone();
+        assert_eq!(
+            still_open, "3600.000",
+            "the observation close was lost, so the interval is still open"
+        );
+
+        // The canonical stop lifecycle completes through the surfaced
+        // (retried) projection at the transitioned instant.
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let stop_operation = Uuid::now_v7();
+        journal
+            .begin_lifecycle(resource.id, stop_operation, LifecycleAction::Stop)
+            .await?;
+        observer.set_observed_at_ms(METERING_BASE_MS + 1_800_000);
+        assert_eq!(
+            journal.reconcile_lifecycle_once(stop_operation).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(observer.recorded_projections(), 2);
+        let report = authority_usage(&store, METERING_BASE_MS + METERING_HOUR_MS).await?;
+        assert_eq!(
+            report.meters[0].total, "1800.000",
+            "the surfaced lifecycle close must close the interval exactly once at +30min"
+        );
+
+        // Replays: the terminal lifecycle short-circuits, and the duplicate
+        // observation repairs nothing (idle states are never projected), so the
+        // total and the projection count are unchanged.
+        assert_eq!(
+            journal.reconcile_lifecycle_once(stop_operation).await?,
+            OperationState::Succeeded
+        );
+        journal
+            .apply_agent_observation(&stopped_observation(
+                create_operation,
+                request.o3k_server_id,
+            ))
+            .await?;
+        assert_eq!(observer.recorded_projections(), 2);
+        let replay = authority_usage(&store, METERING_BASE_MS + METERING_HOUR_MS).await?;
+        assert_eq!(replay.meters[0].total, "1800.000");
+        Ok(())
+    }
+
+    /// When the first lifecycle drive's surfaced projection fails too, the
+    /// operation stays retriable and the interval stays open; the retried drive
+    /// closes it through the surfaced path, and a later observation of the same
+    /// resource never leaves it open.
+    #[tokio::test]
+    async fn surfaced_lifecycle_close_retries_until_the_interval_closes()
+    -> Result<(), ReconcileError> {
+        let (journal, store, observer) =
+            metered_journal("metering-surfaced-close-retry", METERING_BASE_MS).await?;
+        let request = request();
+
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(observer.recorded_projections(), 1);
+
+        // The observation close is lost (best-effort projection fails).
+        bind_observation_command(
+            &store,
+            create_operation,
+            request.o3k_server_id,
+            "compute-1",
+            "epoch-1",
+        )
+        .await?;
+        observer.fail_next_projection();
+        journal
+            .apply_agent_observation(&stopped_observation(
+                create_operation,
+                request.o3k_server_id,
+            ))
+            .await?;
+        assert_eq!(observer.failed_projections(), 1);
+
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let stop_operation = Uuid::now_v7();
+        journal
+            .begin_lifecycle(resource.id, stop_operation, LifecycleAction::Stop)
+            .await?;
+        observer.set_observed_at_ms(METERING_BASE_MS + 1_800_000);
+
+        // First drive: the surfaced projection fails too, so the lifecycle must
+        // stay retriable and the interval open.
+        observer.fail_next_projection();
+        assert!(matches!(
+            journal.reconcile_lifecycle_once(stop_operation).await,
+            Err(ReconcileError::Metering(_))
+        ));
+        assert_eq!(observer.failed_projections(), 2);
+        assert!(
+            !matches!(
+                store.get_operation(stop_operation).await?.state,
+                OperationState::Succeeded | OperationState::Failed
+            ),
+            "a failed surfaced projection must leave the lifecycle retriable"
+        );
+        let still_open = authority_usage(&store, METERING_BASE_MS + METERING_HOUR_MS)
+            .await?
+            .meters[0]
+            .total
+            .clone();
+        assert_eq!(
+            still_open, "3600.000",
+            "a failed surfaced projection must not close the interval"
+        );
+
+        // The retried drive (observer recovered) closes it through the surfaced
+        // path.
+        assert_eq!(
+            journal.reconcile_lifecycle_once(stop_operation).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(observer.recorded_projections(), 2);
+        let report = authority_usage(&store, METERING_BASE_MS + METERING_HOUR_MS).await?;
+        assert_eq!(report.meters[0].total, "1800.000");
+
+        // A later observation of the same resource must not leave it open.
+        journal
+            .apply_agent_observation(&stopped_observation(
+                create_operation,
+                request.o3k_server_id,
+            ))
+            .await?;
+        assert_eq!(observer.recorded_projections(), 2);
+        let after = authority_usage(&store, METERING_BASE_MS + METERING_HOUR_MS).await?;
+        assert_eq!(
+            after.meters[0].total, "1800.000",
+            "the stop interval must remain closed after a later observation"
+        );
         Ok(())
     }
 }

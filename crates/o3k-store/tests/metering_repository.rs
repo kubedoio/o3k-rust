@@ -1267,65 +1267,306 @@ async fn aborted_write_observation_leaves_the_pool_usable() {
         "o3k-metering-abort-{}.db",
         uuid::Uuid::now_v7().simple()
     ));
+    let writer = SqliteStore::connect_file(&path).await.unwrap();
+    let d0 = 100 * DAY;
+    let close_at = d0 + 366 * DAY;
+    writer.ensure_authority(d0).await.unwrap();
+    writer
+        .record_observation(&observation("project-a", "server-1", 1, true, d0))
+        .await
+        .unwrap();
+
+    // The live pre-close amount: the interval is open, so usage reports the
+    // full d0..close_at segment. 366 days of hourly ingest rows fold into 366
+    // day-granularity buckets.
+    let mut day_query = query("project-a", d0, close_at, close_at);
+    day_query.granularity = UsageGranularity::Day;
+    let before = writer.usage(&day_query).await.unwrap();
+    assert_eq!(hourly_total(&before), "31622400.000");
+
+    // A zero-busy-timeout WAL connection lets us synchronise on the writer's
+    // write lock deterministically instead of sleeping to "hit" the window.
+    let probe_pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&path)
+                .busy_timeout(std::time::Duration::ZERO),
+        )
+        .await
+        .unwrap();
+    let mut probe = probe_pool.acquire().await.unwrap();
+
+    let close = observation("project-a", "server-1", 0, false, close_at);
+    let task = tokio::spawn({
+        let writer = writer.clone();
+        let close = close.clone();
+        async move { writer.record_observation(&close).await }
+    });
+
+    // Spin until the writer's `BEGIN IMMEDIATE` holds the write lock: the close
+    // transaction is then open (past the CAS close) and folding 8784 buckets.
+    // Abort without yielding so the abort lands inside that window.
+    let mut lock_seen = false;
+    for _ in 0..1_000_000 {
+        match sqlx::query("BEGIN IMMEDIATE").execute(&mut *probe).await {
+            Ok(_) => {
+                sqlx::query("ROLLBACK").execute(&mut *probe).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+            Err(_) => {
+                lock_seen = true;
+                break;
+            }
+        }
+    }
+    assert!(lock_seen, "never observed the close write lock");
+    task.abort();
+    let _ = task.await;
+
+    // Dropping the writer pool terminates its connection. SQLite discards the
+    // still-open transaction on close, so the abort is rolled back and the
+    // write lock is released regardless of how far the fold got.
+    drop(writer);
+    let mut released = false;
+    for _ in 0..1_000 {
+        match sqlx::query("BEGIN IMMEDIATE").execute(&mut *probe).await {
+            Ok(_) => {
+                sqlx::query("ROLLBACK").execute(&mut *probe).await.unwrap();
+                released = true;
+                break;
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+        }
+    }
+    assert!(released, "aborted write never released its lock");
+
+    // Crash window: rollback left the interval open and leaked no partial fold,
+    // so the durable values are unchanged.
+    let open_intervals: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM metering_intervals \
+         WHERE scope = ?1 AND meter_key = ?2 AND resource_id = ?3 AND ended_at_ms IS NULL",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .bind("server-1")
+    .fetch_one(&mut *probe)
+    .await
+    .unwrap();
+    assert_eq!(
+        open_intervals, 1,
+        "aborted close must leave the interval open"
+    );
+    let folded_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM metering_aggregates WHERE scope = ?1 AND meter_key = ?2",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .fetch_one(&mut *probe)
+    .await
+    .unwrap();
+    assert_eq!(folded_before, 0, "no partial fold may survive the abort");
+
+    // Reconnect with a fresh pool; the durable state is unchanged.
+    let store = SqliteStore::connect_file(&path).await.unwrap();
+    let after = store.usage(&day_query).await.unwrap();
+    assert_eq!(
+        hourly_total(&after),
+        "31622400.000",
+        "the pre-close live total must be exactly the pre-abort amount"
+    );
+
+    // Re-issue the same close: it converges exactly once, folding every hourly
+    // ingest bucket into exactly one day-granularity rollup.
+    store.record_observation(&close).await.unwrap();
+    let folded = store.usage(&day_query).await.unwrap();
+    assert_eq!(hourly_total(&folded), "31622400.000");
+    let closed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM metering_intervals \
+         WHERE scope = ?1 AND meter_key = ?2 AND resource_id = ?3 AND ended_at_ms = ?4",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .bind("server-1")
+    .bind(close_at)
+    .fetch_one(&mut *probe)
+    .await
+    .unwrap();
+    assert_eq!(closed, 1, "the replayed close must close the interval once");
+    let folded_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM metering_aggregates WHERE scope = ?1 AND meter_key = ?2",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .fetch_one(&mut *probe)
+    .await
+    .unwrap();
+    assert_eq!(
+        folded_after, 8_784,
+        "one folded row per hourly ingest bucket"
+    );
+
+    // Replaying the close is idempotent: no double count, no loss.
+    store.record_observation(&close).await.unwrap();
+    let replayed = store.usage(&day_query).await.unwrap();
+    assert_eq!(hourly_total(&replayed), "31622400.000");
+    let folded_replay: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM metering_aggregates WHERE scope = ?1 AND meter_key = ?2",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .fetch_one(&mut *probe)
+    .await
+    .unwrap();
+    assert_eq!(folded_replay, 8_784, "replay must not double count");
+
+    drop(probe);
+    drop(probe_pool);
+    drop(store);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(path.with_extension("db-shm"));
+}
+
+/// Deterministic mechanism test for the SQLite write path: it replays the
+/// store's `BEGIN IMMEDIATE` / CAS close / first fold write on a raw
+/// connection and then drops the transaction (rollback-on-drop == abort). The
+/// public-API crash-window coverage is
+/// `aborted_write_observation_leaves_the_pool_usable`.
+#[tokio::test]
+async fn mid_fold_rollback_keeps_interval_open_and_converges() {
+    let path = std::env::temp_dir().join(format!(
+        "o3k-metering-midfold-{}.db",
+        uuid::Uuid::now_v7().simple()
+    ));
     let store = SqliteStore::connect_file(&path).await.unwrap();
     let d0 = 100 * DAY;
+    let close_at = d0 + 1_000 * HOUR;
     store.ensure_authority(d0).await.unwrap();
     store
         .record_observation(&observation("project-a", "server-1", 1, true, d0))
         .await
         .unwrap();
-
-    // Closing a 1000-hour interval folds 1000 buckets, so aborting shortly
-    // after spawn lands inside the write transaction while still draining well
-    // within the store's `busy_timeout`.
-    let close_at = d0 + 1_000 * HOUR;
-    let close = observation("project-a", "server-1", 0, false, close_at);
-    let task = tokio::spawn({
-        let store = store.clone();
-        async move { store.record_observation(&close).await }
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    task.abort();
-    let _ = task.await;
-
-    // The aborted transaction must roll back before its connection returns to
-    // the pool. A leaked open transaction would surface here as SQLite's
-    // "cannot start a transaction within a transaction" (or a lock held past
-    // `busy_timeout`); allow a bounded retry for the aborted fold to drain.
-    let mut usable = false;
-    let mut last_error = None;
-    for _ in 0..5 {
-        match store
-            .record_observation(&observation("project-a", "server-2", 1, true, close_at))
+    let before_total = hourly_total(
+        &store
+            .usage(&query("project-a", d0, close_at, close_at))
             .await
-        {
-            Ok(()) => {
-                usable = true;
-                break;
-            }
-            Err(error) => {
-                let message = error.to_string();
-                assert!(
-                    !message.contains("within a transaction"),
-                    "cancelled write left the pool inside an open transaction: {message}"
-                );
-                last_error = Some(message);
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            }
-        }
-    }
-    assert!(usable, "pool did not recover after abort: {last_error:?}");
-    store
-        .record_observation(&observation(
-            "project-a",
-            "server-2",
-            0,
-            false,
-            close_at + 1_000,
-        ))
+            .unwrap(),
+    );
+    assert_eq!(before_total, "3600000.000");
+
+    let raw = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
         .await
         .unwrap();
+    let interval_id: String = sqlx::query_scalar(
+        "SELECT interval_id FROM metering_intervals \
+         WHERE scope = ?1 AND meter_key = ?2 AND resource_id = ?3 AND ended_at_ms IS NULL",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .bind("server-1")
+    .fetch_one(&raw)
+    .await
+    .unwrap();
 
+    let closed = {
+        let mut transaction = raw.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let cas = sqlx::query(
+            "UPDATE metering_intervals SET ended_at_ms = ?1 \
+             WHERE interval_id = ?2 AND ended_at_ms IS NULL",
+        )
+        .bind(close_at)
+        .bind(&interval_id)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        assert_eq!(cas.rows_affected(), 1);
+        // One partial fold write, then the abort.
+        sqlx::query(
+            "INSERT INTO metering_aggregates \
+             (scope, meter_key, resource_id, bucket_start_ms, bucket_width_ms, quantity_millis) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind("project-a")
+        .bind(METER)
+        .bind("server-1")
+        .bind(d0)
+        .bind(HOUR)
+        .bind(3_600_000_i64)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        drop(transaction);
+        // The next statement on the raw pool runs after the rollback.
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT ended_at_ms FROM metering_intervals WHERE interval_id = ?1",
+        )
+        .bind(&interval_id)
+        .fetch_one(&raw)
+        .await
+        .unwrap()
+    };
+    assert_eq!(closed, None, "aborted close must leave the interval open");
+    let folded: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM metering_aggregates WHERE scope = ?1 AND meter_key = ?2",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .fetch_one(&raw)
+    .await
+    .unwrap();
+    assert_eq!(folded, 0, "the partial fold must be rolled back");
+
+    // Durable values are unchanged: the live total still equals the pre-abort
+    // amount.
+    let after_abort = hourly_total(
+        &store
+            .usage(&query("project-a", d0, close_at, close_at))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(after_abort, before_total);
+
+    // Re-issuing the close through the store converges exactly once.
+    store
+        .record_observation(&observation("project-a", "server-1", 0, false, close_at))
+        .await
+        .unwrap();
+    let folded_total = hourly_total(
+        &store
+            .usage(&query("project-a", d0, close_at, close_at))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(folded_total, "3600000.000");
+    let folded_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM metering_aggregates WHERE scope = ?1 AND meter_key = ?2",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .fetch_one(&raw)
+    .await
+    .unwrap();
+    assert_eq!(folded_rows, 1_000, "exactly one fold, no loss");
+
+    // A replayed close is idempotent.
+    store
+        .record_observation(&observation("project-a", "server-1", 0, false, close_at))
+        .await
+        .unwrap();
+    let replay_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM metering_aggregates WHERE scope = ?1 AND meter_key = ?2",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .fetch_one(&raw)
+    .await
+    .unwrap();
+    assert_eq!(replay_rows, 1_000, "replay must not double count");
+
+    drop(raw);
     drop(store);
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("db-wal"));

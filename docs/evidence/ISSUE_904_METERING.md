@@ -141,9 +141,10 @@ Focused tests added by this change:
   a retried create terminal failure accrues no compute metering, and retry
   exhaustion accrues no compute metering — each through the real durable
   authority with restart and replay checks.
-- `crates/o3k-compute` (3): delete projects `DELETED`, a failing observer
-  surfaces on the mutation path, and a read-path projection failure does not
-  fail `GET /servers/{id}` with the idle-state repair skip.
+- `crates/o3k-compute` (4): delete projects `DELETED`, a failing observer
+  surfaces on the mutation path, a read-path projection failure does not fail
+  `GET /servers/{id}`, and the read-path repair only opens/refreshing consuming
+  states (it skips idle states).
 
 Repository gates (each command was exercised green on the current head while
 converging; the `[pending]` marks are placeholders that are filled only after

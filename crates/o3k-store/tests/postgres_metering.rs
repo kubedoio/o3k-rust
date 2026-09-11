@@ -1249,3 +1249,144 @@ async fn postgres_replayed_open_with_different_quantity_or_authority_fails_close
 
     fixture.dispose(&[&store]).await;
 }
+
+/// Deterministic mechanism test for the PostgreSQL write path: it replays the
+/// store's `BEGIN` / CAS close / first fold write on a raw transaction and then
+/// drops it (rollback-on-drop == abort). It asserts the crash window leaves the
+/// aborted series open and unfoled, and that re-issuing the close through the
+/// store converges exactly once.
+#[tokio::test]
+async fn postgres_mid_fold_rollback_keeps_interval_open_and_converges() {
+    let _guard = test_lock().await;
+    let Some(fixture) = Fixture::new().await else {
+        eprintln!("skipping PostgreSQL metering mid-fold abort: O3K_DATABASE_URL unavailable");
+        return;
+    };
+    let store = fixture.store().await;
+    let d0 = 100 * DAY;
+    let close_at = d0 + 1_000 * HOUR;
+    store.ensure_authority(d0).await.unwrap();
+    store
+        .record_observation(&observation("project-a", "server-1", 1, true, d0))
+        .await
+        .unwrap();
+
+    // The live pre-close amount before the aborted transaction.
+    let before_total = hourly_total(
+        &store
+            .usage(&query("project-a", d0, close_at, close_at))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(before_total, "3600000.000");
+
+    let interval_id: String = sqlx::query_scalar(
+        "SELECT interval_id FROM metering_intervals \
+         WHERE scope = $1 AND meter_key = $2 AND resource_id = $3 AND ended_at_ms IS NULL",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .bind("server-1")
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+
+    // Replay the store's write transaction, then abort it by dropping the
+    // transaction (sqlx rolls back on drop).
+    {
+        let mut transaction = store.pool().begin().await.unwrap();
+        let cas = sqlx::query(
+            "UPDATE metering_intervals SET ended_at_ms = $1 \
+             WHERE interval_id = $2 AND ended_at_ms IS NULL",
+        )
+        .bind(close_at)
+        .bind(&interval_id)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        assert_eq!(cas.rows_affected(), 1);
+        sqlx::query(
+            "INSERT INTO metering_aggregates \
+             (scope, meter_key, resource_id, bucket_start_ms, bucket_width_ms, quantity_millis) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind("project-a")
+        .bind(METER)
+        .bind("server-1")
+        .bind(d0)
+        .bind(HOUR)
+        .bind(3_600_000_i64)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        drop(transaction);
+    }
+
+    // The uncommitted close and partial fold are invisible and must not exist:
+    // a fresh statement shows the interval open and no folded rows.
+    let ended: Option<i64> =
+        sqlx::query_scalar("SELECT ended_at_ms FROM metering_intervals WHERE interval_id = $1")
+            .bind(&interval_id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(ended, None, "aborted close must leave the interval open");
+    let folded: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM metering_aggregates WHERE scope = $1 AND meter_key = $2",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(folded, 0, "the partial fold must be rolled back");
+
+    // Durable values are unchanged: the live total still equals the pre-abort
+    // amount.
+    let after_abort = hourly_total(
+        &store
+            .usage(&query("project-a", d0, close_at, close_at))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(after_abort, before_total);
+
+    // Re-issuing the close through the store converges exactly once.
+    store
+        .record_observation(&observation("project-a", "server-1", 0, false, close_at))
+        .await
+        .unwrap();
+    let folded_total = hourly_total(
+        &store
+            .usage(&query("project-a", d0, close_at, close_at))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(folded_total, "3600000.000");
+    let folded_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM metering_aggregates WHERE scope = $1 AND meter_key = $2",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(folded_rows, 1_000, "exactly one fold, no loss");
+
+    // A replayed close is idempotent.
+    store
+        .record_observation(&observation("project-a", "server-1", 0, false, close_at))
+        .await
+        .unwrap();
+    let replay_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM metering_aggregates WHERE scope = $1 AND meter_key = $2",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(replay_rows, 1_000, "replay must not double count");
+
+    fixture.dispose(&[&store]).await;
+}

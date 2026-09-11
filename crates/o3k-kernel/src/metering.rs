@@ -40,7 +40,9 @@ pub const MAX_USAGE_METERS: usize = 8;
 ///
 /// This is the work bound: a query that would read more rows is rejected, never
 /// silently truncated. A single series over the advertised 366-day range needs
-/// at most 8784 hourly rows, so this bound admits many series at full range.
+/// at most 8784 hourly rows, so this bound serves one series at full range (two
+/// barely; a third long-lived series is rejected) and more series at shorter
+/// ranges.
 pub const MAX_USAGE_AGGREGATE_ROWS: usize = 25_000;
 
 /// Maximum number of **distinct** resource series one bounded usage query may
