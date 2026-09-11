@@ -335,13 +335,14 @@ pub(crate) fn compute_error(error: ComputeError) -> axum::response::Response {
         ComputeError::Store(o3k_store::StoreError::InvalidKeypair(_)) => {
             keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "invalid public key")
         }
-        ComputeError::Store(_) | ComputeError::Reconcile(_) | ComputeError::Provider(_) => {
-            keystone_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal Server Error",
-                "compute service is unavailable",
-            )
-        }
+        ComputeError::Store(_)
+        | ComputeError::Reconcile(_)
+        | ComputeError::Provider(_)
+        | ComputeError::Metering(_) => keystone_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal Server Error",
+            "compute service is unavailable",
+        ),
         ComputeError::Unavailable => keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service Unavailable",

@@ -91,6 +91,8 @@ pub enum ComputeError {
     Provider(#[from] ProviderError),
     #[error("compute scheduler error")]
     Scheduler(#[from] SchedulerError),
+    #[error("metering projection failed: {0}")]
+    Metering(String),
     #[error("compute service is unavailable or misconfigured")]
     Unavailable,
 }

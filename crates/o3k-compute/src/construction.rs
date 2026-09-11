@@ -45,6 +45,7 @@ impl ComputeService {
             config_drive_cleaner: None,
             authorizer: Arc::new(StaticAuthorizer::standard()),
             audit_sink,
+            metering: None,
             coordination: None,
         }
     }
@@ -160,6 +161,84 @@ impl ComputeService {
         self.journal = self.journal.clone().with_agent_registry(registry.clone());
         self.agent_registry = Some(registry);
         self
+    }
+
+    /// Configures the metering observer that projects compute resource
+    /// lifecycle projections into O3K metering authority. It is attached to
+    /// both the service's own projections and its reconciliation journal, so
+    /// one builder covers the direct and reconciled lifecycle paths. The
+    /// observer is intentionally optional so direct fake-provider operation
+    /// keeps its existing behavior.
+    #[must_use]
+    pub fn with_metering_observer(
+        mut self,
+        observer: Arc<dyn o3k_kernel::LifecycleMeteringObserver>,
+    ) -> Self {
+        self.journal = self
+            .journal
+            .clone()
+            .with_metering_observer(observer.clone());
+        self.metering = Some(observer);
+        self
+    }
+
+    /// Projects a compute lifecycle state into metering authority. No-op
+    /// without an observer; a metering failure is surfaced as `ComputeError`
+    /// so the caller decides whether the step is retriable or best-effort.
+    pub(super) async fn project_metering(
+        &self,
+        resource: &o3k_store::ResourceRecord,
+        observed_state: &str,
+    ) -> Result<(), ComputeError> {
+        let Some(observer) = self.metering.as_ref() else {
+            return Ok(());
+        };
+        observer
+            .observe_resource_state(
+                &resource.kind,
+                &resource.project_id,
+                &resource.id.to_string(),
+                observed_state,
+            )
+            .await
+            .map_err(|error| ComputeError::Metering(error.to_string()))
+    }
+
+    /// Best-effort metering projection for the read-path convergence drive: a
+    /// metering failure is logged and swallowed so a metering hiccup cannot
+    /// turn a GET into a 500. The next read re-projects the durable state
+    /// (idempotent), which repairs any observation lost here.
+    pub(super) async fn project_metering_best_effort(
+        &self,
+        resource: &o3k_store::ResourceRecord,
+        observed_state: &str,
+    ) {
+        if let Err(error) = self.project_metering(resource, observed_state).await {
+            tracing::warn!(
+                resource_id = %resource.id,
+                %error,
+                "metering projection on the read path failed; the GET is unaffected and the next read repairs it"
+            );
+        }
+    }
+
+    /// Best-effort read-path repair projection from durable truth.
+    ///
+    /// A repair only ever OPENS or REFRESHES a consuming interval. It never
+    /// emits a close: closing is owned by the authoritative state-transition
+    /// paths, and a read that closed at the read instant would under-count a
+    /// teardown tail and could permanently close an interval for an instance
+    /// that later resumes (`ACTIVE`/`STARTING`/`STOPPING`/`REBOOTING`).
+    pub(super) async fn repair_metering_from_durable_state(&self, resource_id: Uuid) {
+        let Ok(resource) = self.store.get_resource(resource_id).await else {
+            return;
+        };
+        if o3k_reconciler::compute_instance_state_consuming(&resource.observed_state) != Some(true)
+        {
+            return;
+        }
+        self.project_metering_best_effort(&resource, &resource.observed_state)
+            .await;
     }
 
     #[must_use]

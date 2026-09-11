@@ -466,6 +466,68 @@ impl StaticAuthorizer {
                 },
             );
         }
+
+        // Native metering (#904) exposes the canonical meter catalog and
+        // bounded usage for one scope. Definitions are public, secret-free
+        // metadata and are readable by any authenticated user, so they carry
+        // no ownership requirement and no scope gate.
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("metering", "ReadDefinitions"),
+            ResourceType::new("metering", "definitions"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: false,
+                    required_roles: vec![],
+                },
+            );
+        }
+
+        // Usage is owner-scoped: a caller always reads the effective scope
+        // carried by its own `AuthContext`, never a scope taken from request
+        // JSON. `require_ownership` is meaningful here because the handler
+        // always authorizes this action against the caller's own scope.
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("metering", "ReadUsage"),
+            ResourceType::new("metering", "usage"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: true,
+                    required_roles: vec![],
+                },
+            );
+        }
+
+        // Cross-scope usage reads are a distinct durable system/operator
+        // capability, discoverable in the action inventory rather than
+        // expressed ad-hoc by the handler. It is never inferred from a tenant
+        // role name, and the system-scope gate below (like `operator` actions)
+        // ensures a project-scoped caller cannot satisfy it even with an
+        // `operator` role string.
+        if let (Ok(action), Ok(expected_resource_type)) = (
+            ActionId::new("metering", "ReadUsageAll"),
+            ResourceType::new("metering", "usage"),
+        ) {
+            self.policies.insert(
+                action.clone(),
+                ActionPolicy {
+                    action,
+                    expected_resource_type,
+                    accepted_principals: vec![PrincipalKind::User],
+                    require_ownership: false,
+                    required_roles: vec!["operator".to_owned()],
+                },
+            );
+        }
     }
 }
 
@@ -506,6 +568,21 @@ impl Authorizer for StaticAuthorizer {
         // satisfy it; only durable System authority plus the required
         // operator role can (the role is checked in step 5).
         if request.action == ActionId::new_unchecked("operator", "ReadDiagnostics")
+            && request.auth_context.effective_scope().kind() != ScopeKind::System
+        {
+            return AuthorizationDecision::Deny {
+                reason: DecisionReason::ScopeMismatch,
+            };
+        }
+
+        // Cross-scope metering reads (`metering:ReadUsageAll`) are system-scoped
+        // by construction, exactly like the `operator` actions: a tenant or
+        // project-scoped caller carrying an `operator` role name must never
+        // satisfy one. Only durable System scope plus the required operator role
+        // can (the role is checked in step 5). Owner-scoped `metering:ReadUsage`
+        // has no gate here because its ownership check against the caller's own
+        // effective scope is honest and sufficient.
+        if request.action == ActionId::new_unchecked("metering", "ReadUsageAll")
             && request.auth_context.effective_scope().kind() != ScopeKind::System
         {
             return AuthorizationDecision::Deny {

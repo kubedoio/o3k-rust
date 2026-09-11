@@ -342,11 +342,23 @@ impl ComputeService {
     /// command. The drive is lazy (read-triggered), bounded (terminal and
     /// accepted operations are not re-driven), and idempotent (the
     /// reconciler reuses in-flight and terminal provider work by the
-    /// deterministic operation identity). Errors are surfaced as warnings so
-    /// the read path stays available; a converged failure applies the same
-    /// reverse-order compensation as the asynchronous agent-failure path.
+    /// deterministic operation identity).
+    ///
+    /// Metering is best-effort here: a projection failure is logged, never
+    /// returned, so a metering hiccup cannot turn `GET /servers/{id}` into a
+    /// 500. Every drive first re-projects the resource's durable observed
+    /// state, so an observation lost by a failed projection is repaired by the
+    /// next read. A converged failure applies the same reverse-order
+    /// compensation as the asynchronous agent-failure path.
     pub(super) async fn drive_create_convergence(&self, resource: &o3k_store::ResourceRecord) {
         tracing::debug!(resource_id = %resource.id, "create convergence drive entered");
+        // Repair projection: re-read the durable resource and re-project its
+        // current observed_state on every drive, before the re-drive guard, so
+        // an observation lost by an earlier failed projection is healed by the
+        // next read. The helper only ever opens/refreshes a consuming interval
+        // (it never closes), is idempotent, and is best-effort: it never fails
+        // the GET.
+        self.repair_metering_from_durable_state(resource.id).await;
         let Ok(request) = serde_json::from_str::<CreateInstanceRequest>(&resource.desired_state)
         else {
             return;
@@ -408,8 +420,12 @@ impl ComputeService {
                 let Ok(resource) = self.store.get_resource(resource.id).await else {
                     return;
                 };
-                if resource.observed_state != server_state_to_storage(ServerState::Error)
-                    && let Err(error) = self
+                if resource.observed_state != server_state_to_storage(ServerState::Error) {
+                    // Project after the durable write so the observation always
+                    // matches the state that was actually written. Best-effort:
+                    // a failure is logged, never returned, and the repair
+                    // projection above heals it on the next read.
+                    match self
                         .store
                         .update_resource(
                             resource.id,
@@ -420,13 +436,23 @@ impl ComputeService {
                             resource.provider_id.as_deref(),
                         )
                         .await
-                {
-                    tracing::warn!(
-                        operation_id = %request.operation_id,
-                        resource_id = %resource.id,
-                        error = %error,
-                        "server create failure projection to ERROR failed"
-                    );
+                    {
+                        Ok(_) => {
+                            self.project_metering_best_effort(
+                                &resource,
+                                server_state_to_storage(ServerState::Error),
+                            )
+                            .await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                operation_id = %request.operation_id,
+                                resource_id = %resource.id,
+                                error = %error,
+                                "server create failure projection to ERROR failed"
+                            );
+                        }
+                    }
                 }
             }
             o3k_store::OperationState::Succeeded => {
@@ -437,7 +463,11 @@ impl ComputeService {
                 .await;
                 if let Ok(resource) = self.store.get_resource(resource.id).await
                     && resource.observed_state != "ACTIVE"
-                    && let Err(error) = self
+                {
+                    // Project after the durable write so the observation always
+                    // matches the state that was actually written. Best-effort
+                    // like the failure arm.
+                    match self
                         .store
                         .update_resource(
                             resource.id,
@@ -448,13 +478,19 @@ impl ComputeService {
                             resource.provider_id.as_deref(),
                         )
                         .await
-                {
-                    tracing::warn!(
-                        operation_id = %request.operation_id,
-                        resource_id = %resource.id,
-                        error = %error,
-                        "server create success projection to ACTIVE failed"
-                    );
+                    {
+                        Ok(_) => {
+                            self.project_metering_best_effort(&resource, "ACTIVE").await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                operation_id = %request.operation_id,
+                                resource_id = %resource.id,
+                                error = %error,
+                                "server create success projection to ACTIVE failed"
+                            );
+                        }
+                    }
                 }
             }
             _ => {}

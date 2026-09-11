@@ -4,7 +4,7 @@ pub mod network;
 pub mod runtime;
 pub mod storage;
 
-use o3k_kernel::Controller;
+use o3k_kernel::{Clock, Controller};
 use o3k_provider::ComputeProvider;
 use o3k_storage::StorageProvider;
 use o3k_store::ComputeRepository;
@@ -722,6 +722,30 @@ pub async fn build_composition(
             None => None,
         };
 
+    // Metering authority: the durable authority window is anchored once at
+    // daemon start so consumption before this instant is never invented. The
+    // same adapter is both the bounded read projection and the lifecycle write
+    // projection, so reads and observations share one authority.
+    let metering_clock: Arc<dyn Clock> = Arc::new(o3k_kernel::SystemClock);
+    // A meter is advertised only when this composition can actually produce it:
+    // the compute-instance meter requires the compute authority (always
+    // configured by this composition root) and the volume allocation meter
+    // requires a native storage provider.
+    let metering_adapter = Arc::new(
+        crate::native_adapters::MeteringAdapter::new(store.clone(), metering_clock.clone())
+            .with_producible_meters(crate::native_adapters::metering::producible_meters(
+                true,
+                native_storage_provider.is_some(),
+            )),
+    );
+    o3k_kernel::MeteringRepository::ensure_authority(&*store, metering_clock.now_unix_ms()).await?;
+    let metering_observer: Arc<dyn o3k_kernel::LifecycleMeteringObserver> =
+        metering_adapter.clone();
+    // The compute service forwards the observer to its reconciliation journal
+    // as well, so both the direct and the reconciled lifecycle paths project
+    // the same compute-instance meter.
+    compute_service = compute_service.with_metering_observer(metering_observer.clone());
+
     // First-party services remain in-process in the modular o3kd composition,
     // but they still publish the shared controller lifecycle state used by
     // native discovery and mutation dispatch.  Each readiness value is tied
@@ -824,6 +848,7 @@ pub async fn build_composition(
                 Arc::new(NativeAttachmentWorkflowAdapter(workflow.clone()))
                     as Arc<dyn o3k_native_api::resource::VolumeAttachmentWorkflow>
             }),
+            metering: Some(metering_observer.clone()),
         });
 
     let composition_task = if let Ok(listen_addr) = std::env::var("O3K_COMPOSITION_LISTEN_ADDR") {
@@ -971,7 +996,11 @@ pub async fn build_composition(
         diagnostics_adapter.observations(),
     );
     let native_state = native_state.with_diagnostics_reader(diagnostics_adapter);
+    // Bounded read projection of the same canonical metering authority the
+    // lifecycle observer writes to.
+    let native_state = native_state.with_metering_reader(metering_adapter.clone());
     state = state.with_native_api(native_state);
+    state = state.with_metering_observer(metering_observer.clone());
     state = state.with_storage_store(store.clone());
     if let Some(provider) = native_storage_provider {
         state = state.with_storage_provider(provider);

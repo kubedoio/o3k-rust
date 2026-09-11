@@ -159,6 +159,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            metering: None,
         });
     let mut manifests = ManifestRegistry::new();
     manifests.seed_core()?;
@@ -262,6 +263,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            metering: None,
         });
     manifests.register_controller("database-example", controller.session().clone())?;
     manifests.activate_controller("database-example")?;
@@ -784,6 +786,7 @@ async fn database_controller_and_composition_cross_real_mtls_boundaries()
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            metering: None,
         });
     let independent_dispatcher =
         o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&manifests)
@@ -1293,6 +1296,7 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
                 public_allocator: None,
                 network_external_realm_id: None,
                 attachment_workflow: None,
+                metering: None,
             });
         let dispatcher =
             o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&registry)
@@ -1503,6 +1507,7 @@ async fn p12_6_reconstructs_two_independent_control_plane_runtimes()
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            metering: None,
         });
     let dispatcher_b =
         o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(&registry_b)
@@ -1764,6 +1769,7 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            metering: None,
         });
     let right_application: Arc<dyn o3k_native_api::resource::ResourceApplication> =
         Arc::new(o3kd::native_adapters::GenericResourceApplication {
@@ -1786,6 +1792,7 @@ async fn p12_6_independent_application_instances_converge_durable_slots()
             public_allocator: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            metering: None,
         });
     let mut child_registry = ManifestRegistry::new();
     child_registry.seed_core()?;

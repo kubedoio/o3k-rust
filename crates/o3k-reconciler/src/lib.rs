@@ -73,6 +73,25 @@ fn test_fault_pause_ms_value(raw: Option<String>) -> Option<u64> {
 pub mod types;
 pub use crate::types::*;
 
+/// Decodes a storage-encoded compute-instance state into whether the instance
+/// consumes instance-seconds.
+///
+/// This is the single canonical state→consuming mapping shared by the
+/// reconciler's metering projections, the compute read-path repair, and the
+/// `o3kd` metering adapter (which re-exports it). `Some(true)` means the
+/// instance currently holds its runtime (`ACTIVE`/`STARTING`/`STOPPING`/
+/// `REBOOTING`); `Some(false)` means it does not (`REQUESTED`/`BUILD`/
+/// `SHUTOFF`/`DELETING`/`DELETED`/`ERROR`); `None` means the value is not a
+/// decodable canonical state and must never be treated as idle.
+#[must_use]
+pub fn compute_instance_state_consuming(observed_state: &str) -> Option<bool> {
+    match observed_state.trim().to_ascii_uppercase().as_str() {
+        "ACTIVE" | "STARTING" | "STOPPING" | "REBOOTING" => Some(true),
+        "REQUESTED" | "BUILD" | "SHUTOFF" | "DELETING" | "DELETED" | "ERROR" => Some(false),
+        _ => None,
+    }
+}
+
 // ─── OperationJournal ──────────────────────────────────────
 pub struct OperationJournal<S: ?Sized, P: ?Sized> {
     store: Arc<S>,
@@ -89,6 +108,11 @@ pub struct OperationJournal<S: ?Sized, P: ?Sized> {
     /// epoch. Without a registry the fence keeps the strict first-evidence
     /// anchor of the original behavior.
     agent_registry: Option<Arc<dyn AgentNodeRegistry>>,
+    /// Optional metering observer that projects each durably applied resource
+    /// lifecycle state into O3K metering authority. Wired by the composition
+    /// root; without it the projection is a no-op so direct fake-provider
+    /// operation is unchanged.
+    metering: Option<Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
 }
 
 impl<S: ?Sized, P: ?Sized> Clone for OperationJournal<S, P> {
@@ -101,6 +125,7 @@ impl<S: ?Sized, P: ?Sized> Clone for OperationJournal<S, P> {
             agent_evidence: self.agent_evidence.clone(),
             observation_evidence: self.observation_evidence.clone(),
             agent_registry: self.agent_registry.clone(),
+            metering: self.metering.clone(),
         }
     }
 }
@@ -119,6 +144,7 @@ where
             agent_evidence: Arc::new(Mutex::new(HashMap::new())),
             observation_evidence: Arc::new(Mutex::new(HashMap::new())),
             agent_registry: None,
+            metering: None,
         }
     }
 
@@ -131,6 +157,75 @@ where
     pub fn with_agent_registry(mut self, registry: Arc<dyn AgentNodeRegistry>) -> Self {
         self.agent_registry = Some(registry);
         self
+    }
+
+    /// Attaches the metering observer that projects every durably applied
+    /// resource lifecycle state into O3K metering authority. Wired by the
+    /// composition root; the observer is intentionally optional so direct
+    /// fake-provider operation projects no usage.
+    #[must_use]
+    pub fn with_metering_observer(
+        mut self,
+        observer: Arc<dyn o3k_kernel::LifecycleMeteringObserver>,
+    ) -> Self {
+        self.metering = Some(observer);
+        self
+    }
+
+    /// Projects a resource lifecycle state into metering authority. No-op
+    /// without an observer; a metering failure is surfaced as
+    /// [`ReconcileError::Metering`] so the caller decides whether the step is
+    /// retriable or best-effort.
+    async fn project_metering(
+        &self,
+        resource: &ResourceRecord,
+        observed_state: &str,
+    ) -> Result<(), ReconcileError> {
+        let Some(observer) = self.metering.as_ref() else {
+            return Ok(());
+        };
+        observer
+            .observe_resource_state(
+                &resource.kind,
+                &resource.project_id,
+                &resource.id.to_string(),
+                observed_state,
+            )
+            .await
+            .map_err(|error| ReconcileError::Metering(error.to_string()))
+    }
+
+    /// Best-effort variant of [`Self::project_metering`]: a failure is logged
+    /// and never propagated.
+    async fn project_metering_best_effort(&self, resource: &ResourceRecord, observed_state: &str) {
+        if let Err(error) = self.project_metering(resource, observed_state).await {
+            tracing::warn!(
+                resource_id = %resource.id,
+                %error,
+                "metering projection failed; it is best-effort here and the next observation repairs it"
+            );
+        }
+    }
+
+    /// Repairs a possibly-lost metering projection from durable truth: reads
+    /// the resource and best-effort re-projects its current `observed_state`.
+    /// The observation is idempotent by state, so re-projecting durable truth
+    /// is not a fabrication; a read or projection failure is logged/no-op.
+    ///
+    /// A repair only ever OPENS or REFRESHES a consuming interval. It never
+    /// emits a close: closing is owned by the authoritative transition paths
+    /// (delete, provider absence), and a read that closed at the read instant
+    /// would under-count a teardown tail and could permanently close an
+    /// interval for a resource that later resumes consuming.
+    async fn repair_metering_from_durable_state(&self, resource_id: Uuid) {
+        let Ok(resource) = self.store.get_resource(resource_id).await else {
+            return;
+        };
+        if compute_instance_state_consuming(&resource.observed_state) != Some(true) {
+            return;
+        }
+        self.project_metering_best_effort(&resource, &resource.observed_state)
+            .await;
     }
 
     async fn fence_agent_evidence(
@@ -535,6 +630,21 @@ where
         ) {
             return Ok(operation.state);
         }
+        // A terminally failed create must not leave the resource in its
+        // pre-creation state: clients polling the server would otherwise wait
+        // forever. Its metering observation is projected here, before the
+        // operation terminalizes below, so a failed or crashed projection
+        // leaves the step retriable instead of losing the observation.
+        let failed_create_resource =
+            if durable_state == OperationState::Failed && operation.kind == "create" {
+                let resource = self.store.get_resource(update.resource_id).await?;
+                self.project_metering(&resource, server_state_to_storage(ServerState::Error))
+                    .await?;
+                Some(resource)
+            } else {
+                None
+            };
+
         let provider_operation_id = operation.provider_operation_id.as_deref();
         self.store
             .update_operation(
@@ -546,12 +656,9 @@ where
             )
             .await?;
 
-        if durable_state == OperationState::Failed && operation.kind == "create" {
-            // A terminally failed create must not leave the resource in its
-            // pre-creation state: clients polling the server would otherwise
-            // wait forever. Projecting ERROR keeps the failure durable and
-            // visible while observations remain the only success projection.
-            let resource = self.store.get_resource(update.resource_id).await?;
+        if let Some(resource) = failed_create_resource {
+            // Projecting ERROR keeps the failure durable and visible while
+            // observations remain the only success projection.
             self.store
                 .update_resource(
                     update.resource_id,
@@ -778,6 +885,13 @@ where
             )
             .await?;
         if evidence_permit.disposition != EvidenceDisposition::New {
+            // A re-delivered (duplicate) or out-of-order (stale) observation is
+            // a repair opportunity: re-project the durable observed_state so a
+            // projection lost after an earlier CAS is healed. The projection is
+            // durable-state-derived and idempotent by state, so this never
+            // fabricates or double-counts.
+            self.repair_metering_from_durable_state(observation.resource_id)
+                .await;
             return Ok(());
         }
         let observed_state = server_state_to_storage(ServerState::from(observation.state));
@@ -856,6 +970,13 @@ where
                 );
                 e
             })?;
+        // Project the state the CAS actually applied. This is best-effort: an
+        // agent observation must not be rejected because metering is unhappy.
+        // The projection is durable-state-derived and idempotent by state, so a
+        // lost projection is repaired when the agent re-delivers the observation
+        // (the fence's non-New short-circuit re-projects the durable state).
+        self.project_metering_best_effort(&updated, &updated.observed_state)
+            .await;
         tracing::debug!(
             operation_id=%observation.operation_id,
             resource_id=%observation.resource_id,
@@ -1373,6 +1494,9 @@ where
                 Err(error) => return Err(ReconcileError::Provider(error)),
             }
         };
+        // Project before the terminalizing write so the observation lands while
+        // the lifecycle is still retriable; the observation is idempotent.
+        self.project_metering(&resource, &observed_state).await?;
         self.store
             .update_operation(
                 operation_id,
@@ -2026,6 +2150,10 @@ where
         operation: OperationRecord,
         resource: ResourceRecord,
     ) -> Result<OperationState, ReconcileError> {
+        // Project before the terminalizing write so the observation lands while
+        // the step is still retriable.
+        self.project_metering(&resource, server_state_to_storage(ServerState::Error))
+            .await?;
         self.store
             .update_operation(
                 operation.id,
@@ -2075,6 +2203,21 @@ where
         let provider_resource_id = provider_resource_id.ok_or(ReconcileError::InvalidIntent)?;
         let instance = self.provider.get_instance(&provider_resource_id).await?;
         let observed_state = server_state_to_storage(ServerState::from(instance.state));
+        if instance.state == o3k_provider::InstanceState::Running {
+            return self
+                .finish(
+                    operation_id,
+                    resource,
+                    provider_operation_id,
+                    Some(provider_resource_id),
+                )
+                .await;
+        }
+        // The three non-Running outcomes below all durably project exactly this
+        // observed_state, so project it once before any of their writes: the
+        // observation must land while the step is still retriable, and the
+        // observation is idempotent if a later write fails and re-drives.
+        self.project_metering(&resource, observed_state).await?;
         if instance.state == o3k_provider::InstanceState::Error {
             self.store
                 .update_operation(
@@ -2097,16 +2240,6 @@ where
                 .await?;
             self.event(operation_id, resource.id, JournalEventKind::Failed);
             return Ok(OperationState::Failed);
-        }
-        if instance.state == o3k_provider::InstanceState::Running {
-            return self
-                .finish(
-                    operation_id,
-                    resource,
-                    provider_operation_id,
-                    Some(provider_resource_id),
-                )
-                .await;
         }
         if instance.state == o3k_provider::InstanceState::Creating {
             // The create is still in flight at the execution boundary; keep
@@ -2223,6 +2356,12 @@ where
                 Err(error) => return Err(error.into()),
             }
         }
+        // The target state is the constant ACTIVE, so project once before the
+        // terminalizing write rather than inside the CAS retry loop (every
+        // attempt retries into the same state, never a different one). The
+        // observation must land while the step is still retriable.
+        self.project_metering(&resource, server_state_to_storage(ServerState::Active))
+            .await?;
         self.store
             .update_operation(
                 operation_id,

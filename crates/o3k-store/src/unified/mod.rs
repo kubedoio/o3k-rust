@@ -15,6 +15,7 @@ mod core;
 mod governance;
 mod identity;
 mod image;
+mod metering;
 mod network;
 mod placement;
 mod policy;

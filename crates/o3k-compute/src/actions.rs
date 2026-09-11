@@ -500,6 +500,10 @@ impl ComputeService {
                     Err(error) => return Err(ComputeError::Reconcile(error)),
                 }
             }
+            // Project before terminalizing the delete operation so a crash
+            // between the projection and the writes is repaired by re-drive.
+            self.project_metering(&resource, server_state_to_storage(ServerState::Deleted))
+                .await?;
             self.store
                 .update_operation(
                     operation_id,

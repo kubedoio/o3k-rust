@@ -35,4 +35,10 @@ pub enum KernelError {
 
     #[error("audit event identity conflicts with existing evidence")]
     AuditConflict,
+
+    #[error("metering authority unavailable: {0}")]
+    MeteringUnavailable(String),
+
+    #[error("metering state is corrupt or inconsistent: {0}")]
+    MeteringCorrupt(String),
 }

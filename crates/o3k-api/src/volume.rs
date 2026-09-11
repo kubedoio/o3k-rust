@@ -19,6 +19,124 @@ use uuid::Uuid;
 
 use crate::{AppState, compute::project_auth_context, error::keystone_error};
 
+/// Canonical key of the volume allocation meter. Defined once here because the
+/// canonical volume authority owns the observation; the `o3kd` adapter
+/// re-exports it rather than repeating the literal.
+pub const VOLUME_ALLOCATION_METER: &str = "volume:allocated_byte_seconds";
+
+/// Projects one volume allocation transition through the optional metering
+/// authority.
+///
+/// This is the single observation path for native volumes. `size_bytes` is the
+/// canonical allocation size for an open and is ignored by the adapter for a
+/// close (which records quantity zero). A failure is returned so the caller can
+/// defer its durable mutation; the observation itself is idempotent.
+pub async fn observe_volume_allocation(
+    metering: Option<&Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
+    scope: &str,
+    resource_id: &str,
+    size_bytes: u64,
+    consuming: bool,
+) -> Result<(), String> {
+    let Some(observer) = metering else {
+        return Ok(());
+    };
+    observer
+        .observe_allocation(
+            VOLUME_ALLOCATION_METER,
+            scope,
+            resource_id,
+            size_bytes,
+            consuming,
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Whether a durable volume state means the volume is consuming allocated
+/// byte-seconds.
+///
+/// This is the single canonical mapping. A volume consumes while its
+/// allocation exists at the provider: `Creating`, `Available`, `Attaching`,
+/// `InUse`, `Detaching` and `Unknown` all represent a durable allocation that
+/// exists or is being reconciled. `Requested` has not been dispatched, `Error`
+/// failed before an allocation was observed, and `Deleting`/`Deleted` are
+/// terminal closes.
+#[must_use]
+pub fn volume_state_consumes(state: VolumeState) -> bool {
+    matches!(
+        state,
+        VolumeState::Creating
+            | VolumeState::Available
+            | VolumeState::Attaching
+            | VolumeState::InUse
+            | VolumeState::Detaching
+            | VolumeState::Unknown
+    )
+}
+
+/// Best-effort repair of the canonical volume allocation observation from the
+/// durable volume state.
+///
+/// Called from volume read paths so a projection lost after the durable
+/// create/delete committed is repaired by the next read of that volume. The
+/// observation is idempotent by state, so re-projecting durable truth is not a
+/// fabrication; a failure is logged and never fails the read.
+///
+/// A repair only ever OPENS or REFRESHES a consuming interval. When the durable
+/// state is not consuming it skips entirely and never emits a close: closing is
+/// owned by the authoritative transition paths (`remove_native_volume`,
+/// recovery on provider absence), and a read that closed at the read instant
+/// would under-count a teardown tail and could permanently close an interval
+/// for a volume later re-tried out of `Deleting`.
+pub async fn repair_volume_metering(
+    metering: Option<&Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
+    record: &VolumeRecord,
+) {
+    if !volume_state_consumes(record.volume.state) {
+        return;
+    }
+    if let Err(error) = observe_volume_allocation(
+        metering,
+        &record.volume.project_id,
+        &record.volume.id.as_uuid().to_string(),
+        record.volume.size_bytes,
+        true,
+    )
+    .await
+    {
+        tracing::warn!(
+            %error,
+            volume_id = %record.volume.id,
+            "native volume read-path metering repair failed; the next read repairs it"
+        );
+    }
+}
+
+/// Opens the volume allocation meter from a durable row, only while the row is
+/// durably consuming.
+///
+/// Caller-side replays (an idempotent native create against an existing row)
+/// must never reopen a non-consuming row: closing belongs to the authoritative
+/// delete/provider-absence path. This keeps caller-side replay and the canonical
+/// transition using the same [`volume_state_consumes`] mapping.
+pub async fn observe_volume_open_if_consuming(
+    metering: Option<&Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
+    record: &VolumeRecord,
+) -> Result<(), String> {
+    if !volume_state_consumes(record.volume.state) {
+        return Ok(());
+    }
+    observe_volume_allocation(
+        metering,
+        &record.volume.project_id,
+        &record.volume.id.as_uuid().to_string(),
+        record.volume.size_bytes,
+        true,
+    )
+    .await
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct VolumeRequest {
     volume: VolumeCreate,
@@ -143,12 +261,14 @@ fn volume_not_found() -> Response {
 
 /// Shared provider-backed native Volume lifecycle used by both the Cinder
 /// projection and the native `volume:volume` adapter.  Compatibility wire
-/// formats remain outside this function; canonical persistence and provider
-/// observation are deliberately single-sourced here.
+/// formats remain outside this function; canonical persistence, provider
+/// observation, and the metering projection are deliberately single-sourced
+/// here so no caller can durably create a volume without opening its meter.
 pub async fn realize_native_volume_create(
     store: Arc<dyn o3k_store::StorageRepository>,
     provider: Arc<dyn o3k_storage::StorageProvider>,
     record: VolumeRecord,
+    metering: Option<&Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
 ) -> Result<VolumeRecord, String> {
     let mut creating = record.clone();
     creating.volume.state = VolumeState::Creating;
@@ -201,10 +321,22 @@ pub async fn realize_native_volume_create(
         provider: observed.provider_reference.provider,
         resource_id: observed.provider_reference.resource_id,
     });
-    store
+    let realized = store
         .update_volume(realized.volume.generation - 1, &realized)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    // The durable transition to `Available` is the point at which the volume
+    // starts consuming allocated byte-seconds. A failed projection fails the
+    // create so a caller with a deterministic resource id can replay it.
+    observe_volume_allocation(
+        metering,
+        &realized.volume.project_id,
+        &realized.volume.id.as_uuid().to_string(),
+        realized.volume.size_bytes,
+        true,
+    )
+    .await?;
+    Ok(realized)
 }
 
 fn volume_observation_matches(
@@ -222,13 +354,16 @@ fn available_volume_observation_matches(
 }
 
 /// Shared provider-backed native Volume deletion.  Canonical state is kept in
-/// `Deleting` until an explicit provider absence observation succeeds.
+/// `Deleting` until an explicit provider absence observation succeeds. The
+/// allocation meter is closed at that same durable point so every caller
+/// (Cinder projection and native adapter) closes exactly once.
 pub async fn remove_native_volume(
     store: Arc<dyn o3k_store::StorageRepository>,
     provider: Arc<dyn o3k_storage::StorageProvider>,
     project_id: &str,
     id: Uuid,
     operation_id: Option<Uuid>,
+    metering: Option<&Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
 ) -> Result<(), String> {
     let record = store
         .get_volume(id)
@@ -280,7 +415,17 @@ pub async fn remove_native_volume(
     match provider.inspect_volume(&request).await {
         // Keep the Deleting row as recovery inventory.  The caller removes
         // it only after all durable lifecycle projections have committed.
-        Err(o3k_storage::StorageProviderError::NotFound) => Ok(()),
+        Err(o3k_storage::StorageProviderError::NotFound) => {
+            observe_volume_allocation(
+                metering,
+                &record.volume.project_id,
+                &record.volume.id.as_uuid().to_string(),
+                record.volume.size_bytes,
+                false,
+            )
+            .await?;
+            Ok(())
+        }
         Ok(_) => Err("provider volume is still present".to_owned()),
         Err(error) => Err(error.to_string()),
     }
@@ -314,10 +459,17 @@ pub(crate) async fn list(
         return unavailable();
     };
     match store.list_volumes(&project_id).await {
-        Ok(records) => Json(VolumeListResponse {
-            volumes: records.iter().map(view).collect(),
-        })
-        .into_response(),
+        Ok(records) => {
+            // Repair any projection lost after a volume's durable transition;
+            // idempotent and best-effort per record.
+            for record in &records {
+                repair_volume_metering(state.metering_observer.as_ref(), record).await;
+            }
+            Json(VolumeListResponse {
+                volumes: records.iter().map(view).collect(),
+            })
+            .into_response()
+        }
         Err(_) => unavailable(),
     }
 }
@@ -334,13 +486,18 @@ pub(crate) async fn show(
         return volume_not_found();
     };
     match store.get_volume(id).await {
-        Ok(Some(record)) if record.volume.project_id == project_id => (
-            StatusCode::OK,
-            Json(VolumeResponse {
-                volume: view(&record),
-            }),
-        )
-            .into_response(),
+        Ok(Some(record)) if record.volume.project_id == project_id => {
+            // Repair any projection lost after this volume's durable transition;
+            // idempotent and best-effort so the read never fails on metering.
+            repair_volume_metering(state.metering_observer.as_ref(), &record).await;
+            (
+                StatusCode::OK,
+                Json(VolumeResponse {
+                    volume: view(&record),
+                }),
+            )
+                .into_response()
+        }
         Ok(_) => {
             keystone_error(StatusCode::NOT_FOUND, "Not Found", "volume not found").into_response()
         }
@@ -414,7 +571,14 @@ pub(crate) async fn create(
     };
     match store.insert_volume(&record).await {
         Ok(()) => {
-            let record = match realize_native_volume_create(store.clone(), provider, record).await {
+            let record = match realize_native_volume_create(
+                store.clone(),
+                provider,
+                record,
+                state.metering_observer.as_ref(),
+            )
+            .await
+            {
                 Ok(record) => record,
                 Err(_) => return unavailable(),
             };
@@ -549,7 +713,16 @@ pub(crate) async fn delete(
         // durable row is the recovery inventory for an owned provider volume.
         return unavailable();
     };
-    match remove_native_volume(store.clone(), provider, &project_id, id, None).await {
+    match remove_native_volume(
+        store.clone(),
+        provider,
+        &project_id,
+        id,
+        None,
+        state.metering_observer.as_ref(),
+    )
+    .await
+    {
         Ok(()) => match store.delete_volume(&project_id, id).await {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),
             Err(_) => unavailable(),
@@ -564,6 +737,34 @@ pub(crate) async fn delete(
                 .into_response(),
             _ => unavailable(),
         },
+    }
+}
+
+/// Projects a recovered native volume transition into metering authority.
+///
+/// Returns `false` when a configured observer rejected the projection. The
+/// caller must then skip the recovery mutation: the row stays in its
+/// pre-recovery state and the next startup re-runs the same idempotent
+/// transition. Without a configured observer recovery proceeds unchanged.
+async fn observe_recovered_volume(
+    state: &AppState,
+    record: &VolumeRecord,
+    consuming: bool,
+) -> bool {
+    match observe_volume_allocation(
+        state.metering_observer.as_ref(),
+        &record.volume.project_id,
+        &record.volume.id.as_uuid().to_string(),
+        record.volume.size_bytes,
+        consuming,
+    )
+    .await
+    {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, volume_id = %record.volume.id, "native volume recovery metering projection failed; recovery deferred to the next startup");
+            false
+        }
     }
 }
 
@@ -642,6 +843,9 @@ pub async fn recover_native_volumes(state: &AppState) {
                 .await
             {
                 Ok(observation) if available_volume_observation_matches(&record, &observation) => {
+                    if !observe_recovered_volume(state, &record, true).await {
+                        continue;
+                    }
                     let mut available = record.clone();
                     available.volume.state = VolumeState::Available;
                     available.volume.generation = match record.volume.generation.checked_add(1) {
@@ -676,6 +880,9 @@ pub async fn recover_native_volumes(state: &AppState) {
                         Ok(observation)
                             if available_volume_observation_matches(&record, &observation) =>
                         {
+                            if !observe_recovered_volume(state, &record, true).await {
+                                continue;
+                            }
                             let mut available = record.clone();
                             available.volume.state = VolumeState::Available;
                             available.volume.generation =
@@ -732,6 +939,9 @@ pub async fn recover_native_volumes(state: &AppState) {
             },
             VolumeState::Deleting => match provider.inspect_volume(&request).await {
                 Err(o3k_storage::StorageProviderError::NotFound) => {
+                    if !observe_recovered_volume(state, &record, false).await {
+                        continue;
+                    }
                     if finalize_recovered_native_delete(store, &record).await {
                         let _ = store
                             .delete_volume(&record.volume.project_id, record.volume.id.as_uuid())
@@ -744,14 +954,18 @@ pub async fn recover_native_volumes(state: &AppState) {
                             if matches!(
                                 provider.inspect_volume(&request).await,
                                 Err(o3k_storage::StorageProviderError::NotFound)
-                            ) && finalize_recovered_native_delete(store, &record).await
-                            {
-                                let _ = store
-                                    .delete_volume(
-                                        &record.volume.project_id,
-                                        record.volume.id.as_uuid(),
-                                    )
-                                    .await;
+                            ) {
+                                if !observe_recovered_volume(state, &record, false).await {
+                                    continue;
+                                }
+                                if finalize_recovered_native_delete(store, &record).await {
+                                    let _ = store
+                                        .delete_volume(
+                                            &record.volume.project_id,
+                                            record.volume.id.as_uuid(),
+                                        )
+                                        .await;
+                                }
                             }
                         }
                         Err(_) => {}
@@ -762,6 +976,14 @@ pub async fn recover_native_volumes(state: &AppState) {
                 }
                 Err(_) => {}
             },
+            // An `Available` volume should be consuming. Re-observing its open
+            // interval is idempotent and repairs a volume whose create
+            // observation was interrupted before it was recorded. There is no
+            // state mutation to gate, so a failed projection is simply retried
+            // on the next startup.
+            VolumeState::Available => {
+                let _ = observe_recovered_volume(state, &record, true).await;
+            }
             _ => {}
         }
     }

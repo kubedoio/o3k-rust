@@ -4,7 +4,7 @@ use o3k_domain::{
     AttachmentAccessMode, StorageExecutionScope, Volume, VolumeAttachment, VolumeAttachmentId,
     VolumeAttachmentState, VolumeId, VolumeState,
 };
-use o3k_kernel::Controller;
+use o3k_kernel::{Controller, LifecycleMeteringObserver};
 use o3k_native_api::{
     compute::ServerItem,
     network::AddressRealmItem,
@@ -35,9 +35,64 @@ pub struct GenericResourceApplication {
     pub public_address_workflow: Option<Arc<dyn PublicAddressWorkflow>>,
     pub network_external_realm_id: Option<Uuid>,
     pub attachment_workflow: Option<Arc<dyn VolumeAttachmentWorkflow>>,
+    /// Optional projection of canonical volume allocation into metering
+    /// authority. `None` disables metering (tests and profiles without a
+    /// metering authority); the composition root attaches the production
+    /// adapter so a durably created or deleted volume opens/closes its meter.
+    pub metering: Option<Arc<dyn LifecycleMeteringObserver>>,
 }
 
 impl GenericResourceApplication {
+    /// Attaches the lifecycle metering observer used to open and close the
+    /// volume allocation meter from canonical volume authority.
+    #[must_use]
+    pub fn with_metering_observer(mut self, observer: Arc<dyn LifecycleMeteringObserver>) -> Self {
+        self.metering = Some(observer);
+        self
+    }
+
+    /// Projects one volume allocation transition through the optional metering
+    /// authority.
+    ///
+    /// A failure is surfaced as [`ResourceApplicationError::Retryable`]: the
+    /// observation is idempotent, so a replay re-observes the same transition
+    /// instead of double counting, and silently dropping it would under-report
+    /// durable usage.
+    ///
+    /// The canonical open/close projection lives in
+    /// [`o3k_api::realize_native_volume_create`]/[`o3k_api::remove_native_volume`];
+    /// this helper covers only the two replay paths that do not call them (an
+    /// existing row on create, and an already-removed row on delete).
+    async fn observe_volume_allocation(
+        &self,
+        scope_id: &str,
+        resource_id: Uuid,
+        size_bytes: u64,
+        consuming: bool,
+    ) -> Result<(), ResourceApplicationError> {
+        o3k_api::observe_volume_allocation(
+            self.metering.as_ref(),
+            scope_id,
+            &resource_id.to_string(),
+            size_bytes,
+            consuming,
+        )
+        .await
+        .map_err(|_| ResourceApplicationError::Retryable)
+    }
+
+    /// Replays the volume open only while the durable row is consuming, so a
+    /// caller-side idempotent create cannot reopen a `Deleting`/`Deleted`/
+    /// `Error` row (closing belongs to the authoritative delete path).
+    async fn open_volume_metering_if_consuming(
+        &self,
+        record: &o3k_store::VolumeRecord,
+    ) -> Result<(), ResourceApplicationError> {
+        o3k_api::observe_volume_open_if_consuming(self.metering.as_ref(), record)
+            .await
+            .map_err(|_| ResourceApplicationError::Retryable)
+    }
+
     /// The process configuration historically names the external network
     /// selector `...REALM_ID`, while compute/network composition consumes it
     /// as a canonical external-network ID. Resolve the active realm at the
@@ -729,19 +784,25 @@ impl ResourceApplication for GenericResourceApplication {
                         .and_then(serde_json::Value::as_str),
                 ))
             }
-            "volume:volume" => self
-                .store
-                .get_volume(id)
-                .await
-                .map_err(|_| ResourceApplicationError::NotFound)
-                .and_then(|record| match record {
+            "volume:volume" => {
+                let record = self
+                    .store
+                    .get_volume(id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::NotFound)?;
+                match record {
                     Some(record)
                         if record.volume.project_id == auth.effective_scope().id().as_str() =>
                     {
+                        // Repair a projection lost after this volume's durable
+                        // transition; idempotent and best-effort so a metering
+                        // hiccup never fails the read.
+                        o3k_api::repair_volume_metering(self.metering.as_ref(), &record).await;
                         Ok(native_volume_json(&record))
                     }
                     _ => Err(ResourceApplicationError::NotFound),
-                }),
+                }
+            }
             "volume:volume_attachment" => {
                 let record = self
                     .store
@@ -1335,6 +1396,13 @@ impl ResourceApplication for GenericResourceApplication {
                         .await
                         .map_err(|_| ResourceApplicationError::Internal)?
                         .ok_or(ResourceApplicationError::Internal)?;
+                    // The row already exists from a prior attempt (the create
+                    // is idempotent by deterministic resource id), so the open
+                    // observation is replayed here rather than only in the
+                    // fresh-insert path. Without this, a retry after a failed
+                    // first observation would silently drop the allocation.
+                    // The replay only opens while the row is durably consuming.
+                    self.open_volume_metering_if_consuming(&existing).await?;
                     return Ok(MutationResult {
                         operation_id: operation_id.to_string(),
                         resource_id: Some(resource_id.to_string()),
@@ -1344,9 +1412,14 @@ impl ResourceApplication for GenericResourceApplication {
                 }
                 Err(_) => return Err(ResourceApplicationError::Internal),
             }
-            o3k_api::realize_native_volume_create(self.store.clone(), provider, record)
-                .await
-                .map_err(|_| ResourceApplicationError::Retryable)?;
+            o3k_api::realize_native_volume_create(
+                self.store.clone(),
+                provider,
+                record,
+                self.metering.as_ref(),
+            )
+            .await
+            .map_err(|_| ResourceApplicationError::Retryable)?;
             // The legacy generic-resource index is a compatibility projection
             // used by relationship tests and older native callers.  The
             // canonical volume above remains the sole authority.
@@ -2661,6 +2734,7 @@ impl ResourceApplication for GenericResourceApplication {
                     auth.effective_scope().id().as_str(),
                     resource_id,
                     Some(operation_id),
+                    self.metering.as_ref(),
                 )
                 .await
                 .map_err(|error| {
@@ -2838,6 +2912,7 @@ impl ResourceApplication for GenericResourceApplication {
                     auth.effective_scope().id().as_str(),
                     resource_id,
                     Some(operation_id),
+                    self.metering.as_ref(),
                 )
                 .await
                 .map_err(|error| {
@@ -2973,6 +3048,18 @@ impl ResourceApplication for GenericResourceApplication {
                 )
                 .await
                 .map_err(|_| ResourceApplicationError::Internal)?;
+            // The native volume row is already gone (a prior attempt completed
+            // the durable delete), so there is no size to close with. This is
+            // an idempotent close with quantity zero: the store records nothing
+            // when no interval is open, and it never fabricates a close for an
+            // allocation that was never observed opening.
+            self.observe_volume_allocation(
+                auth.effective_scope().id().as_str(),
+                resource_id,
+                0,
+                false,
+            )
+            .await?;
             return Ok(MutationResult {
                 operation_id: operation_id.to_string(),
                 resource_id: Some(id.to_owned()),

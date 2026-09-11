@@ -99,6 +99,11 @@ pub struct ComputeService {
     config_drive_cleaner: Option<o3k_config_drive::ConfigDriveStore>,
     authorizer: Arc<dyn Authorizer>,
     audit_sink: Arc<dyn o3k_kernel::RequiredAuditPublisher>,
+    /// Optional metering observer that projects each durably applied compute
+    /// lifecycle state into O3K metering authority. Wired by the composition
+    /// root; without it the projection is a no-op so existing tests and hosts
+    /// are unchanged.
+    metering: Option<Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
     coordination: Option<(
         Arc<dyn o3k_store::CoordinationRepository>,
         o3k_store::ControllerId,
@@ -6369,5 +6374,243 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    type MeteringObservations = Vec<(String, String, String, String)>;
+
+    /// Recording observer that captures every projected lifecycle state in
+    /// order so tests can assert what metering authority actually saw.
+    #[derive(Clone, Default)]
+    struct RecordingMeteringObserver {
+        observed: Arc<std::sync::Mutex<MeteringObservations>>,
+    }
+
+    impl RecordingMeteringObserver {
+        fn states_for(&self, resource_id: &Uuid) -> Vec<String> {
+            let Ok(observed) = self.observed.lock() else {
+                return Vec::new();
+            };
+            observed
+                .iter()
+                .filter(|(_, _, id, _)| id == &resource_id.to_string())
+                .map(|(_, _, _, state)| state.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl o3k_kernel::LifecycleMeteringObserver for RecordingMeteringObserver {
+        async fn observe_resource_state(
+            &self,
+            kind: &str,
+            project_id: &str,
+            resource_id: &str,
+            observed_state: &str,
+        ) -> Result<(), o3k_kernel::KernelError> {
+            if let Ok(mut observed) = self.observed.lock() {
+                observed.push((
+                    kind.to_owned(),
+                    project_id.to_owned(),
+                    resource_id.to_owned(),
+                    observed_state.to_owned(),
+                ));
+            }
+            Ok(())
+        }
+
+        async fn observe_allocation(
+            &self,
+            _meter_key: &str,
+            _project_id: &str,
+            _resource_id: &str,
+            _quantity: u64,
+            _consuming: bool,
+        ) -> Result<(), o3k_kernel::KernelError> {
+            Ok(())
+        }
+    }
+
+    struct FailingMeteringObserver;
+
+    #[async_trait::async_trait]
+    impl o3k_kernel::LifecycleMeteringObserver for FailingMeteringObserver {
+        async fn observe_resource_state(
+            &self,
+            _kind: &str,
+            _project_id: &str,
+            _resource_id: &str,
+            _observed_state: &str,
+        ) -> Result<(), o3k_kernel::KernelError> {
+            Err(o3k_kernel::KernelError::MeteringUnavailable(
+                "observer down".to_owned(),
+            ))
+        }
+
+        async fn observe_allocation(
+            &self,
+            _meter_key: &str,
+            _project_id: &str,
+            _resource_id: &str,
+            _quantity: u64,
+            _consuming: bool,
+        ) -> Result<(), o3k_kernel::KernelError> {
+            Ok(())
+        }
+    }
+
+    /// The compute-owned stranded-delete path durably projects DELETED; the
+    /// observer must see that exact state for the canonical resource identity.
+    #[tokio::test]
+    async fn delete_projects_deleted_state_to_metering_observer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, store, _placement, request) =
+            stranded_failed_create_fixture("delete-metering", provider.clone()).await?;
+        let observer = RecordingMeteringObserver::default();
+        let service = service.with_metering_observer(Arc::new(observer.clone()));
+
+        service
+            .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "DELETED"
+        );
+        let observed = match observer.observed.lock() {
+            Ok(entries) => entries.clone(),
+            Err(_) => Vec::new(),
+        };
+        assert!(
+            observed
+                .iter()
+                .any(|(kind, project_id, resource_id, state)| {
+                    kind == "compute_instance"
+                        && project_id == "project-a"
+                        && resource_id == &request.o3k_server_id.to_string()
+                        && state == "DELETED"
+                }),
+            "expected a DELETED compute_instance projection, saw {observed:?}"
+        );
+        Ok(())
+    }
+
+    /// A metering authority failure during a compute-owned projection must
+    /// surface, never be silently dropped.
+    #[tokio::test]
+    async fn failing_metering_observer_surfaces_compute_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, _store, _placement, request) =
+            stranded_failed_create_fixture("delete-metering-failure", provider.clone()).await?;
+        let service = service.with_metering_observer(Arc::new(FailingMeteringObserver));
+
+        let result = service
+            .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await;
+        assert!(
+            matches!(result, Err(ComputeError::Metering(_))),
+            "expected ComputeError::Metering, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// A metering failure on the read-path convergence drive must be
+    /// best-effort: the GET still succeeds and the durable projection is still
+    /// written (metering is never allowed to fail the request).
+    #[tokio::test]
+    async fn failing_metering_observer_does_not_fail_convergence_read_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        fake.set_failure(FailureInjection::Timeout)?;
+        let (service, store, _placement, request, provider_operation_id, _instance_id) =
+            unknown_outcome_create_fixture("metering-read-path", fake.clone()).await?;
+        fake.set_operation_provider_resource_id(provider_operation_id, None)?;
+        // Every re-drive after the accepted create fails terminally, so the
+        // drive is the one that durably projects ERROR.
+        fake.set_failure(FailureInjection::TerminalOnRedrive)?;
+        store
+            .update_operation(
+                request.operation_id,
+                o3k_store::OperationState::Pending,
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let service = service.with_metering_observer(Arc::new(FailingMeteringObserver));
+
+        let server = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(server.state, ServerState::Error);
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ERROR",
+            "the durable write must happen even when metering fails"
+        );
+        Ok(())
+    }
+
+    /// R1: the read-path repair only ever opens/refreshes a consuming interval.
+    /// An idle durable state (`ERROR`) is skipped entirely, so a read can never
+    /// close an interval at the read instant; a consuming durable state
+    /// (`ACTIVE`) is repaired. A previous version of this test asserted the
+    /// opposite (repairing `ERROR`), which is the defect R1 fixes.
+    #[tokio::test]
+    async fn read_path_repair_skips_idle_and_projects_consuming()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_store::DurableStore as _;
+
+        let raw = Arc::new(o3k_store::testkit::open_memory().await?);
+        let idle_id = Uuid::now_v7();
+        let active_id = Uuid::now_v7();
+        raw.insert_resource(&metered_resource(idle_id, "ERROR"))
+            .await?;
+        raw.insert_resource(&metered_resource(active_id, "ACTIVE"))
+            .await?;
+        let repo: Arc<dyn o3k_store::ComputeRepository> = raw.clone();
+        let observer = RecordingMeteringObserver::default();
+        let service = ComputeService::new_for_test(repo, Arc::new(FakeComputeProvider::new()))
+            .with_metering_observer(Arc::new(observer.clone()));
+
+        let idle = raw.get_resource(idle_id).await?;
+        service.drive_create_convergence(&idle).await;
+        assert!(
+            observer.states_for(&idle_id).is_empty(),
+            "an idle durable state must never be projected by a read repair"
+        );
+
+        let active = raw.get_resource(active_id).await?;
+        service.drive_create_convergence(&active).await;
+        assert_eq!(
+            observer.states_for(&active_id),
+            vec!["ACTIVE".to_owned()],
+            "a consuming durable state must be repaired by a read"
+        );
+        Ok(())
+    }
+
+    /// A minimal durable compute-instance row used by read-path repair tests.
+    /// The `desired_state` is deliberately not a valid create intent: the
+    /// repair runs before the drive parses it, which is exactly the read-path
+    /// behavior under test.
+    fn metered_resource(id: Uuid, observed_state: &str) -> o3k_store::ResourceRecord {
+        o3k_store::ResourceRecord {
+            id,
+            kind: "compute_instance".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: "{}".to_owned(),
+            observed_state: observed_state.to_owned(),
+            provider_id: None,
+        }
     }
 }
