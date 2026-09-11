@@ -13,8 +13,8 @@ implementation at the current working branch.
 
 - **Base SHA (authoritative `main`):** `1bdecfcb8517133383902b5bb9062019ed945567`
 - **Working branch:** `planning/operator-diagnostics-capacity`
-- **Candidate head SHA:** `[fill: git rev-parse HEAD after CI]`
-- **Status:** draft; CI not yet run to completion on this branch (`[pending]`). An adversarial review converged on the corrected SPEC-0045 wording (fail-closed bounds, service staleness gate, saturating capacity) and added the contract/store tests below; review convergence is still in progress (`[pending]`).
+- **Candidate head SHA:** `[fill: git rev-parse HEAD after final CI]`
+- **Status:** draft; local `cargo fmt --all -- --check`, workspace `cargo clippy -D warnings`, and `cargo test --workspace --all-features` pass on the candidate head; adversarial review convergence (passes C/D) reached zero code findings; final two clean passes and exact-head GitHub CI are still to be recorded (`[pending]`).
 
 ## Authority map
 
@@ -32,7 +32,7 @@ Each projection source class and its canonical authority:
 ## Status semantics
 
 - Vocabulary: `healthy`, `degraded`, `unavailable`, `stale`, `unknown` — distinct by design; `unknown` (never observed) and `stale` (observation older than freshness) never collapse into `healthy`.
-- Provider precedence: never-observed → `unknown` even if durable `Enabled` (restart safety); `Disabled`/`Deleted` → `unavailable`; `Draining` → `degraded`; agent `Unavailable` → `stale`/`unavailable` (`heartbeat_lost`); heartbeat older than lease → `stale`; else `healthy`.
+- Provider precedence: never-observed → `unknown` even if durable `Enabled` (restart safety); `Disabled`/`Deleted` → `unavailable`; `Draining` → `degraded`; agent `Unavailable` → `stale`/`unavailable` (`heartbeat_lost`); heartbeat older than lease → `stale`; durable `Unavailable` while the agent reports healthy → `unavailable`; an unrecognized durable state (corrupt authority) → `unknown`, never `healthy`; else `healthy`.
 - Service mapping: `Ready`→healthy, `NotReady`→unavailable/`readiness_failed`, `Incompatible`→degraded/`protocol_incompatible`, `Disabled`→unavailable/`administratively_disabled`, `Declared`→unknown/`never_observed`.
 - Aggregate summary: worst of services and providers aggregates; any unavailable/stale/degraded degrades the platform.
 
@@ -123,10 +123,13 @@ The following tests were added by the implementation and must pass:
 - `crates/o3k-store` (bounded placement reads exercised by the adapter tests against the real SQLite adapter): `list_providers_bounded`, `capacity_summary` fail-closed at 64 classes, and the direct store tests `sqlite_list_provider_states_pagination_and_narrow_read` and `sqlite_placement_diagnostics_capacity_and_bounded_providers` for `list_provider_states`/`capacity_summary` (including `providers_over_allocated`).
 - `bins/o3kd/tests/native_diagnostics_process.rs` (real-adapter process tests): cover the adapter leak boundary that the DTO structural check cannot.
 
-## CI / evidence not yet run
+## CI / evidence status
 
-- `[pending]` `cargo fmt --all -- --check`
-- `[pending]` `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `[pending]` `cargo test --workspace --all-features`
-- `[pending]` confirm head SHA and record per-file coverage
-- `[pending]` full-profile/process-level verification (protected workflow) — not part of the portable gate
+- `cargo fmt --all -- --check` — pass (verified locally on the candidate head).
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — pass (verified locally).
+- `cargo test --workspace --all-features` — pass (verified locally; note: `o3k-compute::tests::create_convergence_sweep_survives_empty_registry_until_agent_registers` is a pre-existing load-timing flake unrelated to #903 — it passes standalone and on re-runs; the #903 test additions all pass).
+- `git diff --check` — pass.
+- `scripts/check-architecture-boundaries.py`, `scripts/check-maintainability-guards.py`, `tests/adr-governance.sh`, `tests/architecture-boundaries.sh` — pass.
+- `[pending]` confirm exact head SHA and record per-file coverage.
+- `[pending]` final GitHub CI on the exact head.
+- `[pending]` full-profile/process-level verification (protected workflow) — not part of the portable gate.
