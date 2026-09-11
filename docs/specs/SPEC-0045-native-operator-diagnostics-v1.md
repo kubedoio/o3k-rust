@@ -30,7 +30,7 @@ Responses are versioned `v1` and mounted under the native prefix in production `
 - `GET /o3k/v1/operator/diagnostics/providers` — bounded page of providers.
 - `GET /o3k/v1/operator/diagnostics/capacity` — the fleet capacity aggregate.
 
-Bounded pages accept `limit` (default 50, maximum 200; a request above the maximum is a `BadRequest` client error) and an opaque continuation `cursor` (base64 URL-safe no-pad encoding of the after-id key; an invalid cursor is an `InvalidCursor` client error that affects only which page the caller sees, never an escalation). Pages are ordered by stable id, and `has_more`/`next_cursor` signal continuation. The contract never materializes an unbounded collection.
+Bounded pages accept `limit` (default 50; an explicit `limit=0` is treated as the default page size 50; a request above the maximum of 200 is a `BadRequest` client error) and an opaque continuation `cursor` (base64 URL-safe no-pad encoding of the after-id key; an invalid cursor is an `InvalidCursor` client error that affects only which page the caller sees, never an escalation). Pages are ordered by stable id, and `has_more`/`next_cursor` signal continuation. The contract never materializes an unbounded collection.
 
 ## 4. Authorization
 
@@ -68,11 +68,11 @@ Component-class counts aggregate by documented rules: nothing observed → `unkn
 
 ## 6. Freshness semantics
 
-The agent lease is 15 seconds (`AGENT_LEASE_MS = 15_000` in the production adapter, mirroring the compute-agent `DEFAULT_LEASE` of 15 seconds). A service's `observed_at_unix_ms` is the probe/stored observation or the process start time; the probe re-records observations every 15 seconds. After a restart, durable placement state alone never reports a provider or capacity source healthy — a component stays `unknown`/`stale` until a fresh re-observation. Capacity status is `unknown` when no providers exist, `stale` when durable last-known values exist without any fresh agent observation (covers restart and a fleet that stopped reporting), `degraded` on partial provider failure even when one provider is fresh, and otherwise `healthy`.
+The agent lease is 15 seconds (`AGENT_LEASE_MS = 15_000` in the production adapter, mirroring the compute-agent `DEFAULT_LEASE` of 15 seconds). A service's `observed_at_unix_ms` is the probe/stored observation or the process start time; the composition probe re-records observations every 15 seconds. External controllers are subject to a service staleness gate: a controller with a transport `session` whose last confirmed observation is older than 75 seconds (`SERVICE_OBSERVATION_THRESHOLD_MS = 75_000`, five 15-second probe intervals) is projected `stale` / `observation_stale` even if its last lifecycle state was `Ready` — a dead external controller is never reported healthy indefinitely. In-process services (no `session`) are configuration-authoritative: their readiness is a fact of the running composition, not an observation, so they never go stale from age. Providers use the 15-second agent lease. After a restart, durable placement state alone never reports a provider or capacity source healthy — a component stays `unknown`/`stale` until a fresh re-observation. Capacity status always reflects durable placement state plus agent liveness, so a durably draining or deleted provider is never counted healthy here. Capacity status is `unknown` when no providers exist, `stale` when durable last-known values exist without any fresh agent observation (covers restart and a fleet that stopped reporting), `degraded` on partial provider failure even when one provider is fresh, and `degraded` when a dimension is over-allocated (a drifted/corrupt durable invariant); otherwise `healthy`.
 
 ## 7. Capacity
 
-Capacity reports only placement-authoritative dimensions: `VCPU`, `MEMORY_MB`, and `DISK_GB`. Per provider, `total`, `reserved`, `allocated`, and `available` are exposed; in the aggregate, `allocatable`, `reserved`, `allocated`, and `available`. `available = allocatable − reserved − allocated` uses saturating arithmetic so it is never negative and never wraps; a drifted or corrupt remainder surfaces as zero and is reported degraded, never as negative capacity. Unit labels are `count` (VCPU), `mib` (MEMORY_MB), and `gib` (DISK_GB). Storage, network, Ceph, and quota are deliberately not placement-authoritative and are not exposed; an unsupported dimension/class is not claimed and not present.
+Capacity reports only placement-authoritative dimensions: `VCPU`, `MEMORY_MB`, and `DISK_GB`. Per provider, `total`, `reserved`, `allocated`, and `available` are exposed; in the aggregate, `allocatable`, `reserved`, `allocated`, and `available`. `available = allocatable − reserved − allocated` uses saturating arithmetic so it is never negative and never wraps; a drifted or corrupt remainder surfaces as zero. An over-allocated dimension (`allocated > allocatable − reserved`, i.e. a drifted/corrupt durable invariant) makes the whole capacity status `degraded` rather than `healthy`, while `available` stays saturating (never negative). Unit labels are `count` (VCPU), `mib` (MEMORY_MB), and `gib` (DISK_GB). Storage, network, Ceph, and quota are deliberately not placement-authoritative and are not exposed; an unsupported dimension/class is not claimed and not present.
 
 ## 8. Location aggregation
 
@@ -92,11 +92,11 @@ Errors use ProblemDetails. An unhealthy provider or stale component is data (HTT
 
 ## 12. Secret safety
 
-The projection never exposes node id, agent epoch, session ids, manifest digests, service principal, `health.detail`, connection strings, credentials, or host paths. Only bounded canonical identity and counts cross the wire.
+The projection never exposes the agent `node_id` field, agent epoch, session ids, manifest digests, service principal, `health.detail`, connection strings, credentials, or host paths. The providers endpoint exposes only the durable placement `provider_id`, which by placement design equals the agent/node id; no additional node identity is exposed. Only bounded canonical identity and counts cross the wire.
 
 ## 13. Boundedness
 
-Service collections are registry-backed (process-internal) with an additional `MAX_SERVICES = 256` bound; provider reads use the bounded `list_providers_bounded` placement read; the capacity aggregate uses the bounded `capacity_summary`, which fails closed at 64 resource classes; the page bound is 200 and the capacity class bound is 64. There is no `all()` → `filter` → `truncate` on production collections and no per-dashboard full infrastructure scan.
+Service collections are registry-backed (process-internal) and bound fail-closed at `MAX_SERVICES = 256`: a registry exceeding the bound yields an error, never a silently truncated projection. Provider aggregates (summary and capacity) read the durable provider set through the bounded `list_provider_states` read bound fail-closed at `MAX_PROVIDERS = 65_536`; the providers page uses the bounded `list_providers_bounded` placement read. The capacity aggregate uses the bounded `capacity_summary`, which fails closed at 64 resource classes; the page bound is 200 and the capacity class bound is 64. There is no `all()` → `filter` → `truncate` on production collections and no per-dashboard full infrastructure scan.
 
 ## 14. Non-goals
 

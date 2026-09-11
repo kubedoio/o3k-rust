@@ -1667,6 +1667,60 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn sqlite_list_provider_states_pagination_and_narrow_read() -> Result<(), StoreError> {
+        let store = O3kStore::connect_sqlite_memory().await?;
+        let inventory = PlacementInventoryRecord {
+            resource_class: "VCPU".to_owned(),
+            total: 8,
+            reserved: 1,
+            allocation_ratio: 1.0,
+            used: 0,
+        };
+        store
+            .register_provider("compute-1", std::slice::from_ref(&inventory))
+            .await?;
+        store.register_provider("compute-2", &[inventory]).await?;
+
+        // Returns id+state rows ordered by id; both default to `Enabled`.
+        let all = store.list_provider_states(None, 10).await?;
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all.iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["compute-1", "compute-2"]
+        );
+        assert!(all.iter().all(|record| record.state == "Enabled"));
+
+        // Honors `after_id` pagination and `limit`.
+        let page1 = store.list_provider_states(None, 1).await?;
+        assert_eq!(page1.len(), 1);
+        assert_eq!(page1[0].id, "compute-1");
+
+        let page2 = store.list_provider_states(Some("compute-1"), 1).await?;
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2[0].id, "compute-2");
+
+        assert!(
+            store
+                .list_provider_states(Some("compute-2"), 10)
+                .await?
+                .is_empty()
+        );
+
+        // The aggregate read is deliberately narrow: it carries only the
+        // provider id + durable state, never inventories or allocations.
+        // The record type structurally prevents those fields from appearing.
+        for record in store.list_provider_states(None, 10).await? {
+            assert!(matches!(
+                record,
+                PlacementProviderStateRecord { id: _, state: _ }
+            ));
+        }
+        Ok(())
+    }
+
     /// Returns a single capacity aggregate class by name, or a corrupt-state
     /// error if it is absent (a test invariant failure).
     fn class<'a>(

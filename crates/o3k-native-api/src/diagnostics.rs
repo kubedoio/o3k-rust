@@ -683,15 +683,121 @@ mod tests {
         validator.validate(&value).unwrap();
     }
 
+    /// Validates a single serialized DTO against one `definitions` entry of
+    /// the native diagnostics contract schema by building a wrapper schema that
+    /// references that definition while carrying the full `definitions` table.
+    fn validate_against_definition(payload: &serde_json::Value, definition: &str) {
+        let full: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../contracts/native-diagnostics-v1.schema.json"
+        )))
+        .unwrap();
+        let mut wrapper = serde_json::json!({ "$ref": format!("#/definitions/{definition}") });
+        wrapper["definitions"] = full["definitions"].clone();
+        let validator = jsonschema::validator_for(&wrapper).unwrap();
+        assert!(
+            validator.validate(payload).is_ok(),
+            "payload does not match definition {definition:?}"
+        );
+    }
+
+    #[test]
+    fn service_validates_against_diagnostics_contract_schema() {
+        let service = ServiceDiagnostics {
+            service_id: "compute".to_owned(),
+            namespace: "compute".to_owned(),
+            service_version: "0.4.0".to_owned(),
+            ownership: "o3k-implemented".to_owned(),
+            lifecycle_state: "ready".to_owned(),
+            status: DiagnosticStatus::Healthy,
+            observed_at_unix_ms: Some(1_700_000_000_000),
+            reason: None,
+            controller: Some(ControllerDiagnostics {
+                mode: "external".to_owned(),
+                protocol: "o3k-v1".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                healthy: true,
+                session_generation: Some(3),
+            }),
+        };
+        validate_against_definition(&serde_json::to_value(service).unwrap(), "service");
+    }
+
+    #[test]
+    fn provider_validates_against_diagnostics_contract_schema() {
+        let provider = ProviderDiagnostics {
+            provider_id: "compute-1".to_owned(),
+            state: "Enabled".to_owned(),
+            availability: "available".to_owned(),
+            status: DiagnosticStatus::Healthy,
+            observed_at_unix_ms: Some(1_700_000_000_000),
+            reason: None,
+            capacity: vec![ProviderCapacityDimension {
+                resource_class: "VCPU".to_owned(),
+                total: 8,
+                reserved: 1,
+                allocated: 2,
+                available: 5,
+            }],
+        };
+        validate_against_definition(&serde_json::to_value(provider).unwrap(), "provider");
+    }
+
+    #[test]
+    fn capacity_validates_against_diagnostics_contract_schema() {
+        let capacity = CapacityDiagnostics {
+            version: DIAGNOSTICS_VERSION.to_owned(),
+            status: DiagnosticStatus::Degraded,
+            observed_at_unix_ms: Some(1_700_000_000_000),
+            reason: Some(DiagnosticReason::ObservationStale),
+            providers_enabled: 1,
+            providers_draining: 0,
+            providers_unavailable: 0,
+            providers_deleted: 0,
+            dimensions: vec![CapacityDimension {
+                resource_class: "VCPU".to_owned(),
+                unit: "count".to_owned(),
+                allocatable: 160,
+                reserved: 1,
+                allocated: 2,
+                available: 157,
+            }],
+        };
+        validate_against_definition(&serde_json::to_value(capacity).unwrap(), "capacity");
+    }
+
+    #[test]
+    fn page_validates_against_diagnostics_contract_schema() {
+        // The schema's `page.items` is untyped, so a page of services validates
+        // against `#/definitions/page` without any item-level constraints.
+        let page = DiagnosticsPage {
+            items: vec![ServiceDiagnostics {
+                service_id: "compute".to_owned(),
+                namespace: "compute".to_owned(),
+                service_version: "0.4.0".to_owned(),
+                ownership: "o3k-implemented".to_owned(),
+                lifecycle_state: "ready".to_owned(),
+                status: DiagnosticStatus::Healthy,
+                observed_at_unix_ms: Some(1_700_000_000_000),
+                reason: None,
+                controller: None,
+            }],
+            has_more: true,
+            next_cursor: Some("bmV4dA".to_owned()),
+        };
+        validate_against_definition(&serde_json::to_value(page).unwrap(), "page");
+    }
+
     #[test]
     fn public_dtos_never_carry_credentials_or_node_identity() {
         // The diagnostics projection is a bounded, system/operator-authorized
         // view of canonical authority. Its public wire shape must have no field
         // that can carry provider credentials, connection strings, node
-        // identity, or agent epoch. This is a structural guarantee: serialize
-        // every representative DTO and assert none of the secret/identity
-        // tokens below can appear in the JSON. An adapter that tried to leak
-        // them into a free-form String field would be caught here.
+        // identity, or agent epoch. This is a structural check on the public
+        // DTO field set only: it asserts the tokens below never appear when a
+        // representative DTO is serialized. It does not exercise the production
+        // adapter, so adapter leaks are covered separately by the real-adapter
+        // tests in `bins/o3kd/tests/native_diagnostics_process.rs`.
         let secrets = [
             "postgres://user:pass@host/db",
             "password",
