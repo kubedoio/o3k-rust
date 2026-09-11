@@ -67,7 +67,7 @@ From the canonical controller lifecycle state: `Ready` → `healthy`; `NotReady`
 
 ### Aggregate summary status
 
-Component-class counts aggregate by documented rules: nothing observed → `unknown`; all healthy → `healthy`; all unavailable → `unavailable`; any unavailable, stale, or degraded → `degraded`; otherwise `unknown`. The summary status is the worst of the services and providers aggregates, so one unavailable or stale source degrades the platform without masking the others.
+Component-class counts aggregate by documented rules: nothing observed → `unknown`; all healthy → `healthy`; all unavailable → `unavailable`; any unavailable, stale, or degraded → `degraded`; partially observed (some confirmed healthy alongside never-observed) → `degraded`; otherwise `unknown`. The summary status is the worst of the services and providers aggregates, so one unavailable or stale or never-observed source degrades the platform without masking the others.
 
 ## 6. Freshness semantics
 

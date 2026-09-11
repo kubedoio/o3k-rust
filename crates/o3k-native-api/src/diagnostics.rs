@@ -153,12 +153,12 @@ impl ComponentCounts {
     /// Computes the aggregate status of a component class from its counts.
     ///
     /// Rules (documented in SPEC-0045):
-    /// - nothing observed       -> `unknown`;
-    /// - all healthy            -> `healthy`;
-    /// - any unavailable        -> `degraded` unless *all* are unavailable/unknown;
-    /// - any stale              -> `degraded`;
-    /// - any degraded           -> `degraded`;
-    /// - otherwise              -> `unknown`.
+    /// - nothing observed        -> `unknown`;
+    /// - all healthy             -> `healthy`;
+    /// - any unavailable         -> `degraded` unless *all* are unavailable;
+    /// - any stale/degraded      -> `degraded`;
+    /// - partially observed (some healthy alongside never-observed) -> `degraded`;
+    /// - otherwise               -> `unknown`.
     #[must_use]
     pub fn aggregate(self) -> DiagnosticStatus {
         if self.total == 0 {
@@ -171,6 +171,13 @@ impl ComponentCounts {
             return DiagnosticStatus::Unavailable;
         }
         if self.unavailable > 0 || self.stale > 0 || self.degraded > 0 {
+            return DiagnosticStatus::Degraded;
+        }
+        // Partially observed: some components are confirmed healthy but others
+        // have never been observed, so the class is not fully healthy. This
+        // keeps the summary consistent with the capacity endpoint, which
+        // reports a never-observed provider as degraded.
+        if self.unknown > 0 && self.unknown < self.total {
             return DiagnosticStatus::Degraded;
         }
         DiagnosticStatus::Unknown
@@ -572,6 +579,19 @@ mod tests {
         let counts = ComponentCounts {
             total: 1,
             stale: 1,
+            ..ComponentCounts::default()
+        };
+        assert_eq!(counts.aggregate(), DiagnosticStatus::Degraded);
+    }
+
+    #[test]
+    fn aggregate_partially_observed_is_degraded_not_unknown() {
+        // Some confirmed healthy alongside never-observed is a partial state
+        // (degraded), consistent with the capacity endpoint.
+        let counts = ComponentCounts {
+            total: 2,
+            healthy: 1,
+            unknown: 1,
             ..ComponentCounts::default()
         };
         assert_eq!(counts.aggregate(), DiagnosticStatus::Degraded);

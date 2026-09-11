@@ -231,6 +231,15 @@ fn parse_timestamp(value: &str) -> Option<i64> {
     None
 }
 
+/// Canonical placement resource classes advertised by the contract. The
+/// projection only exposes these placement-authoritative dimensions; any other
+/// class stored in the durable authority is not advertised.
+const CANONICAL_CAPACITY_CLASSES: [&str; 3] = ["VCPU", "MEMORY_MB", "DISK_GB"];
+
+fn is_canonical_class(resource_class: &str) -> bool {
+    CANONICAL_CAPACITY_CLASSES.contains(&resource_class)
+}
+
 /// Capacity unit label for a resource class.
 fn unit_for(resource_class: &str) -> &'static str {
     match resource_class {
@@ -593,6 +602,7 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
             let capacity = record
                 .inventories
                 .iter()
+                .filter(|inventory| is_canonical_class(&inventory.resource_class))
                 .map(|inventory| {
                     let allocatable =
                         ((inventory.total as f64) * inventory.allocation_ratio).floor() as u64;
@@ -683,9 +693,12 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
         // Dimensions, with `available` derived through the shared saturating
         // helper. A negative remainder (drifted/corrupt durable state) is a
         // capacity invariant violation and degrades the whole capacity status.
+        // Only the canonical placement classes are advertised; any other
+        // class stored in the durable authority is not projected.
         let mut dimensions: Vec<CapacityDimension> = summary
             .classes
             .iter()
+            .filter(|class| is_canonical_class(&class.resource_class))
             .map(|class| {
                 CapacityDimension {
                     resource_class: class.resource_class.clone(),
@@ -1482,18 +1495,18 @@ mod tests {
         );
 
         // A fresh provider alongside a never-observed provider must not make
-        // the fleet (or capacity) healthy.
+        // the fleet (or capacity) healthy — it is a partial/degraded state.
         let summary = adapter.summary().await.expect("summary");
         assert_eq!(summary.counts.providers.total, 2);
         assert_eq!(summary.counts.providers.healthy, 1);
         assert_eq!(summary.counts.providers.unknown, 1);
-        assert_ne!(
+        assert_eq!(
             summary.counts.providers.aggregate(),
-            DiagnosticStatus::Healthy
+            DiagnosticStatus::Degraded
         );
 
         let capacity = adapter.capacity().await.expect("capacity");
-        assert_ne!(capacity.status, DiagnosticStatus::Healthy);
+        assert_eq!(capacity.status, DiagnosticStatus::Degraded);
     }
 
     #[tokio::test]
