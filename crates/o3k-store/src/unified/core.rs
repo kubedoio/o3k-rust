@@ -7,6 +7,7 @@ use crate::{
     IdempotencyReservation, IdempotencyReservationRequest, ImageOverlayIdentity,
     ImageOverlayOwnershipRecord, ImageOverlayUpdate, ObservationUpdate, OperationRecord,
     OperationState, ProviderReference, RepositoryPage, ResourceRecord, StoreError,
+    StoredIdempotencyReservation,
 };
 
 use super::O3kStore;
@@ -148,6 +149,24 @@ impl DurableStore for O3kStore {
         match self {
             Self::Sqlite(s) => s.insert_operation(operation).await,
             Self::Postgres(s) => s.insert_operation(operation).await,
+        }
+    }
+
+    async fn get_idempotency_reservation(
+        &self,
+        owner_scope: &str,
+        action: &str,
+        key: &str,
+    ) -> Result<Option<StoredIdempotencyReservation>, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.get_idempotency_reservation(owner_scope, action, key)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.get_idempotency_reservation(owner_scope, action, key)
+                    .await
+            }
         }
     }
 

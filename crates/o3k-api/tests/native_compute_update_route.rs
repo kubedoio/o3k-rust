@@ -216,6 +216,29 @@ async fn production_router_compute_update_reaches_generic_update_application()
 }
 
 #[tokio::test]
+async fn production_router_update_rejects_mismatched_resource_kind()
+-> Result<(), Box<dyn std::error::Error>> {
+    let router = production_native_router()?;
+    let server_id = uuid::Uuid::new_v4();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/o3k/v1/compute/servers/{server_id}"))
+                .header("authorization", "Bearer tenant-token")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "kind-mismatch")
+                .header("if-match", "generation-1")
+                .body(Body::from(
+                    json!({"kind": "volume:volume", "spec": {"name": "renamed"}}).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+#[tokio::test]
 async fn production_discovery_advertises_compute_update_lifecycle_operation()
 -> Result<(), Box<dyn std::error::Error>> {
     let router = production_native_router()?;

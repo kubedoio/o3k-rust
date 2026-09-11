@@ -157,6 +157,59 @@ outside #907's evidence-only scope.
    reachability rule). Regression:
    `discovery_advertises_only_reachable_lifecycle_operations`
    (`crates/o3k-native-api/src/lib.rs`).
+6. **A stale `If-Match` on the generic update committed a phantom durable
+   operation.** The update arm created the canonical `lifecycle:update`
+   operation and consumed the idempotency reservation BEFORE checking the
+   generation precondition, so a rejected 409 left a `Pending` operation the
+   reconciler would retry forever and made a same-key retry replay as 202 for
+   an operation that could never complete. Fixed in
+   `bins/o3kd/src/native_adapters/resource.rs` with a new non-creating store
+   lookup (`DurableStore::get_idempotency_reservation`, SQLite/PostgreSQL/
+   unified parity): reservation-first replay detection returns the durable
+   result of an already-accepted update regardless of the now-advanced
+   generation (true idempotent replay) and rejects key reuse with different
+   semantics via the stored fingerprint; only a never-accepted request
+   reaches the generation precondition, which is validated before any
+   durable write. Regressions:
+   `native_update_stale_if_match_leaves_no_pending_operation`
+   (`bins/o3kd/src/native_adapters/tests.rs`) — 409, no durable operation at
+   the deterministic operation id, replay stays 409, live generation still
+   updates and bumps the durable generation;
+   `sqlite_idempotency_reservation_is_scoped_and_atomic` extended with the
+   non-creating lookup (`crates/o3k-store/src/tests.rs`).
+7. **A network create whose ledger insert failed orphaned canonical
+   authority.** The canonical network (and its quota reservation) committed
+   before the generic-ledger row; a ledger failure left a network visible to
+   native show yet invisible to native list and undeletable through it.
+   Fixed: both ledger-failure branches (generic store failure and an
+   `AlreadyExists` row that is genuinely a different resource) compensate by
+   deleting the canonical network before the error is returned. Regression:
+   `native_network_create_compensates_canonical_on_ledger_conflict`.
+8. **Native network create/show dropped the public spec name.** Returning
+   the raw ledger projection emitted `spec: {}`; the pre-#928 shape carried
+   `spec.name`. Fixed: `network_external_json` whitelist-projects the
+   name-only public contract (raw desired_state still never crosses the
+   boundary — imported rows can carry provider references). Regression:
+   `native_network_create_replay_returns_same_resource` (create response,
+   show, and collection all carry `spec.name`).
+9. **Deleted native networks were still readable through show.** The ledger
+   tombstone made show return 200 with `status.state: DELETED` while compute
+   conceals deleted servers (404). Fixed: show is the live-resource view and
+   conceals finalized rows; the collection keeps projecting tombstones with
+   an explicit DELETED state (documented below). Regression:
+   `native_network_show_conceals_deleted_resource`.
+10. **Network create ignored `Idempotency-Key`.** The canonical id was a
+    fresh UUIDv7 per call, so a same-key retry name-conflicted (409) or
+    duplicated instead of converging, and the migration-envelope fields the
+    arm still read were unreachable through the HTTP contract
+    (`NetworkCreateSpec` is `deny_unknown_fields`). Fixed: the canonical id
+    derives deterministically from the idempotency key (volume-arm pattern),
+    a same-key retry returns the original resource (canonical and ledger
+    replay are both recognized), the dead envelope reads are removed, and
+    `update_for` now rejects a mismatched `kind` exactly like create.
+    Regressions: `native_network_create_replay_returns_same_resource`,
+    `production_router_update_rejects_mismatched_resource_kind`
+    (`crates/o3k-api/tests/native_compute_update_route.rs`).
 
 ## Validation
 
@@ -195,3 +248,8 @@ head is frozen):
 - The discovery `actions` metadata projects canonical lifecycle operations;
   domain actions (start/stop/reboot) are manifest-declared and proven
   executable by the journey rather than part of that metadata projection.
+- Cross-surface network symmetry is directional: a natively created network
+  is visible to the Neutron-compatible surface (shared canonical authority),
+  but a Neutron-created network has no generic-ledger row by design, so the
+  native generic collection and native delete route do not manage it; the
+  canonical Neutron routes remain its authority.

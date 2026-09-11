@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use sqlx::Row;
 use uuid::Uuid;
 
+use crate::StoredIdempotencyReservation;
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
     ArtifactTransferUpdate, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
@@ -279,6 +280,37 @@ impl DurableStore for PostgresStore {
         .await
         .map_err(map_pg_error)?;
         Ok(())
+    }
+
+    async fn get_idempotency_reservation(
+        &self,
+        owner_scope: &str,
+        action: &str,
+        key: &str,
+    ) -> Result<Option<StoredIdempotencyReservation>, StoreError> {
+        let row = sqlx::query(
+            "SELECT fingerprint, operation_id FROM idempotency_reservations WHERE owner_scope = $1 AND action = $2 AND idempotency_key = $3",
+        )
+        .bind(owner_scope)
+        .bind(action)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.map(|row| {
+            let fingerprint: String = row.try_get("fingerprint").map_err(StoreError::Database)?;
+            let operation_id = Uuid::parse_str(
+                row.try_get::<String, _>("operation_id")
+                    .map_err(StoreError::Database)?
+                    .as_str(),
+            )
+            .map_err(StoreError::InvalidUuid)?;
+            Ok(StoredIdempotencyReservation {
+                fingerprint,
+                operation_id,
+            })
+        })
+        .transpose()
     }
 
     async fn reserve_idempotent_operation(

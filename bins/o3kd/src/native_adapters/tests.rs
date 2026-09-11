@@ -19,6 +19,7 @@ mod native_compute_tests {
     use o3k_native_api::auth::{NativeTokenRequestV1, TokenIssuer};
     use o3k_provider::{FailureInjection, FakeComputeProvider};
     use o3k_store::DurableStore;
+    use o3k_store::NetworkRepository;
     use std::sync::Arc;
     use tower::util::ServiceExt;
     use uuid::Uuid;
@@ -615,6 +616,272 @@ mod native_compute_tests {
             .await
             .expect("delete request");
         assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn native_network_create_replay_returns_same_resource() {
+        let (router, store, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({"spec": {"name": "replay-network"}});
+        let (status, first) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-replay", body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{first}");
+        let first_id = first["resource_id"]
+            .as_str()
+            .expect("network id")
+            .to_owned();
+        // The create response projects the public spec (name-only contract).
+        assert_eq!(
+            first["resource"]["spec"]["name"], "replay-network",
+            "{first}"
+        );
+
+        let (status, replay) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-replay", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{replay}");
+        assert_eq!(replay["resource_id"], first_id, "{replay}");
+
+        // Exactly one canonical network and one ledger row exist for the
+        // replayed create.
+        let canonicals = store
+            .list_canonical_networks("project-a")
+            .await
+            .expect("canonical networks");
+        assert_eq!(
+            canonicals
+                .iter()
+                .filter(|network| network.id.to_string() == first_id)
+                .count(),
+            1,
+            "replay must not duplicate the canonical network: {canonicals:?}"
+        );
+        let (status, listed) = exec(router, authed("/network/networks", "a")).await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        let occurrences = listed["items"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| item["metadata"]["id"].as_str() == Some(first_id.as_str()))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(
+            occurrences, 1,
+            "replay must not duplicate the ledger row: {listed}"
+        );
+
+        // Show projects the public spec name for natively created networks.
+        let (status, shown) = exec(
+            router,
+            authed(&format!("/network/networks/{first_id}"), "a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{shown}");
+        assert_eq!(shown["spec"]["name"], "replay-network", "{shown}");
+    }
+
+    #[tokio::test]
+    async fn native_network_create_compensates_canonical_on_ledger_conflict() {
+        let (router, store, _, _) = setup().await;
+        let router = &router;
+        // Pre-insert a ledger row with the exact id the create will derive
+        // from its idempotency key, but under a different resource kind, so
+        // the ledger insert fails after the canonical create has committed.
+        let conflicting_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, b"project-a:net-conflict");
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: conflicting_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: "{}".to_owned(),
+                observed_state: "active".to_owned(),
+                provider_id: None,
+            })
+            .await
+            .expect("conflicting ledger row");
+        let body = serde_json::json!({"spec": {"name": "orphan-candidate"}});
+        let (status, failed) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-conflict", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{failed}");
+
+        // The canonical network created before the ledger failure must have
+        // been compensated: it is not visible through the native surface
+        // (without a ledger row it would previously have stayed visible to
+        // show via the canonical fallback while being invisible to list and
+        // undeletable — the orphan authority the fix removes).
+        let (status, shown) = exec(
+            router,
+            authed(&format!("/network/networks/{conflicting_id}"), "a"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "compensated network must not remain visible: {shown}"
+        );
+        let canonicals = store
+            .list_canonical_networks("project-a")
+            .await
+            .expect("canonical networks");
+        assert!(
+            canonicals
+                .iter()
+                .all(|network| network.id != conflicting_id),
+            "compensated network must not remain canonical authority: {canonicals:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_network_show_conceals_deleted_resource() {
+        let (router, _, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({"spec": {"name": "doomed-network"}});
+        let (status, created) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-doomed", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let network_id = created["resource_id"]
+            .as_str()
+            .expect("network id")
+            .to_owned();
+        let delete_response = router
+            .clone()
+            .oneshot(authed_delete(
+                &format!("/network/networks/{network_id}"),
+                "a",
+                "net-doomed-delete",
+            ))
+            .await
+            .expect("delete request");
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+        // Show is the live-resource view: a finalized network is concealed
+        // (404) exactly like a deleted compute server, even though the
+        // ledger keeps the tombstone for the collection projection.
+        let (status, shown) = exec(
+            router,
+            authed(&format!("/network/networks/{network_id}"), "a"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "deleted network must be concealed from show: {shown}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_update_stale_if_match_leaves_no_pending_operation() {
+        // The live generation is read from the durable ledger directly: this
+        // minimal harness declares the legacy `compute:ShowServer` action,
+        // which the standard authorizer does not register, so generic show
+        // is not the generation source here.
+        let (router, store, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+        let (status, created) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-stale-upd", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let server_id = created["resource_id"]
+            .as_str()
+            .expect("server id")
+            .to_owned();
+
+        // Stale If-Match: 409, and — the actual regression — no durable
+        // Pending operation or consumed idempotency reservation may be left
+        // behind by a rejected precondition.
+        let stale = authed_put(
+            &format!("/compute/servers/{server_id}"),
+            "a",
+            "upd-stale",
+            99_999,
+            serde_json::json!({"spec": {"name": "renamed"}}),
+        );
+        let (status, rejected) = exec(router, stale).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+        let phantom_operation = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("compute:server:{server_id}:compute:UpdateServer:upd-stale").as_bytes(),
+        );
+        let (status, missing) = exec(
+            router,
+            authed(&format!("/operations/{phantom_operation}"), "a"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a stale precondition must not leave a durable operation: {missing}"
+        );
+
+        // Replaying the same rejected request with the same key must not be
+        // accepted as a replay of a never-valid operation.
+        let replay = authed_put(
+            &format!("/compute/servers/{server_id}"),
+            "a",
+            "upd-stale",
+            99_999,
+            serde_json::json!({"spec": {"name": "renamed"}}),
+        );
+        let (status, replayed) = exec(router, replay).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a rejected update must not replay as accepted: {replayed}"
+        );
+
+        // The live generation still updates successfully afterwards.
+        let server_uuid = Uuid::parse_str(&server_id).expect("server uuid");
+        let ledger = store
+            .get_resource(server_uuid)
+            .await
+            .expect("server ledger row");
+        let live_generation = ledger.generation;
+        let live = authed_put(
+            &format!("/compute/servers/{server_id}"),
+            "a",
+            "upd-live",
+            live_generation,
+            serde_json::json!({"spec": {"name": "renamed-live"}}),
+        );
+        let (status, updated) = exec(router, live).await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        assert_eq!(updated["complete"], true, "{updated}");
+        let ledger = store
+            .get_resource(server_uuid)
+            .await
+            .expect("server ledger row");
+        assert_eq!(
+            ledger.generation,
+            live_generation + 1,
+            "update bumps the durable generation"
+        );
+        let desired: serde_json::Value =
+            serde_json::from_str(&ledger.desired_state).expect("desired state");
+        assert_eq!(desired["name"], "renamed-live", "{desired}");
     }
 
     #[tokio::test]

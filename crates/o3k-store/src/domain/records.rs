@@ -883,6 +883,16 @@ pub struct IdempotencyReservationRequest {
     pub operation_id: Uuid,
 }
 
+/// A durable idempotency reservation as stored, without the request-side
+/// resource-type material. Lets callers distinguish a true replay (identical
+/// request semantics) from a key reuse with different semantics before
+/// re-validating mutable preconditions such as resource generations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredIdempotencyReservation {
+    pub fingerprint: String,
+    pub operation_id: Uuid,
+}
+
 impl IdempotencyReservationRequest {
     pub const MAX_KEY_LENGTH: usize = 128;
 
