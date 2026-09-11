@@ -176,7 +176,7 @@ impl SqliteStore {
         // over-allocation is masked by another provider's slack.
         let over_allocated: i64 = sqlx::query_scalar(
             "SELECT COUNT(DISTINCT provider_id) FROM placement_inventories \
-             WHERE used > MAX(CAST(total * allocation_ratio AS INTEGER) - reserved, 0)",
+             WHERE used > CAST(total * allocation_ratio AS INTEGER) - reserved",
         )
         .fetch_one(&self.pool)
         .await

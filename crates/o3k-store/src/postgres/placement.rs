@@ -192,7 +192,7 @@ impl PlacementRepository for PostgresStore {
         // over-allocation is masked by another provider's slack.
         let over_allocated: i64 = sqlx::query_scalar(
             "SELECT COUNT(DISTINCT provider_id) FROM placement_inventories \
-             WHERE used > GREATEST(FLOOR(total * allocation_ratio)::BIGINT - reserved, 0)",
+             WHERE used > FLOOR(total * allocation_ratio)::BIGINT - reserved",
         )
         .fetch_one(&self.pool)
         .await

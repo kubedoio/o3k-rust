@@ -54,10 +54,12 @@ Supported (placement-authoritative, unit in parentheses):
 - `DISK_GB` (`gib`)
 
 `available = allocatable − reserved − allocated` with saturating arithmetic
-(never negative, never wraps; negative remainder clamps to zero). An
-over-allocated dimension (`allocated > allocatable − reserved`, i.e. a
-drifted/corrupt durable invariant) makes the whole capacity status `degraded`
-while `available` stays saturating.
+(never negative, never wraps; negative remainder clamps to zero). The
+over-allocation invariant uses raw signed arithmetic (`allocated > allocatable
+− reserved`), so an over-allocated dimension or an over-reservation
+(`reserved > allocatable`) — both drifted/corrupt durable invariants — makes
+the whole capacity status `degraded`, detected in the aggregate and
+per-provider (`providers_over_allocated`), while `available` stays saturating.
 
 Explicitly **unsupported** (never exposed, not claimed):
 

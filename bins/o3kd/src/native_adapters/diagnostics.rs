@@ -713,7 +713,13 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
             .collect();
         sort_dimensions(&mut dimensions);
         let over_allocated = dimensions.iter().any(|dimension| {
-            dimension.allocated > dimension.allocatable.saturating_sub(dimension.reserved)
+            // Raw invariant: `allocated > allocatable - reserved`. Evaluated
+            // in signed arithmetic so an over-reservation (`reserved >
+            // allocatable`, e.g. a corrupt durable value) also degrades rather
+            // than being masked by saturating subtraction. `available` itself
+            // still clamps to zero (never negative).
+            (i128::from(dimension.allocated))
+                > (i128::from(dimension.allocatable) - i128::from(dimension.reserved))
         });
 
         let (status, reason) = if states.is_empty() {
@@ -1114,7 +1120,10 @@ mod tests {
 
         let page = adapter.providers(10, None).await.expect("providers");
         let capacity = adapter.capacity().await.expect("capacity");
-        assert_eq!(capacity.status, DiagnosticStatus::Healthy);
+        // The MEMORY_MB class is over-reserved (reserved 5 > allocatable 2), a
+        // corrupt durable invariant: the raw over-allocation rule degrades the
+        // whole capacity status while `available` still clamps to zero.
+        assert_eq!(capacity.status, DiagnosticStatus::Degraded);
 
         let vcpu = capacity
             .dimensions
