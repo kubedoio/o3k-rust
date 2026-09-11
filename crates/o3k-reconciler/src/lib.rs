@@ -73,6 +73,25 @@ fn test_fault_pause_ms_value(raw: Option<String>) -> Option<u64> {
 pub mod types;
 pub use crate::types::*;
 
+/// Decodes a storage-encoded compute-instance state into whether the instance
+/// consumes instance-seconds.
+///
+/// This is the single canonical state→consuming mapping shared by the
+/// reconciler's metering projections, the compute read-path repair, and the
+/// `o3kd` metering adapter (which re-exports it). `Some(true)` means the
+/// instance currently holds its runtime (`ACTIVE`/`STARTING`/`STOPPING`/
+/// `REBOOTING`); `Some(false)` means it does not (`REQUESTED`/`BUILD`/
+/// `SHUTOFF`/`DELETING`/`DELETED`/`ERROR`); `None` means the value is not a
+/// decodable canonical state and must never be treated as idle.
+#[must_use]
+pub fn compute_instance_state_consuming(observed_state: &str) -> Option<bool> {
+    match observed_state.trim().to_ascii_uppercase().as_str() {
+        "ACTIVE" | "STARTING" | "STOPPING" | "REBOOTING" => Some(true),
+        "REQUESTED" | "BUILD" | "SHUTOFF" | "DELETING" | "DELETED" | "ERROR" => Some(false),
+        _ => None,
+    }
+}
+
 // ─── OperationJournal ──────────────────────────────────────
 pub struct OperationJournal<S: ?Sized, P: ?Sized> {
     store: Arc<S>,
@@ -153,12 +172,10 @@ where
         self
     }
 
-    /// Projects the lifecycle state a step is about to durably apply into
-    /// metering authority, before that step's durable writes. Projecting first
-    /// keeps the step retriable: a crash between the two writes is repaired by
-    /// the idempotent re-drive instead of losing the observation, and the
-    /// observation itself is idempotent so re-applying it converges. No-op
-    /// without an observer; a metering failure is surfaced, never dropped.
+    /// Projects a resource lifecycle state into metering authority. No-op
+    /// without an observer; a metering failure is surfaced as
+    /// [`ReconcileError::Metering`] so the caller decides whether the step is
+    /// retriable or best-effort.
     async fn project_metering(
         &self,
         resource: &ResourceRecord,
@@ -176,6 +193,39 @@ where
             )
             .await
             .map_err(|error| ReconcileError::Metering(error.to_string()))
+    }
+
+    /// Best-effort variant of [`Self::project_metering`]: a failure is logged
+    /// and never propagated.
+    async fn project_metering_best_effort(&self, resource: &ResourceRecord, observed_state: &str) {
+        if let Err(error) = self.project_metering(resource, observed_state).await {
+            tracing::warn!(
+                resource_id = %resource.id,
+                %error,
+                "metering projection failed; it is best-effort here and the next observation repairs it"
+            );
+        }
+    }
+
+    /// Repairs a possibly-lost metering projection from durable truth: reads
+    /// the resource and best-effort re-projects its current `observed_state`.
+    /// The observation is idempotent by state, so re-projecting durable truth
+    /// is not a fabrication; a read or projection failure is logged/no-op.
+    ///
+    /// A repair only ever OPENS or REFRESHES a consuming interval. It never
+    /// emits a close: closing is owned by the authoritative transition paths
+    /// (delete, provider absence), and a read that closed at the read instant
+    /// would under-count a teardown tail and could permanently close an
+    /// interval for a resource that later resumes consuming.
+    async fn repair_metering_from_durable_state(&self, resource_id: Uuid) {
+        let Ok(resource) = self.store.get_resource(resource_id).await else {
+            return;
+        };
+        if compute_instance_state_consuming(&resource.observed_state) != Some(true) {
+            return;
+        }
+        self.project_metering_best_effort(&resource, &resource.observed_state)
+            .await;
     }
 
     async fn fence_agent_evidence(
@@ -835,6 +885,13 @@ where
             )
             .await?;
         if evidence_permit.disposition != EvidenceDisposition::New {
+            // A re-delivered (duplicate) or out-of-order (stale) observation is
+            // a repair opportunity: re-project the durable observed_state so a
+            // projection lost after an earlier CAS is healed. The projection is
+            // durable-state-derived and idempotent by state, so this never
+            // fabricates or double-counts.
+            self.repair_metering_from_durable_state(observation.resource_id)
+                .await;
             return Ok(());
         }
         let observed_state = server_state_to_storage(ServerState::from(observation.state));
@@ -913,14 +970,13 @@ where
                 );
                 e
             })?;
-        // Project after the CAS write, using the state actually durably applied.
-        // A competing observation can win the generation CAS; projecting the
-        // loser's input state would meter a state that never became durable,
-        // which is worse than this narrow window between the write and the
-        // projection (agent observations/evidence are re-driven, so the window
-        // is repaired). The applied observation is idempotent on re-application.
-        self.project_metering(&updated, &updated.observed_state)
-            .await?;
+        // Project the state the CAS actually applied. This is best-effort: an
+        // agent observation must not be rejected because metering is unhappy.
+        // The projection is durable-state-derived and idempotent by state, so a
+        // lost projection is repaired when the agent re-delivers the observation
+        // (the fence's non-New short-circuit re-projects the durable state).
+        self.project_metering_best_effort(&updated, &updated.observed_state)
+            .await;
         tracing::debug!(
             operation_id=%observation.operation_id,
             resource_id=%observation.resource_id,

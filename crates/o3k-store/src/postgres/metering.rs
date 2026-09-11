@@ -6,13 +6,14 @@
 //! idempotent so replayed observations converge instead of double counting.
 
 use async_trait::async_trait;
-use o3k_kernel::metering::{MAX_OPEN_INTERVALS, UsageAccumulator};
+use o3k_kernel::metering::{MAX_OPEN_INTERVALS, MAX_USAGE_AGGREGATE_ROWS, UsageAccumulator};
 use o3k_kernel::{
     INGEST_BUCKET_WIDTH_MS, KernelError, MAX_USAGE_SERIES, MeterObservation, MeterUsage,
     MeterUsageReport, MeteringRepository, UsageBucket, UsageQuery, UsageStatus,
     bucket_contributions, format_quantity_millis, meter_definition,
 };
 use sqlx::Row;
+use std::collections::HashSet;
 
 use super::PostgresStore;
 
@@ -119,6 +120,7 @@ struct OpenInterval {
     interval_id: String,
     quantity: i64,
     started_at_ms: i64,
+    authority: String,
 }
 
 impl PostgresStore {
@@ -129,7 +131,7 @@ impl PostgresStore {
         // `FOR UPDATE` serializes concurrent writers on the same series row so
         // a close/fold is applied exactly once.
         let row = sqlx::query(
-            "SELECT interval_id, quantity, started_at_ms FROM metering_intervals \
+            "SELECT interval_id, quantity, started_at_ms, authority FROM metering_intervals \
              WHERE meter_key = $1 AND scope = $2 AND resource_id = $3 AND ended_at_ms IS NULL \
              ORDER BY started_at_ms DESC LIMIT 1 FOR UPDATE",
         )
@@ -146,7 +148,46 @@ impl PostgresStore {
             interval_id: row.try_get("interval_id").map_err(store_err)?,
             quantity: row.try_get("quantity").map_err(store_err)?,
             started_at_ms: row.try_get("started_at_ms").map_err(store_err)?,
+            authority: row.try_get("authority").map_err(store_err)?,
         }))
+    }
+
+    /// Whether a row already carries the observation's deterministic interval
+    /// id and describes exactly the same interval. A match means a replayed
+    /// open may converge; a mismatch is corruption rather than something to
+    /// silently swallow.
+    async fn deterministic_interval_matches(
+        connection: &mut sqlx::PgConnection,
+        observation: &MeterObservation,
+        quantity: i64,
+    ) -> Result<bool, KernelError> {
+        let row = sqlx::query(
+            "SELECT meter_key, scope, resource_id, quantity, authority \
+             FROM metering_intervals WHERE interval_id = $1",
+        )
+        .bind(interval_id(observation))
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(store_err)?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        let meter_key: String = row.try_get("meter_key").map_err(store_err)?;
+        let scope: String = row.try_get("scope").map_err(store_err)?;
+        let resource_id: String = row.try_get("resource_id").map_err(store_err)?;
+        let stored_quantity: i64 = row.try_get("quantity").map_err(store_err)?;
+        let authority: String = row.try_get("authority").map_err(store_err)?;
+        if meter_key != observation.meter_key
+            || scope != observation.scope
+            || resource_id != observation.resource_id
+            || stored_quantity != quantity
+            || authority != observation.authority
+        {
+            return Err(KernelError::MeteringCorrupt(
+                "metering interval identity conflict".into(),
+            ));
+        }
+        Ok(true)
     }
 
     /// Latest end instant already folded for the series, if any. Used to reject
@@ -235,9 +276,13 @@ impl PostgresStore {
             .map_err(store_err)?;
             if inserted.rows_affected() == 0 {
                 // The deterministic interval already exists (replay of an
-                // already-closed interval) or a concurrent writer opened it;
-                // both converge on the existing row, and a replay of a closed
-                // interval is an idempotent no-op via the `None` arm below.
+                // already-closed interval, or a concurrent open of the same
+                // one) or a concurrent writer owns a different open interval
+                // for the series. A replay must match the existing row exactly;
+                // a mismatch is corruption, never swallowed.
+                if Self::deterministic_interval_matches(connection, observation, quantity).await? {
+                    return Ok(());
+                }
                 open = Self::load_open_interval(connection, observation).await?;
             } else {
                 // A newly opened interval must not start before already folded
@@ -270,6 +315,11 @@ impl PostgresStore {
                             "metering quantity changed within an open interval".into(),
                         ));
                     }
+                    if existing.authority != observation.authority {
+                        return Err(KernelError::MeteringCorrupt(
+                            "metering authority changed within an open interval".into(),
+                        ));
+                    }
                     return Ok(());
                 }
                 Self::close_and_fold(connection, &existing, observation).await
@@ -292,7 +342,7 @@ impl PostgresStore {
         .await
         .map_err(store_err)?;
         if updated.rows_affected() == 0 {
-            return Self::replay_or_corrupt(connection, open, observation).await;
+            return Self::replay_or_corrupt(connection, open).await;
         }
 
         // A zero-duration interval accrues nothing. Folding would ask
@@ -356,29 +406,23 @@ impl PostgresStore {
         Ok(())
     }
 
-    /// A concurrent writer already closed the interval. An exact end-instant
-    /// match is an idempotent replay and must not fold again.
+    /// A concurrent writer already closed the interval, so this close folded
+    /// nothing. It is an idempotent no-op for any end instant.
     async fn replay_or_corrupt(
         connection: &mut sqlx::PgConnection,
         open: &OpenInterval,
-        observation: &MeterObservation,
     ) -> Result<(), KernelError> {
-        let row = sqlx::query("SELECT ended_at_ms FROM metering_intervals WHERE interval_id = $1")
+        let row = sqlx::query("SELECT interval_id FROM metering_intervals WHERE interval_id = $1")
             .bind(&open.interval_id)
             .fetch_optional(&mut *connection)
             .await
             .map_err(store_err)?;
         match row {
-            Some(row) => {
-                let ended: Option<i64> = row.try_get("ended_at_ms").map_err(store_err)?;
-                if ended == Some(observation.observed_at_ms) {
-                    Ok(())
-                } else {
-                    Err(KernelError::MeteringCorrupt(
-                        "metering interval closed by a different observation".into(),
-                    ))
-                }
-            }
+            // Two truthful close observations of the same transition (a
+            // retried delete racing recovery) can carry different instants;
+            // the loser folded nothing, so it is an idempotent no-op. Only a
+            // vanished interval is corruption.
+            Some(_) => Ok(()),
             None => Err(KernelError::MeteringCorrupt(
                 "metering interval disappeared during close".into(),
             )),
@@ -389,12 +433,15 @@ impl PostgresStore {
         connection: &mut sqlx::PgConnection,
         query: &UsageQuery,
         meter_key: &str,
-    ) -> Result<Vec<(i64, i64)>, KernelError> {
-        let limit = i64::try_from(MAX_USAGE_SERIES + 1)
-            .map_err(|_| KernelError::InvalidIdentifier("usage series bound".into()))?;
+    ) -> Result<Vec<(String, i64, i64)>, KernelError> {
+        // The work bound is one row per `resource × ingest bucket`; the
+        // cardinality bound is how many distinct series those rows span. Both
+        // are enforced here and reject rather than truncate.
+        let limit = i64::try_from(MAX_USAGE_AGGREGATE_ROWS + 1)
+            .map_err(|_| KernelError::InvalidIdentifier("usage aggregate rows bound".into()))?;
         let rows = if let Some(resource_id) = &query.resource_id {
             sqlx::query(
-                "SELECT bucket_start_ms, quantity_millis FROM metering_aggregates \
+                "SELECT resource_id, bucket_start_ms, quantity_millis FROM metering_aggregates \
                  WHERE scope = $1 AND meter_key = $2 AND resource_id = $3 \
                    AND bucket_start_ms >= $4 AND bucket_start_ms < $5 \
                  ORDER BY bucket_start_ms, resource_id LIMIT $6",
@@ -410,7 +457,7 @@ impl PostgresStore {
             .map_err(store_err)?
         } else {
             sqlx::query(
-                "SELECT bucket_start_ms, quantity_millis FROM metering_aggregates \
+                "SELECT resource_id, bucket_start_ms, quantity_millis FROM metering_aggregates \
                  WHERE scope = $1 AND meter_key = $2 \
                    AND bucket_start_ms >= $3 AND bucket_start_ms < $4 \
                  ORDER BY bucket_start_ms, resource_id LIMIT $5",
@@ -424,14 +471,26 @@ impl PostgresStore {
             .await
             .map_err(store_err)?
         };
-        rows.iter()
-            .map(|row| {
-                Ok((
-                    row.try_get("bucket_start_ms").map_err(store_err)?,
-                    row.try_get("quantity_millis").map_err(store_err)?,
-                ))
-            })
-            .collect()
+        if rows.len() > MAX_USAGE_AGGREGATE_ROWS {
+            return Err(KernelError::InvalidIdentifier(
+                "usage aggregate rows bound".into(),
+            ));
+        }
+        let mut parsed = Vec::with_capacity(rows.len());
+        let mut series = HashSet::with_capacity(rows.len().min(MAX_USAGE_SERIES + 1));
+        for row in &rows {
+            let resource_id: String = row.try_get("resource_id").map_err(store_err)?;
+            series.insert(resource_id.clone());
+            parsed.push((
+                resource_id,
+                row.try_get("bucket_start_ms").map_err(store_err)?,
+                row.try_get("quantity_millis").map_err(store_err)?,
+            ));
+        }
+        if series.len() > MAX_USAGE_SERIES {
+            return Err(KernelError::InvalidIdentifier("usage series bound".into()));
+        }
+        Ok(parsed)
     }
 
     async fn load_open_intervals(
@@ -513,11 +572,11 @@ impl PostgresStore {
         for meter_key in &query.meter_keys {
             let mut accumulator = UsageAccumulator::new();
 
-            let aggregates = Self::load_aggregates(connection, query, meter_key).await?;
-            if aggregates.len() > MAX_USAGE_SERIES {
-                return Err(KernelError::InvalidIdentifier("usage series bound".into()));
-            }
-            for (bucket_start_ms, quantity_millis) in aggregates {
+            // `load_aggregates` enforces both the aggregate-row work bound and
+            // the distinct-series cardinality bound.
+            for (_resource_id, bucket_start_ms, quantity_millis) in
+                Self::load_aggregates(connection, query, meter_key).await?
+            {
                 accumulator.add(query.granularity, bucket_start_ms, quantity_millis)?;
             }
 

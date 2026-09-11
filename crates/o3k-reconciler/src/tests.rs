@@ -2,6 +2,7 @@
 mod reconciler_tests {
     use crate::storage_workflow;
     use crate::*;
+    use o3k_kernel::MeteringRepository;
     use o3k_provider::{FailureInjection, FakeComputeProvider};
     use o3k_store::testkit::TestStore;
     use std::path::PathBuf;
@@ -3618,10 +3619,26 @@ mod reconciler_tests {
     type MeteringObservations = Vec<(String, String, String, String)>;
 
     /// Recording observer that captures every projected lifecycle state in
-    /// order, so tests can assert the exact sequence the authority saw.
+    /// order, so tests can assert the exact sequence the authority saw. It can
+    /// be toggled to fail, so tests can prove a lost projection is repaired.
     #[derive(Clone, Default)]
     struct RecordingMeteringObserver {
         observed: Arc<Mutex<MeteringObservations>>,
+        failing: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl RecordingMeteringObserver {
+        fn set_failing(&self, failing: bool) {
+            self.failing
+                .store(failing, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn observations(&self) -> MeteringObservations {
+            match self.observed.lock() {
+                Ok(entries) => entries.clone(),
+                Err(_) => Vec::new(),
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -3633,6 +3650,11 @@ mod reconciler_tests {
             resource_id: &str,
             observed_state: &str,
         ) -> Result<(), o3k_kernel::KernelError> {
+            if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(o3k_kernel::KernelError::MeteringUnavailable(
+                    "observer failing".to_owned(),
+                ));
+            }
             if let Ok(mut observed) = self.observed.lock() {
                 observed.push((
                     kind.to_owned(),
@@ -4376,6 +4398,356 @@ mod reconciler_tests {
             observed.is_empty(),
             "a losing generation CAS must record no observation, saw {observed:?}"
         );
+        Ok(())
+    }
+
+    fn running_observation(operation_id: Uuid, resource_id: Uuid) -> AgentObservation {
+        AgentObservation {
+            agent_id: "compute-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            resource_id,
+            provider_resource_id: None,
+            state: o3k_provider::InstanceState::Running,
+            operation_id,
+            operation_state: AgentOperationState::Succeeded,
+            observation_sequence: 1,
+            observed_at_unix_ms: 1,
+            redacted_message: None,
+            console_log_bytes: Vec::new(),
+            console_log_offset: 0,
+            console_log_complete: false,
+            console_log_truncated: false,
+            block_device: None,
+        }
+    }
+
+    /// A metering failure while applying an agent observation is best-effort:
+    /// the observation is durably applied, `apply_agent_observation` returns
+    /// `Ok`, and the agent observation is never dropped because metering is
+    /// unhappy.
+    #[tokio::test]
+    async fn failing_metering_observer_does_not_fail_agent_observation()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _provider) = journal("observation-metering-fail", 2).await?;
+        let journal = journal.with_metering_observer(Arc::new(FailingMeteringObserver));
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        bind_observation_command(
+            &store,
+            operation_id,
+            request.o3k_server_id,
+            "compute-1",
+            "epoch-1",
+        )
+        .await?;
+
+        journal
+            .apply_agent_observation(&running_observation(operation_id, request.o3k_server_id))
+            .await?;
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ACTIVE"
+        );
+        Ok(())
+    }
+
+    /// A projection lost after a committed observation is repaired by the next
+    /// delivery for the same resource: the non-New fence short-circuit
+    /// re-projects the durable `observed_state` (idempotent, not a fabrication).
+    #[tokio::test]
+    async fn duplicate_observation_repairs_a_lost_projection() -> Result<(), ReconcileError> {
+        let observer = RecordingMeteringObserver::default();
+        observer.set_failing(true);
+        let (journal, store, _provider) = journal("observation-metering-repair", 2).await?;
+        let journal = journal.with_metering_observer(Arc::new(observer.clone()));
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        bind_observation_command(
+            &store,
+            operation_id,
+            request.o3k_server_id,
+            "compute-1",
+            "epoch-1",
+        )
+        .await?;
+        let observation = running_observation(operation_id, request.o3k_server_id);
+
+        // First delivery: the CAS commits but the projection fails, so nothing
+        // is recorded.
+        journal.apply_agent_observation(&observation).await?;
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ACTIVE"
+        );
+        assert!(
+            observer.observations().is_empty(),
+            "a failing observer must record nothing"
+        );
+
+        // The same observation is re-delivered (the fence reports a duplicate);
+        // the durable state is re-projected and now lands.
+        observer.set_failing(false);
+        journal.apply_agent_observation(&observation).await?;
+        assert_eq!(
+            observer.observations(),
+            vec![(
+                "compute_instance".to_owned(),
+                "project".to_owned(),
+                request.o3k_server_id.to_string(),
+                "ACTIVE".to_owned(),
+            )]
+        );
+        Ok(())
+    }
+
+    /// A UTC hour boundary: 2023-11-14T22:00:00Z.
+    const METERING_BASE_MS: i64 = 1_699_999_200_000;
+    const METERING_HOUR_MS: i64 = 3_600_000;
+
+    /// Test metering authority: forwards compute-instance lifecycle
+    /// observations into the durable store through the real
+    /// [`MeteringRepository`], using the single shared state→consuming mapping.
+    struct AuthorityMeteringObserver {
+        store: Arc<TestStore>,
+        observed_at_ms: i64,
+    }
+
+    impl AuthorityMeteringObserver {
+        fn new(store: Arc<TestStore>, observed_at_ms: i64) -> Self {
+            Self {
+                store,
+                observed_at_ms,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl o3k_kernel::LifecycleMeteringObserver for AuthorityMeteringObserver {
+        async fn observe_resource_state(
+            &self,
+            kind: &str,
+            project_id: &str,
+            resource_id: &str,
+            observed_state: &str,
+        ) -> Result<(), o3k_kernel::KernelError> {
+            if kind != "compute_instance" {
+                return Ok(());
+            }
+            let Some(consuming) = crate::compute_instance_state_consuming(observed_state) else {
+                return Err(o3k_kernel::KernelError::MeteringCorrupt(format!(
+                    "unknown compute instance state `{observed_state}`"
+                )));
+            };
+            self.store
+                .record_observation(&o3k_kernel::MeterObservation {
+                    meter_key: "compute:instance_seconds".to_owned(),
+                    scope: project_id.to_owned(),
+                    resource_id: resource_id.to_owned(),
+                    quantity: if consuming { 1 } else { 0 },
+                    consuming,
+                    observed_at_ms: self.observed_at_ms,
+                    authority: "test-lifecycle".to_owned(),
+                })
+                .await
+        }
+
+        async fn observe_allocation(
+            &self,
+            _meter_key: &str,
+            _project_id: &str,
+            _resource_id: &str,
+            _quantity: u64,
+            _consuming: bool,
+        ) -> Result<(), o3k_kernel::KernelError> {
+            Ok(())
+        }
+    }
+
+    async fn authority_usage(
+        store: &TestStore,
+        evaluated_at_ms: i64,
+    ) -> Result<o3k_kernel::MeterUsageReport, ReconcileError> {
+        use o3k_kernel::{UsageGranularity, UsageQuery};
+        store
+            .usage(&UsageQuery {
+                scope: "project".to_owned(),
+                meter_keys: vec!["compute:instance_seconds".to_owned()],
+                start_ms: METERING_BASE_MS,
+                end_ms: METERING_BASE_MS + METERING_HOUR_MS,
+                granularity: UsageGranularity::Hour,
+                resource_id: None,
+                evaluated_at_ms,
+            })
+            .await
+            .map_err(|_| ReconcileError::InvalidIntent)
+    }
+
+    fn metering_path(label: &str) -> PathBuf {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-reconciler-{label}-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// R2 (i): a create rejected at dispatch terminalizes `Failed` without ever
+    /// opening the compute runtime meter. The real metering authority reports
+    /// exactly `0.000` — before and after a store restart and a replay.
+    #[tokio::test]
+    async fn dispatch_rejected_create_accrues_no_compute_metering() -> Result<(), ReconcileError> {
+        let path = metering_path("metering-dispatch-rejected");
+        let request = request();
+        let operation_id;
+        {
+            let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
+            store
+                .ensure_authority(METERING_BASE_MS)
+                .await
+                .map_err(|_| ReconcileError::InvalidIntent)?;
+            let provider = Arc::new(FakeComputeProvider::new());
+            provider.set_failure(FailureInjection::Terminal)?;
+            let journal =
+                OperationJournal::new(store.clone(), provider, 3).with_metering_observer(Arc::new(
+                    AuthorityMeteringObserver::new(store.clone(), METERING_BASE_MS),
+                ));
+            operation_id = journal.begin_create("project", &request).await?;
+            assert_eq!(
+                journal.reconcile_once(operation_id).await?,
+                OperationState::Failed
+            );
+
+            let report = authority_usage(&store, METERING_BASE_MS + METERING_HOUR_MS).await?;
+            assert_eq!(report.meters[0].total, "0.000");
+            assert_eq!(report.meters[0].status, o3k_kernel::UsageStatus::Complete);
+        }
+        // Restart the durable store: reopening the same database must show no
+        // open interval and no accrual.
+        {
+            let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
+            let report = authority_usage(&store, METERING_BASE_MS + METERING_HOUR_MS).await?;
+            assert_eq!(
+                report.meters[0].total, "0.000",
+                "no open interval may survive a restart"
+            );
+            assert_eq!(report.meters[0].status, o3k_kernel::UsageStatus::Complete);
+        }
+        // Replaying the terminal failed create must not accrue or open.
+        {
+            let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
+            let provider = Arc::new(FakeComputeProvider::new());
+            provider.set_failure(FailureInjection::Terminal)?;
+            let journal = OperationJournal::new(store.clone(), provider, 3).with_metering_observer(
+                Arc::new(AuthorityMeteringObserver::new(
+                    store.clone(),
+                    METERING_BASE_MS + METERING_HOUR_MS,
+                )),
+            );
+            assert_eq!(
+                journal.reconcile_once(operation_id).await?,
+                OperationState::Failed
+            );
+            let report = authority_usage(&store, METERING_BASE_MS + METERING_HOUR_MS).await?;
+            assert_eq!(
+                report.meters[0].total, "0.000",
+                "a replayed failed create must not accrue"
+            );
+        }
+        Ok(())
+    }
+
+    /// R2 (ii): a create re-scheduled by the retry path and then rejected
+    /// terminally also finalizes `Failed` with exactly `0.000` metered runtime.
+    #[tokio::test]
+    async fn retried_create_terminal_failure_accrues_no_compute_metering()
+    -> Result<(), ReconcileError> {
+        let path = metering_path("metering-retried-terminal");
+        let request = request();
+        let operation_id;
+        {
+            let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
+            store
+                .ensure_authority(METERING_BASE_MS)
+                .await
+                .map_err(|_| ReconcileError::InvalidIntent)?;
+            let provider = Arc::new(FakeComputeProvider::new());
+            provider.set_failure(FailureInjection::Transient)?;
+            let journal = OperationJournal::new(store.clone(), provider.clone(), 3)
+                .with_metering_observer(Arc::new(AuthorityMeteringObserver::new(
+                    store.clone(),
+                    METERING_BASE_MS,
+                )));
+            operation_id = journal.begin_create("project", &request).await?;
+            // First dispatch is scheduled for retry.
+            assert_eq!(
+                journal.reconcile_once(operation_id).await?,
+                OperationState::Retryable
+            );
+            provider.set_failure(FailureInjection::Terminal)?;
+            assert_eq!(
+                journal.reconcile_once(operation_id).await?,
+                OperationState::Failed
+            );
+            let report = authority_usage(&store, METERING_BASE_MS + METERING_HOUR_MS).await?;
+            assert_eq!(report.meters[0].total, "0.000");
+            assert_eq!(report.meters[0].status, o3k_kernel::UsageStatus::Complete);
+        }
+        {
+            let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
+            let report = authority_usage(&store, METERING_BASE_MS + METERING_HOUR_MS).await?;
+            assert_eq!(report.meters[0].total, "0.000");
+        }
+        Ok(())
+    }
+
+    /// R2 (ii, exhaustion): exhausting the retry budget leaves the operation
+    /// `UnknownOutcome` (never `Failed`) and never opens the runtime meter, even
+    /// across a restart and a replay.
+    #[tokio::test]
+    async fn retry_exhaustion_accrues_no_compute_metering() -> Result<(), ReconcileError> {
+        let path = metering_path("metering-retry-exhausted");
+        let request = request();
+        let operation_id;
+        {
+            let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
+            store
+                .ensure_authority(METERING_BASE_MS)
+                .await
+                .map_err(|_| ReconcileError::InvalidIntent)?;
+            let provider = Arc::new(FakeComputeProvider::new());
+            provider.set_failure(FailureInjection::Transient)?;
+            let journal = OperationJournal::new(store.clone(), provider.clone(), 3)
+                .with_metering_observer(Arc::new(AuthorityMeteringObserver::new(
+                    store.clone(),
+                    METERING_BASE_MS,
+                )));
+            operation_id = journal.begin_create("project", &request).await?;
+            let mut last = OperationState::Pending;
+            for _ in 0..3 {
+                last = journal.reconcile_once(operation_id).await?;
+            }
+            assert_eq!(
+                last,
+                OperationState::UnknownOutcome,
+                "retry exhaustion must not terminalize a retryable dispatch"
+            );
+            let report = authority_usage(&store, METERING_BASE_MS + METERING_HOUR_MS).await?;
+            assert_eq!(report.meters[0].total, "0.000");
+        }
+        {
+            let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
+            let report = authority_usage(&store, METERING_BASE_MS + METERING_HOUR_MS).await?;
+            assert_eq!(
+                report.meters[0].total, "0.000",
+                "retry exhaustion must not open an interval that survives a restart"
+            );
+        }
         Ok(())
     }
 }

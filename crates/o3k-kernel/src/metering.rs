@@ -15,6 +15,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::error::KernelError;
 
@@ -34,8 +35,20 @@ pub const MAX_USAGE_BUCKETS: usize = 1100;
 /// Maximum number of meters selected by one query.
 pub const MAX_USAGE_METERS: usize = 8;
 
-/// Maximum number of durable aggregate rows read by one query.
-pub const MAX_USAGE_SERIES: usize = 5000;
+/// Maximum number of durable `resource × ingest bucket` aggregate rows one
+/// bounded usage query may read, per meter.
+///
+/// This is the work bound: a query that would read more rows is rejected, never
+/// silently truncated. A single series over the advertised 366-day range needs
+/// at most 8784 hourly rows, so this bound admits many series at full range.
+pub const MAX_USAGE_AGGREGATE_ROWS: usize = 25_000;
+
+/// Maximum number of **distinct** resource series one bounded usage query may
+/// read, per meter.
+///
+/// This bounds response cardinality independently of how many aggregate rows
+/// those series span; a query exceeding it is rejected, never truncated.
+pub const MAX_USAGE_SERIES: usize = 500;
 
 /// Maximum number of open (unclosed) intervals read by one query.
 pub const MAX_OPEN_INTERVALS: usize = 20_000;
@@ -420,9 +433,12 @@ pub fn bucket_contributions(
 
 /// Accumulates ingest-bucket contributions into output buckets of a coarser
 /// granularity, failing closed on overflow.
+///
+/// Contributions are keyed by the aligned bucket start so one request cannot
+/// pay a quadratic scan when many ingest buckets are folded.
 #[derive(Debug, Default)]
 pub struct UsageAccumulator {
-    buckets: Vec<(i64, i128)>,
+    buckets: BTreeMap<i64, i128>,
 }
 
 impl UsageAccumulator {
@@ -430,7 +446,7 @@ impl UsageAccumulator {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            buckets: Vec::new(),
+            buckets: BTreeMap::new(),
         }
     }
 
@@ -446,14 +462,10 @@ impl UsageAccumulator {
         }
         let width = granularity.width_ms();
         let aligned = bucket_start_ms.div_euclid(width) * width;
-        match self.buckets.iter_mut().find(|(start, _)| *start == aligned) {
-            Some((_, total)) => {
-                *total = total
-                    .checked_add(i128::from(quantity_millis))
-                    .ok_or_else(|| KernelError::InvalidIdentifier("meter overflow".into()))?;
-            }
-            None => self.buckets.push((aligned, i128::from(quantity_millis))),
-        }
+        let total = self.buckets.entry(aligned).or_insert(0);
+        *total = (*total)
+            .checked_add(i128::from(quantity_millis))
+            .ok_or_else(|| KernelError::InvalidIdentifier("meter overflow".into()))?;
         Ok(())
     }
 
@@ -471,9 +483,8 @@ impl UsageAccumulator {
 
     /// Consumes the accumulator, returning buckets ordered by start instant.
     #[must_use]
-    pub fn into_buckets(mut self) -> Vec<(i64, i128)> {
-        self.buckets.sort_by_key(|(start, _)| *start);
-        self.buckets
+    pub fn into_buckets(self) -> Vec<(i64, i128)> {
+        self.buckets.into_iter().collect()
     }
 }
 
@@ -523,7 +534,11 @@ pub struct MeterUsageReport {
     pub observed_through_ms: i64,
     /// Instant O3K metering authority began for this scope, if any.
     pub authority_started_at_ms: Option<i64>,
-    /// Most recent durable observation processed for this scope, if any.
+    /// Most recent durable observation processed by the whole metering
+    /// authority, if any. This is authority-wide observability, **not**
+    /// per-scope: whichever scope was observed most recently sets it, so a
+    /// quiet scope can appear fresher than it is. Authority start and
+    /// `observed_through` carry the per-scope completeness meaning.
     pub last_observed_at_ms: Option<i64>,
     pub meters: Vec<MeterUsage>,
 }
@@ -750,6 +765,16 @@ mod tests {
             evaluated_at_ms: MAX_USAGE_RANGE_MS,
         };
         assert!(hourly_over_366_days.validate().is_err());
+    }
+
+    #[test]
+    fn usage_bounds_admit_a_full_range_single_series() {
+        // The advertised 366-day range needs at most 8784 hourly aggregate rows
+        // for one series, so the work bound admits it with room to spare while
+        // the series bound stays about cardinality.
+        let hourly_rows = usize::try_from(MAX_USAGE_RANGE_MS / INGEST_BUCKET_WIDTH_MS).unwrap();
+        assert!(hourly_rows > 5_000);
+        assert!(hourly_rows <= MAX_USAGE_AGGREGATE_ROWS);
     }
 
     #[test]

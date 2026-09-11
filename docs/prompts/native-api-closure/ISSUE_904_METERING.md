@@ -181,5 +181,24 @@ administration, billing, pricing or Araf UI.
 Only report `BLOCKED` for a genuine external dependency. Required
 kernel/store/aggregation/API changes belong in #904.
 
+Only report `BLOCKED` for a genuine external dependency. Required
+kernel/store/aggregation/API changes belong in #904.
+
+Additional feeds-freezing constraints that the accepted contract already
+carries, and which must be honoured rather than reinvented:
+
+- The meter catalog is compiled into the kernel but a meter is advertised only
+  while the active composition can produce it: `definitions` returns the
+  producible subset and a usage request for a non-producible meter is rejected
+  as an unknown meter rather than answered with a fabricated zero.
+- Cross-scope usage reads are a durable kernel capability (`metering:ReadUsage`
+  for the caller's effective scope, `metering:ReadUsageAll` for durable system
+  scope plus the `operator` role), registered and discoverable in the
+  authorization inventory — not ad-hoc handler logic.
+- Unrecognized query parameters are rejected, so a typo cannot silently return
+  a different scope's usage.
+- `last_observed_at` is authority-wide observability, not per-scope
+  completeness evidence.
+
 Finish only with `#904 COMPLETE` when issue exit criteria and authoritative
 usage evidence are proven.

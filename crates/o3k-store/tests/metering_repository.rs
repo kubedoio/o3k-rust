@@ -710,6 +710,72 @@ async fn oversized_series_result_is_rejected_not_truncated() {
 }
 
 #[tokio::test]
+async fn full_range_single_series_day_query_is_served() {
+    let store = memory_store().await;
+    let d0 = 100 * DAY;
+    store.ensure_authority(d0).await.unwrap();
+    // One series consuming continuously across the whole advertised range: 366
+    // days of hourly ingest rows, which must not be mistaken for 8784 series.
+    store
+        .record_observation(&observation("project-a", "server-1", 1, true, d0))
+        .await
+        .unwrap();
+    store
+        .record_observation(&observation(
+            "project-a",
+            "server-1",
+            0,
+            false,
+            d0 + 366 * DAY,
+        ))
+        .await
+        .unwrap();
+
+    let mut day_query = query("project-a", d0, d0 + 366 * DAY, d0 + 366 * DAY);
+    day_query.granularity = UsageGranularity::Day;
+    let report = store.usage(&day_query).await.unwrap();
+    assert_eq!(report.meters[0].status, UsageStatus::Complete);
+    assert_eq!(report.meters[0].buckets.len(), 366);
+    assert_eq!(report.meters[0].buckets[0].quantity, "86400.000");
+    assert_eq!(
+        report.meters[0].buckets[365].bucket_start_ms,
+        d0 + 365 * DAY
+    );
+    assert_eq!(hourly_total(&report), "31622400.000");
+}
+
+#[tokio::test]
+async fn oversized_aggregate_rows_result_is_rejected() {
+    let store = memory_store().await;
+    let d0 = 100 * DAY;
+    store.ensure_authority(d0).await.unwrap();
+    // Three series over the full range is 3 × 8784 = 26352 hourly aggregate
+    // rows: below the distinct-series bound but above the aggregate-row bound.
+    for index in 0..3 {
+        let resource = format!("server-{index}");
+        store
+            .record_observation(&observation("project-a", &resource, 1, true, d0))
+            .await
+            .unwrap();
+        store
+            .record_observation(&observation(
+                "project-a",
+                &resource,
+                0,
+                false,
+                d0 + 366 * DAY,
+            ))
+            .await
+            .unwrap();
+    }
+
+    let mut day_query = query("project-a", d0, d0 + 366 * DAY, d0 + 366 * DAY);
+    day_query.granularity = UsageGranularity::Day;
+    let error = store.usage(&day_query).await.unwrap_err();
+    assert!(matches!(error, KernelError::InvalidIdentifier(_)));
+}
+
+#[tokio::test]
 async fn restart_durability_matches_single_process() {
     let path =
         std::env::temp_dir().join(format!("o3k-metering-{}.db", uuid::Uuid::now_v7().simple()));
@@ -1104,6 +1170,163 @@ async fn two_writers_fold_a_release_exactly_once() {
 
     drop(store_a);
     drop(store_b);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(path.with_extension("db-shm"));
+}
+
+#[tokio::test]
+async fn replay_close_at_any_instant_is_idempotent() {
+    let store = memory_store().await;
+    store.ensure_authority(T0).await.unwrap();
+    store
+        .record_observation(&observation("project-a", "server-1", 1, true, T0))
+        .await
+        .unwrap();
+    // Winner closes the interval at T0+60s.
+    store
+        .record_observation(&observation("project-a", "server-1", 0, false, T0 + 60_000))
+        .await
+        .unwrap();
+
+    // (a) same instant, (b) later instant, (c) earlier instant: two truthful
+    // close observations of one transition can carry different instants, and
+    // the loser folded nothing, so every replay is an idempotent no-op.
+    for at in [T0 + 60_000, T0 + 90_000, T0 + 30_000] {
+        store
+            .record_observation(&observation("project-a", "server-1", 0, false, at))
+            .await
+            .unwrap();
+    }
+
+    let report = store
+        .usage(&query("project-a", T0, T0 + HOUR, T0 + HOUR))
+        .await
+        .unwrap();
+    assert_eq!(report.meters[0].buckets.len(), 1);
+    // Exactly one folded effect, reflecting the winner's close instant.
+    assert_eq!(hourly_total(&report), "60.000");
+}
+
+#[tokio::test]
+async fn replayed_open_with_different_quantity_or_authority_fails_closed() {
+    let store = memory_store().await;
+    store.ensure_authority(T0).await.unwrap();
+    store
+        .record_observation(&observation("project-a", "server-1", 1, true, T0))
+        .await
+        .unwrap();
+    store
+        .record_observation(&observation("project-a", "server-1", 0, false, T0 + 60_000))
+        .await
+        .unwrap();
+
+    // Same started instant but a different quantity must fail closed instead
+    // of being silently swallowed as a replay.
+    let mut replay = observation("project-a", "server-1", 2, true, T0);
+    assert!(matches!(
+        store.record_observation(&replay).await,
+        Err(KernelError::MeteringCorrupt(_))
+    ));
+
+    // Same quantity but a different authority label is likewise corruption.
+    replay.quantity = 1;
+    replay.authority = "o3k-other".into();
+    assert!(matches!(
+        store.record_observation(&replay).await,
+        Err(KernelError::MeteringCorrupt(_))
+    ));
+
+    // While an interval is still open, a same-quantity refresh under a
+    // different authority label is rejected too.
+    store
+        .record_observation(&observation("project-a", "server-2", 1, true, T0))
+        .await
+        .unwrap();
+    let mut foreign_authority = observation("project-a", "server-2", 1, true, T0 + 10_000);
+    foreign_authority.authority = "o3k-other".into();
+    assert!(matches!(
+        store.record_observation(&foreign_authority).await,
+        Err(KernelError::MeteringCorrupt(_))
+    ));
+
+    // A matching replay still converges and does not change the total.
+    store
+        .record_observation(&observation("project-a", "server-1", 1, true, T0))
+        .await
+        .unwrap();
+    let mut server_one = query("project-a", T0, T0 + HOUR, T0 + HOUR);
+    server_one.resource_id = Some("server-1".into());
+    let report = store.usage(&server_one).await.unwrap();
+    assert_eq!(hourly_total(&report), "60.000");
+}
+
+#[tokio::test]
+async fn aborted_write_observation_leaves_the_pool_usable() {
+    let path = std::env::temp_dir().join(format!(
+        "o3k-metering-abort-{}.db",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let store = SqliteStore::connect_file(&path).await.unwrap();
+    let d0 = 100 * DAY;
+    store.ensure_authority(d0).await.unwrap();
+    store
+        .record_observation(&observation("project-a", "server-1", 1, true, d0))
+        .await
+        .unwrap();
+
+    // Closing a 1000-hour interval folds 1000 buckets, so aborting shortly
+    // after spawn lands inside the write transaction while still draining well
+    // within the store's `busy_timeout`.
+    let close_at = d0 + 1_000 * HOUR;
+    let close = observation("project-a", "server-1", 0, false, close_at);
+    let task = tokio::spawn({
+        let store = store.clone();
+        async move { store.record_observation(&close).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    task.abort();
+    let _ = task.await;
+
+    // The aborted transaction must roll back before its connection returns to
+    // the pool. A leaked open transaction would surface here as SQLite's
+    // "cannot start a transaction within a transaction" (or a lock held past
+    // `busy_timeout`); allow a bounded retry for the aborted fold to drain.
+    let mut usable = false;
+    let mut last_error = None;
+    for _ in 0..5 {
+        match store
+            .record_observation(&observation("project-a", "server-2", 1, true, close_at))
+            .await
+        {
+            Ok(()) => {
+                usable = true;
+                break;
+            }
+            Err(error) => {
+                let message = error.to_string();
+                assert!(
+                    !message.contains("within a transaction"),
+                    "cancelled write left the pool inside an open transaction: {message}"
+                );
+                last_error = Some(message);
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
+    assert!(usable, "pool did not recover after abort: {last_error:?}");
+    store
+        .record_observation(&observation(
+            "project-a",
+            "server-2",
+            0,
+            false,
+            close_at + 1_000,
+        ))
+        .await
+        .unwrap();
+
+    drop(store);
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("db-wal"));
     let _ = std::fs::remove_file(path.with_extension("db-shm"));

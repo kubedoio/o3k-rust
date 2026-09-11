@@ -222,6 +222,25 @@ impl ComputeService {
         }
     }
 
+    /// Best-effort read-path repair projection from durable truth.
+    ///
+    /// A repair only ever OPENS or REFRESHES a consuming interval. It never
+    /// emits a close: closing is owned by the authoritative state-transition
+    /// paths, and a read that closed at the read instant would under-count a
+    /// teardown tail and could permanently close an interval for an instance
+    /// that later resumes (`ACTIVE`/`STARTING`/`STOPPING`/`REBOOTING`).
+    pub(super) async fn repair_metering_from_durable_state(&self, resource_id: Uuid) {
+        let Ok(resource) = self.store.get_resource(resource_id).await else {
+            return;
+        };
+        if o3k_reconciler::compute_instance_state_consuming(&resource.observed_state) != Some(true)
+        {
+            return;
+        }
+        self.project_metering_best_effort(&resource, &resource.observed_state)
+            .await;
+    }
+
     #[must_use]
     pub fn provider(&self) -> Arc<ProviderBackend> {
         self.provider.clone()

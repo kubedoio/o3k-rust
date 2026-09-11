@@ -63,10 +63,16 @@ current `main`:
    concurrently applied transition produces exactly one durable effect. On a
    mutation path a metering failure is surfaced to the caller, which retries the
    idempotent step, and the projection is applied before the step is
-   terminalized so a crash window is repaired rather than lost. The read-path
-   repair projection is deliberately best-effort: it logs and is re-run by the
-   next drive, because a metering hiccup must never turn a read into an error.
-   Metering is never silently dropped in either case.
+   terminalized so a crash window is repaired rather than lost. Where a
+   projection cannot be retried behind the transition that already committed —
+   an agent observation whose compare-and-set already landed, or a native volume
+   whose row is durably created — the authority repairs instead: it re-projects
+   the resource's **durable** state, which is idempotent and derived from truth
+   rather than from an unapplied input, and the next observation or read of that
+   same resource makes good on a projection that was lost. The read path also
+   uses this durable-state repair and is best-effort, because a metering hiccup
+   must never turn a read into an error. Metering is never silently dropped in
+   any of these cases.
 
 5. **Start of O3K authority is explicit and durable.** Metering authority begins
    at an anchored instant and is never backdated. Periods before that instant

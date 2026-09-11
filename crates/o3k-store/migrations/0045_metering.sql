@@ -33,3 +33,9 @@ CREATE TABLE IF NOT EXISTS metering_aggregates (
 );
 CREATE INDEX IF NOT EXISTS idx_metering_aggregates_scope_bucket
     ON metering_aggregates(scope, meter_key, bucket_start_ms, resource_id);
+
+-- The bounded usage read filters open intervals by series and start instant
+-- (`meter_key = ? AND scope = ? AND ended_at_ms IS NULL AND started_at_ms < ?`),
+-- which neither index above serves. Identical DDL on both engines.
+CREATE INDEX IF NOT EXISTS idx_metering_intervals_open_series
+    ON metering_intervals(meter_key, scope, started_at_ms) WHERE ended_at_ms IS NULL;

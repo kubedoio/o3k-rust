@@ -133,6 +133,8 @@ impl Fixture {
             .execute(&admin)
             .await
             .ok()?;
+        // Close the creator session before any store connects, so the admin
+        // connection can never be the lingering backend that blocks the drop.
         admin.close().await;
         let mut isolated = parsed;
         isolated.set_path(&format!("/{database}"));
@@ -156,10 +158,44 @@ impl Fixture {
             .connect(&self.admin_url)
             .await
             .unwrap();
-        sqlx::query(&format!("DROP DATABASE {}", self.database))
-            .execute(&admin)
-            .await
-            .unwrap();
+        // Under nextest every test runs in its own process, so the process-wide
+        // `test_lock` cannot serialize fixture teardown. Make `dispose`
+        // self-sufficient: terminate any leftover backend, then force the drop
+        // with a bounded retry.
+        let _ = sqlx::query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+             WHERE datname = $1 AND pid <> pg_backend_pid()",
+        )
+        .bind(&self.database)
+        .execute(&admin)
+        .await;
+        let mut last_error: Option<sqlx::Error> = None;
+        for attempt in 0..5u64 {
+            match sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.database))
+                .execute(&admin)
+                .await
+            {
+                Ok(_) => {
+                    admin.close().await;
+                    return;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    tokio::time::sleep(std::time::Duration::from_millis(100 * (attempt + 1))).await;
+                }
+            }
+        }
+        let last_error = last_error.unwrap_or_else(|| {
+            sqlx::Error::Protocol("DROP DATABASE retry loop produced no error".into())
+        });
+        admin.close().await;
+        // Retries exhausted: fail the test with the final driver error.
+        let drop_result: Result<(), sqlx::Error> = Err(last_error);
+        assert!(
+            drop_result.is_ok(),
+            "failed to drop disposable database {} after retries: {drop_result:?}",
+            self.database
+        );
     }
 }
 
@@ -377,6 +413,83 @@ async fn postgres_oversized_series_result_is_rejected() {
         .usage(&query("project-a", T0, T0 + HOUR, T0 + HOUR))
         .await
         .unwrap_err();
+    assert!(matches!(error, KernelError::InvalidIdentifier(_)));
+
+    fixture.dispose(&[&store]).await;
+}
+
+#[tokio::test]
+async fn postgres_full_range_single_series_day_query_is_served() {
+    let _guard = test_lock().await;
+    let Some(fixture) = Fixture::new().await else {
+        eprintln!("skipping PostgreSQL metering full range: O3K_DATABASE_URL unavailable");
+        return;
+    };
+    let store = fixture.store().await;
+    let d0 = 100 * DAY;
+    store.ensure_authority(d0).await.unwrap();
+    // One series consuming continuously across the whole advertised range: 366
+    // days of hourly ingest rows, which must not be mistaken for 8784 series.
+    store
+        .record_observation(&observation("project-a", "server-1", 1, true, d0))
+        .await
+        .unwrap();
+    store
+        .record_observation(&observation(
+            "project-a",
+            "server-1",
+            0,
+            false,
+            d0 + 366 * DAY,
+        ))
+        .await
+        .unwrap();
+
+    let mut day_query = query("project-a", d0, d0 + 366 * DAY, d0 + 366 * DAY);
+    day_query.granularity = UsageGranularity::Day;
+    let report = store.usage(&day_query).await.unwrap();
+    assert_eq!(report.meters[0].status, UsageStatus::Complete);
+    assert_eq!(report.meters[0].buckets.len(), 366);
+    assert_eq!(report.meters[0].buckets[0].quantity, "86400.000");
+    assert_eq!(
+        report.meters[0].buckets[365].bucket_start_ms,
+        d0 + 365 * DAY
+    );
+    assert_eq!(hourly_total(&report), "31622400.000");
+
+    fixture.dispose(&[&store]).await;
+}
+
+#[tokio::test]
+async fn postgres_oversized_aggregate_rows_result_is_rejected() {
+    let _guard = test_lock().await;
+    let Some(fixture) = Fixture::new().await else {
+        eprintln!("skipping PostgreSQL metering aggregate-row bound: O3K_DATABASE_URL unavailable");
+        return;
+    };
+    let store = fixture.store().await;
+    let d0 = 100 * DAY;
+    store.ensure_authority(d0).await.unwrap();
+    // 25001 rows spread over three series (8784 hourly buckets each) is below
+    // the distinct-series bound but above the aggregate-row bound.
+    sqlx::query(
+        "INSERT INTO metering_aggregates \
+         (scope, meter_key, resource_id, bucket_start_ms, bucket_width_ms, quantity_millis) \
+         SELECT $1, $2, 'server-' || (g / 8784), $3 + (g % 8784) * $4, $4, 1000 \
+         FROM generate_series(0, $5) AS g",
+    )
+    .bind("project-a")
+    .bind(METER)
+    .bind(d0)
+    .bind(HOUR)
+    .bind(25_000_i64)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let mut day_query = query("project-a", d0, d0 + 366 * DAY, d0 + 366 * DAY);
+    day_query.granularity = UsageGranularity::Day;
+    let error = store.usage(&day_query).await.unwrap_err();
     assert!(matches!(error, KernelError::InvalidIdentifier(_)));
 
     fixture.dispose(&[&store]).await;
@@ -1014,6 +1127,124 @@ async fn postgres_pre_metering_schema_upgrades_with_usable_metering_tables() {
         .usage(&query("project-a", T0, T0 + HOUR, T0 + HOUR))
         .await
         .unwrap();
+    assert_eq!(hourly_total(&report), "60.000");
+
+    let index_present: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('idx_metering_intervals_open_series')::text")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert!(
+        index_present.is_some(),
+        "the open-interval read index must exist after the upgrade"
+    );
+
+    fixture.dispose(&[&store]).await;
+}
+
+#[tokio::test]
+async fn postgres_replay_close_at_any_instant_is_idempotent() {
+    let _guard = test_lock().await;
+    let Some(fixture) = Fixture::new().await else {
+        eprintln!("skipping PostgreSQL metering close replay: O3K_DATABASE_URL unavailable");
+        return;
+    };
+    let store = fixture.store().await;
+    store.ensure_authority(T0).await.unwrap();
+    store
+        .record_observation(&observation("project-a", "server-1", 1, true, T0))
+        .await
+        .unwrap();
+    store
+        .record_observation(&observation("project-a", "server-1", 0, false, T0 + 60_000))
+        .await
+        .unwrap();
+
+    // Same instant, later instant and earlier instant: only one close folds,
+    // and a different-instant replay of an already-closed interval is a no-op.
+    for at in [T0 + 60_000, T0 + 90_000, T0 + 30_000] {
+        store
+            .record_observation(&observation("project-a", "server-1", 0, false, at))
+            .await
+            .unwrap();
+    }
+
+    let report = store
+        .usage(&query("project-a", T0, T0 + HOUR, T0 + HOUR))
+        .await
+        .unwrap();
+    assert_eq!(report.meters[0].buckets.len(), 1);
+    assert_eq!(hourly_total(&report), "60.000");
+
+    let aggregates: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metering_aggregates")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(aggregates, 1, "exactly one folded effect");
+    let intervals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metering_intervals")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(intervals, 1, "replays must not open extra intervals");
+
+    fixture.dispose(&[&store]).await;
+}
+
+#[tokio::test]
+async fn postgres_replayed_open_with_different_quantity_or_authority_fails_closed() {
+    let _guard = test_lock().await;
+    let Some(fixture) = Fixture::new().await else {
+        eprintln!("skipping PostgreSQL metering identity conflict: O3K_DATABASE_URL unavailable");
+        return;
+    };
+    let store = fixture.store().await;
+    store.ensure_authority(T0).await.unwrap();
+    store
+        .record_observation(&observation("project-a", "server-1", 1, true, T0))
+        .await
+        .unwrap();
+    store
+        .record_observation(&observation("project-a", "server-1", 0, false, T0 + 60_000))
+        .await
+        .unwrap();
+
+    // Same started instant but a different quantity must fail closed instead
+    // of being silently swallowed as a replay.
+    let mut replay = observation("project-a", "server-1", 2, true, T0);
+    assert!(matches!(
+        store.record_observation(&replay).await,
+        Err(KernelError::MeteringCorrupt(_))
+    ));
+
+    // Same quantity but a different authority label is likewise corruption.
+    replay.quantity = 1;
+    replay.authority = "o3k-other".into();
+    assert!(matches!(
+        store.record_observation(&replay).await,
+        Err(KernelError::MeteringCorrupt(_))
+    ));
+
+    // While an interval is still open, a same-quantity refresh under a
+    // different authority label is rejected too.
+    store
+        .record_observation(&observation("project-a", "server-2", 1, true, T0))
+        .await
+        .unwrap();
+    let mut foreign_authority = observation("project-a", "server-2", 1, true, T0 + 10_000);
+    foreign_authority.authority = "o3k-other".into();
+    assert!(matches!(
+        store.record_observation(&foreign_authority).await,
+        Err(KernelError::MeteringCorrupt(_))
+    ));
+
+    // A matching replay still converges and does not change the total.
+    store
+        .record_observation(&observation("project-a", "server-1", 1, true, T0))
+        .await
+        .unwrap();
+    let mut server_one = query("project-a", T0, T0 + HOUR, T0 + HOUR);
+    server_one.resource_id = Some("server-1".into());
+    let report = store.usage(&server_one).await.unwrap();
     assert_eq!(hourly_total(&report), "60.000");
 
     fixture.dispose(&[&store]).await;

@@ -84,26 +84,29 @@ observation lag to report.
 
 Focused tests added by this change:
 
-- `crates/o3k-kernel/src/metering.rs` (13): catalog integrity, no pricing or
+- `crates/o3k-kernel/src/metering.rs` (14): catalog integrity, no pricing or
   formula text, bucket splitting, end-instant exclusivity, `MAX_INGEST_BUCKETS`
   rejection, bucket-end overflow fail-closed, contribution overflow
   fail-closed, accumulator merging, quantity formatting, query bound and
-  alignment rejection, observation validation.
-- `crates/o3k-store/tests/metering_repository.rs` (27, SQLite): exact interval
+  alignment rejection, observation validation, full-range single-series
+  admission, aggregate-row and distinct-series bounds.
+- `crates/o3k-store/tests/metering_repository.rs` (32, SQLite): exact interval
   arithmetic, stopped intervals not accruing, idempotent replay of open and of
   close, replay of an open whose interval already closed, duplicate consume,
   close-without-open, zero-duration close, clock regression, pre-anchor
   observation refused, overlapping out-of-order open refused, quantity change,
-  hour-boundary split, day-granularity multi-day split, long interval, live open
-  contribution, authority status, authority anchor immutability and watermark
-  monotonicity, scope isolation, unrelated-resource filter, series and
-  open-interval bound rejection, aggregate overflow, restart durability,
+  hour-boundary split, day-granularity multi-day split, full-range single-series
+  day query, long interval, live open contribution, authority status, authority
+  anchor immutability and watermark monotonicity, scope isolation,
+  unrelated-resource filter, series and open-interval bound rejection,
+  aggregate-row bound rejection, aggregate overflow, restart durability,
   colon-bearing series identity, future-end partiality, snapshot mechanism,
-  concurrent reads, two writers folding once.
-- `crates/o3k-store/tests/postgres_metering.rs` (17, real PostgreSQL): the
+  concurrent reads, two writers folding once, cancelled write keeps the pool
+  usable, dropped write rolls back.
+- `crates/o3k-store/tests/postgres_metering.rs` (21, real PostgreSQL): the
   PostgreSQL parity of the above, plus concurrent release folding exactly once.
 - `crates/o3k-store/tests/metering_migration_upgrade.rs` (1): a pre-metering
-  schema upgrades with usable metering tables.
+  schema upgrades with usable metering tables and the open-series index.
 - `crates/o3k-native-api/src/metering.rs` (13): definition page bounds and
   cursor, catalog fidelity, exact JSON key sets, RFC3339 rendering, malformed
   instant rejection, status vocabulary, error mapping, unknown-parameter
@@ -115,9 +118,14 @@ Focused tests added by this change:
   `ReadUsageAll` discoverable in the authorization inventory, unknown parameter
   rejected, multiple meters, producible-set default, meter-count bound,
   alignment and unknown-meter rejection, `resource_id` narrowing.
-- `bins/o3kd/src/native_adapters/metering.rs` (8): state-to-consuming mapping,
-  unknown state corrupt, non-metered kind no-op, definition paging, allocation
-  close, exact lifecycle accrual, producible-meter filtering.
+- `crates/o3k-api/tests/native_volume_metering_repair.rs` (4): a lost volume
+  open is repaired by the next read, the state→consuming mapping is pinned, a
+  read during `Deleting` does not close, and create replay derives consuming
+  from the durable row.
+- `bins/o3kd/src/native_adapters/metering.rs` (8): state-to-consuming mapping
+  (re-exported from the reconciler as the single definition), unknown state
+  corrupt, non-metered kind no-op, definition paging, allocation close, exact
+  lifecycle accrual, producible-meter filtering.
 - `bins/o3kd/tests/native_metering_process.rs` (3): real HTTP
   definitions/authority, usage journey replay safety, undecodable-state refusal.
 - `bins/o3kd/tests/native_metering_lifecycle_process.rs` (6): lifecycle-driven
@@ -125,14 +133,22 @@ Focused tests added by this change:
   volume allocation exactness and replay safety, Cinder-compatible volume
   create/delete metering, recovery closing an interrupted volume delete,
   recovery deferring the mutation when the projection fails, capability hiding.
-- `crates/o3k-reconciler` (4) and `crates/o3k-compute` (4): ordered lifecycle
-  projection, replay does not duplicate the projected sequence, a failed
-  projection surfaces and leaves the step retriable, a losing compare-and-set
-  records no observation, a read-path projection failure does not fail
-  `GET /servers/{id}`, and a lost read-path projection is repaired on a later
-  drive.
+- `crates/o3k-reconciler` (9): ordered lifecycle projection, replay does not
+  duplicate the projected sequence, a failed projection surfaces and leaves the
+  step retriable, a losing compare-and-set records no observation, a failing
+  observer does not drop an agent observation, a duplicate observation repairs a
+  lost projection, a dispatch-rejected create accrues no compute metering,
+  a retried create terminal failure accrues no compute metering, and retry
+  exhaustion accrues no compute metering — each through the real durable
+  authority with restart and replay checks.
+- `crates/o3k-compute` (3): delete projects `DELETED`, a failing observer
+  surfaces on the mutation path, and a read-path projection failure does not
+  fail `GET /servers/{id}` with the idle-state repair skip.
 
-Repository gates:
+Repository gates (each command was exercised green on the current head while
+converging; the `[pending]` marks are placeholders that are filled only after
+the converged head is frozen, so that no post-approval commit invalidates the
+exact-head CI and human-approval gate):
 
 | Command | Result |
 | --- | --- |
@@ -161,15 +177,45 @@ losing compare-and-set, unenforced producibility, and several coverage gaps.
 
 Round 1 findings: BLOCKER 1, HIGH 3, MEDIUM 5, LOW 10. All fixed.
 
+Review round 2 (two independent reviewers, fresh orders) produced:
+BLOCKER 0, HIGH 1, MEDIUM 4, LOW 3. All fixed:
+
+- read-path repair could close a still-consuming `Deleting` interval — repairs
+  now only open/refresh consuming intervals; closing belongs to the
+  authoritative transition paths (regression: a read during `Deleting` leaves
+  the interval open and totals unchanged);
+- `MAX_USAGE_SERIES` bounded ingest rows rather than distinct series, spuriously
+  rejecting legitimate full-range queries — split into
+  `MAX_USAGE_AGGREGATE_ROWS = 25000` (work bound) and `MAX_USAGE_SERIES = 500`
+  (distinct-series cardinality bound), plus a full-range single-series test;
+- the SQLite write path was not cancellation-safe (raw `BEGIN IMMEDIATE`) —
+  moved to `pool.begin_with("BEGIN IMMEDIATE")` with rollback-on-drop;
+- the open-interval read had no covering index — added
+  `idx_metering_intervals_open_series` in both migrations;
+- no crash/failure-injection test existed between the CAS close and the fold —
+  added aborted-write rollback tests proving the interval stays open, aggregates
+  unchanged, and a replayed close converges;
+- no test pinned the disclosed failed-create residual (`0.000` usage, no open
+  interval, restart-stable) — added dispatch-rejection, retried-terminal-failure
+  and retry-exhaustion tests;
+- the native create-replay observation was state-independent and could reopen a
+  `Deleting` interval — it now derives consuming from the durable row;
+- doc wording implying full repair was made forward-only precise.
+
 Two consecutive independent clean convergence passes at one unchanged head are
 `[pending]` and are not claimed here.
 
 ## PostgreSQL evidence
 
 `crates/o3k-store/tests/postgres_metering.rs` runs against a disposable
-`postgres:16.4` container with `O3K_DATABASE_URL` set, one isolated database per
-test, executed with `--test-threads=1`. `O3K_DATABASE_URL` being absent is a
-skip, not a blocker.
+`postgres:16.4` container with `O3K_DATABASE_URL` set, one isolated database
+per test. Each test creates its own database, runs, then terminates every
+remaining backend for that database and drops it with `WITH (FORCE)` and a
+bounded retry, so the suite is robust under `cargo test`'s in-process
+parallelism and `cargo nextest`'s per-test process isolation alike — the
+fixture's teardown never depends on a process-level mutex. Verified by running
+the suite both ways against a real container. `O3K_DATABASE_URL` being absent is
+a skip, not a blocker.
 
 ## Honest non-claims
 

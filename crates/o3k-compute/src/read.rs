@@ -355,11 +355,10 @@ impl ComputeService {
         // Repair projection: re-read the durable resource and re-project its
         // current observed_state on every drive, before the re-drive guard, so
         // an observation lost by an earlier failed projection is healed by the
-        // next read. Idempotent and best-effort: it never fails the GET.
-        if let Ok(current) = self.store.get_resource(resource.id).await {
-            self.project_metering_best_effort(&current, &current.observed_state)
-                .await;
-        }
+        // next read. The helper only ever opens/refreshes a consuming interval
+        // (it never closes), is idempotent, and is best-effort: it never fails
+        // the GET.
+        self.repair_metering_from_durable_state(resource.id).await;
         let Ok(request) = serde_json::from_str::<CreateInstanceRequest>(&resource.desired_state)
         else {
             return;

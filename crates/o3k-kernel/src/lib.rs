@@ -62,11 +62,12 @@ pub use manifest::{
     ServiceHealth, ServiceLifecycleState, ServiceManifest, ServiceManifestV1,
 };
 pub use metering::{
-    Clock, INGEST_BUCKET_WIDTH_MS, LifecycleMeteringObserver, MAX_USAGE_BUCKETS, MAX_USAGE_METERS,
-    MAX_USAGE_RANGE_MS, MAX_USAGE_SERIES, METER_CATALOG, MeterAggregateRecord, MeterAggregation,
-    MeterDefinition, MeterIntervalRecord, MeterObservation, MeterUnit, MeterUsage,
-    MeterUsageReport, MeteringRepository, SystemClock, UsageBucket, UsageGranularity, UsageQuery,
-    UsageStatus, bucket_contributions, format_quantity_millis, meter_definition,
+    Clock, INGEST_BUCKET_WIDTH_MS, LifecycleMeteringObserver, MAX_USAGE_AGGREGATE_ROWS,
+    MAX_USAGE_BUCKETS, MAX_USAGE_METERS, MAX_USAGE_RANGE_MS, MAX_USAGE_SERIES, METER_CATALOG,
+    MeterAggregateRecord, MeterAggregation, MeterDefinition, MeterIntervalRecord, MeterObservation,
+    MeterUnit, MeterUsage, MeterUsageReport, MeteringRepository, SystemClock, UsageBucket,
+    UsageGranularity, UsageQuery, UsageStatus, bucket_contributions, format_quantity_millis,
+    meter_definition,
 };
 pub use operation::{Operation, OperationState};
 pub use principal::{Principal, PrincipalId, PrincipalKind, ServicePrincipal, UserPrincipal};

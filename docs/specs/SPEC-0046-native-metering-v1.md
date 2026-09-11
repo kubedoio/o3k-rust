@@ -153,9 +153,12 @@ Two independent writers therefore produce exactly one durable effect per logical
 transition. Correctness rests on durable uniqueness, compare-and-set and
 transactions, never on process-local locks.
 
-On a mutation path a projection failure is surfaced to the caller and the step
-is retried. The read-path repair projection is best-effort: it logs and is
-re-run on the next drive, because a metering hiccup must not fail a read.
+On a mutation path a projection failure is surfaced to the caller and the step is
+retried. Where a projection cannot be retried behind a transition that already
+committed, the projection is repaired by re-projecting the resource's durable
+state — which is idempotent and derived from truth — on the next observation or
+read of that same resource. The read-path repair projection is best-effort: it
+logs, because a metering hiccup must not fail a read.
 
 ## 7. Time semantics
 
@@ -195,14 +198,29 @@ instant used by the metering authority), `authority_started_at` and
 its own clock, so observation and evaluation share one time source; in
 production that clock is the system clock.
 
+`last_observed_at` is **authority-wide observability, not per-scope
+completeness evidence**. It is the most recent durable observation processed by
+the whole metering authority, so whichever scope was observed most recently sets
+it: a quiet scope can therefore appear fresher than it is, and `last_observed_at`
+must not be read as evidence that this scope is current. Per-scope completeness
+meaning comes only from `authority_started_at` and `observed_through`.
+
 Because recording is synchronous with the lifecycle authority, and because open
 intervals are evaluated live at query time rather than folded, a returned series
 is current as of `observed_through`. A requested period that extends beyond the
 evaluation instant is not yet fully observed and is therefore `partial`, never
-`complete`. `stale` is deliberately absent from the vocabulary rather than
-synthesized: metering has no asynchronous processing pipeline, so there is no
-observation lag that could be stale, and reporting one would be a fabrication.
-`complete`, `partial` and `unavailable` are the only truthful states.
+`complete`. `last_observed_at` is the whole authority's watermark, not this
+scope's, so it must not be read as per-scope completeness evidence.
+
+`stale` is deliberately absent from the vocabulary rather than synthesized:
+metering has no asynchronous processing pipeline, so there is no observation lag
+that could be stale, and reporting one would be a fabrication. One caveat is
+honest and documented instead: a projection that is lost (an observation whose
+commit landed after the durable transition, or an outage during a volume-open
+observe) is repaired **forward only** by the durable-state repair described in
+§6 — it never backdates, so the segment between the durable transition and the
+repair is absent, exactly as an imported resource's pre-authority segment is
+absent. `complete`, `partial` and `unavailable` are the only truthful states.
 
 ## 10. Boundedness
 
@@ -213,9 +231,16 @@ Hard maxima, enforced by rejection and never by truncation:
 | Query range | 366 days |
 | Output buckets per meter | 1100 |
 | Meters per query | 8 |
-| Durable aggregate series rows read | 5000 |
+| Aggregate rows read (resource × ingest bucket) | 25000 |
+| Distinct resource series read | 500 |
 | Open intervals read | 20000 |
 | Definitions page size | 200 |
+
+These bounds are independent: a request that satisfies any of them but exceeds
+another is rejected, so a maximal range plus a maximal series count is not
+claimable. Aggregate reads are indexed by scope, meter and ingest bucket, and
+open intervals by a partial index over open series only, so a query never scans
+closed history to find open intervals.
 
 Aggregates are read at the repository/SQL boundary with the scope as the leading
 predicate. A usage request never enumerates resources, volumes, networks or

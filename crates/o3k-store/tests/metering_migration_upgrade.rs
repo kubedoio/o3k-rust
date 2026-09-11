@@ -46,6 +46,16 @@ async fn table_exists(pool: &sqlx::SqlitePool, name: &str) -> bool {
     count > 0
 }
 
+async fn index_exists(pool: &sqlx::SqlitePool, name: &str) -> bool {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1")
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    count > 0
+}
+
 #[tokio::test]
 async fn sqlite_pre_metering_schema_upgrades_with_usable_metering_tables() {
     let path = std::env::temp_dir().join(format!(
@@ -109,6 +119,10 @@ async fn sqlite_pre_metering_schema_upgrades_with_usable_metering_tables() {
             "{name} must exist after the upgrade"
         );
     }
+    assert!(
+        index_exists(&check, "idx_metering_intervals_open_series").await,
+        "the open-interval read index must exist after the upgrade"
+    );
     check.close().await;
 
     let _ = std::fs::remove_file(&path);

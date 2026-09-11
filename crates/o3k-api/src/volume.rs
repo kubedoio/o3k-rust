@@ -53,6 +53,90 @@ pub async fn observe_volume_allocation(
         .map_err(|error| error.to_string())
 }
 
+/// Whether a durable volume state means the volume is consuming allocated
+/// byte-seconds.
+///
+/// This is the single canonical mapping. A volume consumes while its
+/// allocation exists at the provider: `Creating`, `Available`, `Attaching`,
+/// `InUse`, `Detaching` and `Unknown` all represent a durable allocation that
+/// exists or is being reconciled. `Requested` has not been dispatched, `Error`
+/// failed before an allocation was observed, and `Deleting`/`Deleted` are
+/// terminal closes.
+#[must_use]
+pub fn volume_state_consumes(state: VolumeState) -> bool {
+    matches!(
+        state,
+        VolumeState::Creating
+            | VolumeState::Available
+            | VolumeState::Attaching
+            | VolumeState::InUse
+            | VolumeState::Detaching
+            | VolumeState::Unknown
+    )
+}
+
+/// Best-effort repair of the canonical volume allocation observation from the
+/// durable volume state.
+///
+/// Called from volume read paths so a projection lost after the durable
+/// create/delete committed is repaired by the next read of that volume. The
+/// observation is idempotent by state, so re-projecting durable truth is not a
+/// fabrication; a failure is logged and never fails the read.
+///
+/// A repair only ever OPENS or REFRESHES a consuming interval. When the durable
+/// state is not consuming it skips entirely and never emits a close: closing is
+/// owned by the authoritative transition paths (`remove_native_volume`,
+/// recovery on provider absence), and a read that closed at the read instant
+/// would under-count a teardown tail and could permanently close an interval
+/// for a volume later re-tried out of `Deleting`.
+pub async fn repair_volume_metering(
+    metering: Option<&Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
+    record: &VolumeRecord,
+) {
+    if !volume_state_consumes(record.volume.state) {
+        return;
+    }
+    if let Err(error) = observe_volume_allocation(
+        metering,
+        &record.volume.project_id,
+        &record.volume.id.as_uuid().to_string(),
+        record.volume.size_bytes,
+        true,
+    )
+    .await
+    {
+        tracing::warn!(
+            %error,
+            volume_id = %record.volume.id,
+            "native volume read-path metering repair failed; the next read repairs it"
+        );
+    }
+}
+
+/// Opens the volume allocation meter from a durable row, only while the row is
+/// durably consuming.
+///
+/// Caller-side replays (an idempotent native create against an existing row)
+/// must never reopen a non-consuming row: closing belongs to the authoritative
+/// delete/provider-absence path. This keeps caller-side replay and the canonical
+/// transition using the same [`volume_state_consumes`] mapping.
+pub async fn observe_volume_open_if_consuming(
+    metering: Option<&Arc<dyn o3k_kernel::LifecycleMeteringObserver>>,
+    record: &VolumeRecord,
+) -> Result<(), String> {
+    if !volume_state_consumes(record.volume.state) {
+        return Ok(());
+    }
+    observe_volume_allocation(
+        metering,
+        &record.volume.project_id,
+        &record.volume.id.as_uuid().to_string(),
+        record.volume.size_bytes,
+        true,
+    )
+    .await
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct VolumeRequest {
     volume: VolumeCreate,
@@ -375,10 +459,17 @@ pub(crate) async fn list(
         return unavailable();
     };
     match store.list_volumes(&project_id).await {
-        Ok(records) => Json(VolumeListResponse {
-            volumes: records.iter().map(view).collect(),
-        })
-        .into_response(),
+        Ok(records) => {
+            // Repair any projection lost after a volume's durable transition;
+            // idempotent and best-effort per record.
+            for record in &records {
+                repair_volume_metering(state.metering_observer.as_ref(), record).await;
+            }
+            Json(VolumeListResponse {
+                volumes: records.iter().map(view).collect(),
+            })
+            .into_response()
+        }
         Err(_) => unavailable(),
     }
 }
@@ -395,13 +486,18 @@ pub(crate) async fn show(
         return volume_not_found();
     };
     match store.get_volume(id).await {
-        Ok(Some(record)) if record.volume.project_id == project_id => (
-            StatusCode::OK,
-            Json(VolumeResponse {
-                volume: view(&record),
-            }),
-        )
-            .into_response(),
+        Ok(Some(record)) if record.volume.project_id == project_id => {
+            // Repair any projection lost after this volume's durable transition;
+            // idempotent and best-effort so the read never fails on metering.
+            repair_volume_metering(state.metering_observer.as_ref(), &record).await;
+            (
+                StatusCode::OK,
+                Json(VolumeResponse {
+                    volume: view(&record),
+                }),
+            )
+                .into_response()
+        }
         Ok(_) => {
             keystone_error(StatusCode::NOT_FOUND, "Not Found", "volume not found").into_response()
         }

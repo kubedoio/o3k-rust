@@ -65,19 +65,13 @@ pub fn producible_meters(
 /// Decodes the storage-encoded compute-instance state into whether the
 /// instance consumes instance-seconds.
 ///
-/// `Some(true)` means the instance is running (or in a transient state that is
-/// still holding its runtime), `Some(false)` means it is not, and `None` means
-/// the value is not a state O3K can decode. A `None` is corrupt authority and
-/// must never be treated as idle: an unknown state could silently stop
-/// accruing usage that O3K actually owns.
-#[must_use]
-pub fn compute_instance_state_consuming(observed_state: &str) -> Option<bool> {
-    match observed_state.trim().to_ascii_uppercase().as_str() {
-        "ACTIVE" | "STARTING" | "STOPPING" | "REBOOTING" => Some(true),
-        "REQUESTED" | "BUILD" | "SHUTOFF" | "DELETING" | "DELETED" | "ERROR" => Some(false),
-        _ => None,
-    }
-}
+/// The single canonical state→consuming mapping now lives in
+/// [`o3k_reconciler::compute_instance_state_consuming`]; this adapter re-exports
+/// it so `o3kd` and the compute/reconciler repair paths share one definition.
+/// `Some(true)` means the instance still holds its runtime, `Some(false)` means
+/// it does not, and `None` is corrupt authority that must never be treated as
+/// idle (an unknown state could silently stop accruing owned usage).
+pub use o3k_reconciler::compute_instance_state_consuming;
 
 /// Maps a canonical durable metering failure into the bounded native error
 /// vocabulary. Bounds violations are client errors; everything else is either

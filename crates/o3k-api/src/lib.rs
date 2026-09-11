@@ -51,8 +51,9 @@ mod volume;
 mod volume_attachment;
 
 pub use volume::{
-    VOLUME_ALLOCATION_METER, observe_volume_allocation, realize_native_volume_create,
-    recover_native_volumes, remove_native_volume,
+    VOLUME_ALLOCATION_METER, observe_volume_allocation, observe_volume_open_if_consuming,
+    realize_native_volume_create, recover_native_volumes, remove_native_volume,
+    repair_volume_metering, volume_state_consumes,
 };
 
 pub use network::recover_l3_gateway_operations;

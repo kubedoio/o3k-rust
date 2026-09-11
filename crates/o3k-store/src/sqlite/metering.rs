@@ -6,13 +6,14 @@
 //! idempotent so replayed observations converge instead of double counting.
 
 use async_trait::async_trait;
-use o3k_kernel::metering::{MAX_OPEN_INTERVALS, UsageAccumulator};
+use o3k_kernel::metering::{MAX_OPEN_INTERVALS, MAX_USAGE_AGGREGATE_ROWS, UsageAccumulator};
 use o3k_kernel::{
     INGEST_BUCKET_WIDTH_MS, KernelError, MAX_USAGE_SERIES, MeterObservation, MeterUsage,
     MeterUsageReport, MeteringRepository, UsageBucket, UsageQuery, UsageStatus,
     bucket_contributions, format_quantity_millis, meter_definition,
 };
 use sqlx::Row;
+use std::collections::HashSet;
 
 use super::SqliteStore;
 
@@ -126,34 +127,11 @@ fn meter_usage(
     })
 }
 
-/// Finalizes the deliberately hand-managed `BEGIN IMMEDIATE` write
-/// transaction: COMMIT on success, or a best-effort ROLLBACK preserving the
-/// original error. `BEGIN IMMEDIATE` takes the write lock up front so the
-/// configured `busy_timeout` applies. Read paths use sqlx's transaction API
-/// instead, which rolls back on drop.
-async fn finish_transaction<T>(
-    connection: &mut sqlx::sqlite::SqliteConnection,
-    outcome: Result<T, KernelError>,
-) -> Result<T, KernelError> {
-    match outcome {
-        Ok(value) => match sqlx::query("COMMIT").execute(&mut *connection).await {
-            Ok(_) => Ok(value),
-            Err(error) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
-                Err(store_err(error))
-            }
-        },
-        Err(error) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
-            Err(error)
-        }
-    }
-}
-
 struct OpenInterval {
     interval_id: String,
     quantity: i64,
     started_at_ms: i64,
+    authority: String,
 }
 
 impl SqliteStore {
@@ -162,7 +140,7 @@ impl SqliteStore {
         observation: &MeterObservation,
     ) -> Result<Option<OpenInterval>, KernelError> {
         let row = sqlx::query(
-            "SELECT interval_id, quantity, started_at_ms FROM metering_intervals \
+            "SELECT interval_id, quantity, started_at_ms, authority FROM metering_intervals \
              WHERE meter_key = ?1 AND scope = ?2 AND resource_id = ?3 AND ended_at_ms IS NULL \
              ORDER BY started_at_ms DESC LIMIT 1",
         )
@@ -179,7 +157,46 @@ impl SqliteStore {
             interval_id: row.try_get("interval_id").map_err(store_err)?,
             quantity: row.try_get("quantity").map_err(store_err)?,
             started_at_ms: row.try_get("started_at_ms").map_err(store_err)?,
+            authority: row.try_get("authority").map_err(store_err)?,
         }))
+    }
+
+    /// Whether a row already carries the observation's deterministic interval
+    /// id and describes exactly the same interval. A match means a replayed
+    /// open may converge; a mismatch is corruption rather than something to
+    /// silently swallow.
+    async fn deterministic_interval_matches(
+        connection: &mut sqlx::sqlite::SqliteConnection,
+        observation: &MeterObservation,
+        quantity: i64,
+    ) -> Result<bool, KernelError> {
+        let row = sqlx::query(
+            "SELECT meter_key, scope, resource_id, quantity, authority \
+             FROM metering_intervals WHERE interval_id = ?1",
+        )
+        .bind(interval_id(observation))
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(store_err)?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        let meter_key: String = row.try_get("meter_key").map_err(store_err)?;
+        let scope: String = row.try_get("scope").map_err(store_err)?;
+        let resource_id: String = row.try_get("resource_id").map_err(store_err)?;
+        let stored_quantity: i64 = row.try_get("quantity").map_err(store_err)?;
+        let authority: String = row.try_get("authority").map_err(store_err)?;
+        if meter_key != observation.meter_key
+            || scope != observation.scope
+            || resource_id != observation.resource_id
+            || stored_quantity != quantity
+            || authority != observation.authority
+        {
+            return Err(KernelError::MeteringCorrupt(
+                "metering interval identity conflict".into(),
+            ));
+        }
+        Ok(true)
     }
 
     /// Latest end instant already folded for the series, if any. Used to reject
@@ -277,8 +294,15 @@ impl SqliteStore {
                 }
                 Err(error) if is_unique_violation(&error) => {
                     // Either the deterministic interval already exists (replay
-                    // of an already-closed interval) or a concurrent writer
-                    // opened it; both converge on the existing row.
+                    // of an already-closed interval, or a concurrent open of the
+                    // same one) or a concurrent writer owns a different open
+                    // interval for the series. A replay must match the existing
+                    // row exactly; a mismatch is corruption, never swallowed.
+                    if Self::deterministic_interval_matches(connection, observation, quantity)
+                        .await?
+                    {
+                        return Ok(());
+                    }
                     open = Self::load_open_interval(connection, observation).await?;
                 }
                 Err(error) => return Err(store_err(error)),
@@ -297,6 +321,11 @@ impl SqliteStore {
                     if existing.quantity != quantity {
                         return Err(KernelError::MeteringCorrupt(
                             "metering quantity changed within an open interval".into(),
+                        ));
+                    }
+                    if existing.authority != observation.authority {
+                        return Err(KernelError::MeteringCorrupt(
+                            "metering authority changed within an open interval".into(),
                         ));
                     }
                     return Ok(());
@@ -321,7 +350,7 @@ impl SqliteStore {
         .await
         .map_err(store_err)?;
         if updated.rows_affected() == 0 {
-            return Self::replay_or_corrupt(connection, open, observation).await;
+            return Self::replay_or_corrupt(connection, open).await;
         }
 
         // A zero-duration interval accrues nothing. Folding would ask
@@ -385,29 +414,24 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// A concurrent writer already closed the interval. An exact end-instant
-    /// match is an idempotent replay and must not fold again.
+    /// A concurrent writer already closed the interval, so this close folded
+    /// nothing. It is an idempotent no-op for any end instant.
     async fn replay_or_corrupt(
         connection: &mut sqlx::sqlite::SqliteConnection,
         open: &OpenInterval,
-        observation: &MeterObservation,
     ) -> Result<(), KernelError> {
-        let row = sqlx::query("SELECT ended_at_ms FROM metering_intervals WHERE interval_id = ?1")
+        let row = sqlx::query("SELECT interval_id FROM metering_intervals WHERE interval_id = ?1")
             .bind(&open.interval_id)
             .fetch_optional(&mut *connection)
             .await
             .map_err(store_err)?;
         match row {
-            Some(row) => {
-                let ended: Option<i64> = row.try_get("ended_at_ms").map_err(store_err)?;
-                if ended == Some(observation.observed_at_ms) {
-                    Ok(())
-                } else {
-                    Err(KernelError::MeteringCorrupt(
-                        "metering interval closed by a different observation".into(),
-                    ))
-                }
-            }
+            // A concurrent writer already closed the interval. Two truthful
+            // close observations of the same transition (a retried delete
+            // racing recovery) can carry different instants; the loser folded
+            // nothing, so it is an idempotent no-op regardless of the end
+            // instant. Only a vanished interval is corruption.
+            Some(_) => Ok(()),
             None => Err(KernelError::MeteringCorrupt(
                 "metering interval disappeared during close".into(),
             )),
@@ -418,12 +442,15 @@ impl SqliteStore {
         connection: &mut sqlx::sqlite::SqliteConnection,
         query: &UsageQuery,
         meter_key: &str,
-    ) -> Result<Vec<(i64, i64)>, KernelError> {
-        let limit = i64::try_from(MAX_USAGE_SERIES + 1)
-            .map_err(|_| KernelError::InvalidIdentifier("usage series bound".into()))?;
+    ) -> Result<Vec<(String, i64, i64)>, KernelError> {
+        // The work bound is one row per `resource × ingest bucket`; the
+        // cardinality bound is how many distinct series those rows span. Both
+        // are enforced here and reject rather than truncate.
+        let limit = i64::try_from(MAX_USAGE_AGGREGATE_ROWS + 1)
+            .map_err(|_| KernelError::InvalidIdentifier("usage aggregate rows bound".into()))?;
         let rows = if let Some(resource_id) = &query.resource_id {
             sqlx::query(
-                "SELECT bucket_start_ms, quantity_millis FROM metering_aggregates \
+                "SELECT resource_id, bucket_start_ms, quantity_millis FROM metering_aggregates \
                  WHERE scope = ?1 AND meter_key = ?2 AND resource_id = ?3 \
                    AND bucket_start_ms >= ?4 AND bucket_start_ms < ?5 \
                  ORDER BY bucket_start_ms, resource_id LIMIT ?6",
@@ -439,7 +466,7 @@ impl SqliteStore {
             .map_err(store_err)?
         } else {
             sqlx::query(
-                "SELECT bucket_start_ms, quantity_millis FROM metering_aggregates \
+                "SELECT resource_id, bucket_start_ms, quantity_millis FROM metering_aggregates \
                  WHERE scope = ?1 AND meter_key = ?2 \
                    AND bucket_start_ms >= ?3 AND bucket_start_ms < ?4 \
                  ORDER BY bucket_start_ms, resource_id LIMIT ?5",
@@ -453,14 +480,26 @@ impl SqliteStore {
             .await
             .map_err(store_err)?
         };
-        rows.iter()
-            .map(|row| {
-                Ok((
-                    row.try_get("bucket_start_ms").map_err(store_err)?,
-                    row.try_get("quantity_millis").map_err(store_err)?,
-                ))
-            })
-            .collect()
+        if rows.len() > MAX_USAGE_AGGREGATE_ROWS {
+            return Err(KernelError::InvalidIdentifier(
+                "usage aggregate rows bound".into(),
+            ));
+        }
+        let mut parsed = Vec::with_capacity(rows.len());
+        let mut series = HashSet::with_capacity(rows.len().min(MAX_USAGE_SERIES + 1));
+        for row in &rows {
+            let resource_id: String = row.try_get("resource_id").map_err(store_err)?;
+            series.insert(resource_id.clone());
+            parsed.push((
+                resource_id,
+                row.try_get("bucket_start_ms").map_err(store_err)?,
+                row.try_get("quantity_millis").map_err(store_err)?,
+            ));
+        }
+        if series.len() > MAX_USAGE_SERIES {
+            return Err(KernelError::InvalidIdentifier("usage series bound".into()));
+        }
+        Ok(parsed)
     }
 
     async fn load_open_intervals(
@@ -542,11 +581,11 @@ impl SqliteStore {
         for meter_key in &query.meter_keys {
             let mut accumulator = UsageAccumulator::new();
 
-            let aggregates = Self::load_aggregates(connection, query, meter_key).await?;
-            if aggregates.len() > MAX_USAGE_SERIES {
-                return Err(KernelError::InvalidIdentifier("usage series bound".into()));
-            }
-            for (bucket_start_ms, quantity_millis) in aggregates {
+            // `load_aggregates` enforces both the aggregate-row work bound and
+            // the distinct-series cardinality bound.
+            for (_resource_id, bucket_start_ms, quantity_millis) in
+                Self::load_aggregates(connection, query, meter_key).await?
+            {
                 accumulator.add(query.granularity, bucket_start_ms, quantity_millis)?;
             }
 
@@ -607,18 +646,19 @@ impl MeteringRepository for SqliteStore {
 
     async fn record_observation(&self, observation: &MeterObservation) -> Result<(), KernelError> {
         observation.validate()?;
-        // `BEGIN IMMEDIATE` is deliberate (it takes the write lock up front so
-        // the configured `busy_timeout` applies, matching `sqlite/placement.rs`)
-        // and therefore bypasses sqlx's transaction API. It must always be
-        // finished by `finish_transaction`, never dropped, so the pooled
-        // connection is not returned inside an open write transaction.
-        let mut connection = self.pool.acquire().await.map_err(store_err)?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut *connection)
+        // `BEGIN IMMEDIATE` takes the write lock up front so the configured
+        // `busy_timeout` applies (matching `sqlite/placement.rs`). sqlx's
+        // `begin_with` still returns a `Transaction`, which rolls back on drop,
+        // so a cancelled future can no longer leak an open write transaction
+        // into the pool.
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(store_err)?;
-        let outcome = Self::record_observation_tx(&mut connection, observation).await;
-        finish_transaction(&mut connection, outcome).await
+        Self::record_observation_tx(&mut transaction, observation).await?;
+        transaction.commit().await.map_err(store_err)?;
+        Ok(())
     }
 
     async fn usage(&self, query: &UsageQuery) -> Result<MeterUsageReport, KernelError> {
@@ -631,5 +671,92 @@ impl MeteringRepository for SqliteStore {
         let report = Self::usage_snapshot(&mut transaction, query).await?;
         transaction.commit().await.map_err(store_err)?;
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use o3k_kernel::MeteringRepository;
+
+    const T0: i64 = 100 * INGEST_BUCKET_WIDTH_MS;
+
+    fn observation(consuming: bool, at: i64) -> MeterObservation {
+        MeterObservation {
+            meter_key: "compute:instance_seconds".into(),
+            scope: "project-a".into(),
+            resource_id: "server-1".into(),
+            quantity: if consuming { 1 } else { 0 },
+            consuming,
+            observed_at_ms: at,
+            authority: "o3k-lifecycle".into(),
+        }
+    }
+
+    /// `replay_or_corrupt` is only reached when a concurrent writer closes the
+    /// interval between this transaction's load and its guarded update, which
+    /// the public API cannot force. Call it directly to pin the semantics.
+    #[tokio::test]
+    async fn replay_or_corrupt_is_idempotent_for_any_closed_end_instant() {
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        let open_observation = observation(true, T0);
+        store.ensure_authority(T0).await.unwrap();
+        store.record_observation(&open_observation).await.unwrap();
+        store
+            .record_observation(&observation(false, T0 + 60_000))
+            .await
+            .unwrap();
+
+        let closed = OpenInterval {
+            interval_id: interval_id(&open_observation),
+            quantity: 1,
+            started_at_ms: T0,
+            authority: "o3k-lifecycle".into(),
+        };
+        let mut connection = store.pool.acquire().await.unwrap();
+        // Already closed by the winner; the loser folded nothing and must not
+        // be turned into an error just because its instant differs.
+        SqliteStore::replay_or_corrupt(&mut connection, &closed)
+            .await
+            .unwrap();
+
+        // A vanished interval is still corruption.
+        let vanished = OpenInterval {
+            interval_id: "missing-interval".into(),
+            ..closed
+        };
+        assert!(matches!(
+            SqliteStore::replay_or_corrupt(&mut connection, &vanished).await,
+            Err(KernelError::MeteringCorrupt(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropped_write_transaction_rolls_back_and_keeps_the_pool_usable() {
+        // In-memory store => a single pooled connection, so a write transaction
+        // that leaked back into the pool would be observed immediately.
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        {
+            let mut transaction = store.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            sqlx::query(
+                "INSERT INTO metering_authority (id, authority_started_at_ms, last_observed_at_ms) \
+                 VALUES (1, 5, 5) ON CONFLICT (id) DO NOTHING",
+            )
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+            drop(transaction);
+        }
+
+        // The dropped transaction must have rolled back: the later anchor wins.
+        store.ensure_authority(7).await.unwrap();
+        let anchor: i64 = sqlx::query_scalar(
+            "SELECT authority_started_at_ms FROM metering_authority WHERE id = 1",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(anchor, 7);
     }
 }

@@ -81,6 +81,18 @@ impl GenericResourceApplication {
         .map_err(|_| ResourceApplicationError::Retryable)
     }
 
+    /// Replays the volume open only while the durable row is consuming, so a
+    /// caller-side idempotent create cannot reopen a `Deleting`/`Deleted`/
+    /// `Error` row (closing belongs to the authoritative delete path).
+    async fn open_volume_metering_if_consuming(
+        &self,
+        record: &o3k_store::VolumeRecord,
+    ) -> Result<(), ResourceApplicationError> {
+        o3k_api::observe_volume_open_if_consuming(self.metering.as_ref(), record)
+            .await
+            .map_err(|_| ResourceApplicationError::Retryable)
+    }
+
     /// The process configuration historically names the external network
     /// selector `...REALM_ID`, while compute/network composition consumes it
     /// as a canonical external-network ID. Resolve the active realm at the
@@ -772,19 +784,25 @@ impl ResourceApplication for GenericResourceApplication {
                         .and_then(serde_json::Value::as_str),
                 ))
             }
-            "volume:volume" => self
-                .store
-                .get_volume(id)
-                .await
-                .map_err(|_| ResourceApplicationError::NotFound)
-                .and_then(|record| match record {
+            "volume:volume" => {
+                let record = self
+                    .store
+                    .get_volume(id)
+                    .await
+                    .map_err(|_| ResourceApplicationError::NotFound)?;
+                match record {
                     Some(record)
                         if record.volume.project_id == auth.effective_scope().id().as_str() =>
                     {
+                        // Repair a projection lost after this volume's durable
+                        // transition; idempotent and best-effort so a metering
+                        // hiccup never fails the read.
+                        o3k_api::repair_volume_metering(self.metering.as_ref(), &record).await;
                         Ok(native_volume_json(&record))
                     }
                     _ => Err(ResourceApplicationError::NotFound),
-                }),
+                }
+            }
             "volume:volume_attachment" => {
                 let record = self
                     .store
@@ -1383,13 +1401,8 @@ impl ResourceApplication for GenericResourceApplication {
                     // observation is replayed here rather than only in the
                     // fresh-insert path. Without this, a retry after a failed
                     // first observation would silently drop the allocation.
-                    self.observe_volume_allocation(
-                        auth.effective_scope().id().as_str(),
-                        resource_id,
-                        existing.volume.size_bytes,
-                        true,
-                    )
-                    .await?;
+                    // The replay only opens while the row is durably consuming.
+                    self.open_volume_metering_if_consuming(&existing).await?;
                     return Ok(MutationResult {
                         operation_id: operation_id.to_string(),
                         resource_id: Some(resource_id.to_string()),
