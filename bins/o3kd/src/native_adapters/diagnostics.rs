@@ -88,7 +88,9 @@ fn availability_str(availability: AgentAvailability) -> &'static str {
 ///    authority dominates a healthy-looking agent);
 /// 8. unrecognized durable state (corrupt authority) -> Unknown / no reason
 ///    (mirrors the store's corrupt-state handling; never reported healthy);
-/// 9. otherwise                -> Healthy.
+/// 9. live snapshot with no observation time -> Unknown / NeverObserved (the
+///    registry could not supply a timestamp; never reported healthy);
+/// 10. otherwise                -> Healthy.
 #[allow(clippy::needless_pass_by_value)]
 fn provider_status(
     snap: Option<&AgentNodeSnapshot>,
@@ -151,6 +153,16 @@ fn provider_status(
         "Enabled" | "Draining" | "Unavailable" | "Deleted"
     ) {
         return (DiagnosticStatus::Unknown, None);
+    }
+    // A live snapshot with no observation time cannot be confirmed fresh.
+    // The `AgentNodeRegistry` contract is explicit: a registry that cannot
+    // supply an observation time returns `None`, which is projected as
+    // `unknown` — never as `healthy`.
+    if observed.is_none() {
+        return (
+            DiagnosticStatus::Unknown,
+            Some(DiagnosticReason::NeverObserved),
+        );
     }
     (DiagnosticStatus::Healthy, None)
 }
@@ -305,11 +317,13 @@ impl DiagnosticsReaderAdapter {
         let sessions = match self.store.list_active_controller_sessions().await {
             Ok(sessions) => sessions,
             Err(_) => {
+                // The coordination authority could not be read, not "never
+                // observed" — report it as an unavailable dependency.
                 return ControlPlaneStatus {
                     status: DiagnosticStatus::Unavailable,
                     active_sessions: 0,
                     observed_at_unix_ms: None,
-                    reason: Some(DiagnosticReason::NeverObserved),
+                    reason: Some(DiagnosticReason::DependencyUnavailable),
                 };
             }
         };
@@ -1156,6 +1170,24 @@ mod tests {
         );
         assert_eq!(status, DiagnosticStatus::Unknown);
         assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn provider_status_live_snapshot_without_observation_time_is_never_healthy() {
+        // A live snapshot with no observation timestamp must be unknown, never
+        // healthy (the AgentNodeRegistry contract: None -> unknown).
+        let (status, reason) = provider_status(
+            Some(&snapshot(
+                "provider-a",
+                AgentAvailability::Available,
+                AgentAdministrativeState::Enabled,
+            )),
+            "Enabled",
+            None,
+            now_unix_ms(),
+        );
+        assert_eq!(status, DiagnosticStatus::Unknown);
+        assert_eq!(reason, Some(DiagnosticReason::NeverObserved));
     }
 
     #[test]

@@ -58,7 +58,8 @@ From most to least severe, and never reporting `healthy` from durable placement 
 6. last heartbeat older than the lease → `stale` / `observation_stale`;
 7. durable state `Unavailable` (scheduler out-of-service) while the agent reports healthy → `unavailable` / `administratively_disabled` (the durable authority dominates a healthy-looking agent);
 8. unrecognized durable state (corrupt authority) → `unknown` (mirrors the store's corrupt-state handling; never reported healthy);
-9. otherwise → `healthy`.
+9. live snapshot with no observation time → `unknown` / `never_observed` (the registry could not supply a timestamp; never reported healthy);
+10. otherwise → `healthy`.
 
 ### Service status mapping
 

@@ -32,7 +32,7 @@ Each projection source class and its canonical authority:
 ## Status semantics
 
 - Vocabulary: `healthy`, `degraded`, `unavailable`, `stale`, `unknown` — distinct by design; `unknown` (never observed) and `stale` (observation older than freshness) never collapse into `healthy`.
-- Provider precedence: never-observed → `unknown` even if durable `Enabled` (restart safety); `Disabled`/`Deleted` → `unavailable`; `Draining` → `degraded`; agent `Unavailable` → `stale`/`unavailable` (`heartbeat_lost`); heartbeat older than lease → `stale`; durable `Unavailable` while the agent reports healthy → `unavailable`; an unrecognized durable state (corrupt authority) → `unknown`, never `healthy`; else `healthy`.
+- Provider precedence: never-observed → `unknown` even if durable `Enabled` (restart safety); `Disabled`/`Deleted` → `unavailable`; `Draining` → `degraded`; agent `Unavailable` → `stale`/`unavailable` (`heartbeat_lost`); heartbeat older than lease → `stale`; durable `Unavailable` while the agent reports healthy → `unavailable`; an unrecognized durable state (corrupt authority) → `unknown`; a live snapshot with no observation time → `unknown`, never `healthy`; else `healthy`.
 - Service mapping: `Ready`→healthy, `NotReady`→unavailable/`readiness_failed`, `Incompatible`→degraded/`protocol_incompatible`, `Disabled`→unavailable/`administratively_disabled`, `Declared`→unknown/`never_observed`.
 - Aggregate summary: worst of services and providers aggregates; any unavailable/stale/degraded degrades the platform.
 
@@ -120,6 +120,7 @@ The following tests were added by the implementation and must pass:
   - `provider_durably_unavailable_is_not_healthy_even_with_live_agent`
   - `capacity_masked_provider_over_allocation_is_degraded`
   - `provider_status_unrecognized_durable_state_is_never_healthy`
+  - `provider_status_live_snapshot_without_observation_time_is_never_healthy`
 - `crates/o3k-store` (bounded placement reads exercised by the adapter tests against the real SQLite adapter): `list_providers_bounded`, `capacity_summary` fail-closed at 64 classes, and the direct store tests `sqlite_list_provider_states_pagination_and_narrow_read` and `sqlite_placement_diagnostics_capacity_and_bounded_providers` for `list_provider_states`/`capacity_summary` (including `providers_over_allocated`).
 - `bins/o3kd/tests/native_diagnostics_process.rs` (real-adapter process tests): cover the adapter leak boundary that the DTO structural check cannot.
 
