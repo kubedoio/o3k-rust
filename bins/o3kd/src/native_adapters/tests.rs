@@ -688,6 +688,68 @@ mod native_compute_tests {
     }
 
     #[tokio::test]
+    async fn native_network_replay_with_changed_name_conflicts() {
+        let (router, _, _, _) = setup().await;
+        let router = &router;
+        let first = serde_json::json!({"spec": {"name": "original-name"}});
+        let (status, created) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-rename", first),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        // Same key, different name: key reuse with changed semantics is a
+        // conflict, not a silent replay of the original resource.
+        let changed = serde_json::json!({"spec": {"name": "changed-name"}});
+        let (status, conflict) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-rename", changed),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    }
+
+    #[tokio::test]
+    async fn native_network_replay_after_delete_is_not_a_replay() {
+        let (router, _, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({"spec": {"name": "recreated-candidate"}});
+        let (status, created) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-delete-replay", body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let network_id = created["resource_id"]
+            .as_str()
+            .expect("network id")
+            .to_owned();
+        let delete_response = router
+            .clone()
+            .oneshot(authed_delete(
+                &format!("/network/networks/{network_id}"),
+                "a",
+                "net-delete-replay-del",
+            ))
+            .await
+            .expect("delete request");
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+        // A same-key retry after deletion must not treat the DELETED ledger
+        // tombstone as a replay target: it fails closed (conflict) instead of
+        // splitting fresh canonical authority from a stale ledger row.
+        let (status, retried) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-delete-replay", body),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "same-key retry after delete must fail closed: {retried}"
+        );
+    }
+
+    #[tokio::test]
     async fn native_network_create_compensates_canonical_on_ledger_conflict() {
         let (router, store, _, _) = setup().await;
         let router = &router;

@@ -203,11 +203,22 @@ outside #907's evidence-only scope.
     duplicated instead of converging, and the migration-envelope fields the
     arm still read were unreachable through the HTTP contract
     (`NetworkCreateSpec` is `deny_unknown_fields`). Fixed: the canonical id
-    derives deterministically from the idempotency key (volume-arm pattern),
-    a same-key retry returns the original resource (canonical and ledger
-    replay are both recognized), the dead envelope reads are removed, and
-    `update_for` now rejects a mismatched `kind` exactly like create.
-    Regressions: `native_network_create_replay_returns_same_resource`,
+    derives deterministically from the idempotency key with the resource
+    type in the derivation material (`{scope}:network:network:{key}`; the
+    volume and volume-attachment arms use the same type-prefixed form so one
+    key can never collide across types), a same-key retry with identical
+    semantics returns the original resource (canonical and ledger replay are
+    both recognized), a same-key retry with a changed name is an
+    IdempotencyConflict, a same-key retry after deletion fails closed
+    (a DELETED ledger tombstone is never a replay target), the dead envelope
+    reads are removed, and `update_for` rejects a mismatched `kind` exactly
+    like create. Upgrade note: the type-prefixed derivation is an observable
+    id change for a given key; a same-key retry issued across the upgrade is
+    treated as a new create rather than a replay (in-flight reservations
+    keep their recorded operation identity, so accepted calls replay
+    correctly). Regressions: `native_network_create_replay_returns_same_resource`,
+    `native_network_replay_with_changed_name_conflicts`,
+    `native_network_replay_after_delete_is_not_a_replay`,
     `production_router_update_rejects_mismatched_resource_kind`
     (`crates/o3k-api/tests/native_compute_update_route.rs`).
 
@@ -255,7 +266,13 @@ head is frozen):
   P12-IAM.7 suite (a single IdP/store fixture via `O3K_P12_7_AFTER_HOOK`):
   quota limits are set relative to live usage, metering totals are narrowed
   to the gate's own closed resources, and the operator assignment
-  provenance is asserted loudly (fix 8 above) rather than assumed.
+  provenance is asserted loudly at the start of the gate (`seed_store`) rather than assumed.
+- The update arm's post-acceptance terminalization (fix 6) has no direct
+  unit test: injecting a store failure between the resource write and the
+  operation-state write requires a fault-injection seam the concrete
+  `O3kStore` type does not expose. The branch is defense-in-depth over an
+  already-durable precondition design; the replay/conflict/precondition
+  paths around it are fully covered.
 - Cross-surface network symmetry is directional: a natively created network
   is visible to the Neutron-compatible surface (shared canonical authority),
   but a Neutron-created network has no generic-ledger row by design, so the

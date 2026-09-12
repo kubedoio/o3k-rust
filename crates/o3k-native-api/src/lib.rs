@@ -560,15 +560,24 @@ fn action_metadata(
         if *operation == LifecycleOperation::Create && !create_reachable {
             continue;
         }
+        if *operation == LifecycleOperation::List && !collection_supported {
+            continue;
+        }
+        // List is a bounded read, not an asynchronous instance mutation.
+        let (target, asynchronous) = if *operation == LifecycleOperation::List {
+            ("collection", false)
+        } else {
+            ("instance", true)
+        };
         actions.push(ActionSchemaMetadata {
             name: action.action().to_owned(),
             action_id: action.to_string(),
-            target: "instance".to_owned(),
+            target: target.to_owned(),
             input: Some("https://o3k.io/schemas/native-action-input/v1".to_owned()),
             output: Some(
                 "https://o3k.io/contracts/native-mutation-result-v1.schema.json".to_owned(),
             ),
-            asynchronous: true,
+            asynchronous,
         });
     }
     actions.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1402,6 +1411,10 @@ mod tests {
         assert!(
             !subnet_actions.contains(&"create"),
             "network:subnet actions must not advertise create: {subnet}"
+        );
+        assert!(
+            !subnet_actions.contains(&"CreateSubnet"),
+            "network:subnet actions must not advertise the canonical create action either: {subnet}"
         );
         // A service without a ready controller advertises no lifecycle
         // operations at all (previously only list was readiness-gated).

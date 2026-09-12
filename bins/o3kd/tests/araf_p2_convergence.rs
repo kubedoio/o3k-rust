@@ -648,13 +648,15 @@ fn scan_o3kd_log(data_dir: &std::path::Path, secrets: &[(&str, String)]) {
         "private-key marker leaked into the o3kd log {}",
         log_path.display()
     );
-    for marker in ["postgres://", "agent_epoch"] {
-        assert!(
-            !content.contains(marker),
-            "marker {marker} leaked into the o3kd log {}",
-            log_path.display()
-        );
-    }
+    // `postgres://` (DSN material) must never reach the log. `agent_epoch`
+    // is intentionally body-only: it is a legitimate tracing field and SQL
+    // column name inside the process, and only the diagnostics *contract*
+    // forbids it in responses.
+    assert!(
+        !content.contains("postgres://"),
+        "DSN marker leaked into the o3kd log {}",
+        log_path.display()
+    );
 }
 
 #[tokio::test]
@@ -1359,11 +1361,17 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
         current_generation > server_a_generation,
         "domain actions must advance the durable generation: before={server_a_generation} after={current_generation}"
     );
+    // Missing If-Match must be rejected. The probe carries an idempotency
+    // key (so the observed 400 is provably the missing-precondition rule,
+    // not the missing-key rule, which is checked first).
     let no_match = api
-        .put(
+        .raw(
+            reqwest::Method::PUT,
             &format!("/o3k/v1/compute/servers/{server_a_id}"),
             Some(&alice_token),
-            json!({"spec": {"name": "stale"}}),
+            Some(json!({"spec": {"name": "no-match-probe"}})),
+            Some("araf-update-no-if-match"),
+            None,
         )
         .await;
     assert_eq!(no_match.status, 400, "{}", no_match.body);

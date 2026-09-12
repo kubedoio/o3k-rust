@@ -605,7 +605,13 @@ impl ResourceApplication for GenericResourceApplication {
                     .get_canonical_operation(stored.operation_id)
                     .await
                     .map_err(|_| ResourceApplicationError::Internal)?;
-                if stored_operation.state == o3k_store::OperationState::Failed {
+                if matches!(
+                    stored_operation.state,
+                    o3k_store::OperationState::Failed | o3k_store::OperationState::UnknownOutcome
+                ) {
+                    // Terminal-but-unknown or failed: the caller must retry
+                    // with a fresh key instead of replaying an indeterminate
+                    // result forever.
                     return Err(ResourceApplicationError::Conflict);
                 }
                 return Ok(MutationResult {
@@ -695,25 +701,30 @@ impl ResourceApplication for GenericResourceApplication {
             .await
         {
             // The operation was already accepted durably; a post-acceptance
-            // write failure (a concurrent writer advancing the generation
-            // between the precondition and the write, or a store error) must
-            // terminalize it. `lifecycle:update` has no reconciler handler,
-            // so a lingering Pending operation would make same-key replays
-            // return 202 forever with no recovery path.
+            // write failure must terminalize it — `lifecycle:update` has no
+            // reconciler handler, so a lingering Pending operation would
+            // make same-key replays return 202 forever. A CAS rejection
+            // proves the update did not apply (Failed); any other store
+            // error leaves the outcome genuinely unknown.
+            let terminal_state = if matches!(error, o3k_store::StoreError::StaleGeneration) {
+                o3k_kernel::OperationState::Failed
+            } else {
+                o3k_kernel::OperationState::UnknownOutcome
+            };
             let terminal = o3k_store::CanonicalOperationLifecycleUpdate::new(
-                o3k_kernel::OperationState::Failed,
+                terminal_state,
                 1,
                 None,
-                Some(now.clone()),
-                Some(
-                    serde_json::to_string(&serde_json::json!({
-                        "category": "resource_write_failed",
-                        "retryable": matches!(error, o3k_store::StoreError::StaleGeneration),
-                    }))
-                    .unwrap_or_else(|_| "{\"category\":\"resource_write_failed\"}".to_owned()),
-                ),
+                if terminal_state == o3k_kernel::OperationState::Failed {
+                    Some(now.clone())
+                } else {
+                    None
+                },
+                Some("resource_write_failed".to_owned()),
             )
             .map_err(|_| ResourceApplicationError::Internal)?;
+            // Best effort: if the terminalization write itself fails, the
+            // operation may stay Pending; nothing more can be done inline.
             let _ = self
                 .store
                 .update_canonical_operation_lifecycle(operation_id, &terminal)
@@ -729,14 +740,33 @@ impl ResourceApplication for GenericResourceApplication {
             o3k_kernel::OperationState::Succeeded,
             1,
             Some(now.clone()),
-            Some(now),
+            Some(now.clone()),
             None,
         )
         .map_err(|_| ResourceApplicationError::Internal)?;
-        self.store
+        if let Err(error) = self
+            .store
             .update_canonical_operation_lifecycle(operation_id, &lifecycle)
             .await
+        {
+            // The resource mutation applied but the operation record could
+            // not be marked Succeeded: the truthful state is UnknownOutcome
+            // (terminal without finished_at), so same-key replays terminate
+            // deterministically instead of replaying an incomplete result.
+            tracing::error!(%error, %operation_id, "update operation terminalization failed");
+            let unknown = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                o3k_kernel::OperationState::UnknownOutcome,
+                1,
+                None,
+                None,
+                Some("operation_state_write_failed".to_owned()),
+            )
             .map_err(|_| ResourceApplicationError::Internal)?;
+            let _ = self
+                .store
+                .update_canonical_operation_lifecycle(operation_id, &unknown)
+                .await;
+        }
         Ok(MutationResult {
             operation_id: operation_id.to_string(),
             resource_id: Some(id.to_owned()),
@@ -1610,12 +1640,12 @@ impl ResourceApplication for GenericResourceApplication {
                 format!("{}:network:network:{}", auth.effective_scope().id(), key).as_bytes(),
             );
             let project_id = auth.effective_scope().id().as_str().to_owned();
-            let network_id = match self
+            let (network_id, created_here) = match self
                 .network_service
                 .create_network_for_project_with_id(&project_id, canonical_id, name.clone())
                 .await
             {
-                Ok(network) => network.id,
+                Ok(network) => (network.id, true),
                 // Replay: a same-key retry derives the same canonical id, so a
                 // name conflict on that exact id is the durable result of the
                 // original call — but only when the semantics match: reusing
@@ -1634,7 +1664,10 @@ impl ResourceApplication for GenericResourceApplication {
                     if candidate.name != name {
                         return Err(ResourceApplicationError::IdempotencyConflict);
                     }
-                    candidate.id
+                    // Pre-existing durable authority: a later ledger failure
+                    // must never compensate (delete) a row this call did not
+                    // create.
+                    (candidate.id, false)
                 }
             };
             // The generic native ledger must reflect every natively created
@@ -1685,10 +1718,12 @@ impl ResourceApplication for GenericResourceApplication {
                         && existing.observed_state != "DELETED"
                         && stored_name.as_deref() == Some(name.as_str());
                     if !replay {
-                        self.network_service
-                            .delete_network_for_project(&project_id, network_id)
-                            .await
-                            .map_err(|_| ResourceApplicationError::Internal)?;
+                        if created_here {
+                            self.network_service
+                                .delete_network_for_project(&project_id, network_id)
+                                .await
+                                .map_err(|_| ResourceApplicationError::Internal)?;
+                        }
                         return Err(ResourceApplicationError::Conflict);
                     }
                 }
@@ -1698,11 +1733,13 @@ impl ResourceApplication for GenericResourceApplication {
                     // would be visible to native show yet invisible to native
                     // list and undeletable through it. Compensate by removing
                     // the canonical network so the failed create leaves no
-                    // orphan authority.
-                    self.network_service
-                        .delete_network_for_project(&project_id, network_id)
-                        .await
-                        .map_err(|_| ResourceApplicationError::Internal)?;
+                    // orphan authority — but only when this call created it.
+                    if created_here {
+                        self.network_service
+                            .delete_network_for_project(&project_id, network_id)
+                            .await
+                            .map_err(|_| ResourceApplicationError::Internal)?;
+                    }
                     return Err(ResourceApplicationError::Internal);
                 }
             }
