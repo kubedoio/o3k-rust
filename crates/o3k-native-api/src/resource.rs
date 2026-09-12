@@ -628,11 +628,12 @@ mod tests {
 /// POST /{namespace}/{collection}/{id}/actions/{action_name}
 ///
 /// Executes a manifest-declared domain action through a canonical Operation.
-/// The request body is the domain action input; callers may wrap
-/// cross-cutting metadata (for example an operator `reason`) in the
-/// published `https://o3k.io/schemas/native-action-input/v1` envelope
-/// (`contracts/native-action-input-v1.schema.json`). The domain-specific
-/// payload travels in `input` and is validated by the owning domain.
+/// The request body is the envelope `{"input": <domain action input>}`.
+/// The `input` value is the domain action input as defined by the published
+/// `https://o3k.io/schemas/native-action-input/v1` schema
+/// (`contracts/native-action-input-v1.schema.json`), carrying cross-cutting
+/// action metadata such as an operator `reason`; the owning domain validates
+/// it.
 pub async fn action(
     auth: BearerAuth,
     headers: HeaderMap,
