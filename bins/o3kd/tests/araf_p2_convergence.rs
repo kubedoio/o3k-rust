@@ -1959,6 +1959,28 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
         )
         .await;
     assert_eq!(bob_network.status, 404, "{}", bob_network.body);
+    // Live-row list concealment: network A is still live at this point (the
+    // show probe above just proved it exists), so a list surface leaking all
+    // projects' networks would surface here — the compute list probe targets
+    // a since-deleted server and cannot.
+    let bob_net_list = api.get("/o3k/v1/network/networks", Some(&bob_token)).await;
+    assert_eq!(bob_net_list.status, 200, "{}", bob_net_list.body);
+    let bob_net_ids: Vec<&str> = bob_net_list.json["items"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "bob network list must be well-formed: {}",
+                bob_net_list.body
+            )
+        })
+        .iter()
+        .filter_map(|i| i["metadata"]["id"].as_str())
+        .collect();
+    assert!(
+        !bob_net_ids.contains(&network_id.as_str()),
+        "{}",
+        bob_net_list.body
+    );
     let bob_op = api
         .get(&format!("/o3k/v1/operations/{stop_op}"), Some(&bob_token))
         .await;

@@ -1547,6 +1547,9 @@ impl ResourceApplication for GenericResourceApplication {
             };
             match self.store.insert_volume(&record).await {
                 Ok(()) => {}
+                Err(o3k_store::StoreError::QuotaExceeded { .. }) => {
+                    return Err(ResourceApplicationError::Forbidden);
+                }
                 Err(o3k_store::StoreError::ResourceAlreadyExists) => {
                     let existing = self
                         .store
@@ -1554,6 +1557,21 @@ impl ResourceApplication for GenericResourceApplication {
                         .await
                         .map_err(|_| ResourceApplicationError::Internal)?
                         .ok_or(ResourceApplicationError::Internal)?;
+                    // Same-key replay with changed semantics is key reuse,
+                    // not a replay: this arm writes no idempotency
+                    // reservation, so the deterministic id is the only
+                    // replay identity and the durable result must be pinned
+                    // to the request's declared semantics — exactly as the
+                    // generic idempotency contract treats changed bodies.
+                    if existing.volume.name != record.volume.name
+                        || existing.volume.description != record.volume.description
+                        || existing.volume.size_bytes != record.volume.size_bytes
+                        || existing.volume.volume_type != record.volume.volume_type
+                        || existing.volume.availability_zone != record.volume.availability_zone
+                        || existing.volume.metadata != record.volume.metadata
+                    {
+                        return Err(ResourceApplicationError::IdempotencyConflict);
+                    }
                     // The row already exists from a prior attempt (the create
                     // is idempotent by deterministic resource id), so the open
                     // observation is replayed here rather than only in the
@@ -1661,6 +1679,11 @@ impl ResourceApplication for GenericResourceApplication {
                 .await
             {
                 Ok(network) => (network.id, true),
+                // A durable quota denial is a non-retryable limit, exactly as
+                // on the compute surface — it is never a replay probe.
+                Err(o3k_network::NetworkError::QuotaExceeded { .. }) => {
+                    return Err(ResourceApplicationError::Forbidden);
+                }
                 // Replay: a same-key retry derives the same canonical id, so a
                 // name conflict on that exact id is the durable result of the
                 // original call — but only when the semantics match: reusing

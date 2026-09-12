@@ -13,18 +13,143 @@ mod native_compute_tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::post;
+    use o3k_domain::StorageCapabilities;
     use o3k_kernel::{
         ActionId, AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, UserPrincipal,
     };
     use o3k_native_api::auth::{NativeTokenRequestV1, TokenIssuer};
     use o3k_provider::{FailureInjection, FakeComputeProvider};
+    use o3k_storage::{
+        PreparedAttachment, StorageAttachmentObservation, StorageAttachmentRequest,
+        StorageProvider, StorageProviderError, StorageSnapshotObservation, StorageSnapshotRequest,
+        StorageVolumeObservation, StorageVolumeRequest,
+    };
     use o3k_store::DurableStore;
     use o3k_store::NetworkRepository;
+    use o3k_store::StorageRepository;
     use std::sync::Arc;
     use tower::util::ServiceExt;
     use uuid::Uuid;
 
     struct TestIssuer;
+
+    /// Minimal in-memory storage provider so the generic native volume create
+    /// arm can run end to end; models observe-after-mutation without touching
+    /// host storage.
+    #[derive(Default)]
+    struct FakeStorageProvider {
+        volumes: std::sync::Mutex<BTreeMap<Uuid, StorageVolumeObservation>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageProvider for FakeStorageProvider {
+        async fn capabilities(&self) -> Result<StorageCapabilities, StorageProviderError> {
+            Ok(StorageCapabilities {
+                create_volume: true,
+                snapshots: false,
+                attachment: false,
+                capacity_bytes: 1 << 40,
+                allocated_bytes: 0,
+                allocation_unit_bytes: 4096,
+            })
+        }
+
+        async fn create_volume(
+            &self,
+            request: &StorageVolumeRequest,
+        ) -> Result<StorageVolumeObservation, StorageProviderError> {
+            let observation = StorageVolumeObservation {
+                provider_reference: o3k_domain::StorageProviderReference {
+                    provider: "test".into(),
+                    resource_id: format!("volume-{}", request.volume_id),
+                },
+                size_bytes: request.size_bytes,
+                owned: true,
+                available: true,
+            };
+            self.volumes
+                .lock()
+                .map_err(|_| StorageProviderError::CommandFailed)?
+                .insert(request.volume_id.as_uuid(), observation.clone());
+            Ok(observation)
+        }
+
+        async fn inspect_volume(
+            &self,
+            request: &StorageVolumeRequest,
+        ) -> Result<StorageVolumeObservation, StorageProviderError> {
+            self.volumes
+                .lock()
+                .map_err(|_| StorageProviderError::CommandFailed)?
+                .get(&request.volume_id.as_uuid())
+                .cloned()
+                .ok_or(StorageProviderError::NotFound)
+        }
+
+        async fn delete_volume(
+            &self,
+            request: &StorageVolumeRequest,
+        ) -> Result<(), StorageProviderError> {
+            self.volumes
+                .lock()
+                .map_err(|_| StorageProviderError::CommandFailed)?
+                .remove(&request.volume_id.as_uuid())
+                .map(|_| ())
+                .ok_or(StorageProviderError::NotFound)
+        }
+
+        async fn prepare_attachment(
+            &self,
+            request: &StorageAttachmentRequest,
+        ) -> Result<PreparedAttachment, StorageProviderError> {
+            PreparedAttachment::from_provider(
+                o3k_domain::StorageProviderReference {
+                    provider: "test".into(),
+                    resource_id: format!("volume-{}", request.volume_id),
+                },
+                "/dev/test".into(),
+                request.attachment_id,
+                request.volume_id,
+            )
+        }
+
+        async fn inspect_attachment(
+            &self,
+            request: &StorageAttachmentRequest,
+        ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+            Ok(StorageAttachmentObservation {
+                attachment_id: request.attachment_id,
+                volume_id: request.volume_id,
+                host_id: "test".into(),
+                attached: false,
+                provider_reference: o3k_domain::StorageProviderReference {
+                    provider: "test".into(),
+                    resource_id: format!("volume-{}", request.volume_id),
+                },
+            })
+        }
+
+        async fn terminate_attachment(
+            &self,
+            request: &StorageAttachmentRequest,
+        ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+            self.inspect_attachment(request).await
+        }
+
+        async fn create_snapshot(
+            &self,
+            _request: &StorageSnapshotRequest,
+        ) -> Result<StorageSnapshotObservation, StorageProviderError> {
+            Err(StorageProviderError::InvalidRequest)
+        }
+
+        async fn delete_snapshot(
+            &self,
+            _request: &StorageSnapshotRequest,
+        ) -> Result<(), StorageProviderError> {
+            Err(StorageProviderError::InvalidRequest)
+        }
+    }
 
     fn context(project: &str) -> AuthContext {
         AuthContext::new(
@@ -223,6 +348,75 @@ mod native_compute_tests {
             },
         );
         let _ = reg.activate_controller("network");
+        let mut volume_ops = HashMap::new();
+        volume_ops.insert(
+            "list".to_owned(),
+            ActionId::new_unchecked("volume", "ListVolumes"),
+        );
+        volume_ops.insert(
+            "show".to_owned(),
+            ActionId::new_unchecked("volume", "ReadVolume"),
+        );
+        volume_ops.insert(
+            "create".to_owned(),
+            ActionId::new_unchecked("volume", "CreateVolume"),
+        );
+        volume_ops.insert(
+            "delete".to_owned(),
+            ActionId::new_unchecked("volume", "DeleteVolume"),
+        );
+        let volume_manifest = o3k_kernel::ServiceManifest {
+            manifest_version: 1,
+            service_id: "volume".to_owned(),
+            namespace: "volume".to_owned(),
+            service_version: "0.4.0".to_owned(),
+            ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
+            resource_types: vec![o3k_kernel::RegisteredResourceType {
+                resource_type: o3k_kernel::ResourceType::new_unchecked("volume", "volume"),
+                schema_version: "v1".to_owned(),
+                collection: Some("volumes".to_owned()),
+                scope: o3k_kernel::ResourceScope::Tenant,
+                operations: volume_ops,
+            }],
+            actions: vec![
+                "volume:ListVolumes".to_owned(),
+                "volume:CreateVolume".to_owned(),
+                "volume:ReadVolume".to_owned(),
+                "volume:DeleteVolume".to_owned(),
+            ],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: Some(o3k_kernel::ManifestController {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            }),
+            health: None,
+        };
+        let _ = reg.register(volume_manifest);
+        let _ = reg.register_controller(
+            "volume",
+            o3k_kernel::controller::ControllerSession {
+                service_id: "volume".to_owned(),
+                namespace: "volume".to_owned(),
+                service_principal: o3k_kernel::ServicePrincipal::new(
+                    o3k_kernel::PrincipalId::new_unchecked("test-volume-controller"),
+                    "test-volume-controller",
+                    "volume",
+                ),
+                session_id: uuid::Uuid::new_v4(),
+                session_generation: 1,
+                protocol_version: o3k_kernel::controller::ProtocolVersion::new(1, 0),
+                manifest_digest: "test-digest".to_owned(),
+                manifest_generation: 1,
+                started_at: "2026-01-01T00:00:00Z".to_owned(),
+            },
+        );
+        let _ = reg.activate_controller("volume");
         reg
     }
 
@@ -281,7 +475,6 @@ mod native_compute_tests {
             image: None,
             network_service,
             store: store.clone(),
-            storage_provider: None,
             server: Arc::new(ServerReaderAdapter {
                 service: compute.clone(),
             }),
@@ -294,6 +487,7 @@ mod native_compute_tests {
             public_address_workflow: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            storage_provider: Some(Arc::new(FakeStorageProvider::default())),
             metering: None,
         };
 
@@ -568,6 +762,116 @@ mod native_compute_tests {
             "quota denial must not map to an internal error: {problem}"
         );
         assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_network_quota_denial_is_forbidden_not_a_replay_conflict() {
+        let (router, store, _, _) = setup().await;
+        let router = &router;
+        use o3k_kernel::{LimitKey, LimitValue};
+        use o3k_store::QuotaRepository;
+        let scope_a = OwnershipScope::project(ScopeId::new_unchecked("project-a"), None, None);
+        store
+            .set_limit(
+                &scope_a,
+                &LimitKey::network_networks(),
+                LimitValue::Maximum(0),
+            )
+            .await
+            .expect("quota limit");
+
+        // Regression: the durable quota denial from the network authority was
+        // swallowed by the replay probe and surfaced as a 409 conflict,
+        // telling the tenant a non-retryable limit is retryable. It is a
+        // caller-visible 403.
+        let (status, problem) = exec(
+            router,
+            authed_post(
+                "/network/networks",
+                "a",
+                "net-quota-1",
+                serde_json::json!({"spec": {"name": "quota-net"}}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "network quota denial must map to 403, not a replay conflict: {problem}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_volume_create_replay_with_changed_semantics_conflicts() {
+        let (router, store, _, _) = setup().await;
+        let router = &router;
+        let volume_spec = |size: u64, name: &str| {
+            serde_json::json!({
+                "spec": {
+                    "name": name,
+                    "size_bytes": size,
+                    "volume_type": "lvm"
+                }
+            })
+        };
+        let (status, created) = exec(
+            router,
+            authed_post(
+                "/volume/volumes",
+                "a",
+                "vol-key-1",
+                volume_spec(1_073_741_824, "vol-a"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let volume_id = created["resource_id"]
+            .as_str()
+            .expect("volume id")
+            .to_owned();
+
+        // A same-key retry with identical semantics replays the durable
+        // result.
+        let (status, replayed) = exec(
+            router,
+            authed_post(
+                "/volume/volumes",
+                "a",
+                "vol-key-1",
+                volume_spec(1_073_741_824, "vol-a"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{replayed}");
+        assert_eq!(replayed["resource_id"], volume_id, "{replayed}");
+
+        // Regression: reusing the key with different semantics used to return
+        // the original volume as if it were this request's result. Key reuse
+        // with a changed body is an idempotency conflict.
+        let (status, conflict) = exec(
+            router,
+            authed_post(
+                "/volume/volumes",
+                "a",
+                "vol-key-1",
+                volume_spec(2_147_483_648, "vol-a"),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "same-key retry with changed semantics must conflict: {conflict}"
+        );
+
+        // The durable volume is untouched by the rejected key reuse.
+        let volume_uuid = Uuid::parse_str(&volume_id).expect("volume uuid");
+        let record = store
+            .get_volume(volume_uuid)
+            .await
+            .expect("volume record")
+            .expect("volume exists");
+        assert_eq!(record.volume.size_bytes, 1_073_741_824);
     }
 
     #[tokio::test]
