@@ -40,16 +40,17 @@ start_postgres() {
   docker run --rm -d --name "${pg_container}" \
     -e POSTGRES_USER=o3k -e POSTGRES_PASSWORD="${pg_password}" -e POSTGRES_DB=o3k_test \
     -p 127.0.0.1::5432 postgres:16.4 >/dev/null
-  local port=""
+  local port="" ready=""
   for _ in $(seq 1 60); do
     port="$(docker port "${pg_container}" 5432/tcp 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -1)"
     if [[ -n "${port}" ]] && \
       docker exec "${pg_container}" pg_isready -h 127.0.0.1 -p 5432 -U o3k -d o3k_test >/dev/null 2>&1; then
+      ready="1"
       break
     fi
     sleep 1
   done
-  if [[ -z "${port}" ]]; then
+  if [[ -z "${ready}" ]]; then
     echo "PostgreSQL readiness timeout (container=${pg_container})" >&2
     docker logs "${pg_container}" >&2 || true
     return 1

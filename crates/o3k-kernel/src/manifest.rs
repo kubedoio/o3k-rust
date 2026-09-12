@@ -2578,6 +2578,30 @@ mod tests {
     }
 
     #[test]
+    fn seed_core_declares_update_only_where_the_application_supports_it() {
+        // The generic application implements update for compute:server only;
+        // any other manifest declaration would advertise an update the
+        // runtime fails closed with UnsupportedOperation (#907 clean-pass
+        // finding: the positive declaration test alone cannot catch this
+        // drift).
+        let mut reg = ManifestRegistry::new();
+        reg.seed_core().unwrap();
+        for service_id in ["compute", "network", "volume", "image", "identity"] {
+            let Some(service) = reg.get(service_id) else {
+                continue;
+            };
+            for resource in &service.resource_types {
+                assert!(
+                    !resource.operations.contains_key("update")
+                        || resource.resource_type.to_string() == "compute:server",
+                    "{} must not declare update: the application does not implement it",
+                    resource.resource_type
+                );
+            }
+        }
+    }
+
+    #[test]
     fn in_process_controller_readiness_uses_shared_lifecycle_state() {
         let mut reg = ManifestRegistry::new();
         reg.seed_core().unwrap();

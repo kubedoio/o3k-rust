@@ -746,6 +746,9 @@ async fn update_for(
         Ok(action) => action,
         Err(error) => return ProblemDetails::new(error).into_response(),
     };
+    if let Err(response) = authorize(&state, descriptor, action, &auth.0, Some(&id)) {
+        return ProblemDetails::new(response).into_response();
+    }
     if let Some(kind) = request.kind.as_deref()
         && kind != descriptor.resource_type.to_string()
     {
@@ -754,9 +757,6 @@ async fn update_for(
             "kind does not match route resource type",
         )
         .into_response();
-    }
-    if let Err(response) = authorize(&state, descriptor, action, &auth.0, Some(&id)) {
-        return ProblemDetails::new(response).into_response();
     }
     if let Err(response) = ready_for_mutation(&state.resource_index, descriptor) {
         return ProblemDetails::new(response).into_response();

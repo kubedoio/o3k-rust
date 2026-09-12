@@ -694,7 +694,10 @@ mod native_compute_tests {
         // Pre-insert a ledger row with the exact id the create will derive
         // from its idempotency key, but under a different resource kind, so
         // the ledger insert fails after the canonical create has committed.
-        let conflicting_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, b"project-a:net-conflict");
+        let conflicting_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_OID,
+            b"project-a:network:network:net-conflict",
+        );
         store
             .insert_resource(&o3k_store::ResourceRecord {
                 id: conflicting_id,
@@ -870,6 +873,10 @@ mod native_compute_tests {
         let (status, updated) = exec(router, live).await;
         assert_eq!(status, StatusCode::OK, "{updated}");
         assert_eq!(updated["complete"], true, "{updated}");
+        let updated_operation = updated["operation_id"]
+            .as_str()
+            .expect("update operation id")
+            .to_owned();
         let ledger = store
             .get_resource(server_uuid)
             .await
@@ -882,6 +889,22 @@ mod native_compute_tests {
         let desired: serde_json::Value =
             serde_json::from_str(&ledger.desired_state).expect("desired state");
         assert_eq!(desired["name"], "renamed-live", "{desired}");
+
+        // True idempotent replay: a same-key retry of the ACCEPTED update
+        // returns the durable result even though the generation has since
+        // advanced — rejecting a client retry as stale would defeat
+        // idempotency (the first call itself moved the generation).
+        let replay_live = authed_put(
+            &format!("/compute/servers/{server_id}"),
+            "a",
+            "upd-live",
+            live_generation,
+            serde_json::json!({"spec": {"name": "renamed-live"}}),
+        );
+        let (status, replayed) = exec(router, replay_live).await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(replayed["operation_id"], updated_operation, "{replayed}");
+        assert_eq!(replayed["complete"], true, "{replayed}");
     }
 
     #[tokio::test]

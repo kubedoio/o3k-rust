@@ -621,9 +621,9 @@ impl ResourceApplication for GenericResourceApplication {
         // The resource precondition is validated BEFORE any durable operation
         // or idempotency reservation is written: a stale If-Match on a
         // never-accepted request must leave no phantom Pending operation
-        // behind (the reconciler would retry it forever) and must not consume
-        // the idempotency key (a retry would otherwise replay as 202 for an
-        // operation that can never complete).
+        // behind — `lifecycle:update` has no reconciler handler, so a Pending
+        // operation would make same-key retries replay 202 forever with no
+        // recovery path — and must not consume the idempotency key.
         if existing.generation != expected_generation {
             return Err(ResourceApplicationError::PreconditionConflict);
         }
@@ -681,7 +681,9 @@ impl ResourceApplication for GenericResourceApplication {
         }
         let desired =
             serde_json::to_string(&desired).map_err(|_| ResourceApplicationError::Internal)?;
-        self.store
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Err(error) = self
+            .store
             .update_resource(
                 resource_id,
                 expected_generation,
@@ -691,13 +693,38 @@ impl ResourceApplication for GenericResourceApplication {
                 existing.provider_id.as_deref(),
             )
             .await
-            .map_err(|error| match error {
+        {
+            // The operation was already accepted durably; a post-acceptance
+            // write failure (a concurrent writer advancing the generation
+            // between the precondition and the write, or a store error) must
+            // terminalize it. `lifecycle:update` has no reconciler handler,
+            // so a lingering Pending operation would make same-key replays
+            // return 202 forever with no recovery path.
+            let terminal = o3k_store::CanonicalOperationLifecycleUpdate::new(
+                o3k_kernel::OperationState::Failed,
+                1,
+                None,
+                Some(now.clone()),
+                Some(
+                    serde_json::to_string(&serde_json::json!({
+                        "category": "resource_write_failed",
+                        "retryable": matches!(error, o3k_store::StoreError::StaleGeneration),
+                    }))
+                    .unwrap_or_else(|_| "{\"category\":\"resource_write_failed\"}".to_owned()),
+                ),
+            )
+            .map_err(|_| ResourceApplicationError::Internal)?;
+            let _ = self
+                .store
+                .update_canonical_operation_lifecycle(operation_id, &terminal)
+                .await;
+            return Err(match error {
                 o3k_store::StoreError::StaleGeneration => {
                     ResourceApplicationError::PreconditionConflict
                 }
                 _ => ResourceApplicationError::Internal,
-            })?;
-        let now = chrono::Utc::now().to_rfc3339();
+            });
+        }
         let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
             o3k_kernel::OperationState::Succeeded,
             1,
@@ -1337,7 +1364,12 @@ impl ResourceApplication for GenericResourceApplication {
                 .unwrap_or_else(|| {
                     Uuid::new_v5(
                         &Uuid::NAMESPACE_OID,
-                        format!("{}:{}", auth.effective_scope().id(), key).as_bytes(),
+                        format!(
+                            "{}:volume:volume_attachment:{}",
+                            auth.effective_scope().id(),
+                            key
+                        )
+                        .as_bytes(),
                     )
                 });
             let record = o3k_store::storage::VolumeAttachmentRecordV1 {
@@ -1430,7 +1462,7 @@ impl ResourceApplication for GenericResourceApplication {
             let resource_id = spec._canonical_id.unwrap_or_else(|| {
                 Uuid::new_v5(
                     &Uuid::NAMESPACE_OID,
-                    format!("{}:{}", auth.effective_scope().id(), key).as_bytes(),
+                    format!("{}:volume:volume:{}", auth.effective_scope().id(), key).as_bytes(),
                 )
             });
             let operation_id = Uuid::new_v5(
@@ -1575,30 +1607,34 @@ impl ResourceApplication for GenericResourceApplication {
                 .unwrap_or_else(|| format!("native:network:{}", Uuid::new_v4()));
             let canonical_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_OID,
-                format!("{}:{}", auth.effective_scope().id(), key).as_bytes(),
+                format!("{}:network:network:{}", auth.effective_scope().id(), key).as_bytes(),
             );
             let project_id = auth.effective_scope().id().as_str().to_owned();
             let network_id = match self
                 .network_service
-                .create_network_for_project_with_id(&project_id, canonical_id, name)
+                .create_network_for_project_with_id(&project_id, canonical_id, name.clone())
                 .await
             {
                 Ok(network) => network.id,
                 // Replay: a same-key retry derives the same canonical id, so a
                 // name conflict on that exact id is the durable result of the
-                // original call, not a new conflict. Any other name conflict
-                // (a different key or an out-of-band create) stays a conflict.
+                // original call — but only when the semantics match: reusing
+                // the key with a different name is a conflict, exactly as the
+                // generic idempotency contract treats changed bodies.
                 Err(_) => {
                     let existing = self
                         .network_service
                         .list_canonical_networks_for_project(&project_id)
                         .await
                         .map_err(|_| ResourceApplicationError::Internal)?;
-                    existing
+                    let candidate = existing
                         .into_iter()
                         .find(|candidate| candidate.id == canonical_id)
-                        .ok_or(ResourceApplicationError::Conflict)?
-                        .id
+                        .ok_or(ResourceApplicationError::Conflict)?;
+                    if candidate.name != name {
+                        return Err(ResourceApplicationError::IdempotencyConflict);
+                    }
+                    candidate.id
                 }
             };
             // The generic native ledger must reflect every natively created
@@ -1625,17 +1661,29 @@ impl ResourceApplication for GenericResourceApplication {
             match self.store.insert_resource(&record).await {
                 Ok(()) => {}
                 Err(o3k_store::StoreError::ResourceAlreadyExists) => {
-                    // Same-key replay re-derives the same row; only a row that
-                    // is genuinely not this resource is a conflict. Either way
-                    // the canonical network created above must not be left
-                    // orphaned when the ledger write fails.
+                    // Same-key replay re-derives the same row. A finalized
+                    // (DELETED) row is never a replay target: the canonical
+                    // create above already succeeded with a fresh generation,
+                    // so accepting would split canonical and ledger truth.
+                    // A row whose stored name differs from the request is
+                    // key reuse with changed semantics — a conflict, not a
+                    // replay. Only an identical live row replays. Any other
+                    // row at this id must not orphan the canonical network
+                    // created above.
                     let existing = self
                         .store
                         .get_resource(network_id)
                         .await
                         .map_err(|_| ResourceApplicationError::Internal)?;
+                    let stored_name =
+                        serde_json::from_str::<serde_json::Value>(&existing.desired_state)
+                            .ok()
+                            .and_then(|spec| spec.get("name").cloned())
+                            .and_then(|name| name.as_str().map(str::to_owned));
                     let replay = existing.kind == "network:network"
-                        && existing.project_id == record.project_id;
+                        && existing.project_id == record.project_id
+                        && existing.observed_state != "DELETED"
+                        && stored_name.as_deref() == Some(name.as_str());
                     if !replay {
                         self.network_service
                             .delete_network_for_project(&project_id, network_id)
@@ -3191,112 +3239,6 @@ impl ResourceApplication for GenericResourceApplication {
                 false,
             )
             .await?;
-            return Ok(MutationResult {
-                operation_id: operation_id.to_string(),
-                resource_id: Some(id.to_owned()),
-                complete: true,
-                resource: None,
-            });
-        }
-        if descriptor.resource_type.to_string() == "network:network" {
-            let resource_id = id
-                .parse::<Uuid>()
-                .map_err(|_| ResourceApplicationError::NotFound)?;
-            let action = descriptor
-                .lifecycle_actions
-                .get(&o3k_native_api::resource::LifecycleOperation::Delete)
-                .cloned()
-                .ok_or(ResourceApplicationError::UnsupportedOperation)?;
-            let key = idempotency_key
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("native:network-delete:{id}"));
-            let operation_id = Uuid::new_v5(
-                &Uuid::NAMESPACE_URL,
-                format!("network:delete:{}:{id}:{key}", auth.effective_scope().id()).as_bytes(),
-            );
-            let operation = o3k_store::OperationRecord {
-                id: operation_id,
-                resource_id,
-                kind: "lifecycle:delete".into(),
-                state: o3k_store::OperationState::Pending,
-                provider_operation_id: None,
-                error_category: None,
-                error_message: None,
-            };
-            let canonical = o3k_store::CanonicalOperationRecord::from_kernel_operation(
-                &o3k_kernel::Operation::new(
-                    operation_id,
-                    "network",
-                    action.clone(),
-                    auth.principal().id().to_string(),
-                    auth.effective_scope().clone(),
-                    o3k_kernel::ResourceType::new_unchecked("network", "network"),
-                    Some(o3k_kernel::ResourceId::new_unchecked(id)),
-                    Some(auth.request_id().to_owned()),
-                ),
-            )
-            .map_err(|_| ResourceApplicationError::Internal)?;
-            let identity = o3k_store::IdempotencyReservationRequest::from_semantics(
-                auth.effective_scope().id().as_str(),
-                action.to_string(),
-                key,
-                "network:network",
-                Some(id),
-                &serde_json::json!({"resource_id": id}),
-                operation_id,
-            )
-            .map_err(|_| ResourceApplicationError::Validation)?;
-            let acceptance = self
-                .store
-                .create_or_replay_canonical_scoped_operation(&operation, &canonical, &identity)
-                .await
-                .map_err(|_| ResourceApplicationError::Internal)?;
-            match acceptance {
-                o3k_store::IdempotencyReservation::Conflict => {
-                    return Err(ResourceApplicationError::IdempotencyConflict);
-                }
-                o3k_store::IdempotencyReservation::ExistingEquivalent(operation_id) => {
-                    let existing = self
-                        .store
-                        .get_canonical_operation(operation_id)
-                        .await
-                        .map_err(|_| ResourceApplicationError::Internal)?;
-                    return Ok(MutationResult {
-                        operation_id: operation_id.to_string(),
-                        resource_id: Some(id.to_owned()),
-                        complete: existing.state == o3k_store::OperationState::Succeeded,
-                        resource: None,
-                    });
-                }
-                o3k_store::IdempotencyReservation::Created(_) => {}
-            }
-            let network = self
-                .network_service
-                .get_canonical_network(auth, resource_id)
-                .await
-                .map_err(|_| ResourceApplicationError::NotFound)?;
-            if expected_generation.is_some_and(|expected| {
-                expected != i64::try_from(network.generation).unwrap_or(i64::MAX)
-            }) {
-                return Err(ResourceApplicationError::PreconditionConflict);
-            }
-            self.network_service
-                .delete_canonical_network(auth, resource_id)
-                .await
-                .map_err(|_| ResourceApplicationError::Retryable)?;
-            let now = chrono::Utc::now().to_rfc3339();
-            let lifecycle = o3k_store::CanonicalOperationLifecycleUpdate::new(
-                o3k_kernel::OperationState::Succeeded,
-                1,
-                Some(now.clone()),
-                Some(now),
-                None,
-            )
-            .map_err(|_| ResourceApplicationError::Internal)?;
-            self.store
-                .update_canonical_operation_lifecycle(operation_id, &lifecycle)
-                .await
-                .map_err(|_| ResourceApplicationError::Internal)?;
             return Ok(MutationResult {
                 operation_id: operation_id.to_string(),
                 resource_id: Some(id.to_owned()),

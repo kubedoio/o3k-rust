@@ -435,7 +435,7 @@ fn get_token(response: &RawResponse) -> String {
 
 /// Keystone-compatible password grant returning the `x-subject-token`.
 async fn keystone_password_grant(
-    api: &Api,
+    api: &mut Api,
     user: &str,
     password: &str,
     project: &str,
@@ -452,24 +452,29 @@ async fn keystone_password_grant(
     });
     let response = api
         .client
-        .post(url)
+        .post(url.clone())
         .header("accept", "application/json")
         .header("content-type", "application/json")
         .json(&payload)
         .send()
         .await?;
-    if response.status() != reqwest::StatusCode::CREATED {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        panic!("keystone password grant failed: {status}: {text}");
-    }
+    let status = response.status();
+    // The subject token is a response header: read it before consuming the
+    // body below.
     let token = response
         .headers()
         .get("x-subject-token")
-        .ok_or("missing x-subject-token")?
-        .to_str()?
-        .to_owned();
-    Ok(token)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    // The grant response body is retained for the item-13 secret scan like
+    // every other journey response.
+    let body = response.text().await.unwrap_or_default();
+    api.bodies
+        .push(format!("POST /v3/auth/tokens -> {status}: {body}"));
+    if status != reqwest::StatusCode::CREATED {
+        panic!("keystone password grant failed: {status}: {body}");
+    }
+    Ok(token.ok_or("missing x-subject-token")?)
 }
 
 /// Generic compute:server create used across the journey.
@@ -643,6 +648,13 @@ fn scan_o3kd_log(data_dir: &std::path::Path, secrets: &[(&str, String)]) {
         "private-key marker leaked into the o3kd log {}",
         log_path.display()
     );
+    for marker in ["postgres://", "agent_epoch"] {
+        assert!(
+            !content.contains(marker),
+            "marker {marker} leaked into the o3kd log {}",
+            log_path.display()
+        );
+    }
 }
 
 #[tokio::test]
@@ -798,7 +810,7 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
     // the OpenStack-compatible Neutron surface to create the subnet/port, and
     // later to list the natively-created server through Nova.
     let keystone_token = self::keystone_password_grant(
-        &api,
+        &mut api,
         "alice",
         &required("O3K_P12_7_BOOTSTRAP_SECRET"),
         "project-a",
@@ -1367,8 +1379,9 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
         .await;
     assert_eq!(stale_update.status, 409, "{}", stale_update.body);
     // The good update uses its own idempotency key: the stale attempt above
-    // durably reserved its key, and a different body/generation under one key
-    // is an IdempotencyConflict by design.
+    // was rejected before any durable write (it reserved nothing), and a
+    // different body/generation under one key is an IdempotencyConflict by
+    // design.
     let good_update = api
         .raw(
             reqwest::Method::PUT,
@@ -1809,16 +1822,17 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
             )
             .await;
         assert_eq!(bob_filtered.status, 200, "{}", bob_filtered.body);
-        let leaked = bob_filtered.json["items"]
-            .as_array()
-            .map(|items| {
-                items.iter().any(|item| {
-                    item["event_id"]
-                        .as_str()
-                        .is_some_and(|id| audit_event_ids.contains(&id.to_owned()))
-                })
-            })
-            .unwrap_or(false);
+        let bob_items = bob_filtered.json["items"].as_array().unwrap_or_else(|| {
+            panic!(
+                "bob audit filter must be a well-formed array: {}",
+                bob_filtered.body
+            )
+        });
+        let leaked = bob_items.iter().any(|item| {
+            item["event_id"]
+                .as_str()
+                .is_some_and(|id| audit_event_ids.contains(&id.to_owned()))
+        });
         assert!(
             !leaked,
             "bob audit must not expose alice events: {}",
@@ -1918,15 +1932,13 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
     // target collection-level concealment rather than a live instance.
     let bob_list = api.get("/o3k/v1/compute/servers", Some(&bob_token)).await;
     assert_eq!(bob_list.status, 200, "{}", bob_list.body);
-    let bob_ids: Vec<&str> = bob_list.json["items"]
+    let bob_items = bob_list.json["items"]
         .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|i| i["metadata"]["id"].as_str())
-                .collect()
-        })
-        .unwrap_or_default();
+        .unwrap_or_else(|| panic!("bob list must be a well-formed array: {}", bob_list.body));
+    let bob_ids: Vec<&str> = bob_items
+        .iter()
+        .filter_map(|i| i["metadata"]["id"].as_str())
+        .collect();
     assert!(
         !bob_ids.contains(&server_b_id.as_str()),
         "{}",

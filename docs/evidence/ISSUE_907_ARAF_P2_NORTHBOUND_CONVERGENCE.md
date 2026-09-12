@@ -48,7 +48,7 @@ it, the durable authority behind it, and the profile coverage
 | # | Item | Endpoint(s) | Gate coverage (in `araf_p2_northbound_convergence`) | Durable authority | PG | SQ | R | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | Federated login | `POST /o3k/v1/identity/scopes`, `POST /o3k/v1/identity/tokens`, `GET /o3k/v1/identity/me` | Alice/Bob project-scoped exchange (201), operator system exchange via canonical `operator-assignments` path, unbound/foreign/system-for-tenant denials, `identity/me` effective scope | `federated_bindings`, `operator_assignments`, Keystone-compatible users/projects seeded by `seed_identity_defaults` | ✓ | ✓ | ✓ | PASS |
-| 2 | Discovery | `GET /o3k/v1/services`, `/resource-types`, `/resource-schemas/{ns}/{c}/{v}`, `/regions` | All served; compute/network/identity advertised; `compute:server` advertises create/show/list/update/delete and the `StartServer`/`StopServer`/`RebootServer` domain actions; 1 region / 2 AZ from `O3K_LOCATIONS`. Advertised-implies-executable is enforced both ways: every advertised capability is exercised later in the journey, and the readiness/reachability discovery gates (defect fix 5 below) keep unreachable operations out of the advertisement | `ManifestRegistry::seed_core` (composition root) | ✓ | ✓ | ✓ | PASS |
+| 2 | Discovery | `GET /o3k/v1/services`, `/resource-types`, `/resource-schemas/{ns}/{c}/{v}`, `/regions` | All served; compute/network/identity advertised; `compute:server` advertises create/show/list/update/delete; the start/stop/reboot domain actions are manifest-declared and proven executable by the journey (the discovery `actions` metadata projects canonical lifecycle operations per SPEC-0040); 1 region / 2 AZ from `O3K_LOCATIONS`. Advertised-implies-executable is enforced both ways: every advertised capability is exercised later in the journey, and the readiness/reachability discovery gates (defect fix 5 below) keep unreachable operations out of the advertisement | `ManifestRegistry::seed_core` (composition root) | ✓ | ✓ | ✓ | PASS |
 | 3 | Generic lifecycle | `POST/GET/PUT/DELETE /o3k/v1/compute/servers[/{id}]`, `POST /o3k/v1/network/networks` | Create with idempotency key + exact replay (same key → same resource id, no duplicate); bounded list + cursor continuation; show with owner scope; PUT update with `If-Match: generation-N` (missing → 400, stale → 409, live → 200 — after waiting for action convergence so the generation is stable); delete → 204 | `resources` ledger, canonical operations + idempotency reservations | ✓ | ✓ | ✓ | PASS |
 | 4 | Domain actions | `POST /o3k/v1/compute/servers/{id}/actions/{stop,start,reboot}` | Stop/start/reboot through the discovered action schema; canonical Operation IDs returned; replay-safe keys; states converge (ACTIVE→STOPPED→ACTIVE) | canonical operations + reconciler projection | ✓ | ✓ | ✓ | PASS |
 | 5 | Operations | `GET /o3k/v1/operations[/{id}]` | Every mutation's operation shown (`id` agrees with collection); bounded `?limit=1` collection where a continuation cursor provably advances the page (page 2 non-empty and disjoint from page 1); every collected operation id is show-able again after restart | `operations` + `canonical_operation_metadata` | ✓ | ✓ | ✓ | PASS |
@@ -220,9 +220,12 @@ head is frozen):
 | Command | Result |
 | --- | --- |
 | `cargo fmt --all -- --check` | PASS |
-| `cargo clippy -p o3kd -p o3k-native-api --all-targets --all-features -- -D warnings` | PASS |
-| `cargo test -p o3kd --all-features` | PASS (all suites incl. the new regressions) |
-| `cargo test -p o3k-native-api --all-features` | PASS (incl. `discovery_advertises_only_reachable_lifecycle_operations`) |
+| `cargo check --workspace --all-targets --all-features` | PASS |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | PASS |
+| `cargo test --workspace --all-features` | PASS (113 suites, 0 failures) |
+| `git diff --check` | PASS |
+| `bash tests/maintainability-guards.sh` | PASS |
+| `bash tests/adr-governance.sh` | PASS |
 | `bash tests/araf-p2-convergence.sh` (PostgreSQL pass, disposable PG 16.4 + pinned Keycloak 25.0.6, full P12-IAM.7 suite + gate on the shared store) | PASS (`PASS: Araf P2 convergence (PostgreSQL)`) |
 | `bash tests/araf-p2-convergence.sh` (SQLite parity pass, same fixture) | PASS (`PASS: Araf P2 convergence (SQLite)`) |
 | `bash tests/architecture-boundaries.sh` (kernel action inventory validator) | PASS |
@@ -248,6 +251,11 @@ head is frozen):
 - The discovery `actions` metadata projects canonical lifecycle operations;
   domain actions (start/stop/reboot) are manifest-declared and proven
   executable by the journey rather than part of that metadata projection.
+- The PostgreSQL pass intentionally shares one durable store with the
+  P12-IAM.7 suite (a single IdP/store fixture via `O3K_P12_7_AFTER_HOOK`):
+  quota limits are set relative to live usage, metering totals are narrowed
+  to the gate's own closed resources, and the operator assignment
+  provenance is asserted loudly (fix 8 above) rather than assumed.
 - Cross-surface network symmetry is directional: a natively created network
   is visible to the Neutron-compatible surface (shared canonical authority),
   but a Neutron-created network has no generic-ledger row by design, so the
