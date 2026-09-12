@@ -227,6 +227,16 @@ outside #907's evidence-only scope.
     `production_router_update_rejects_mismatched_resource_kind`
     (`crates/o3k-api/tests/native_compute_update_route.rs`).
 
+11. Generic update pre-check panicked on a corrupt non-object
+    `desired_state`. The update path parsed the durable `desired_state` and
+    then assigned through `serde_json`'s `IndexMut`, which panics on a
+    valid-JSON non-object value (corruption or a bad migration), dropping the
+    connection instead of failing closed. The parse now guards
+    `as_object_mut()` and returns the same clean conflict the sibling code
+    paths use. Regression:
+    `native_update_with_non_object_desired_state_fails_closed_without_panic`
+    (`bins/o3kd/src/native_adapters/tests.rs`).
+
 ## Validation
 
 Repository gates (each command exercised green on the current head while

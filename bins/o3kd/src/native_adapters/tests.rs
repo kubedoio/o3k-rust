@@ -970,6 +970,67 @@ mod native_compute_tests {
     }
 
     #[tokio::test]
+    async fn native_update_with_non_object_desired_state_fails_closed_without_panic() {
+        // A durable ledger row whose desired_state is valid JSON but not an
+        // object (corruption or a bad migration) must fail closed with a
+        // clean conflict, not panic the request handler via serde_json's
+        // IndexMut on a non-object value.
+        let (router, store, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+        let (status, created) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-corrupt-desired", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let server_id = created["resource_id"]
+            .as_str()
+            .expect("server id")
+            .to_owned();
+        let server_uuid = Uuid::parse_str(&server_id).expect("server uuid");
+        let ledger = store
+            .get_resource(server_uuid)
+            .await
+            .expect("server ledger row");
+        store
+            .update_resource(
+                server_uuid,
+                ledger.generation,
+                "42",
+                &ledger.observed_state,
+                ledger.observed_generation,
+                ledger.provider_id.as_deref(),
+            )
+            .await
+            .expect("corrupt desired state");
+
+        let (status, rejected) = exec(
+            router,
+            authed_put(
+                &format!("/compute/servers/{server_id}"),
+                "a",
+                "upd-corrupt-desired",
+                ledger.generation + 1,
+                serde_json::json!({"spec": {"name": "renamed"}}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a non-object desired_state must fail closed, not panic: {rejected}"
+        );
+    }
+
+    #[tokio::test]
     async fn native_compute_create_replay_equivalent() {
         let (router, _, provider, _) = setup().await;
         let router = &router;

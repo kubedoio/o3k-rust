@@ -558,7 +558,13 @@ impl ResourceApplication for GenericResourceApplication {
             .ok_or(ResourceApplicationError::Validation)?;
         let mut desired: serde_json::Value = serde_json::from_str(&existing.desired_state)
             .map_err(|_| ResourceApplicationError::Conflict)?;
-        desired["name"] = serde_json::Value::String(name.to_owned());
+        let desired_object = desired
+            .as_object_mut()
+            .ok_or(ResourceApplicationError::Conflict)?;
+        desired_object.insert(
+            "name".to_owned(),
+            serde_json::Value::String(name.to_owned()),
+        );
         let action = descriptor
             .lifecycle_actions
             .get(&o3k_native_api::resource::LifecycleOperation::Update)
