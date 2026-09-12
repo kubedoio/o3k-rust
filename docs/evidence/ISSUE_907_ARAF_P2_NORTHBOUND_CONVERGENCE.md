@@ -241,12 +241,12 @@ outside #907's evidence-only scope.
     treated every `create_network_for_project_with_id` error as a potential
     replay probe, so a durable `QuotaExceeded` became a 409 conflict —
     telling the tenant a non-retryable limit is retryable. The quota denial
-    now maps to 403 before the probe, exactly as on the compute surface; the
-    volume-create arm's quota denial is likewise mapped to 403 instead of
-    500. Regressions:
-    `native_network_quota_denial_is_forbidden_not_a_replay_conflict`,
-    `native_volume_create_replay_with_changed_semantics_conflicts`
-    (`bins/o3kd/src/native_adapters/tests.rs`).
+    now maps to 403 before the probe, exactly as on the compute surface.
+    Regression:
+    `native_network_quota_denial_is_forbidden_not_a_replay_conflict`
+    (`bins/o3kd/src/native_adapters/tests.rs`). Note: the volume-create arm
+    enforces no quota dimension (it performs no `reserve_quota`), so no
+    volume-quota mapping exists or is claimed.
 
 13. Volume-create same-key replay ignored changed semantics. The arm writes
     no idempotency reservation, so the deterministic id is its only replay

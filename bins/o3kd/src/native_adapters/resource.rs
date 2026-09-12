@@ -1547,9 +1547,6 @@ impl ResourceApplication for GenericResourceApplication {
             };
             match self.store.insert_volume(&record).await {
                 Ok(()) => {}
-                Err(o3k_store::StoreError::QuotaExceeded { .. }) => {
-                    return Err(ResourceApplicationError::Forbidden);
-                }
                 Err(o3k_store::StoreError::ResourceAlreadyExists) => {
                     let existing = self
                         .store
