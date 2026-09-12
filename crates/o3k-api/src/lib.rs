@@ -521,6 +521,35 @@ pub fn router_with_state(state: AppState) -> Router {
             )
             .route("/o3k/v1/regions", get(o3k_native_api::discover_regions))
             .route(
+                "/o3k/v1/regions/{region}",
+                put(o3k_native_api::topology::declare_region)
+                    .delete(o3k_native_api::topology::remove_region),
+            )
+            .route(
+                "/o3k/v1/regions/{region}/availability-domains/{az}",
+                put(o3k_native_api::topology::declare_availability_domain)
+                    .delete(o3k_native_api::topology::remove_availability_domain),
+            )
+            .route(
+                "/o3k/v1/topology/failure-domains",
+                get(o3k_native_api::topology::list_failure_domains)
+                    .post(o3k_native_api::topology::create_failure_domain),
+            )
+            .route(
+                "/o3k/v1/topology/failure-domains/{id}",
+                get(o3k_native_api::topology::show_failure_domain)
+                    .put(o3k_native_api::topology::update_failure_domain)
+                    .delete(o3k_native_api::topology::delete_failure_domain),
+            )
+            .route(
+                "/o3k/v1/topology/failure-domains/{id}/bindings",
+                get(o3k_native_api::topology::list_bindings),
+            )
+            .route(
+                "/o3k/v1/topology/failure-domains/{id}/bindings/{kind}/{target}",
+                put(o3k_native_api::topology::bind).delete(o3k_native_api::topology::unbind),
+            )
+            .route(
                 "/o3k/v1/identity/tokens",
                 post(o3k_native_api::identity::issue_token),
             )

@@ -548,6 +548,22 @@ pub async fn seed_identity_defaults(
     store: &dyn IdentityRepository,
     config: &BootstrapConfig,
 ) -> Result<(), StoreError> {
+    seed_identity_defaults_in_region(store, config, "RegionOne").await
+}
+
+/// Seeds the durable identity universe with an explicit canonical catalog
+/// region.
+///
+/// The catalog region is the OpenStack compatibility projection of canonical
+/// O3K topology (see the composition root and ADR-0181/ADR-0184). Callers that
+/// have canonical topology configured pass the projected region; callers
+/// without topology keep the historical `RegionOne` default via
+/// [`seed_identity_defaults`].
+pub async fn seed_identity_defaults_in_region(
+    store: &dyn IdentityRepository,
+    config: &BootstrapConfig,
+    catalog_region: &str,
+) -> Result<(), StoreError> {
     let now = now_rfc3339();
     let default_domain = "default".to_owned();
 
@@ -712,7 +728,7 @@ pub async fn seed_identity_defaults(
 
     store
         .insert_keystone_region(&o3k_store::KeystoneRegionRecord {
-            id: "RegionOne".to_owned(),
+            id: catalog_region.to_owned(),
             description: Some("Default region".to_owned()),
             parent_region_id: None,
             enabled: true,
@@ -779,7 +795,7 @@ pub async fn seed_identity_defaults(
                     service_id: id.to_owned(),
                     interface: interface.to_owned(),
                     url: url.clone(),
-                    region: "RegionOne".to_owned(),
+                    region: catalog_region.to_owned(),
                     enabled: true,
                     created_at: now.clone(),
                 })

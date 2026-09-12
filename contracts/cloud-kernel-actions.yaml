@@ -604,3 +604,23 @@ actions:
     accepted_principal_classes: ["user", "service"]
     require_ownership: true
     public_discovery: false
+
+  # P15.1 — Native topology authority actions (canonical O3K failure domains,
+  # regions, and availability domains). ReadTopology is readable by any
+  # authenticated principal; ManageTopology is durable system/operator
+  # administration, never inferred from a tenant role name.
+  - action_id: "topology:ReadTopology"
+    service_namespace: "topology"
+    resource_type: "failure_domain"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: false
+    public_discovery: true
+
+  - action_id: "topology:ManageTopology"
+    service_namespace: "topology"
+    resource_type: "failure_domain"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: false
+    public_discovery: false

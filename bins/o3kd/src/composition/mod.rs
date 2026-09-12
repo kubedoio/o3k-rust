@@ -252,6 +252,45 @@ pub async fn build_composition(
     };
     let native_api_store = store.clone();
 
+    // Canonical O3K topology is durable. The store is the authority; deployment
+    // configuration declarations (O3K_LOCATIONS) are converged into it
+    // idempotently at startup. A restart therefore reconstructs regions,
+    // availability domains, failure domains and bindings from durable state
+    // (ADR-0181/SPEC-0038; ADR-0184/SPEC-0047).
+    let topology_store: Arc<dyn o3k_kernel::TopologyStore> = store.clone();
+    let mut native_locations = o3k_kernel::LocationRegistry::from_snapshot(
+        topology_store
+            .load_snapshot()
+            .await
+            .map_err(|error| format!("canonical topology load failed: {error}"))?,
+    )
+    .map_err(|error| format!("stored canonical topology is invalid: {error}"))?;
+    let declared_locations = locations_from_env()
+        .map_err(|error| format!("native location configuration failed: {error}"))?;
+    for region in declared_locations.regions() {
+        // Startup convergence is not an HTTP mutation request, so no audit
+        // event (it is a restart-safe idempotent seed).
+        native_locations
+            .declare_region(&*topology_store, &region.id, None)
+            .await
+            .map_err(|error| format!("canonical region convergence failed: {error}"))?;
+        for az in &region.availability_domains {
+            native_locations
+                .declare_availability_domain(&*topology_store, &region.id, &az.id, None)
+                .await
+                .map_err(|error| {
+                    format!("canonical availability-domain convergence failed: {error}")
+                })?;
+        }
+    }
+    // OpenStack region projection: the canonical region when exactly one is
+    // configured, otherwise the historical RegionOne default. Multi-region
+    // catalog projection is deferred (see SPEC-0047 traceability).
+    let catalog_region = match native_locations.regions() {
+        [only] => only.id.clone(),
+        _ => "RegionOne".to_owned(),
+    };
+
     let controller_id = o3k_store::ControllerId::new(
         std::env::var("O3K_CONTROLLER_ID").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string()),
     );
@@ -552,7 +591,7 @@ pub async fn build_composition(
     let identity = match (config.bootstrap_password(), config.token_signing_key()) {
         (Some(password), Some(signing_key)) => {
             let catalog_endpoint = format!("http://{}", config.listen_addr);
-            o3k_identity::seed_identity_defaults(
+            o3k_identity::seed_identity_defaults_in_region(
                 identity_store.as_ref(),
                 &o3k_identity::BootstrapConfig {
                     catalog_endpoint: catalog_endpoint.clone(),
@@ -564,6 +603,7 @@ pub async fn build_composition(
                     pbkdf2_iterations: 0,
                     extra_projects,
                 },
+                &catalog_region,
             )
             .await?;
             Some(
@@ -573,7 +613,13 @@ pub async fn build_composition(
                     Duration::from_secs(3600),
                 )
                 .await?
-                .with_catalog_endpoint(catalog_endpoint),
+                .with_catalog_endpoint(catalog_endpoint.clone())
+                // Keystone catalog/project projection of canonical O3K topology.
+                .with_registry(o3k_kernel::KernelRegistry::standard_in_region(
+                    &catalog_endpoint,
+                    std::env::var("O3K_CINDER_ENDPOINT").ok().as_deref(),
+                    &catalog_region,
+                )),
             )
         }
         _ => {
@@ -593,8 +639,11 @@ pub async fn build_composition(
         .unwrap_or_default();
 
     let mut native_manifest_registry = o3k_kernel::ManifestRegistry::new();
+    // Core manifests publish cloud-wide availability over the canonical
+    // topology reconstructed above (regions/AZs are references, never
+    // invented here).
     native_manifest_registry
-        .seed_core()
+        .seed_core_with_locations(&native_locations)
         .map_err(|e| format!("native manifest seed_core failed: {e}"))?;
     if let Ok(manifest_directory) = std::env::var("O3K_MANIFEST_DIR") {
         let path = std::path::Path::new(&manifest_directory);
@@ -605,10 +654,9 @@ pub async fn build_composition(
     }
 
     // Canonical O3K location topology is the single source of region and
-    // availability-domain truth (ADR-0181/SPEC-0038). It is read from
-    // deployment configuration and never derived from hosts/providers/backends.
-    let native_locations =
-        locations_from_env().map_err(|e| format!("native location configuration failed: {e}"))?;
+    // availability-domain truth (ADR-0181/SPEC-0038): durable store plus
+    // converged deployment declarations, never derived from hosts, providers,
+    // or backends (see the topology bootstrap above).
     native_locations
         .validate_manifest_registry(&native_manifest_registry)
         .map_err(|e| format!("service manifest references unknown location: {e}"))?;
@@ -956,7 +1004,10 @@ pub async fn build_composition(
         volume_reader,
         network_reader,
     )?
-    .with_locations(native_locations.clone())
+    .with_locations(std::sync::Arc::new(
+        o3k_native_api::topology::TopologyGuard::new(native_locations.clone()),
+    ))
+    .with_topology_store(store.clone())
     .with_operation_reader(operation_reader)
     .with_quota_reader(std::sync::Arc::new(
         crate::native_adapters::QuotaReaderAdapter::new(store.clone()),

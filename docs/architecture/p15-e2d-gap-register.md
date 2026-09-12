@@ -65,23 +65,56 @@ Rules:
   identity related to blocks, hosts, network fabrics, and storage domains;
   discoverable by native API/Araf; projects cleanly to OpenStack region/AZ
   semantics (ADR-0182).
-- **Current implementation:** `LocationRegistry`, `RegionDeclaration`,
-  `AvailabilityDomain` in `crates/o3k-kernel/src/location.rs`; seeded from
-  `O3K_LOCATIONS` (`bins/o3kd/src/composition/mod.rs:77-97,610-620`);
-  manifests reference canonical IDs and fail closed; `GET /o3k/v1/regions`
-  (`crates/o3k-api/src/lib.rs:522`).
-- **Evidence:** unit tests `crates/o3k-kernel/src/location.rs:297-657`;
-  `crates/o3k-api/tests/native_location_routes.rs`;
-  `contracts/native-location-discovery-v1.schema.json`; composition tests
-  `bins/o3kd/src/composition/mod.rs:1280-1319`.
-- **Remaining delta:** an AZ is only an identifier; no hierarchy below AZ; no
-  links to hosts, providers, fabrics, or storage; `seed_core` still publishes
-  `regions: vec![]` (`crates/o3k-kernel/src/manifest.rs:1612`); the Keystone
-  catalog hard-codes `RegionOne` from the static registry (projection call at
-  `crates/o3k-identity/src/lib.rs:1538-1553`; `RegionOne` literals at
-  `crates/o3k-identity/src/lib.rs:715` and
-  `crates/o3k-kernel/src/registry.rs:288-293`); no `OS-EXT-AZ` projection in
-  `crates/o3k-api`.
+- **Current implementation:** canonical topology is now durable and
+  authoritative. `topology_regions`, `topology_availability_domains`,
+  `failure_domains`, and `topology_bindings` tables exist in SQLite
+  (`crates/o3k-store/migrations/0046_topology.sql`) and PostgreSQL
+  (`crates/o3k-store/migrations_postgres/0029_topology.sql`), with the
+  `o3k_kernel::TopologyStore` port implemented for both backends and unified
+  dispatch (`crates/o3k-store/src/sqlite/topology.rs`,
+  `crates/o3k-store/src/postgres/topology.rs`,
+  `crates/o3k-store/src/unified/topology.rs`). `LocationRegistry`
+  (`crates/o3k-kernel/src/location.rs:575`) is the single topology authority,
+  reconstructed from durable state at startup via `from_snapshot`
+  (`location.rs:661`), with `O3K_LOCATIONS` declarations converged idempotently
+  into the store (`bins/o3kd/src/composition/mod.rs:256-292`). Generic typed
+  `FailureDomain` (`location.rs:183`) with `class` site/building/room/row/rack/
+  chassis/power-domain/network-domain/storage-domain (`location.rs:120`),
+  validated acyclic parent/child hierarchy (cycle, self-parent, depth-64,
+  rank-nesting, cross-AZ rules), durable generation (CAS) and metadata; and
+  `TopologyBinding` references to resource-provider/host/fabric-domain/
+  storage-domain targets — references only, provider-neutral (`location.rs:252`).
+  Native API (SPEC-0047 §4.1):
+  `GET/POST /o3k/v1/topology/failure-domains`,
+  `GET/PUT/DELETE /o3k/v1/topology/failure-domains/{id}` (If-Match generation),
+  `GET/PUT/DELETE /o3k/v1/topology/failure-domains/{id}/bindings[/{kind}/{target}]`,
+  and operator region/AZ declaration
+  `PUT/DELETE /o3k/v1/regions/{region}` and
+  `PUT/DELETE /o3k/v1/regions/{region}/availability-domains/{az}`
+  (`crates/o3k-native-api/src/topology.rs`). Reads require an authenticated
+  principal (`topology:ReadTopology`); mutations require system scope + operator
+  (`topology:ManageTopology`) and fail closed without a durable audit sink; every
+  mutation publishes a canonical audit event. `seed_core` now publishes canonical
+  regions/AZs — no longer empty — via `seed_core_with_locations`
+  (`crates/o3k-kernel/src/manifest.rs:1578`). Keystone region projection is
+  derived from canonical topology when exactly one region is configured, else the
+  historical `RegionOne` default; multi-region catalog projection is deferred
+  (`bins/o3kd/src/composition/mod.rs:287-292`;
+  `crates/o3k-identity/src/lib.rs:559-565`).
+- **Evidence:** kernel unit tests for hierarchy validity (cycle/rank/depth/
+  cross-AZ), durability, and restart reconstruction
+  (`crates/o3k-kernel/src/location.rs:2271+`); store conformance plus PostgreSQL
+  parity tests including concurrency/CAS/replay
+  (`crates/o3k-store/tests/postgres_topology.rs`); native API route, authz, and
+  schema tests (`crates/o3k-native-api/src/topology.rs:1530+`);
+  `bins/o3kd/tests/p15_1_topology_process.rs` (real o3kd: durable convergence,
+  restart survival, derived catalog region, project-scoped 403) and
+  `bins/o3kd/tests/p15_1_topology_operator.rs` (operator CRUD + audit through the
+  production router, accepted TestIssuer pattern).
+- **Remaining delta:** OpenStack AZ (Nova, `OS-EXT-AZ`) projection from canonical
+  topology is not implemented; host/fabric/storage-domain consumers of
+  `TopologyBinding` references (P16); real-scale / topology-at-scale evidence
+  (P15.7 #937 / P18).
 - **Dependency:** none upstream; this identity is the foundation E2D-02/03/16/17
   build on.
 - **Claim impact:** BLOCKER-to-claim.

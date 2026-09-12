@@ -1970,6 +1970,377 @@ pub async fn run_placement_repository_conformance<S: PlacementRepository>(
     Ok(())
 }
 
+/// Runs the behavior shared by every topology store adapter: region/AZ
+/// declaration with replay-idempotent inserts, snapshot assembly (regions
+/// with their availability domains, failure domains and bindings sorted by
+/// identity), failure-domain CRUD with CAS generations, binding idempotency,
+/// referential-integrity protections surfacing as conflicts, and bounded
+/// keyset lists (page bound honored, stable ordering, exact continuation).
+pub async fn run_topology_store_conformance<S: o3k_kernel::TopologyStore>(
+    store: &S,
+) -> Result<(), o3k_kernel::KernelError> {
+    use o3k_kernel::{
+        AvailabilityDomain, BindingTarget, BindingTargetKind, FailureDomain, FailureDomainClass,
+        KernelError, RegionDeclaration, TopologyBinding,
+    };
+    use std::collections::BTreeMap;
+
+    fn domain(
+        id: &str,
+        class: FailureDomainClass,
+        az: &str,
+        parent: Option<&str>,
+    ) -> FailureDomain {
+        FailureDomain {
+            id: id.to_owned(),
+            class,
+            name: id.to_owned(),
+            availability_domain: az.to_owned(),
+            parent: parent.map(str::to_owned),
+            generation: 1,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    fn binding(failure_domain: &str, kind: BindingTargetKind, id: &str) -> TopologyBinding {
+        TopologyBinding {
+            failure_domain: failure_domain.to_owned(),
+            target: BindingTarget {
+                kind,
+                id: id.to_owned(),
+            },
+        }
+    }
+
+    fn is_conflict(result: &Result<(), KernelError>, needle: &str) -> bool {
+        matches!(result, Err(KernelError::TopologyCorrupt(reason)) if reason.contains(needle))
+    }
+
+    // Declaration and replay-idempotent inserts.
+    store.insert_region("conf-region", None).await?;
+    store.insert_region("conf-region", None).await?;
+    store
+        .insert_availability_domain("conf-region", "conf-az", None)
+        .await?;
+    store
+        .insert_availability_domain("conf-region", "conf-az", None)
+        .await?;
+
+    // Snapshot assembly: regions with their AZs, sorted by identity.
+    let snapshot = store.load_snapshot().await?;
+    assert_eq!(
+        snapshot.regions,
+        vec![RegionDeclaration {
+            id: "conf-region".to_owned(),
+            availability_domains: vec![AvailabilityDomain {
+                id: "conf-az".to_owned()
+            }],
+        }]
+    );
+    assert!(snapshot.failure_domains.is_empty());
+    assert!(snapshot.bindings.is_empty());
+
+    // Failure-domain CRUD with CAS generations and JSON metadata.
+    store
+        .insert_failure_domain(
+            &domain("conf-rack", FailureDomainClass::Rack, "conf-az", None),
+            None,
+        )
+        .await?;
+    let duplicate = store
+        .insert_failure_domain(
+            &domain("conf-rack", FailureDomainClass::Rack, "conf-az", None),
+            None,
+        )
+        .await;
+    assert!(
+        is_conflict(&duplicate, "duplicate"),
+        "unexpected: {duplicate:?}"
+    );
+
+    let unknown_az = store
+        .insert_failure_domain(
+            &domain(
+                "conf-ghost",
+                FailureDomainClass::Rack,
+                "conf-az-missing",
+                None,
+            ),
+            None,
+        )
+        .await;
+    assert!(
+        is_conflict(&unknown_az, "unknown availability domain or parent"),
+        "unexpected: {unknown_az:?}"
+    );
+
+    let mut updated = domain("conf-rack", FailureDomainClass::Rack, "conf-az", None);
+    updated.name = "Conformance Rack".to_owned();
+    updated.generation = 2;
+    updated.metadata.insert("row".to_owned(), "3".to_owned());
+    store.update_failure_domain(&updated, 1, None).await?;
+    let stale = store.update_failure_domain(&updated, 1, None).await;
+    assert!(
+        is_conflict(&stale, "stale generation"),
+        "unexpected: {stale:?}"
+    );
+
+    // Bindings: unique per (failure domain, kind, id), replay-idempotent.
+    store
+        .insert_binding(
+            &binding(
+                "conf-rack",
+                BindingTargetKind::ResourceProvider,
+                "conf-provider",
+            ),
+            None,
+        )
+        .await?;
+    store
+        .insert_binding(
+            &binding(
+                "conf-rack",
+                BindingTargetKind::ResourceProvider,
+                "conf-provider",
+            ),
+            None,
+        )
+        .await?;
+    let unknown_fd = store
+        .insert_binding(
+            &binding("conf-missing", BindingTargetKind::Host, "conf-host"),
+            None,
+        )
+        .await;
+    assert!(
+        is_conflict(&unknown_fd, "unknown failure domain"),
+        "unexpected: {unknown_fd:?}"
+    );
+
+    // Bounded keyset lists: every page honors the bound (at most limit + 1
+    // rows, the extra row signalling a further page), ordering is stable, and
+    // keyset continuation enumerates exactly the sorted durable sequence.
+    for suffix in ["a", "b", "c", "d"] {
+        store
+            .insert_failure_domain(
+                &domain(
+                    &format!("conf-list-{suffix}"),
+                    FailureDomainClass::Rack,
+                    "conf-az",
+                    None,
+                ),
+                None,
+            )
+            .await?;
+    }
+    for host in ["conf-host-a", "conf-host-b", "conf-host-c"] {
+        store
+            .insert_binding(&binding("conf-rack", BindingTargetKind::Host, host), None)
+            .await?;
+    }
+
+    let binding_sort_key = |binding: &TopologyBinding| {
+        (
+            binding.failure_domain.clone(),
+            binding.target.kind.as_str().to_owned(),
+            binding.target.id.clone(),
+        )
+    };
+
+    // Failure-domain pages walk the exact ascending id sequence.
+    let all_ids: Vec<String> = store
+        .load_snapshot()
+        .await?
+        .failure_domains
+        .iter()
+        .map(|domain| domain.id.clone())
+        .collect();
+    let mut seen_ids: Vec<String> = Vec::new();
+    let mut after_id: Option<String> = None;
+    loop {
+        let page = store.list_failure_domains(after_id.as_deref(), 2).await?;
+        assert!(
+            page.len() <= 3,
+            "page exceeds the limit + 1 bound: {page:?}"
+        );
+        assert!(
+            page.windows(2).all(|pair| pair[0].id < pair[1].id),
+            "page must be strictly ascending by id: {page:?}"
+        );
+        seen_ids.extend(page.iter().map(|domain| domain.id.clone()));
+        if page.len() <= 2 {
+            break;
+        }
+        after_id = page.last().map(|domain| domain.id.clone());
+    }
+    assert_eq!(
+        seen_ids, all_ids,
+        "keyset walk must enumerate the exact sorted sequence"
+    );
+
+    // Global binding pages follow (failure_domain, kind, id) order.
+    let all_binding_keys: Vec<(String, String, String)> = store
+        .load_snapshot()
+        .await?
+        .bindings
+        .iter()
+        .map(binding_sort_key)
+        .collect();
+    let mut seen_binding_keys: Vec<(String, String, String)> = Vec::new();
+    let mut after_cursor: Option<o3k_kernel::BindingListCursor> = None;
+    loop {
+        let page = store.list_bindings(after_cursor.as_ref(), 2).await?;
+        assert!(
+            page.len() <= 3,
+            "page exceeds the limit + 1 bound: {page:?}"
+        );
+        assert!(
+            page.windows(2)
+                .all(|pair| binding_sort_key(&pair[0]) < binding_sort_key(&pair[1])),
+            "page must be strictly ascending by identity: {page:?}"
+        );
+        seen_binding_keys.extend(page.iter().map(binding_sort_key));
+        if page.len() <= 2 {
+            break;
+        }
+        after_cursor = page.last().map(o3k_kernel::BindingListCursor::after);
+    }
+    assert_eq!(
+        seen_binding_keys, all_binding_keys,
+        "keyset walk must enumerate the exact sorted sequence"
+    );
+
+    // Per-failure-domain binding pages filter honestly and continue by keyset.
+    let rack_binding_keys: Vec<(String, String, String)> = all_binding_keys
+        .iter()
+        .filter(|(failure_domain, _, _)| failure_domain == "conf-rack")
+        .cloned()
+        .collect();
+    let mut seen_rack_keys: Vec<(String, String, String)> = Vec::new();
+    let mut after_cursor: Option<o3k_kernel::BindingListCursor> = None;
+    loop {
+        let page = store
+            .list_bindings_of("conf-rack", after_cursor.as_ref(), 1)
+            .await?;
+        assert!(
+            page.len() <= 2,
+            "page exceeds the limit + 1 bound: {page:?}"
+        );
+        assert!(
+            page.windows(2).all(|pair| {
+                (pair[0].target.kind.as_str(), pair[0].target.id.as_str())
+                    < (pair[1].target.kind.as_str(), pair[1].target.id.as_str())
+            }),
+            "page must be strictly ascending by target: {page:?}"
+        );
+        seen_rack_keys.extend(page.iter().map(binding_sort_key));
+        if page.len() <= 1 {
+            break;
+        }
+        after_cursor = page.last().map(o3k_kernel::BindingListCursor::after);
+    }
+    assert_eq!(
+        seen_rack_keys, rack_binding_keys,
+        "per-failure-domain keyset walk must enumerate exactly that domain's sorted bindings"
+    );
+
+    // The bounded-list fixtures leave before the protection/teardown flow.
+    for host in ["conf-host-a", "conf-host-b", "conf-host-c"] {
+        store
+            .delete_binding(&binding("conf-rack", BindingTargetKind::Host, host), None)
+            .await?;
+    }
+    for suffix in ["a", "b", "c", "d"] {
+        store
+            .delete_failure_domain(&format!("conf-list-{suffix}"), 1, None)
+            .await?;
+    }
+
+    // Deletion protections: children and bindings keep their parent alive.
+    store
+        .insert_failure_domain(
+            &domain(
+                "conf-chassis",
+                FailureDomainClass::Chassis,
+                "conf-az",
+                Some("conf-rack"),
+            ),
+            None,
+        )
+        .await?;
+    let has_child = store.delete_failure_domain("conf-rack", 2, None).await;
+    assert!(
+        is_conflict(&has_child, "child failure domains or bindings"),
+        "unexpected: {has_child:?}"
+    );
+    let has_fd = store.delete_availability_domain("conf-az", None).await;
+    assert!(
+        is_conflict(&has_fd, "still has failure domains"),
+        "unexpected: {has_fd:?}"
+    );
+    let has_az = store.delete_region("conf-region", None).await;
+    assert!(
+        is_conflict(&has_az, "still has availability domains"),
+        "unexpected: {has_az:?}"
+    );
+
+    // Tear down in dependency order; every mutation converges.
+    store
+        .delete_binding(
+            &binding(
+                "conf-rack",
+                BindingTargetKind::ResourceProvider,
+                "conf-provider",
+            ),
+            None,
+        )
+        .await?;
+    store
+        .delete_binding(
+            &binding(
+                "conf-rack",
+                BindingTargetKind::ResourceProvider,
+                "conf-provider",
+            ),
+            None,
+        )
+        .await?;
+    store.delete_failure_domain("conf-chassis", 1, None).await?;
+    let stale_delete = store.delete_failure_domain("conf-rack", 1, None).await;
+    assert!(
+        is_conflict(&stale_delete, "stale generation"),
+        "unexpected: {stale_delete:?}"
+    );
+    store.delete_failure_domain("conf-rack", 2, None).await?;
+    store.delete_availability_domain("conf-az", None).await?;
+    store.delete_region("conf-region", None).await?;
+
+    // The final snapshot is exactly empty and the updated values persisted.
+    let snapshot = store.load_snapshot().await?;
+    assert!(snapshot.regions.is_empty());
+    assert!(snapshot.failure_domains.is_empty());
+    assert!(snapshot.bindings.is_empty());
+
+    // Rebuild once to verify the update/metadata round-trip end to end.
+    store.insert_region("conf-region", None).await?;
+    store
+        .insert_availability_domain("conf-region", "conf-az", None)
+        .await?;
+    store
+        .insert_failure_domain(
+            &domain("conf-rack", FailureDomainClass::Rack, "conf-az", None),
+            None,
+        )
+        .await?;
+    store.update_failure_domain(&updated, 1, None).await?;
+    let snapshot = store.load_snapshot().await?;
+    assert_eq!(snapshot.failure_domains, vec![updated]);
+    store.delete_failure_domain("conf-rack", 2, None).await?;
+    store.delete_availability_domain("conf-az", None).await?;
+    store.delete_region("conf-region", None).await?;
+    Ok(())
+}
+
 #[cfg(unix)]
 fn restrict_sqlite_sidecars(path: &Path) -> Result<(), StoreError> {
     for suffix in ["-wal", "-shm"] {

@@ -140,8 +140,8 @@ current gaps are:
 
 | ID | Severity for future product claim | Gap |
 |---|---|---|
-| E2D-01 | BLOCKER-to-claim | Canonical Region/AvailabilityDomain discovery is implemented (ADR-0181/SPEC-0038); failure-domain hierarchy below AZ, provider/host/fabric linkage, and Keystone region projection remain open (P15.1 #931). |
-| E2D-02 | BLOCKER-to-claim | Placement/scheduling is still flat capacity selection; no hierarchy, generic traits, topology constraints or failure-domain spreading. |
+| E2D-01 | BLOCKER-to-claim | Canonical topology is durable and exposed on `/o3k/v1/topology/*`: regions/AZs plus a validated generic failure-domain hierarchy and provider/host/fabric/storage references (ADR-0181/SPEC-0038, P15.1 #931). OpenStack AZ (Nova) projection, binding consumers, and real-scale evidence remain open. |
+| E2D-02 | BLOCKER-to-claim | Placement/scheduling is still flat capacity selection; no hierarchy, generic traits, topology constraints or failure-domain spreading. (Carve-out: a validated failure-domain hierarchy now exists as canonical topology authority outside placement/consumption; placement itself still does not consume it — P15.1 #931.) |
 | E2D-03 | BLOCKER-to-claim | Building blocks are an accepted architecture concept but not yet a first-class operator/runtime lifecycle. |
 | E2D-04 | BLOCKER-to-composable-catalog | Static `KernelRegistry` and dynamic `ManifestRegistry` still coexist after #928; service authority/catalog projection convergence is P15.2 (#932). |
 | E2D-05 | BLOCKER-to-composable-catalog | O3K lacks a declarative desired service-composition/`CloudProfile` layer distinct from runtime service discovery. |
@@ -280,7 +280,9 @@ networking, database or control-plane throughput.
 
 Northbound, the native `/o3k/v1` surface is live for identity,
 compute/network/volume resources, discovery (including regions and
-resource-schemas), operations, relationships, audit, quota, governance,
+resource-schemas), topology (canonical regions/AZs plus the generic
+failure-domain hierarchy and provider/host/fabric/storage references on
+`/o3k/v1/topology/*`), operations, relationships, audit, quota, governance,
 diagnostics, and metering; the Araf product consumes this native surface.
 
 The current Placement/scheduler implementation is intentionally simple: enabled

@@ -1563,6 +1563,33 @@ impl ManifestRegistry {
     /// a failure is an invariant violation that must propagate through daemon
     /// startup.
     pub fn seed_core(&mut self) -> Result<(), ManifestError> {
+        self.seed_core_with_locations(&crate::location::LocationRegistry::default())
+    }
+
+    /// Seeds the built-in core manifests, publishing the canonical location
+    /// topology each core service is available in.
+    ///
+    /// Core Cloud Kernel services are available cloud-wide: every core
+    /// manifest advertises exactly the canonical regions and availability
+    /// domains from `locations`. When no topology is configured the filters
+    /// stay empty (the manifest places globally), preserving prior behavior.
+    /// The filters remain references — canonical location identity is owned by
+    /// the `LocationRegistry`, never invented here.
+    pub fn seed_core_with_locations(
+        &mut self,
+        locations: &crate::location::LocationRegistry,
+    ) -> Result<(), ManifestError> {
+        let core_regions: Vec<String> = locations
+            .regions()
+            .iter()
+            .map(|region| region.id.clone())
+            .collect();
+        let core_availability_domains: Vec<String> = locations
+            .regions()
+            .iter()
+            .flat_map(|region| region.availability_domains.iter())
+            .map(|az| az.id.clone())
+            .collect();
         let core_manifests: Vec<ServiceManifest> = vec![
             ServiceManifest {
                 manifest_version: 1,
@@ -2135,6 +2162,14 @@ impl ManifestRegistry {
         ];
 
         for m in core_manifests {
+            // Core services publish cloud-wide availability over the canonical
+            // topology. Identity of regions/AZs comes from the registry; these
+            // fields are references only.
+            let m = ServiceManifest {
+                regions: core_regions.clone(),
+                availability_domains: core_availability_domains.clone(),
+                ..m
+            };
             // Idempotency check: exact equivalent already registered → skip.
             if let Some(existing) = self.manifests.get(&m.service_id) {
                 if *existing == m {
