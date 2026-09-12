@@ -625,6 +625,15 @@ mod tests {
     }
 }
 
+/// POST /{namespace}/{collection}/{id}/actions/{action_name}
+///
+/// Executes a manifest-declared domain action through a canonical Operation.
+/// The request body is the envelope `{"input": <domain action input>}`.
+/// The `input` value is the domain action input as defined by the published
+/// `https://o3k.io/schemas/native-action-input/v1` schema
+/// (`contracts/native-action-input-v1.schema.json`), carrying cross-cutting
+/// action metadata such as an operator `reason`; the owning domain validates
+/// it.
 pub async fn action(
     auth: BearerAuth,
     headers: HeaderMap,
@@ -697,6 +706,48 @@ pub async fn update(
     State(state): State<NativeApiState>,
     Json(request): Json<UpdateRequest>,
 ) -> Response {
+    update_for(
+        auth,
+        headers,
+        namespace,
+        collection,
+        id,
+        State(state),
+        Json(request),
+    )
+    .await
+}
+
+/// Concrete routes must bind their canonical descriptor explicitly. They do
+/// not derive namespace/collection from the request URI.
+pub async fn update_compute(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<NativeApiState>,
+    Json(request): Json<UpdateRequest>,
+) -> Response {
+    update_for(
+        auth,
+        headers,
+        "compute".to_owned(),
+        "servers".to_owned(),
+        id,
+        State(state),
+        Json(request),
+    )
+    .await
+}
+
+async fn update_for(
+    auth: BearerAuth,
+    headers: HeaderMap,
+    namespace: String,
+    collection: String,
+    id: String,
+    State(state): State<NativeApiState>,
+    Json(request): Json<UpdateRequest>,
+) -> Response {
     let Some(descriptor) = state.resource_index.resolve(&namespace, &collection) else {
         return ProblemDetails::new(ErrorCode::ResourceNotFound).into_response();
     };
@@ -709,6 +760,15 @@ pub async fn update(
     }
     if let Err(response) = ready_for_mutation(&state.resource_index, descriptor) {
         return ProblemDetails::new(response).into_response();
+    }
+    if let Some(kind) = request.kind.as_deref()
+        && kind != descriptor.resource_type.to_string()
+    {
+        return ProblemDetails::with_detail(
+            ErrorCode::BadRequest,
+            "kind does not match route resource type",
+        )
+        .into_response();
     }
     let Some(application) = state.resource_application else {
         return ProblemDetails::new(ErrorCode::NotAvailable).into_response();

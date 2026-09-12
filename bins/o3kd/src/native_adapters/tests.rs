@@ -13,17 +13,143 @@ mod native_compute_tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::post;
+    use o3k_domain::StorageCapabilities;
     use o3k_kernel::{
         ActionId, AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, UserPrincipal,
     };
     use o3k_native_api::auth::{NativeTokenRequestV1, TokenIssuer};
     use o3k_provider::{FailureInjection, FakeComputeProvider};
+    use o3k_storage::{
+        PreparedAttachment, StorageAttachmentObservation, StorageAttachmentRequest,
+        StorageProvider, StorageProviderError, StorageSnapshotObservation, StorageSnapshotRequest,
+        StorageVolumeObservation, StorageVolumeRequest,
+    };
     use o3k_store::DurableStore;
+    use o3k_store::NetworkRepository;
+    use o3k_store::StorageRepository;
     use std::sync::Arc;
     use tower::util::ServiceExt;
     use uuid::Uuid;
 
     struct TestIssuer;
+
+    /// Minimal in-memory storage provider so the generic native volume create
+    /// arm can run end to end; models observe-after-mutation without touching
+    /// host storage.
+    #[derive(Default)]
+    struct FakeStorageProvider {
+        volumes: std::sync::Mutex<BTreeMap<Uuid, StorageVolumeObservation>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageProvider for FakeStorageProvider {
+        async fn capabilities(&self) -> Result<StorageCapabilities, StorageProviderError> {
+            Ok(StorageCapabilities {
+                create_volume: true,
+                snapshots: false,
+                attachment: false,
+                capacity_bytes: 1 << 40,
+                allocated_bytes: 0,
+                allocation_unit_bytes: 4096,
+            })
+        }
+
+        async fn create_volume(
+            &self,
+            request: &StorageVolumeRequest,
+        ) -> Result<StorageVolumeObservation, StorageProviderError> {
+            let observation = StorageVolumeObservation {
+                provider_reference: o3k_domain::StorageProviderReference {
+                    provider: "test".into(),
+                    resource_id: format!("volume-{}", request.volume_id),
+                },
+                size_bytes: request.size_bytes,
+                owned: true,
+                available: true,
+            };
+            self.volumes
+                .lock()
+                .map_err(|_| StorageProviderError::CommandFailed)?
+                .insert(request.volume_id.as_uuid(), observation.clone());
+            Ok(observation)
+        }
+
+        async fn inspect_volume(
+            &self,
+            request: &StorageVolumeRequest,
+        ) -> Result<StorageVolumeObservation, StorageProviderError> {
+            self.volumes
+                .lock()
+                .map_err(|_| StorageProviderError::CommandFailed)?
+                .get(&request.volume_id.as_uuid())
+                .cloned()
+                .ok_or(StorageProviderError::NotFound)
+        }
+
+        async fn delete_volume(
+            &self,
+            request: &StorageVolumeRequest,
+        ) -> Result<(), StorageProviderError> {
+            self.volumes
+                .lock()
+                .map_err(|_| StorageProviderError::CommandFailed)?
+                .remove(&request.volume_id.as_uuid())
+                .map(|_| ())
+                .ok_or(StorageProviderError::NotFound)
+        }
+
+        async fn prepare_attachment(
+            &self,
+            request: &StorageAttachmentRequest,
+        ) -> Result<PreparedAttachment, StorageProviderError> {
+            PreparedAttachment::from_provider(
+                o3k_domain::StorageProviderReference {
+                    provider: "test".into(),
+                    resource_id: format!("volume-{}", request.volume_id),
+                },
+                "/dev/test".into(),
+                request.attachment_id,
+                request.volume_id,
+            )
+        }
+
+        async fn inspect_attachment(
+            &self,
+            request: &StorageAttachmentRequest,
+        ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+            Ok(StorageAttachmentObservation {
+                attachment_id: request.attachment_id,
+                volume_id: request.volume_id,
+                host_id: "test".into(),
+                attached: false,
+                provider_reference: o3k_domain::StorageProviderReference {
+                    provider: "test".into(),
+                    resource_id: format!("volume-{}", request.volume_id),
+                },
+            })
+        }
+
+        async fn terminate_attachment(
+            &self,
+            request: &StorageAttachmentRequest,
+        ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+            self.inspect_attachment(request).await
+        }
+
+        async fn create_snapshot(
+            &self,
+            _request: &StorageSnapshotRequest,
+        ) -> Result<StorageSnapshotObservation, StorageProviderError> {
+            Err(StorageProviderError::InvalidRequest)
+        }
+
+        async fn delete_snapshot(
+            &self,
+            _request: &StorageSnapshotRequest,
+        ) -> Result<(), StorageProviderError> {
+            Err(StorageProviderError::InvalidRequest)
+        }
+    }
 
     fn context(project: &str) -> AuthContext {
         AuthContext::new(
@@ -153,6 +279,144 @@ mod native_compute_tests {
             },
         );
         let _ = reg.activate_controller("compute");
+        let mut network_ops = HashMap::new();
+        network_ops.insert(
+            "list".to_owned(),
+            ActionId::new_unchecked("network", "ListNetworks"),
+        );
+        network_ops.insert(
+            "show".to_owned(),
+            ActionId::new_unchecked("network", "ReadNetwork"),
+        );
+        network_ops.insert(
+            "create".to_owned(),
+            ActionId::new_unchecked("network", "CreateNetwork"),
+        );
+        network_ops.insert(
+            "delete".to_owned(),
+            ActionId::new_unchecked("network", "DeleteNetwork"),
+        );
+        let network_manifest = o3k_kernel::ServiceManifest {
+            manifest_version: 1,
+            service_id: "network".to_owned(),
+            namespace: "network".to_owned(),
+            service_version: "0.4.0".to_owned(),
+            ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
+            resource_types: vec![o3k_kernel::RegisteredResourceType {
+                resource_type: o3k_kernel::ResourceType::new_unchecked("network", "network"),
+                schema_version: "v1".to_owned(),
+                collection: Some("networks".to_owned()),
+                scope: o3k_kernel::ResourceScope::Tenant,
+                operations: network_ops,
+            }],
+            actions: vec![
+                "network:ListNetworks".to_owned(),
+                "network:CreateNetwork".to_owned(),
+                "network:ReadNetwork".to_owned(),
+                "network:DeleteNetwork".to_owned(),
+            ],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: Some(o3k_kernel::ManifestController {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            }),
+            health: None,
+        };
+        let _ = reg.register(network_manifest);
+        let _ = reg.register_controller(
+            "network",
+            o3k_kernel::controller::ControllerSession {
+                service_id: "network".to_owned(),
+                namespace: "network".to_owned(),
+                service_principal: o3k_kernel::ServicePrincipal::new(
+                    o3k_kernel::PrincipalId::new_unchecked("test-network-controller"),
+                    "test-network-controller",
+                    "network",
+                ),
+                session_id: uuid::Uuid::new_v4(),
+                session_generation: 1,
+                protocol_version: o3k_kernel::controller::ProtocolVersion::new(1, 0),
+                manifest_digest: "test-digest".to_owned(),
+                manifest_generation: 1,
+                started_at: "2026-01-01T00:00:00Z".to_owned(),
+            },
+        );
+        let _ = reg.activate_controller("network");
+        let mut volume_ops = HashMap::new();
+        volume_ops.insert(
+            "list".to_owned(),
+            ActionId::new_unchecked("volume", "ListVolumes"),
+        );
+        volume_ops.insert(
+            "show".to_owned(),
+            ActionId::new_unchecked("volume", "ReadVolume"),
+        );
+        volume_ops.insert(
+            "create".to_owned(),
+            ActionId::new_unchecked("volume", "CreateVolume"),
+        );
+        volume_ops.insert(
+            "delete".to_owned(),
+            ActionId::new_unchecked("volume", "DeleteVolume"),
+        );
+        let volume_manifest = o3k_kernel::ServiceManifest {
+            manifest_version: 1,
+            service_id: "volume".to_owned(),
+            namespace: "volume".to_owned(),
+            service_version: "0.4.0".to_owned(),
+            ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
+            resource_types: vec![o3k_kernel::RegisteredResourceType {
+                resource_type: o3k_kernel::ResourceType::new_unchecked("volume", "volume"),
+                schema_version: "v1".to_owned(),
+                collection: Some("volumes".to_owned()),
+                scope: o3k_kernel::ResourceScope::Tenant,
+                operations: volume_ops,
+            }],
+            actions: vec![
+                "volume:ListVolumes".to_owned(),
+                "volume:CreateVolume".to_owned(),
+                "volume:ReadVolume".to_owned(),
+                "volume:DeleteVolume".to_owned(),
+            ],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: Some(o3k_kernel::ManifestController {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            }),
+            health: None,
+        };
+        let _ = reg.register(volume_manifest);
+        let _ = reg.register_controller(
+            "volume",
+            o3k_kernel::controller::ControllerSession {
+                service_id: "volume".to_owned(),
+                namespace: "volume".to_owned(),
+                service_principal: o3k_kernel::ServicePrincipal::new(
+                    o3k_kernel::PrincipalId::new_unchecked("test-volume-controller"),
+                    "test-volume-controller",
+                    "volume",
+                ),
+                session_id: uuid::Uuid::new_v4(),
+                session_generation: 1,
+                protocol_version: o3k_kernel::controller::ProtocolVersion::new(1, 0),
+                manifest_digest: "test-digest".to_owned(),
+                manifest_generation: 1,
+                started_at: "2026-01-01T00:00:00Z".to_owned(),
+            },
+        );
+        let _ = reg.activate_controller("volume");
         reg
     }
 
@@ -211,7 +475,6 @@ mod native_compute_tests {
             image: None,
             network_service,
             store: store.clone(),
-            storage_provider: None,
             server: Arc::new(ServerReaderAdapter {
                 service: compute.clone(),
             }),
@@ -224,6 +487,7 @@ mod native_compute_tests {
             public_address_workflow: None,
             network_external_realm_id: None,
             attachment_workflow: None,
+            storage_provider: Some(Arc::new(FakeStorageProvider::default())),
             metering: None,
         };
 
@@ -449,6 +713,625 @@ mod native_compute_tests {
         )
         .await;
         assert_eq!(stale_status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn native_compute_quota_exceeded_is_forbidden_without_provider_side_effect() {
+        let (router, store, provider, _) = setup().await;
+        let router = &router;
+        use o3k_kernel::{LimitKey, LimitValue};
+        use o3k_store::QuotaRepository;
+        let scope_a = OwnershipScope::project(ScopeId::new_unchecked("project-a"), None, None);
+        store
+            .set_limit(
+                &scope_a,
+                &LimitKey::compute_servers(),
+                LimitValue::Maximum(1),
+            )
+            .await
+            .expect("quota limit");
+
+        let spec = |name: &str| {
+            serde_json::json!({
+                "spec": {
+                    "name": name,
+                    "image_id": "image-a",
+                    "flavor_id": "00000000-0000-0000-0000-000000000001",
+                    "network_ids": ["net-a"]
+                }
+            })
+        };
+        let (status, json) = exec(
+            router,
+            authed_post("/compute/servers", "a", "quota-create-1", spec("one")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{json}");
+
+        // Regression: the durable quota denial from the compute authority used
+        // to surface as a 500 through the generic native route; it is a
+        // caller-visible 403, and the provider must not observe the mutation.
+        let (status, problem) = exec(
+            router,
+            authed_post("/compute/servers", "a", "quota-create-2", spec("two")),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "quota denial must not map to an internal error: {problem}"
+        );
+        assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_network_quota_denial_is_forbidden_not_a_replay_conflict() {
+        let (router, store, _, _) = setup().await;
+        let router = &router;
+        use o3k_kernel::{LimitKey, LimitValue};
+        use o3k_store::QuotaRepository;
+        let scope_a = OwnershipScope::project(ScopeId::new_unchecked("project-a"), None, None);
+        store
+            .set_limit(
+                &scope_a,
+                &LimitKey::network_networks(),
+                LimitValue::Maximum(0),
+            )
+            .await
+            .expect("quota limit");
+
+        // Regression: the durable quota denial from the network authority was
+        // swallowed by the replay probe and surfaced as a 409 conflict,
+        // telling the tenant a non-retryable limit is retryable. It is a
+        // caller-visible 403.
+        let (status, problem) = exec(
+            router,
+            authed_post(
+                "/network/networks",
+                "a",
+                "net-quota-1",
+                serde_json::json!({"spec": {"name": "quota-net"}}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "network quota denial must map to 403, not a replay conflict: {problem}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_volume_create_replay_with_changed_semantics_conflicts() {
+        let (router, store, _, _) = setup().await;
+        let router = &router;
+        let volume_spec = |size: u64, name: &str| {
+            serde_json::json!({
+                "spec": {
+                    "name": name,
+                    "size_bytes": size,
+                    "volume_type": "lvm"
+                }
+            })
+        };
+        let (status, created) = exec(
+            router,
+            authed_post(
+                "/volume/volumes",
+                "a",
+                "vol-key-1",
+                volume_spec(1_073_741_824, "vol-a"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let volume_id = created["resource_id"]
+            .as_str()
+            .expect("volume id")
+            .to_owned();
+
+        // A same-key retry with identical semantics replays the durable
+        // result.
+        let (status, replayed) = exec(
+            router,
+            authed_post(
+                "/volume/volumes",
+                "a",
+                "vol-key-1",
+                volume_spec(1_073_741_824, "vol-a"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{replayed}");
+        assert_eq!(replayed["resource_id"], volume_id, "{replayed}");
+
+        // Regression: reusing the key with different semantics used to return
+        // the original volume as if it were this request's result. Key reuse
+        // with a changed body is an idempotency conflict.
+        let (status, conflict) = exec(
+            router,
+            authed_post(
+                "/volume/volumes",
+                "a",
+                "vol-key-1",
+                volume_spec(2_147_483_648, "vol-a"),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "same-key retry with changed semantics must conflict: {conflict}"
+        );
+
+        // The durable volume is untouched by the rejected key reuse.
+        let volume_uuid = Uuid::parse_str(&volume_id).expect("volume uuid");
+        let record = store
+            .get_volume(volume_uuid)
+            .await
+            .expect("volume record")
+            .expect("volume exists");
+        assert_eq!(record.volume.size_bytes, 1_073_741_824);
+    }
+
+    #[tokio::test]
+    async fn native_network_create_is_listed_and_deletable_through_generic_collection() {
+        let (router, _, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({"spec": {"name": "tenant-network"}});
+        let (status, created) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-create", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let network_id = created["resource_id"]
+            .as_str()
+            .expect("network id")
+            .to_owned();
+
+        // Regression: the generic native collection must list a natively
+        // created network. The durable resource-ledger row used to be written
+        // only for migration envelopes, leaving native creates invisible to
+        // the native list and undeletable through the generic delete route.
+        let (status, listed) = exec(router, authed("/network/networks", "a")).await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        let ids: Vec<&str> = listed["items"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item["metadata"]["id"].as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            ids.contains(&network_id.as_str()),
+            "native network missing from the generic collection: {listed}"
+        );
+
+        let delete_response = router
+            .clone()
+            .oneshot(authed_delete(
+                &format!("/network/networks/{network_id}"),
+                "a",
+                "net-delete",
+            ))
+            .await
+            .expect("delete request");
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn native_network_create_replay_returns_same_resource() {
+        let (router, store, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({"spec": {"name": "replay-network"}});
+        let (status, first) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-replay", body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{first}");
+        let first_id = first["resource_id"]
+            .as_str()
+            .expect("network id")
+            .to_owned();
+        // The create response projects the public spec (name-only contract).
+        assert_eq!(
+            first["resource"]["spec"]["name"], "replay-network",
+            "{first}"
+        );
+
+        let (status, replay) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-replay", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{replay}");
+        assert_eq!(replay["resource_id"], first_id, "{replay}");
+
+        // Exactly one canonical network and one ledger row exist for the
+        // replayed create.
+        let canonicals = store
+            .list_canonical_networks("project-a")
+            .await
+            .expect("canonical networks");
+        assert_eq!(
+            canonicals
+                .iter()
+                .filter(|network| network.id.to_string() == first_id)
+                .count(),
+            1,
+            "replay must not duplicate the canonical network: {canonicals:?}"
+        );
+        let (status, listed) = exec(router, authed("/network/networks", "a")).await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        let occurrences = listed["items"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| item["metadata"]["id"].as_str() == Some(first_id.as_str()))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(
+            occurrences, 1,
+            "replay must not duplicate the ledger row: {listed}"
+        );
+
+        // Show projects the public spec name for natively created networks.
+        let (status, shown) = exec(
+            router,
+            authed(&format!("/network/networks/{first_id}"), "a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{shown}");
+        assert_eq!(shown["spec"]["name"], "replay-network", "{shown}");
+    }
+
+    #[tokio::test]
+    async fn native_network_replay_with_changed_name_conflicts() {
+        let (router, _, _, _) = setup().await;
+        let router = &router;
+        let first = serde_json::json!({"spec": {"name": "original-name"}});
+        let (status, created) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-rename", first),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        // Same key, different name: key reuse with changed semantics is a
+        // conflict, not a silent replay of the original resource.
+        let changed = serde_json::json!({"spec": {"name": "changed-name"}});
+        let (status, conflict) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-rename", changed),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    }
+
+    #[tokio::test]
+    async fn native_network_replay_after_delete_is_not_a_replay() {
+        let (router, _, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({"spec": {"name": "recreated-candidate"}});
+        let (status, created) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-delete-replay", body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let network_id = created["resource_id"]
+            .as_str()
+            .expect("network id")
+            .to_owned();
+        let delete_response = router
+            .clone()
+            .oneshot(authed_delete(
+                &format!("/network/networks/{network_id}"),
+                "a",
+                "net-delete-replay-del",
+            ))
+            .await
+            .expect("delete request");
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+        // A same-key retry after deletion must not treat the DELETED ledger
+        // tombstone as a replay target: it fails closed (conflict) instead of
+        // splitting fresh canonical authority from a stale ledger row.
+        let (status, retried) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-delete-replay", body),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "same-key retry after delete must fail closed: {retried}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_network_create_compensates_canonical_on_ledger_conflict() {
+        let (router, store, _, _) = setup().await;
+        let router = &router;
+        // Pre-insert a ledger row with the exact id the create will derive
+        // from its idempotency key, but under a different resource kind, so
+        // the ledger insert fails after the canonical create has committed.
+        let conflicting_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_OID,
+            b"project-a:network:network:net-conflict",
+        );
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: conflicting_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: "{}".to_owned(),
+                observed_state: "active".to_owned(),
+                provider_id: None,
+            })
+            .await
+            .expect("conflicting ledger row");
+        let body = serde_json::json!({"spec": {"name": "orphan-candidate"}});
+        let (status, failed) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-conflict", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{failed}");
+
+        // The canonical network created before the ledger failure must have
+        // been compensated: it is not visible through the native surface
+        // (without a ledger row it would previously have stayed visible to
+        // show via the canonical fallback while being invisible to list and
+        // undeletable — the orphan authority the fix removes).
+        let (status, shown) = exec(
+            router,
+            authed(&format!("/network/networks/{conflicting_id}"), "a"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "compensated network must not remain visible: {shown}"
+        );
+        let canonicals = store
+            .list_canonical_networks("project-a")
+            .await
+            .expect("canonical networks");
+        assert!(
+            canonicals
+                .iter()
+                .all(|network| network.id != conflicting_id),
+            "compensated network must not remain canonical authority: {canonicals:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_network_show_conceals_deleted_resource() {
+        let (router, _, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({"spec": {"name": "doomed-network"}});
+        let (status, created) = exec(
+            router,
+            authed_post("/network/networks", "a", "net-doomed", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let network_id = created["resource_id"]
+            .as_str()
+            .expect("network id")
+            .to_owned();
+        let delete_response = router
+            .clone()
+            .oneshot(authed_delete(
+                &format!("/network/networks/{network_id}"),
+                "a",
+                "net-doomed-delete",
+            ))
+            .await
+            .expect("delete request");
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+        // Show is the live-resource view: a finalized network is concealed
+        // (404) exactly like a deleted compute server, even though the
+        // ledger keeps the tombstone for the collection projection.
+        let (status, shown) = exec(
+            router,
+            authed(&format!("/network/networks/{network_id}"), "a"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "deleted network must be concealed from show: {shown}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_update_stale_if_match_leaves_no_pending_operation() {
+        // The live generation is read from the durable ledger directly: this
+        // minimal harness declares the legacy `compute:ShowServer` action,
+        // which the standard authorizer does not register, so generic show
+        // is not the generation source here.
+        let (router, store, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+        let (status, created) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-stale-upd", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let server_id = created["resource_id"]
+            .as_str()
+            .expect("server id")
+            .to_owned();
+
+        // Stale If-Match: 409, and — the actual regression — no durable
+        // Pending operation or consumed idempotency reservation may be left
+        // behind by a rejected precondition.
+        let stale = authed_put(
+            &format!("/compute/servers/{server_id}"),
+            "a",
+            "upd-stale",
+            99_999,
+            serde_json::json!({"spec": {"name": "renamed"}}),
+        );
+        let (status, rejected) = exec(router, stale).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+        let phantom_operation = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("compute:server:{server_id}:compute:UpdateServer:upd-stale").as_bytes(),
+        );
+        let (status, missing) = exec(
+            router,
+            authed(&format!("/operations/{phantom_operation}"), "a"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a stale precondition must not leave a durable operation: {missing}"
+        );
+
+        // Replaying the same rejected request with the same key must not be
+        // accepted as a replay of a never-valid operation.
+        let replay = authed_put(
+            &format!("/compute/servers/{server_id}"),
+            "a",
+            "upd-stale",
+            99_999,
+            serde_json::json!({"spec": {"name": "renamed"}}),
+        );
+        let (status, replayed) = exec(router, replay).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a rejected update must not replay as accepted: {replayed}"
+        );
+
+        // The live generation still updates successfully afterwards.
+        let server_uuid = Uuid::parse_str(&server_id).expect("server uuid");
+        let ledger = store
+            .get_resource(server_uuid)
+            .await
+            .expect("server ledger row");
+        let live_generation = ledger.generation;
+        let live = authed_put(
+            &format!("/compute/servers/{server_id}"),
+            "a",
+            "upd-live",
+            live_generation,
+            serde_json::json!({"spec": {"name": "renamed-live"}}),
+        );
+        let (status, updated) = exec(router, live).await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        assert_eq!(updated["complete"], true, "{updated}");
+        let updated_operation = updated["operation_id"]
+            .as_str()
+            .expect("update operation id")
+            .to_owned();
+        let ledger = store
+            .get_resource(server_uuid)
+            .await
+            .expect("server ledger row");
+        assert_eq!(
+            ledger.generation,
+            live_generation + 1,
+            "update bumps the durable generation"
+        );
+        let desired: serde_json::Value =
+            serde_json::from_str(&ledger.desired_state).expect("desired state");
+        assert_eq!(desired["name"], "renamed-live", "{desired}");
+
+        // True idempotent replay: a same-key retry of the ACCEPTED update
+        // returns the durable result even though the generation has since
+        // advanced — rejecting a client retry as stale would defeat
+        // idempotency (the first call itself moved the generation).
+        let replay_live = authed_put(
+            &format!("/compute/servers/{server_id}"),
+            "a",
+            "upd-live",
+            live_generation,
+            serde_json::json!({"spec": {"name": "renamed-live"}}),
+        );
+        let (status, replayed) = exec(router, replay_live).await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(replayed["operation_id"], updated_operation, "{replayed}");
+        assert_eq!(replayed["complete"], true, "{replayed}");
+    }
+
+    #[tokio::test]
+    async fn native_update_with_non_object_desired_state_fails_closed_without_panic() {
+        // A durable ledger row whose desired_state is valid JSON but not an
+        // object (corruption or a bad migration) must fail closed with a
+        // clean conflict, not panic the request handler via serde_json's
+        // IndexMut on a non-object value.
+        let (router, store, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+        let (status, created) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-corrupt-desired", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let server_id = created["resource_id"]
+            .as_str()
+            .expect("server id")
+            .to_owned();
+        let server_uuid = Uuid::parse_str(&server_id).expect("server uuid");
+        let ledger = store
+            .get_resource(server_uuid)
+            .await
+            .expect("server ledger row");
+        store
+            .update_resource(
+                server_uuid,
+                ledger.generation,
+                "42",
+                &ledger.observed_state,
+                ledger.observed_generation,
+                ledger.provider_id.as_deref(),
+            )
+            .await
+            .expect("corrupt desired state");
+
+        let (status, rejected) = exec(
+            router,
+            authed_put(
+                &format!("/compute/servers/{server_id}"),
+                "a",
+                "upd-corrupt-desired",
+                ledger.generation + 1,
+                serde_json::json!({"spec": {"name": "renamed"}}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a non-object desired_state must fail closed, not panic: {rejected}"
+        );
     }
 
     #[tokio::test]

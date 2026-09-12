@@ -626,6 +626,34 @@ mod tests {
             store.reserve_idempotent_operation(&other).await?,
             IdempotencyReservation::Created(other.operation_id)
         );
+
+        // The non-creating lookup exposes the stored fingerprint and
+        // operation identity: replay detection can distinguish a true replay
+        // from key reuse with different semantics without writing anything.
+        assert_eq!(
+            store
+                .get_idempotency_reservation("project-a", "compute:CreateServer", "abc")
+                .await?,
+            Some(StoredIdempotencyReservation {
+                fingerprint: request.fingerprint.clone(),
+                operation_id: request.operation_id,
+            })
+        );
+        assert_eq!(
+            store
+                .get_idempotency_reservation("project-a", "compute:CreateServer", "missing")
+                .await?,
+            None
+        );
+        assert_eq!(
+            store
+                .get_idempotency_reservation("project-b", "compute:CreateServer", "abc")
+                .await?,
+            Some(StoredIdempotencyReservation {
+                fingerprint: other.fingerprint.clone(),
+                operation_id: other.operation_id,
+            })
+        );
         Ok(())
     }
 

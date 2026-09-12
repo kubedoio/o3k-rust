@@ -66,7 +66,7 @@ pub use domain::records::{
     PlacementInventoryRecord, PlacementProviderRecord, PlacementProviderStateRecord,
     PlacementReconcileRecord, PlacementResourceRecord, PortRecord, ProviderReference,
     ResourceRecord, SecurityGroupBindingRecord, SecurityGroupRecord, SecurityGroupRuleRecord,
-    SubnetRecord, VolumeAttachmentRecord,
+    StoredIdempotencyReservation, SubnetRecord, VolumeAttachmentRecord,
 };
 pub(crate) use domain::records::{legacy_policy_records, validate_canonical_lifecycle_update};
 pub use domain::state::{

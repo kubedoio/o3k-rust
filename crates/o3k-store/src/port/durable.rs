@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use sqlx::Row;
 use uuid::Uuid;
 
+use crate::StoredIdempotencyReservation;
 use crate::domain::error::StoreError;
 use crate::domain::records::{
     AgentCommandRecord, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
@@ -217,6 +218,17 @@ pub trait DurableStore: Send + Sync {
         &self,
         request: &IdempotencyReservationRequest,
     ) -> Result<IdempotencyReservation, StoreError>;
+    /// Looks up an existing idempotency reservation without creating
+    /// anything. Returns the stored fingerprint and operation identity so a
+    /// caller can distinguish a true replay (identical request semantics)
+    /// from a key reuse with different semantics before re-validating mutable
+    /// preconditions such as resource generations.
+    async fn get_idempotency_reservation(
+        &self,
+        owner_scope: &str,
+        action: &str,
+        key: &str,
+    ) -> Result<Option<StoredIdempotencyReservation>, StoreError>;
     /// Atomically creates an operation and its idempotency reservation.
     /// Existing reservations are only replayable when their operation still
     /// exists; a dangling reservation is treated as corruption.

@@ -3894,6 +3894,17 @@ mod reconciler_tests {
 
     #[async_trait::async_trait]
     impl DurableStore for StaleObservationStore {
+        async fn get_idempotency_reservation(
+            &self,
+            owner_scope: &str,
+            action: &str,
+            key: &str,
+        ) -> Result<Option<o3k_store::StoredIdempotencyReservation>, StoreError> {
+            self.inner
+                .get_idempotency_reservation(owner_scope, action, key)
+                .await
+        }
+
         async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError> {
             self.inner.insert_resource(resource).await
         }

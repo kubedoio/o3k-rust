@@ -349,7 +349,20 @@ pub async fn api_root() -> Json<ApiRootResponse> {
             "/o3k/v1/compute/servers",
             "/o3k/v1/volume/volumes",
             "/o3k/v1/network/address-realms",
+            "/o3k/v1/operations",
             "/o3k/v1/operations/{id}",
+            "/o3k/v1/audit",
+            "/o3k/v1/audit/{id}",
+            "/o3k/v1/quota",
+            "/o3k/v1/quota/{namespace}/{dimension}",
+            "/o3k/v1/operator/quotas/{project}",
+            "/o3k/v1/operator/quotas/{project}/{namespace}/{dimension}",
+            "/o3k/v1/operator/diagnostics",
+            "/o3k/v1/operator/diagnostics/services",
+            "/o3k/v1/operator/diagnostics/providers",
+            "/o3k/v1/operator/diagnostics/capacity",
+            "/o3k/v1/metering/definitions",
+            "/o3k/v1/metering/usage",
             "/o3k/v1/operator/governance/projects",
             "/o3k/v1/operator/governance/projects/{id}",
             "/o3k/v1/operator/governance/principals",
@@ -487,12 +500,17 @@ fn action_metadata(
     descriptor: &ResourceDescriptor,
     collection_supported: bool,
 ) -> Vec<ActionSchemaMetadata> {
+    // The same reachability rules as the lifecycle_actions projection: an
+    // operation the runtime would reject must not appear in either field of
+    // the discovery response.
+    let create_reachable = create_reachable(descriptor);
     let mut actions: Vec<_> =
         descriptor
             .lifecycle_actions
             .iter()
             .filter(|(operation, _)| {
-                *operation != &LifecycleOperation::List || collection_supported
+                (*operation != &LifecycleOperation::List || collection_supported)
+                    && (*operation != &LifecycleOperation::Create || create_reachable)
             })
             .map(|(operation, action)| {
                 let name = format!("{operation:?}").to_lowercase();
@@ -538,16 +556,64 @@ fn action_metadata(
             }
             })
             .collect();
-    for action in descriptor.lifecycle_actions.values() {
+    for (operation, action) in &descriptor.lifecycle_actions {
+        if *operation == LifecycleOperation::Create && !create_reachable {
+            continue;
+        }
+        if *operation == LifecycleOperation::List && !collection_supported {
+            continue;
+        }
+        // The canonical action-name entry must agree with the operation-name
+        // entry (and with contracts/cloud-kernel-actions.yaml): reads are
+        // synchronous and carry read schemas; only mutations are
+        // asynchronous with the mutation-result schema.
+        let (target, asynchronous) = match operation {
+            LifecycleOperation::List | LifecycleOperation::Create => ("collection", false),
+            LifecycleOperation::Show | LifecycleOperation::Update | LifecycleOperation::Delete => {
+                ("instance", false)
+            }
+        };
+        let asynchronous = asynchronous
+            || matches!(
+                operation,
+                LifecycleOperation::Create
+                    | LifecycleOperation::Update
+                    | LifecycleOperation::Delete
+            );
+        let input = match operation {
+            LifecycleOperation::Create => resource_contract::ContractKind::for_resource(
+                &descriptor.resource_type.to_string(),
+                &descriptor.schema_version,
+            )
+            .map(|_| {
+                create_input_schema_id(
+                    descriptor.resource_type.namespace(),
+                    &descriptor.collection,
+                    &descriptor.schema_version,
+                )
+            }),
+            _ => None,
+        };
+        let output = match operation {
+            LifecycleOperation::List => {
+                "https://o3k.io/contracts/native-resource-list-response-v1.schema.json"
+            }
+            LifecycleOperation::Show => {
+                "https://o3k.io/contracts/native-resource-envelope-v1.schema.json"
+            }
+            LifecycleOperation::Create
+            | LifecycleOperation::Update
+            | LifecycleOperation::Delete => {
+                "https://o3k.io/contracts/native-mutation-result-v1.schema.json"
+            }
+        };
         actions.push(ActionSchemaMetadata {
             name: action.action().to_owned(),
             action_id: action.to_string(),
-            target: "instance".to_owned(),
-            input: Some("https://o3k.io/schemas/native-action-input/v1".to_owned()),
-            output: Some(
-                "https://o3k.io/contracts/native-mutation-result-v1.schema.json".to_owned(),
-            ),
-            asynchronous: true,
+            target: target.to_owned(),
+            input,
+            output: Some(output.to_owned()),
+            asynchronous,
         });
     }
     actions.sort_by(|a, b| a.name.cmp(&b.name));
@@ -612,6 +678,20 @@ fn placement_for_service(
     (scope, regions, availability_domain_selection)
 }
 
+/// Mirrors the generic create handler's reachability rule (`resource::create`):
+/// a create is executable only when a public create contract exists for the
+/// descriptor, or the resource is owned by an external controller that
+/// validates its own contract at its boundary. A manifest declaration alone
+/// must not advertise a create that the runtime fails closed with 503.
+fn create_reachable(descriptor: &ResourceDescriptor) -> bool {
+    crate::resource_contract::ContractKind::for_resource(
+        &descriptor.resource_type.to_string(),
+        &descriptor.schema_version,
+    )
+    .is_some()
+        || descriptor.ownership == o3k_kernel::ServiceOwnership::ExternalController
+}
+
 pub async fn discover_resource_types(State(state): State<NativeApiState>) -> impl IntoResponse {
     if state.lifecycle_registry.is_none() {
         return (
@@ -624,15 +704,31 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
     let mut resource_types: Vec<DiscoveredResourceType> = Vec::new();
     for descriptor in state.resource_index.all() {
         let live_ready = state.resource_index.is_ready(descriptor);
-        let collection_supported = state
-            .resource_application
-            .as_ref()
-            .is_some_and(|application| {
-                application.supports_collection(descriptor) && state.cursor_config.is_available()
-            });
+        let application_present = state.resource_application.is_some();
+        let collection_supported = application_present
+            && state.cursor_config.is_available()
+            && state
+                .resource_application
+                .as_ref()
+                .is_some_and(|application| application.supports_collection(descriptor));
         let mut actions = std::collections::HashMap::new();
         for (op, action) in &descriptor.lifecycle_actions {
-            if *op == LifecycleOperation::List && (!live_ready || !collection_supported) {
+            // Every advertised operation must be executable in the live
+            // composition: readiness and a configured resource application
+            // gate all operations (a not-ready resource, or a discovery
+            // surface without an application, must not advertise
+            // show/create/delete either), list additionally requires bounded
+            // collection support, and create additionally requires a
+            // reachable create contract. Advertising an operation the
+            // runtime would reject violates the advertised-implies-executable
+            // discovery contract (#907).
+            if !live_ready || !application_present {
+                continue;
+            }
+            if *op == LifecycleOperation::List && !collection_supported {
+                continue;
+            }
+            if *op == LifecycleOperation::Create && !create_reachable(descriptor) {
                 continue;
             }
             actions.insert(format!("{op:?}").to_lowercase(), action.to_string());
@@ -681,7 +777,7 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
                 version: descriptor.schema_version.clone(),
                 representation: "native-resource-envelope".to_owned(),
             },
-            actions: if live_ready {
+            actions: if live_ready && application_present {
                 action_metadata(descriptor, collection_supported)
             } else {
                 Vec::new()
@@ -822,7 +918,7 @@ pub async fn discover_regions(State(state): State<NativeApiState>) -> impl IntoR
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use o3k_kernel::manifest::{ManifestController, RegisteredResourceType, ResourceScope};
@@ -846,6 +942,96 @@ mod tests {
 
         async fn auth_context(&self, _token: &str) -> Result<AuthContext, error::ProblemDetails> {
             Ok(self.0.clone())
+        }
+    }
+
+    /// Discovery-only application stub: proves bounded collection support
+    /// for every resource type without exercising any mutation.
+    struct DiscoveryStubApplication;
+
+    #[async_trait::async_trait]
+    impl resource::ResourceApplication for DiscoveryStubApplication {
+        fn supports_collection(&self, _descriptor: &resource::ResourceDescriptor) -> bool {
+            true
+        }
+
+        async fn create(
+            &self,
+            _descriptor: &resource::ResourceDescriptor,
+            _auth: &AuthContext,
+            _request: resource::ValidatedCreateRequest,
+            _idempotency_key: Option<&str>,
+        ) -> Result<resource::MutationResult, resource::ResourceApplicationError> {
+            Err(resource::ResourceApplicationError::UnsupportedOperation)
+        }
+
+        async fn delete(
+            &self,
+            _descriptor: &resource::ResourceDescriptor,
+            _auth: &AuthContext,
+            _id: &str,
+            _idempotency_key: Option<&str>,
+            _expected_generation: Option<i64>,
+        ) -> Result<resource::MutationResult, resource::ResourceApplicationError> {
+            Err(resource::ResourceApplicationError::UnsupportedOperation)
+        }
+
+        async fn update(
+            &self,
+            _descriptor: &resource::ResourceDescriptor,
+            _auth: &AuthContext,
+            _id: &str,
+            _request: resource::ValidatedUpdateRequest,
+            _idempotency_key: Option<&str>,
+            _expected_generation: i64,
+        ) -> Result<resource::MutationResult, resource::ResourceApplicationError> {
+            Err(resource::ResourceApplicationError::UnsupportedOperation)
+        }
+
+        async fn action(
+            &self,
+            _descriptor: &resource::ResourceDescriptor,
+            _auth: &AuthContext,
+            _id: &str,
+            _action: o3k_kernel::ActionId,
+            _request: resource::ActionRequest,
+            _idempotency_key: &str,
+        ) -> Result<resource::MutationResult, resource::ResourceApplicationError> {
+            Err(resource::ResourceApplicationError::UnsupportedOperation)
+        }
+
+        async fn list_page(
+            &self,
+            _descriptor: &resource::ResourceDescriptor,
+            _auth: &AuthContext,
+            _query: &pagination::ResourceQuery,
+            _cursors: &pagination::CursorConfig,
+        ) -> Result<pagination::ResourcePage<serde_json::Value>, resource::ResourceApplicationError>
+        {
+            Err(resource::ResourceApplicationError::UnsupportedOperation)
+        }
+
+        async fn show(
+            &self,
+            _descriptor: &resource::ResourceDescriptor,
+            _auth: &AuthContext,
+            _id: &str,
+        ) -> Result<serde_json::Value, resource::ResourceApplicationError> {
+            Err(resource::ResourceApplicationError::UnsupportedOperation)
+        }
+
+        async fn relationships(
+            &self,
+            _descriptor: &resource::ResourceDescriptor,
+            _auth: &AuthContext,
+            _id: &str,
+            _query: &pagination::ResourceQuery,
+            _cursors: &pagination::CursorConfig,
+        ) -> Result<
+            pagination::ResourcePage<resource::RelationshipView>,
+            resource::ResourceApplicationError,
+        > {
+            Err(resource::ResourceApplicationError::UnsupportedOperation)
         }
     }
 
@@ -1159,6 +1345,152 @@ mod tests {
         assert!(kinds.iter().any(|kind| kind == "compute:server"));
         assert!(kinds.iter().any(|kind| kind == "network:address_realm"));
         assert!(kinds.iter().any(|kind| kind == "volume:volume"));
+    }
+
+    #[tokio::test]
+    async fn discovery_advertises_only_reachable_lifecycle_operations() {
+        let mut registry = ManifestRegistry::new();
+        registry.seed_core().unwrap();
+        // Compute and network have ready controllers in this composition;
+        // volume deliberately has none (mirrors a profile without a native
+        // storage provider).
+        registry
+            .register_in_process_controller("compute", true, None)
+            .unwrap();
+        registry
+            .register_in_process_controller("network", true, None)
+            .unwrap();
+        let state = NativeApiState::new(
+            Some(registry),
+            pagination::CursorConfig::new(b"discovery-test-cursor-key-0123456789".to_vec())
+                .unwrap(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_resource_application(std::sync::Arc::new(DiscoveryStubApplication));
+        let app = router(state);
+        let response = axum::http::Request::builder()
+            .uri("/resource-types")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = axum::response::Response::from(
+            tower::ServiceExt::oneshot(app, response).await.unwrap(),
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let find = |namespace: &str, name: &str| {
+            body["resource_types"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|item| item["namespace"] == namespace && item["name"] == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("missing {namespace}:{name}"))
+        };
+        let lifecycle_of = |item: &serde_json::Value| -> Vec<String> {
+            item["lifecycle_actions"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(key, _)| key.clone())
+                .collect()
+        };
+        // Contract-backed native creates stay advertised; the stub proves
+        // collection support, so list appears too.
+        let compute = find("compute", "server");
+        let compute_ops = lifecycle_of(&compute);
+        for op in ["create", "show", "update", "delete"] {
+            assert!(
+                compute_ops.iter().any(|key| key == op),
+                "compute:server must advertise {op}: {compute}"
+            );
+        }
+        assert!(
+            compute_ops.iter().any(|key| key == "list"),
+            "list must be advertised with collection support: {compute}"
+        );
+        // network:network has a create contract; network:subnet does not and
+        // is o3k-implemented, so advertising its create would promise a route
+        // that fails closed with 503 at runtime.
+        let network = find("network", "network");
+        assert!(
+            lifecycle_of(&network).iter().any(|key| key == "create"),
+            "network:network has a public create contract: {network}"
+        );
+        let subnet = find("network", "subnet");
+        assert!(
+            !lifecycle_of(&subnet).iter().any(|key| key == "create"),
+            "network:subnet create is not reachable; it must not be advertised: {subnet}"
+        );
+        for op in ["show", "delete"] {
+            assert!(
+                lifecycle_of(&subnet).iter().any(|key| key == op),
+                "network:subnet must still advertise reachable {op}: {subnet}"
+            );
+        }
+        // The `actions` array must apply the same reachability rule: no
+        // create entry for a resource whose create fails closed at runtime.
+        let subnet_actions: Vec<&str> = subnet["actions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|action| action["name"].as_str())
+            .collect();
+        assert!(
+            !subnet_actions.contains(&"create"),
+            "network:subnet actions must not advertise create: {subnet}"
+        );
+        assert!(
+            !subnet_actions.contains(&"CreateSubnet"),
+            "network:subnet actions must not advertise the canonical create action either: {subnet}"
+        );
+        // Canonical action-name entries must agree with the operation-name
+        // entries (and contracts/cloud-kernel-actions.yaml): reads are
+        // synchronous with read schemas; create targets the collection with
+        // the create-schema input.
+        let compute_action = |name: &str| {
+            compute["actions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|action| action["name"] == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("missing actions entry {name}: {compute}"))
+        };
+        let create_meta = compute_action("CreateServer");
+        assert_eq!(create_meta["target"], "collection", "{create_meta}");
+        assert_eq!(create_meta["asynchronous"], true, "{create_meta}");
+        assert!(
+            create_meta["input"]
+                .as_str()
+                .is_some_and(|input| input.contains("/resource")),
+            "create input must reference the create schema: {create_meta}"
+        );
+        let read_meta = compute_action("ReadServer");
+        assert_eq!(read_meta["target"], "instance", "{read_meta}");
+        assert_eq!(read_meta["asynchronous"], false, "{read_meta}");
+        assert!(
+            read_meta["output"]
+                .as_str()
+                .is_some_and(|output| output.contains("native-resource-envelope")),
+            "read output must be the envelope schema: {read_meta}"
+        );
+        // A service without a ready controller advertises no lifecycle
+        // operations at all (previously only list was readiness-gated).
+        let volume = find("volume", "volume");
+        assert_eq!(volume["ready"], false, "{volume}");
+        assert!(
+            lifecycle_of(&volume).is_empty(),
+            "a not-ready resource must advertise no lifecycle operations: {volume}"
+        );
     }
 
     #[tokio::test]

@@ -408,6 +408,14 @@ actions:
     require_ownership: true
     public_discovery: false
 
+  - action_id: "compute:UpdateServer"
+    service_namespace: "compute"
+    resource_type: "server"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
   - action_id: "compute:DeleteServer"
     service_namespace: "compute"
     resource_type: "server"

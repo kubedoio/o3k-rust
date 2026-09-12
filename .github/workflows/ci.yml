@@ -290,6 +290,25 @@ jobs:
             target/testlab-artifacts/result.json
             target/testlab-artifacts/sbom.spdx.json
             target/testlab-artifacts/SHA256SUMS
+  # ISSUE #907 integrated production-profile northbound convergence gate. The
+  # orchestrator provisions a disposable PostgreSQL 16.4, reuses the pinned
+  # Keycloak fixture via tests/p12-iam-7-real-idp.sh's AFTER_HOOK, and runs the
+  # real o3kd convergence gate against both PostgreSQL and SQLite. It needs
+  # docker (disposable containers) and protoc (o3kd build dependency).
+  araf-p2-convergence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned action; reads rust-toolchain.toml
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install build prerequisites
+        timeout-minutes: 10
+        run: scripts/ci/apt-provision.sh install protobuf-compiler pkg-config python3-yaml sqlite3
+      - name: Run ISSUE #907 Araf P2 northbound convergence gate (PostgreSQL + SQLite)
+        run: bash tests/araf-p2-convergence.sh
   # The installer negative matrix SKIPs itself on any host that is not
   # Ubuntu 24.04/Debian 12 (it would become a vacuous pass on a newer
   # ubuntu-latest). Pin it to ubuntu-24.04 explicitly so the matrix stays

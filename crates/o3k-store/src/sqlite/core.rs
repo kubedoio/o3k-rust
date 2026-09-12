@@ -20,6 +20,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::{fs, path::Path, str::FromStr, sync::Arc, time::Duration};
 use uuid::Uuid;
 
+use crate::StoredIdempotencyReservation;
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
     CanonicalAcceptanceOutcome, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
@@ -1270,6 +1271,37 @@ impl DurableStore for SqliteStore {
             Err(error) => return Err(error),
         }
         Ok(canonical)
+    }
+
+    async fn get_idempotency_reservation(
+        &self,
+        owner_scope: &str,
+        action: &str,
+        key: &str,
+    ) -> Result<Option<StoredIdempotencyReservation>, StoreError> {
+        let row = sqlx::query(
+            "SELECT fingerprint, operation_id FROM idempotency_reservations WHERE owner_scope = ? AND action = ? AND idempotency_key = ?",
+        )
+        .bind(owner_scope)
+        .bind(action)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.map(|row| {
+            let fingerprint: String = row.try_get("fingerprint").map_err(StoreError::Database)?;
+            let operation_id = Uuid::parse_str(
+                row.try_get::<String, _>("operation_id")
+                    .map_err(StoreError::Database)?
+                    .as_str(),
+            )
+            .map_err(StoreError::InvalidUuid)?;
+            Ok(StoredIdempotencyReservation {
+                fingerprint,
+                operation_id,
+            })
+        })
+        .transpose()
     }
 
     async fn reserve_idempotent_operation(

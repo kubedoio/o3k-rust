@@ -1697,6 +1697,10 @@ impl ManifestRegistry {
                                 ActionId::new_unchecked("compute", "CreateServer"),
                             ),
                             (
+                                "update".to_owned(),
+                                ActionId::new_unchecked("compute", "UpdateServer"),
+                            ),
+                            (
                                 "delete".to_owned(),
                                 ActionId::new_unchecked("compute", "DeleteServer"),
                             ),
@@ -1759,6 +1763,7 @@ impl ManifestRegistry {
                     "compute:ListServers".to_owned(),
                     "compute:CreateServer".to_owned(),
                     "compute:ReadServer".to_owned(),
+                    "compute:UpdateServer".to_owned(),
                     "compute:DeleteServer".to_owned(),
                     "compute:StopServer".to_owned(),
                     "compute:StartServer".to_owned(),
@@ -2544,6 +2549,56 @@ mod tests {
         assert!(reg.get("network").is_some());
         assert!(reg.get("volume").is_some());
         assert!(reg.get("placement").is_none());
+    }
+
+    #[test]
+    fn seed_core_compute_server_declares_update_lifecycle_operation() {
+        let mut reg = ManifestRegistry::new();
+        reg.seed_core().unwrap();
+        let compute = reg.get("compute").expect("compute manifest");
+        let server = compute
+            .resource_types
+            .iter()
+            .find(|resource| resource.resource_type.to_string() == "compute:server")
+            .expect("compute:server resource type");
+        // The canonical generic update path (SPEC-0030 lifecycle update) is
+        // implemented for compute:server; the production manifest must
+        // advertise it or the generic PUT route fails closed with
+        // UnsupportedOperation in the real composition.
+        assert_eq!(
+            server.operations.get("update"),
+            Some(&ActionId::new_unchecked("compute", "UpdateServer"))
+        );
+        assert!(
+            compute
+                .actions
+                .iter()
+                .any(|action| action == "compute:UpdateServer")
+        );
+    }
+
+    #[test]
+    fn seed_core_declares_update_only_where_the_application_supports_it() {
+        // The generic application implements update for compute:server only;
+        // any other manifest declaration would advertise an update the
+        // runtime fails closed with UnsupportedOperation (#907 clean-pass
+        // finding: the positive declaration test alone cannot catch this
+        // drift).
+        let mut reg = ManifestRegistry::new();
+        reg.seed_core().unwrap();
+        for service_id in ["compute", "network", "volume", "image", "identity"] {
+            let Some(service) = reg.get(service_id) else {
+                continue;
+            };
+            for resource in &service.resource_types {
+                assert!(
+                    !resource.operations.contains_key("update")
+                        || resource.resource_type.to_string() == "compute:server",
+                    "{} must not declare update: the application does not implement it",
+                    resource.resource_type
+                );
+            }
+        }
     }
 
     #[test]

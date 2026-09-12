@@ -36,7 +36,12 @@ check A2-19 rg -q 'StatusCode::NOT_IMPLEMENTED' "$tests"
 check A2-20 rg -q 'StatusCode::BAD_REQUEST' "$tests"
 check A2-21 rg -q 'provider\.instance_count\(\)' "$tests"
 check A2-SCHEMA test -s "$root/contracts/native-action-input-v1.schema.json"
-check A2-SCHEMA-REF rg -q 'native-action-input/v1' "$root/crates/o3k-native-api/src/lib.rs"
+# The action-input schema is published by the domain-action route contract
+# (its discovery reference moved when discovery metadata became
+# per-operation honest: create advertises the create input schema, reads
+# advertise no input).
+check A2-SCHEMA-REF rg -q 'native-action-input/v1' "$root/crates/o3k-native-api/src/resource.rs"
+check A2-CREATE-INPUT-SCHEMA rg -q 'create_input_schema_id' "$root/crates/o3k-native-api/src/lib.rs"
 check A2-OUTPUT-SCHEMA rg -q 'native-mutation-result-v1.schema.json' "$root/crates/o3k-native-api/src/lib.rs"
 if rg -q '"update".*UpdateNetwork|network:UpdateNetwork"' "$root/crates/o3k-kernel/src/manifest.rs"; then
   printf 'A2-NETWORK-UPDATE-NOT-ADVERTISED NOT PROVEN\n'; status=1
