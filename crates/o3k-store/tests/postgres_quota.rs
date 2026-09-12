@@ -69,13 +69,50 @@ async fn postgres_quota_generation_is_durable_and_cas_safe() {
     store_a.pool().close().await;
     store_b.pool().close().await;
     restarted.pool().close().await;
+    drop_disposable_database(admin_url.as_str(), &database).await;
+}
+
+// Under nextest every test runs in its own process, so process-wide locks
+// cannot serialize fixture teardown: a closed pool's server-side backend may
+// still be terminating when the drop runs (SQLSTATE 55006). Terminate
+// leftover backends, then force the drop with a bounded retry (mirrors
+// postgres_metering.rs).
+async fn drop_disposable_database(admin_url: &str, database: &str) {
     let admin = PgPoolOptions::new()
         .max_connections(1)
-        .connect(admin_url.as_str())
+        .connect(admin_url)
         .await
         .unwrap();
-    sqlx::query(&format!("DROP DATABASE {database}"))
-        .execute(&admin)
-        .await
-        .unwrap();
+    let _ = sqlx::query(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE datname = $1 AND pid <> pg_backend_pid()",
+    )
+    .bind(database)
+    .execute(&admin)
+    .await;
+    let mut last_error: Option<sqlx::Error> = None;
+    for attempt in 0..5u64 {
+        match sqlx::query(&format!("DROP DATABASE {database} WITH (FORCE)"))
+            .execute(&admin)
+            .await
+        {
+            Ok(_) => {
+                admin.close().await;
+                return;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(100 * (attempt + 1))).await;
+            }
+        }
+    }
+    admin.close().await;
+    // Retries exhausted: fail the test with the final driver error.
+    let drop_result: Result<(), sqlx::Error> = Err(last_error.unwrap_or_else(|| {
+        sqlx::Error::Protocol("DROP DATABASE retry loop produced no error".into())
+    }));
+    assert!(
+        drop_result.is_ok(),
+        "failed to drop disposable database {database} after retries: {drop_result:?}"
+    );
 }

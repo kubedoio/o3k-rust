@@ -23,7 +23,7 @@
 
 ![O3K Cloud Operating System architecture](docs/architecture/o3k-cloud-os.svg)
 
-O3K is a **cloud kernel — literally born in the cloud**. It is built from scratch in Rust around a shared cloud authority rather than inherited service boundaries. The Cloud Kernel owns identity and authorization, resource ownership, desired state, operations, scheduling, reconciliation, quotas, audit/event identity, and failure semantics; compatibility APIs stay northbound and infrastructure execution stays southbound.
+O3K is a **cloud kernel — literally born in the cloud**. It is built from scratch in Rust around a shared cloud authority rather than inherited service boundaries. The Cloud Kernel owns identity and authorization, resource ownership, desired state, operations, scheduling, reconciliation, quotas, metering, durable audit/event identity, and failure semantics; compatibility APIs stay northbound and infrastructure execution stays southbound.
 
 The product goal is **one operating system end to end**: from a small office or
 factory server room, through a customer-owned datacenter cage, to a larger
@@ -67,8 +67,20 @@ Core principles:
 > framework, P12-IAM production federation is complete, P13 passed its bounded
 > unmodified OpenStack Terraform/OpenTofu compatibility profile, and P14.9 passed
 > the bounded real OpenStack-to-O3K cold-migration G01–G20 acceptance profile.
+> After P14, the Araf-driven northbound closure delivered canonical Region/AZ
+> discovery (ADR-0181/SPEC-0038), resource/action schema discovery (SPEC-0040),
+> bounded native queries (#906), canonical Operations (#898) and relationships
+> read (#899), domain actions (#897), generic update (#905), native quota
+> (SPEC-0043), IAM governance (SPEC-0044), durable audit (SPEC-0042), operator
+> diagnostics (SPEC-0045), authoritative metering (ADR-0183/SPEC-0046), and the
+> #907 Araf P2 northbound convergence gate (#928) — the gate ran with the fake
+> execution provider, so it proves Cloud Kernel/northbound integration, not
+> execution/scale.
 > These are strong implementation milestones, not a blanket production, full
 > OpenStack parity, multi-region, live-migration, or datacenter-scale claim.
+
+Next program: **P15 — Scale & Composition Foundation** (issue #929,
+ADR-0184 (accepted), prompts in `docs/prompts/p15/`).
 
 ## One Cloud OS from edge to datacenter
 
@@ -128,28 +140,30 @@ current gaps are:
 
 | ID | Severity for future product claim | Gap |
 |---|---|---|
-| E2D-01 | BLOCKER-to-claim | Canonical Region / AvailabilityDomain / failure-domain topology is not yet complete or authoritatively advertised. |
+| E2D-01 | BLOCKER-to-claim | Canonical Region/AvailabilityDomain discovery is implemented (ADR-0181/SPEC-0038); failure-domain hierarchy below AZ, provider/host/fabric linkage, and Keystone region projection remain open (P15.1 #931). |
 | E2D-02 | BLOCKER-to-claim | Placement/scheduling is still flat capacity selection; no hierarchy, generic traits, topology constraints or failure-domain spreading. |
 | E2D-03 | BLOCKER-to-claim | Building blocks are an accepted architecture concept but not yet a first-class operator/runtime lifecycle. |
-| E2D-04 | BLOCKER-to-composable-catalog | Static `KernelRegistry` and dynamic `ManifestRegistry` still overlap; service authority/catalog projection must converge. |
+| E2D-04 | BLOCKER-to-composable-catalog | Static `KernelRegistry` and dynamic `ManifestRegistry` still coexist after #928; service authority/catalog projection convergence is P15.2 (#932). |
 | E2D-05 | BLOCKER-to-composable-catalog | O3K lacks a declarative desired service-composition/`CloudProfile` layer distinct from runtime service discovery. |
 | E2D-06 | HIGH | Reusable hosted OpenStack service install/version/dependency/upgrade/conformance machinery is not yet generalized beyond bounded profiles such as Cinder. |
 | E2D-07 | BLOCKER-to-edge-product | Local site autonomy and WAN-loss semantics are not yet an explicit product contract; same OS must not mean one stretched WAN-dependent control plane. |
 | E2D-08 | BLOCKER-to-DC-scale | The P11 Linux/Geneve/WireGuard fabric is a bounded edge reference provider, not datacenter-scale fabric evidence. |
 | E2D-09 | HIGH | Drain exists, but mature workload mobility/relocation/live migration/fenced evacuation and storage movement remain unproven. |
 | E2D-10 | BLOCKER-to-DC-scale | Multi-controller leases/fencing exist, but cells/shards/hierarchical work partitioning and large PostgreSQL/control-plane scale remain unproven. |
-| E2D-11 | HIGH | Operator observability is incomplete: `o3kd` lacks a declared Prometheus metrics surface and there is no complete block/capacity/reconciliation telemetry contract. |
+| E2D-11 | HIGH | Operator diagnostics/capacity projection (SPEC-0045), durable audit (SPEC-0042), and metering (SPEC-0046) now exist; `o3kd` still lacks a declared metrics surface (no `/metrics`, no OTLP) and latency/lag/lease telemetry (P17). |
 | E2D-12 | HIGH | Tested control-plane backup/restore tooling is incomplete; workload backup/DR is a separate future product profile. |
 | E2D-13 | BLOCKER-to-fast-adoption | Current installer/TestLab is not yet the production `init + select profile + authenticated block join` experience. |
 | E2D-14 | HIGH | mTLS enrollment is strong, but certificate/admin credential rotation/revocation/recovery is not yet fully implemented at fleet scale. |
 | E2D-15 | HIGH | Verified host-local image materialization exists, but large-fleet image/content distribution and cache hierarchy are not proven. |
 | E2D-16 | MEDIUM | Storage locality is proven for current profiles, but general rack/AZ/failure-domain storage topology and movement need Placement/block integration. |
 | E2D-17 | HIGH | Real scale evidence stops at the bounded edge rung; larger cage/rack/DC profiles need their own real load/failure/upgrade evidence. |
-| E2D-18 | HIGH-governance | README/roadmap/profile/current-state/release material still has historical truth drift; product claim state needs one mechanically cross-validated source. |
+| E2D-18 | HIGH-governance | README/roadmap/profile/current-state/release material still has historical truth drift; product claim state needs one mechanically cross-validated source. A post-#928 re-baseline gap register now exists (`docs/architecture/p15-e2d-gap-register.md`); P15 plans the mechanical cross-check (#433). |
 
 These gaps do not invalidate P11/P13/P14. They define what must be closed before
 O3K can honestly market the **end-to-end edge-to-datacenter** claim as a proven
-production capability.
+production capability. The canonical post-#928 record for all rows of this gap
+table is the re-baseline register at
+[`docs/architecture/p15-e2d-gap-register.md`](docs/architecture/p15-e2d-gap-register.md).
 
 ### What “same OS” must not mean
 
@@ -263,6 +277,11 @@ three real hosts with 15 simulated scale hosts for the bounded edge profile.
 Durable work leases/controller fencing and PostgreSQL support provide important
 scale foundations, but do not themselves prove datacenter-scale scheduling,
 networking, database or control-plane throughput.
+
+Northbound, the native `/o3k/v1` surface is live for identity,
+compute/network/volume resources, discovery (including regions and
+resource-schemas), operations, relationships, audit, quota, governance,
+diagnostics, and metering; the Araf product consumes this native surface.
 
 The current Placement/scheduler implementation is intentionally simple: enabled
 host-shaped ResourceProviders advertise VCPU/MEMORY_MB/DISK_GB inventory and the
@@ -591,7 +610,15 @@ For real libvirt execution use [docs/TESTLAB.md](docs/TESTLAB.md).
 - [ADR-0166 — O3K IAM / Keystone compatibility](docs/adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md)
 - [ADR-0167 — Kubernetes-native control plane](docs/adr/ADR-0167-kubernetes-native-control-plane-deployment.md)
 - [ADR-0182 — edge-to-datacenter building-block Cloud OS](docs/adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md)
+- [ADR-0181 — canonical location identity (regions and availability domains)](docs/adr/ADR-0181-canonical-location-identity.md)
+- [ADR-0183 — authoritative metering and bounded usage aggregation](docs/adr/ADR-0183-authoritative-metering-and-bounded-usage-aggregation.md)
+- [ADR-0184 — P15 scale and composition foundation](docs/adr/ADR-0184-p15-scale-and-composition-foundation.md)
 - [SPEC-0039 — edge-to-datacenter building-block cloud](docs/specs/SPEC-0039-edge-to-datacenter-building-block-cloud.md)
+- [SPEC-0038 — canonical location discovery v1](docs/specs/SPEC-0038-canonical-location-discovery-v1.md)
+- [SPEC-0046 — native metering definitions and bounded usage aggregation v1](docs/specs/SPEC-0046-native-metering-v1.md)
+- [SPEC-0047 — P15 scale and composition foundation](docs/specs/SPEC-0047-p15-scale-and-composition-foundation.md)
+- [P15 post-Araf current-state audit](docs/architecture/p15-0-post-araf-current-state-audit.md)
+- [P15 E2D gap register (post-#928 re-baseline)](docs/architecture/p15-e2d-gap-register.md)
 - [Product requirements](docs/PRODUCT_REQUIREMENTS.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Normative source map](docs/NORMATIVE_SOURCES.md)
