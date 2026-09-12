@@ -40,10 +40,9 @@ Required agent plan:
   this flow
 ```
 
-Until ADR-0184 is Accepted by human review, implementation under it proceeds as
-Proposed-architecture work and the PR must record
-`P15.6 implementation authorized: NO — awaiting human architecture approval`
-if the human has not approved. Do not self-approve.
+This phase is authorized under Accepted ADR-0184/SPEC-0047 once its listed
+dependency phases are merged and its review passes per REVIEW_AND_MERGE.md;
+the PR must record the authorization line with its actual state.
 
 ## Objective
 
@@ -57,7 +56,7 @@ control-plane restart.
 
 ## Authoritative dependencies
 
-Read before editing: ADR-0184 (Proposed), SPEC-0047 (proposed),
+Read before editing: ADR-0184 (Accepted), SPEC-0047 (Accepted),
 `docs/architecture/p15-e2d-gap-register.md`,
 `docs/architecture/p15-0-post-araf-current-state-audit.md`, ADR-0182,
 SPEC-0039. Mandatory per AGENTS.md: `README.md`,
@@ -194,7 +193,7 @@ Client/Araf configuration emitted: PASS
 Interrupted join resumable/idempotent: PASS
 Enrolled state survives control-plane restart: PASS
 Timing claims backed by benchmark evidence: YES/NA
-P15.6 implementation authorized: NO — awaiting human architecture approval
+P15.6 implementation authorized: YES under Accepted ADR-0184, contingent on listed dependencies merged (verify per Execution prerequisites)
 Required CI/governance: PASS
 Exact HEAD reviewed: YES
 ```

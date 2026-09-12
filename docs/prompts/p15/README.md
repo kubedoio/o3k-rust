@@ -10,9 +10,12 @@ small edge). The per-phase deployment/evidence profile is recorded in each
 phase prompt; evidence from one profile is not evidence for another.
 
 Authority: ADR-0182 (edge-to-datacenter building-block Cloud OS) is advanced by
-ADR-0184 and SPEC-0047 (P15 scale and composition foundation). ADR-0184 is
-Proposed until a human review accepts it; implementation under it proceeds as
-Proposed-architecture work and no prompt may self-approve.
+ADR-0184 and SPEC-0047 (P15 scale and composition foundation), accepted on
+2026-09-12 by explicit human architecture approval (recorded on PR #938). This
+authorizes P15.1 (#931) once P15.0 (#930) is merged; P15.2–P15.7 are authorized
+per phase under the accepted architecture, contingent on their listed
+dependencies being merged and the protected review-and-merge loop
+(REVIEW_AND_MERGE.md) passing. No phase may self-expand scope.
 
 Order: P15.0 post-Araf re-baseline; P15.1 topology/failure domains and P15.2
 service-registry convergence (these two may proceed in either order); P15.3
@@ -23,8 +26,11 @@ lifecycle; P15.6 init/join bootstrap; P15.7 scale/composition real evidence.
 
 Do not execute any phase prompt until:
 
-1. P15.0 (#930) is merged and the human approval state of ADR-0184 is recorded
-   in the umbrella issue #929 and in the phase PR;
+1. P15.0 (#930) is merged — ADR-0184 and SPEC-0047 were accepted on
+   2026-09-12 by explicit human architecture approval recorded on PR #938, so
+   P15.1 (#931) is authorized once P15.0 is merged — and the per-phase
+   authorization state is recorded in the umbrella issue #929 and in the phase
+   PR;
 2. each phase verifies its own dependency issues are merged/closed: P15.1
    (#931) and P15.2 (#932) are mutually independent (either order after
    P15.0); P15.3 (#933) requires P15.1 (#931); P15.4 (#934) requires P15.2

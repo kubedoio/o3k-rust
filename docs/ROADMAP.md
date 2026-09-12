@@ -518,7 +518,7 @@ bounded-profile caveats are preserved: this is not a general live-migration,
 arbitrary-migration, or production-datacenter claim, and it does not expand
 P13, P12-IAM, the current alpha gate, or any generic cross-cloud claim.
 
-## P15 — Scale and Composition Foundation (proposed)
+## P15 — Scale and Composition Foundation
 
 P15 proposes the scale/composition foundation for the edge-to-datacenter
 building-block Cloud OS: it re-baselines the Cloud Kernel after the post-P14
@@ -531,11 +531,13 @@ and P15.2 (#932) converges `KernelRegistry`/`ManifestRegistry` service
 authority (E2D-04); the remaining phase scopes, dependencies, and acceptance
 model are defined by SPEC-0047.
 
-ADR-0184 and SPEC-0047 are **Proposed** and become active architecture
-authority only after recorded human approval; until then ADR-0182/SPEC-0039
-remain the authoritative E2D sources. The post-P14 native Cloud Kernel closure
-(audit, metering, diagnostics, quota, governance, location discovery, and the
-#907/#928 Araf P2 northbound convergence gate) is recorded in
-`docs/architecture/p15-0-post-araf-current-state-audit.md`; the post-#928 gap
-truth lives in `docs/architecture/p15-e2d-gap-register.md`; implementation
+ADR-0184 and SPEC-0047 were accepted on 2026-09-12 by explicit human
+architecture approval recorded in the PR #938 review; they are now active
+architecture authority, and P15.1 (#931) is authorized once P15.0 (#930) is
+correctly merged. ADR-0182/SPEC-0039 remain the authoritative strategic E2D
+sources — advanced by, not amended by, ADR-0184. The post-P14 native Cloud
+Kernel closure (audit, metering, diagnostics, quota, governance, location
+discovery, and the #907/#928 Araf P2 northbound convergence gate) is recorded
+in `docs/architecture/p15-0-post-araf-current-state-audit.md`; the post-#928
+gap truth lives in `docs/architecture/p15-e2d-gap-register.md`; implementation
 prompts live under `docs/prompts/p15/`.

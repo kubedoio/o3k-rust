@@ -40,10 +40,9 @@ Required agent plan:
   maintenance claims, scale ceilings
 ```
 
-Until ADR-0184 is Accepted by human review, implementation under it proceeds as
-Proposed-architecture work and the PR must record
-`P15.5 implementation authorized: NO — awaiting human architecture approval`
-if the human has not approved. Do not self-approve.
+This phase is authorized under Accepted ADR-0184/SPEC-0047 once its listed
+dependency phases are merged and its review passes per REVIEW_AND_MERGE.md;
+the PR must record the authorization line with its actual state.
 
 ## Objective
 
@@ -58,7 +57,7 @@ ResourceProviders, execution identities (mTLS agent identities), topology
 
 ## Authoritative dependencies
 
-Read before editing: ADR-0184 (Proposed), SPEC-0047 (proposed),
+Read before editing: ADR-0184 (Accepted), SPEC-0047 (Accepted),
 `docs/architecture/p15-e2d-gap-register.md`,
 `docs/architecture/p15-0-post-araf-current-state-audit.md`, ADR-0182,
 SPEC-0039, ADR-0181, SPEC-0038. Mandatory per AGENTS.md: `README.md`,
@@ -114,6 +113,9 @@ typed `AuthContext`. Only authenticated execution identities may enroll.
 Discovery/diagnostics must preserve cross-tenant concealment: blockers and
 capacity are visible within authorized operator scope only, never as a
 cross-tenant existence oracle. Audit lifecycle transitions and drain decisions.
+Provider/agent-facing paths MUST NOT create or rebind Building Block topology
+bindings: binding writes are operator-scope only and must fail closed for
+provider/agent principals.
 
 ## Database implications
 
@@ -196,7 +198,7 @@ Capacity derived from Placement only: PASS
 References by ID to P15.1/P15.3/P15.4: PASS
 Cross-tenant concealment preserved: PASS
 No duplicate agent inventory: CONFIRMED
-P15.5 implementation authorized: NO — awaiting human architecture approval
+P15.5 implementation authorized: YES under Accepted ADR-0184, contingent on listed dependencies merged (verify per Execution prerequisites)
 Required CI/governance: PASS
 Exact HEAD reviewed: YES
 ```

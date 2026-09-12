@@ -1,7 +1,8 @@
 # ADR-0184 — P15 Scale and Composition Foundation
 
-Status: Proposed (human architecture approval required before any P15.1+ implementation; see "Human approval" below)
+Status: Accepted
 Date: 2026-09-12
+Human-approval: explicit human architecture approval for ADR-0184, SPEC-0047, and the P15.0 architecture direction, granted 2026-09-12 in the PR #938 review (authorizes P15.1 after P15.0 merge)
 Supersedes: none
 Superseded-by: none
 Affected-services: cloud-kernel
@@ -12,23 +13,26 @@ Advances (does not amend): [ADR-0182](ADR-0182-edge-to-datacenter-building-block
 
 ## Human approval
 
-This ADR is **Proposed**, not Accepted. Under the ADR lifecycle
+This ADR was **Accepted** on 2026-09-12 by explicit human architecture
+approval, recorded in the PR #938 review. Under the ADR lifecycle
 ([ADR-0154](ADR-0154-engineering-governance-lifecycle.md)), architecture
-decisions require explicit human approval before `Accepted`. Until a human
-architecture approval is recorded:
+decisions require explicit human approval before `Accepted`; that approval is
+now recorded. Consequences:
 
-- P15.0 (#930, the re-baseline tracked from this branch) may proceed: it is
-  re-baseline work only — normative documents, planning records, and audit
-  documents, with no runtime behavior changes.
-- No P15.1+ (#931–#937) implementation may cite this ADR as accepted
-  authority. The phase issues define scope; this ADR and SPEC-0047 become
-  binding only upon acceptance.
+- P15.1 (#931) is authorized once P15.0 (#930) is correctly merged.
+- P15.2–P15.7 (#932–#937) proceed per phase under the accepted architecture
+  via the protected review-and-merge loop
+  ([docs/prompts/p15/REVIEW_AND_MERGE.md](../prompts/p15/REVIEW_AND_MERGE.md)),
+  contingent on their listed dependencies being merged with evidence.
+- Acceptance does **not** mark any implementation gap CLOSED: architecture
+  approval ≠ implementation completion. E2D gap statuses change only with
+  landed profile-scoped evidence, per the gap register rules.
 
 ## Context
 
 ### Post-#928 Cloud Kernel maturity
 
-The P14/Araf convergence work (#887–#907, landed via PRs #920–#928) matured
+The P14/Araf convergence work (#887–#907, landed via PRs #889–#928) matured
 the Cloud Kernel well beyond the P14 baseline. Current `main`, re-based for
 P15.0 at `21fe687c` and audited in
 [docs/architecture/p15-0-post-araf-current-state-audit.md](../architecture/p15-0-post-araf-current-state-audit.md),
@@ -357,4 +361,6 @@ issues), not silently fixed inside a P15 phase.
   second-scheduler/second-capacity-database violation of Decision 3 and the
   ADR-0182 review constraint 1.
 - **(d) Self-accept this ADR.** Rejected: human architecture approval is
-  required before `Accepted`; this record stays Proposed until then.
+  required before `Accepted`; this record would have stayed Proposed until
+  human approval. That approval was granted on 2026-09-12 (recorded in the PR
+  #938 review).

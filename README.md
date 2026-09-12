@@ -80,7 +80,7 @@ Core principles:
 > OpenStack parity, multi-region, live-migration, or datacenter-scale claim.
 
 Next program: **P15 — Scale & Composition Foundation** (issue #929,
-ADR-0184 Proposed, prompts in `docs/prompts/p15/`).
+ADR-0184 (accepted), prompts in `docs/prompts/p15/`).
 
 ## One Cloud OS from edge to datacenter
 
@@ -612,11 +612,11 @@ For real libvirt execution use [docs/TESTLAB.md](docs/TESTLAB.md).
 - [ADR-0182 — edge-to-datacenter building-block Cloud OS](docs/adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md)
 - [ADR-0181 — canonical location identity (regions and availability domains)](docs/adr/ADR-0181-canonical-location-identity.md)
 - [ADR-0183 — authoritative metering and bounded usage aggregation](docs/adr/ADR-0183-authoritative-metering-and-bounded-usage-aggregation.md)
-- [ADR-0184 — P15 scale and composition foundation (Proposed)](docs/adr/ADR-0184-p15-scale-and-composition-foundation.md)
+- [ADR-0184 — P15 scale and composition foundation](docs/adr/ADR-0184-p15-scale-and-composition-foundation.md)
 - [SPEC-0039 — edge-to-datacenter building-block cloud](docs/specs/SPEC-0039-edge-to-datacenter-building-block-cloud.md)
 - [SPEC-0038 — canonical location discovery v1](docs/specs/SPEC-0038-canonical-location-discovery-v1.md)
 - [SPEC-0046 — native metering definitions and bounded usage aggregation v1](docs/specs/SPEC-0046-native-metering-v1.md)
-- [SPEC-0047 — P15 scale and composition foundation (proposed)](docs/specs/SPEC-0047-p15-scale-and-composition-foundation.md)
+- [SPEC-0047 — P15 scale and composition foundation](docs/specs/SPEC-0047-p15-scale-and-composition-foundation.md)
 - [P15 post-Araf current-state audit](docs/architecture/p15-0-post-araf-current-state-audit.md)
 - [P15 E2D gap register (post-#928 re-baseline)](docs/architecture/p15-e2d-gap-register.md)
 - [Product requirements](docs/PRODUCT_REQUIREMENTS.md)

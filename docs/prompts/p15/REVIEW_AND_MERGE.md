@@ -16,11 +16,14 @@ exact HEAD until zero findings remain. Merge only the exact reviewed HEAD
 through normal protected rules. Then fetch protected main, verify the merge,
 and close the slice issue only after acceptance is genuine.
 
-Reminder: ADR-0184 is Proposed until human acceptance. Every phase PR must
-record `P15.N implementation authorized: NO — awaiting human architecture
-approval` when the human has not approved; no agent may self-approve, and the
-review loop must confirm the authorization line matches the human's recorded
-decision.
+Reminder: ADR-0184/SPEC-0047 are Accepted (human architecture approval granted
+2026-09-12, recorded on PR #938). Every phase PR must record the per-phase
+authorization line for its current state — P15.1: `P15.1 implementation
+authorized: YES` (authorized after P15.0 #930 is merged); P15.2–P15.7:
+authorized under the accepted architecture once their listed dependencies are
+merged and review passes. No agent may self-approve beyond this recorded
+decision, and the review loop must confirm the authorization line matches the
+human's recorded decision.
 
 Merge gate:
 

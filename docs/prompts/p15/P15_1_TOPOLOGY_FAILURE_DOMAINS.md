@@ -33,10 +33,9 @@ Required agent plan:
 - Explicit non-goals: scheduling, multi-region operation, cells
 ```
 
-Until ADR-0184 is Accepted by human review, implementation under it proceeds as
-Proposed-architecture work and the PR must record
-`P15.1 implementation authorized: NO — awaiting human architecture approval`
-if the human has not approved. Do not self-approve.
+P15.1 is authorized by the human architecture approval recorded on PR #938
+(ADR-0184/SPEC-0047 Accepted, 2026-09-12), effective once P15.0 (#930) is
+merged; the PR must record `P15.1 implementation authorized: YES`.
 
 ## Objective
 
@@ -53,7 +52,7 @@ discovery surface; Araf consumes it.
 
 ## Authoritative dependencies
 
-Read before editing: ADR-0184 (Proposed), SPEC-0047 (proposed),
+Read before editing: ADR-0184 (Accepted), SPEC-0047 (Accepted),
 `docs/architecture/p15-e2d-gap-register.md`,
 `docs/architecture/p15-0-post-araf-current-state-audit.md`, ADR-0181,
 SPEC-0038, ADR-0182, SPEC-0039. Mandatory per AGENTS.md: `README.md`,
@@ -109,7 +108,9 @@ All topology mutations are protected operations expressed as
 Principal × Action × Resource × Context with the shared typed `AuthContext`.
 Topology reads on the discovery surface must not reveal cross-tenant
 existence. Audit topology mutations with the canonical audit identity. Never
-log secrets or provider payloads.
+log secrets or provider payloads. Provider/agent-facing paths MUST NOT create
+or rebind failure-domain membership: failure-domain membership writes are
+operator-scope only and must fail closed for provider/agent principals.
 
 ## Database implications
 
@@ -194,7 +195,7 @@ Reference bindings by reference: PASS
 seed_core empty regions fixed: PASS
 Keystone region/AZ derived from canonical topology: PASS
 No second topology authority: CONFIRMED
-P15.1 implementation authorized: NO — awaiting human architecture approval
+P15.1 implementation authorized: YES (human approval recorded on PR #938; requires P15.0 #930 merged)
 Required CI/governance: PASS
 Exact HEAD reviewed: YES
 ```

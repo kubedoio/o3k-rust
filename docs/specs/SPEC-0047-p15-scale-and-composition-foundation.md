@@ -1,6 +1,6 @@
 # SPEC-0047 — P15 Scale and Composition Foundation
 
-Status: proposed target contract for the P15 program (issue #929; human architecture approval required — see [ADR-0184](../adr/ADR-0184-p15-scale-and-composition-foundation.md))
+Status: Accepted (human architecture approval for ADR-0184/SPEC-0047 recorded on 2026-09-12 in the PR #938 review)
 Related issue: [#929](https://github.com/o3kio/o3k/issues/929) (umbrella), [#930](https://github.com/o3kio/o3k/issues/930) (P15.0), [#931](https://github.com/o3kio/o3k/issues/931)–[#937](https://github.com/o3kio/o3k/issues/937) (P15.1–P15.7)
 Related decision: [ADR-0184](../adr/ADR-0184-p15-scale-and-composition-foundation.md)
 Related contracts: [contracts/core-architecture-boundaries.toml](../../contracts/core-architecture-boundaries.toml), [contracts/cloud-kernel-services.yaml](../../contracts/cloud-kernel-services.yaml), [contracts/cloud-kernel-actions.yaml](../../contracts/cloud-kernel-actions.yaml) (as amended per phase)
@@ -47,7 +47,7 @@ issues), not silently fixed inside a P15 phase.
   composable catalog, and the claim rules this program implements. This
   specification does not amend them.
 - Program decision: [ADR-0184](../adr/ADR-0184-p15-scale-and-composition-foundation.md)
-  (Proposed; binding only upon human architecture approval).
+  (Accepted 2026-09-12 via PR #938; active P15 architecture authority).
 
 ## 4. Phase definitions and dependency order
 
@@ -85,7 +85,8 @@ evidence; claim limitations; acceptance criteria.
 - **Claim limitations:** no new product, scale, or compatibility claims are
   created by P15.0.
 - **Acceptance criteria:** ADR-0184 and SPEC-0047 merged with
-  `Status: Proposed`; gap register and audit doc merged; ADR index updated;
+  `Status: Accepted` (human approval recorded 2026-09-12, PR #938); gap
+  register and audit doc merged; ADR index updated;
   validator-clean.
 
 ### 4.1 P15.1 — canonical topology/failure domains (#931)
@@ -340,7 +341,10 @@ evidence; claim limitations; acceptance criteria.
   parallel bootstrap authority.
 - **Security requirements:** authenticated join (no unauthenticated
   enrollment); certificate-bound identities with rotation path; bootstrap
-  credentials are short-lived and never logged.
+  credentials are short-lived and never logged. Boundary: P15.6 covers
+  bootstrap-time certificate issuance and re-issuance for enrolled hosts
+  only; fleet-scale certificate rotation/renewal/revocation/recovery remains
+  E2D-14 owned by P17 (`RotateCertificate` is currently proto-only).
 - **Database implications:** bootstrap/init state and issuance records in the
   kernel store; SQLite/PostgreSQL parity.
 - **OpenStack compatibility implications:** none direct; post-init catalog

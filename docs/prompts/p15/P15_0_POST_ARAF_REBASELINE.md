@@ -18,9 +18,9 @@ down before any implementation was authorized. Deliverables:
 - Audit doc: `docs/architecture/p15-0-post-araf-current-state-audit.md`.
 - Gap register: `docs/architecture/p15-e2d-gap-register.md`.
 - ADR-0184: `docs/adr/ADR-0184-p15-scale-and-composition-foundation.md`
-  (status Proposed until human review accepts it).
+  (Accepted — human architecture approval recorded on PR #938).
 - SPEC-0047: `docs/specs/SPEC-0047-p15-scale-and-composition-foundation.md`
-  (status proposed).
+  (Accepted — human architecture approval recorded on PR #938).
 - This prompt set: `docs/prompts/p15/` (README, P15.0 record, P15.1-P15.7,
   REVIEW_AND_MERGE).
 - README/roadmap reconciliation recording the P15 program and its order.
@@ -30,18 +30,20 @@ down before any implementation was authorized. Deliverables:
 
 ## Authorization state
 
-ADR-0184 is Proposed. Until a human review accepts it, implementation under it
-proceeds as Proposed-architecture work, and every phase PR must record
-`P15.N implementation authorized: NO — awaiting human architecture approval`
-when the human has not approved. No agent may self-approve.
+ADR-0184 and SPEC-0047 were accepted by human architecture approval on
+2026-09-12 (recorded on PR #938); P15.1 implementation is authorized once this
+PR merges. P15.2–P15.7 are authorized per phase under the accepted
+architecture, contingent on their listed dependencies being merged and review
+passing per REVIEW_AND_MERGE.md. No agent may self-approve or self-expand
+scope.
 
 ## Completion
 
 ```text
 P15.0 audit doc present: YES
 P15.0 gap register present: YES
-ADR-0184 present (Proposed): YES
-SPEC-0047 present (proposed): YES
+ADR-0184 present (Accepted): YES
+SPEC-0047 present (Accepted): YES
 Prompt set P15.1-P15.7 + README + REVIEW_AND_MERGE present: YES
 README/roadmap reconciliation: YES
 #433 plan recorded: YES

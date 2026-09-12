@@ -38,10 +38,9 @@ Required agent plan:
   building blocks
 ```
 
-Until ADR-0184 is Accepted by human review, implementation under it proceeds as
-Proposed-architecture work and the PR must record
-`P15.3 implementation authorized: NO — awaiting human architecture approval`
-if the human has not approved. Do not self-approve.
+This phase is authorized under Accepted ADR-0184/SPEC-0047 once its listed
+dependency phases are merged and its review passes per REVIEW_AND_MERGE.md;
+the PR must record the authorization line with its actual state.
 
 ## Objective
 
@@ -59,7 +58,7 @@ provider-neutral.
 
 ## Authoritative dependencies
 
-Read before editing: ADR-0184 (Proposed), SPEC-0047 (proposed),
+Read before editing: ADR-0184 (Accepted), SPEC-0047 (Accepted),
 `docs/architecture/p15-e2d-gap-register.md`,
 `docs/architecture/p15-0-post-araf-current-state-audit.md`, ADR-0181,
 SPEC-0038 (P15.1 output). Mandatory per AGENTS.md: `README.md`,
@@ -195,7 +194,7 @@ Allocations durable + deterministic order: PASS
 StaleGeneration fencing: PASS
 Drain exclusion with honest blockers: PASS
 No cells/sharding added: CONFIRMED
-P15.3 implementation authorized: NO — awaiting human architecture approval
+P15.3 implementation authorized: YES under Accepted ADR-0184, contingent on listed dependencies merged (verify per Execution prerequisites)
 Required CI/governance: PASS
 Exact HEAD reviewed: YES
 ```

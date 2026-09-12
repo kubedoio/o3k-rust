@@ -39,10 +39,9 @@ Required agent plan:
   ceiling; re-opening P15.1-P15.6 architecture
 ```
 
-Until ADR-0184 is Accepted by human review, implementation under it proceeds as
-Proposed-architecture work and the PR must record
-`P15.7 implementation authorized: NO — awaiting human architecture approval`
-if the human has not approved. Do not self-approve.
+This phase is authorized under Accepted ADR-0184/SPEC-0047 once its listed
+dependency phases are merged and its review passes per REVIEW_AND_MERGE.md;
+the PR must record the authorization line with its actual state.
 
 ## Objective
 
@@ -59,7 +58,7 @@ API authoritative → OpenStack projection convergent → Araf consumes same tru
 
 ## Authoritative dependencies
 
-Read before editing: ADR-0184 (Proposed), SPEC-0047 (proposed),
+Read before editing: ADR-0184 (Accepted), SPEC-0047 (Accepted),
 `docs/architecture/p15-e2d-gap-register.md`,
 `docs/architecture/p15-0-post-araf-current-state-audit.md`. Mandatory per
 AGENTS.md: `README.md`, `docs/PROJECT_CHARTER.md`, `docs/CLEAN_IMPLEMENTATION.md`,
@@ -188,7 +187,7 @@ Native API authoritative + OpenStack projection convergent: PASS
 Araf consumes same truth: PASS
 owned_leaks + defect ledger published: YES
 No scale-ceiling claims made: CONFIRMED
-P15.7 implementation authorized: NO — awaiting human architecture approval
+P15.7 implementation authorized: YES under Accepted ADR-0184, contingent on listed dependencies merged (verify per Execution prerequisites)
 Required CI/governance: PASS
 Exact HEAD reviewed: YES
 ```

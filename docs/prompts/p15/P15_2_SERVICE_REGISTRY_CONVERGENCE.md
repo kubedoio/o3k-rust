@@ -17,8 +17,12 @@ Required agent plan:
 - OpenStack compatibility adapter: Keystone catalog projection only
 - Authority mode: o3k-implemented (canonical registry authority)
 - Files expected to change: crates/o3k-kernel/src/registry.rs (:207-546),
-  crates/o3k-kernel/src/manifest.rs (ManifestRegistry),
-  crates/o3k-identity/src/lib.rs (catalog projection),
+  crates/o3k-kernel/src/lib.rs (re-exports KernelRegistry),
+  crates/o3k-kernel/src/manifest.rs (ManifestRegistry; also rewrite the stale
+  "not the runtime authority until the P12 migration is proven" comment at
+  ~lines 1201-1203 as part of this phase),
+  bins/o3kd/src/composition/mod.rs (constructs/seeds ManifestRegistry, wires
+  readiness), crates/o3k-identity/src/lib.rs (catalog projection),
   crates/o3k-native-api/src/lib.rs (discovery surface),
   scripts/validate-kernel-actions.py
 - Contracts/specs affected: ADR-0184, SPEC-0047, ADR-0182, SPEC-0039
@@ -33,16 +37,21 @@ Required agent plan:
 - Evidence tier: domain/store tests + process-level discovery tests
 - Tests first: singular-authority invariants, catalog projection equivalence,
   readiness gating regression
+- Consumer inventory (pre-flight deliverable): enumerate every consumer of
+  the current dual registry — Keystone/catalog projection
+  (crates/o3k-identity), native discovery (/o3k/v1/services), o3kd readiness
+  wiring (composition root), scripts/validate-kernel-actions.py, kernel
+  re-exports, and the existing regression tests — and map each consumer to
+  its post-convergence source before implementation starts;
 - Known uncertainties: exact deprecation timeline for static registry
   consumers; keep both paths honest until SPEC-0047 retires one
 - Explicit non-goals: CloudProfile desired composition, runtime
   install/deploy automation
 ```
 
-Until ADR-0184 is Accepted by human review, implementation under it proceeds as
-Proposed-architecture work and the PR must record
-`P15.2 implementation authorized: NO — awaiting human architecture approval`
-if the human has not approved. Do not self-approve.
+This phase is authorized under Accepted ADR-0184/SPEC-0047 once its listed
+dependency phases are merged and its review passes per REVIEW_AND_MERGE.md;
+the PR must record the authorization line with its actual state.
 
 ## Objective
 
@@ -59,7 +68,7 @@ executable readiness gating (regression test
 
 ## Authoritative dependencies
 
-Read before editing: ADR-0184 (Proposed), SPEC-0047 (proposed),
+Read before editing: ADR-0184 (Accepted), SPEC-0047 (Accepted),
 `docs/architecture/p15-e2d-gap-register.md`,
 `docs/architecture/p15-0-post-araf-current-state-audit.md`, ADR-0182,
 SPEC-0039. Mandatory per AGENTS.md: `README.md`,
@@ -194,7 +203,7 @@ Catalog + discovery are projections only: PASS
 for_profile honors profile argument: PASS
 Migration/deprecation path safe: PASS
 Readiness gating regression green: PASS
-P15.2 implementation authorized: NO — awaiting human architecture approval
+P15.2 implementation authorized: YES under Accepted ADR-0184, contingent on listed dependencies merged (verify per Execution prerequisites)
 Required CI/governance: PASS
 Exact HEAD reviewed: YES
 ```

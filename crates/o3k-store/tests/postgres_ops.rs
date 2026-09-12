@@ -285,13 +285,31 @@ async fn test_postgres_backup_and_restore() {
         .expect("some");
     assert_eq!(restored_resv.id, resv.id);
 
-    // Clean up temporary restore database
+    // Clean up temporary restore database. Close the store pool first, then
+    // terminate leftover backends and force the drop so teardown cannot race
+    // server-side session termination (SQLSTATE 55006).
+    restored_store.pool().close().await;
     let _ = Command::new("psql")
         .arg("-d")
         .arg(admin_url)
         .arg("-c")
-        .arg("DROP DATABASE IF EXISTS o3k_restore_test;")
+        .arg(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+             WHERE datname = 'o3k_restore_test' AND pid <> pg_backend_pid();",
+        )
         .output();
+    let drop_out = Command::new("psql")
+        .arg("-d")
+        .arg(admin_url)
+        .arg("-c")
+        .arg("DROP DATABASE IF EXISTS o3k_restore_test;")
+        .output()
+        .expect("drop restore database");
+    assert!(
+        drop_out.status.success(),
+        "DROP DATABASE o3k_restore_test failed: {}",
+        String::from_utf8_lossy(&drop_out.stderr)
+    );
 }
 
 #[tokio::test]

@@ -53,7 +53,7 @@ Rules:
 | E2D-11 | Operational observability contract | PARTIAL | P17 (remainder) |
 | E2D-12 | Control-plane backup/restore | OPEN | P17 |
 | E2D-13 | Production init + authenticated join | PARTIAL | P15.6 #936 |
-| E2D-14 | PKI lifecycle completion | PARTIAL | P17 (#938 not yet filed) |
+| E2D-14 | PKI lifecycle completion | PARTIAL | P17 (tracking issue not yet filed) |
 | E2D-15 | Fleet image/artifact distribution | PARTIAL | P17 |
 | E2D-16 | Storage topology in the placement model | PARTIAL | P16 |
 | E2D-17 | Scale ladder / real scale evidence | OPEN | P18 (first rungs under P15.7 #937) |
@@ -367,8 +367,8 @@ Rules:
   stale rejection and loss/recovery at fleet scale.
 - **Dependency:** agent-control mTLS exists; enrollment ties into E2D-13 join.
 - **Claim impact:** HIGH.
-- **Recommended owner:** P17 (Production Operations & Trust); issue #938 is not
-  yet filed.
+- **Recommended owner:** P17 (Production Operations & Trust); P17 tracking
+  issue not yet filed.
 
 ## E2D-15 — Fleet image/artifact distribution
 

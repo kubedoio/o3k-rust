@@ -75,14 +75,14 @@ support claim; scale evidence remains profile-specific.
 | --- | --- |
 | Edge-to-datacenter building-block continuity, composable service catalog and upstream OpenStack hosted-service extension model | `docs/adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md`, `docs/specs/SPEC-0039-edge-to-datacenter-building-block-cloud.md` |
 
-## Proposed P15 sources — pending human architecture approval
+## Accepted P15 sources — active architecture authority
 
-P15.0 (#930) re-baselines the Cloud Kernel after the #928 Araf P2 northbound
-convergence gate and proposes — but does not yet accept — the P15 architecture.
-`docs/adr/ADR-0184-p15-scale-and-composition-foundation.md` and
-`docs/specs/SPEC-0047-p15-scale-and-composition-foundation.md` are Proposed and
-become active authority only after recorded human approval. Until then,
-ADR-0182/SPEC-0039 remain the authoritative E2D sources and the gap register
+ADR-0184 (`docs/adr/ADR-0184-p15-scale-and-composition-foundation.md`) and
+SPEC-0047 (`docs/specs/SPEC-0047-p15-scale-and-composition-foundation.md`)
+were accepted on 2026-09-12 by explicit human architecture approval recorded
+in the PR #938 review. They are now active architecture authority for the P15
+program. ADR-0182/SPEC-0039 remain the authoritative strategic E2D decision —
+advanced by, not amended by, ADR-0184 — and the gap register
 (`docs/architecture/p15-e2d-gap-register.md`) records the post-#928 truth.
 
 | Subject | Authority |
