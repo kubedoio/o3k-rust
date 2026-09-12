@@ -75,6 +75,23 @@ support claim; scale evidence remains profile-specific.
 | --- | --- |
 | Edge-to-datacenter building-block continuity, composable service catalog and upstream OpenStack hosted-service extension model | `docs/adr/ADR-0182-edge-to-datacenter-building-block-cloud-os.md`, `docs/specs/SPEC-0039-edge-to-datacenter-building-block-cloud.md` |
 
+## Proposed P15 sources — pending human architecture approval
+
+P15.0 (#930) re-baselines the Cloud Kernel after the #928 Araf P2 northbound
+convergence gate and proposes — but does not yet accept — the P15 architecture.
+`docs/adr/ADR-0184-p15-scale-and-composition-foundation.md` and
+`docs/specs/SPEC-0047-p15-scale-and-composition-foundation.md` are Proposed and
+become active authority only after recorded human approval. Until then,
+ADR-0182/SPEC-0039 remain the authoritative E2D sources and the gap register
+(`docs/architecture/p15-e2d-gap-register.md`) records the post-#928 truth.
+
+| Subject | Authority |
+| --- | --- |
+| P15 scale/composition architecture and invariants | `docs/adr/ADR-0184-p15-scale-and-composition-foundation.md` |
+| P15 phase scope/dependency/acceptance model | `docs/specs/SPEC-0047-p15-scale-and-composition-foundation.md` |
+| Post-#928 current-state audit and E2D gap register | `docs/architecture/p15-0-post-araf-current-state-audit.md`, `docs/architecture/p15-e2d-gap-register.md` |
+| P15 implementation prompts | `docs/prompts/p15/` |
+
 ## Core rules
 
 - O3K owns public identity, ownership, desired state, scheduling, operations,

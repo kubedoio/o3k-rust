@@ -507,10 +507,35 @@ evidence exists.
   the conformance example;
 - architecture direction does not replace executable evidence or human review.
 
-# P14 — OpenStack Adoption & Migration v1
+# P14 — OpenStack Adoption & Migration v1 — bounded profile complete
 
 P14.0 architecture and contracts are defined in ADR-0180 and SPEC-0037. The
-bounded `p14-openstack-cold-migration-v1` profile is specified only; runtime
-implementation, real two-cloud evidence, cutover, rollback, and the final
-OpenTofu NO-OP remain ordered P14.1-P14.9 gates. This does not expand P13,
-P12-IAM, the current alpha gate, or any generic cross-cloud claim.
+bounded `p14-openstack-cold-migration-v1` profile is complete: P14.9 real
+two-cloud acceptance passed against protected main 46e050a (G01–G20 all
+passed, owned_leaks=0, inconsistencies=0, foreign_state_changes=0, final
+OpenTofu plan NO-OP), recorded in `docs/status/current-state.yaml`. The
+bounded-profile caveats are preserved: this is not a general live-migration,
+arbitrary-migration, or production-datacenter claim, and it does not expand
+P13, P12-IAM, the current alpha gate, or any generic cross-cloud claim.
+
+## P15 — Scale and Composition Foundation (proposed)
+
+P15 proposes the scale/composition foundation for the edge-to-datacenter
+building-block Cloud OS: it re-baselines the Cloud Kernel after the post-P14
+native northbound closure and the #928 Araf P2 convergence gate, then closes
+the highest-priority E2D gaps so the same Cloud Kernel can scale by
+composition rather than replatforming. The program is split into phases
+P15.0–P15.7 (issues #930–#937): P15.0 (#930) is the re-baseline/foundation
+phase, P15.1 (#931) closes canonical location/failure-domain topology (E2D-01),
+and P15.2 (#932) converges `KernelRegistry`/`ManifestRegistry` service
+authority (E2D-04); the remaining phase scopes, dependencies, and acceptance
+model are defined by SPEC-0047.
+
+ADR-0184 and SPEC-0047 are **Proposed** and become active architecture
+authority only after recorded human approval; until then ADR-0182/SPEC-0039
+remain the authoritative E2D sources. The post-P14 native Cloud Kernel closure
+(audit, metering, diagnostics, quota, governance, location discovery, and the
+#907/#928 Araf P2 northbound convergence gate) is recorded in
+`docs/architecture/p15-0-post-araf-current-state-audit.md`; the post-#928 gap
+truth lives in `docs/architecture/p15-e2d-gap-register.md`; implementation
+prompts live under `docs/prompts/p15/`.

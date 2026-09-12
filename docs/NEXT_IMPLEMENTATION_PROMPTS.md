@@ -8,6 +8,13 @@ Each prompt is deliberately bounded. Do not merge adjacent prompts merely to
 save agent turns. The goal is to remove architecture debt without destabilizing
 the already-working TestLab behavior.
 
+> **Historical note:** this document is the historical SPEC-0025/ADR-0160
+> architecture-convergence prompt set. Prompts 2–6, 11, and 12 are completed
+> (historical markers inline); prompts 1, 7, and 8 are completed or superseded
+> (markers below); prompts 9 and 10 remain standing maintenance guidance. The
+> active implementation program is P15 — Scale & Composition Foundation (issue
+> #929, prompts in `docs/prompts/p15/`).
+
 ## Common preamble for every prompt
 
 Use this preamble before the task-specific text:
@@ -56,6 +63,17 @@ passed unless it actually ran at the required evidence tier.
 ---
 
 ## Prompt 1 — canonicalize compute/server domain state
+
+> Completed by the architecture-convergence acceptance: ADR-0160 and SPEC-0025
+> are now `Accepted` and `contracts/core-architecture-boundaries.toml` is
+> `status = "accepted"`, activating the ratchet in enforcement mode in normal
+> CI. Verification of SPEC-0025 steps 1-7 (canonical server domain lifecycle,
+> repository ports, durable metadata authority, blob/artifact separation,
+> application-level provider ports, protobuf/Cinder/agent isolation, o3k-api
+> adapter split) found no remaining violations, including step 1 (one canonical
+> O3K server lifecycle model in `o3k-domain` with API strings, persisted
+> values, and provider states as projections). The prompt below is retained
+> for historical reference.
 
 ```text
 Objective: make o3k-domain the single canonical owner of O3K server identity,
@@ -379,6 +397,17 @@ Acceptance:
 
 ## Prompt 7 — split o3k-api internally without behavior changes
 
+> Completed by the architecture-convergence acceptance: ADR-0160 and SPEC-0025
+> are now `Accepted` and `contracts/core-architecture-boundaries.toml` is
+> `status = "accepted"`, activating the ratchet in enforcement mode in normal
+> CI. Verification of SPEC-0025 steps 1-7 (canonical server domain lifecycle,
+> repository ports, durable metadata authority, blob/artifact separation,
+> application-level provider ports, protobuf/Cinder/agent isolation, o3k-api
+> adapter split) found no remaining violations, including step 7 (the
+> `o3k-api` internal protocol-adapter module split with routes, microversions,
+> error envelopes, and public behavior preserved). The prompt below is
+> retained for historical reference.
+
 ```text
 Objective: split crates/o3k-api/src/lib.rs into clear internal protocol-adapter
 modules without changing any public route, request, response, status code,
@@ -421,6 +450,13 @@ Acceptance:
 ---
 
 ## Prompt 8 — close the native ephemeral-root alpha vertical slice
+
+> Superseded by `docs/plan/alpha-2-release.md` and the alpha release line
+> recorded in `docs/status/current-state.yaml`: the first native alpha
+> candidate v0.2.0-alpha.1 at 952dcf9c4a1ae958996e4ae9444763e5524eddc5 is
+> rejected and permanently ineligible for release; remediation proceeds under
+> the alpha-2 plan and release tracker. The prompt below is retained for
+> historical reference.
 
 ```text
 Objective: make the native-rust-testlab v0.2.0-alpha.1 workflow the sole
