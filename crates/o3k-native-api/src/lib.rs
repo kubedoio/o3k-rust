@@ -563,20 +563,56 @@ fn action_metadata(
         if *operation == LifecycleOperation::List && !collection_supported {
             continue;
         }
-        // List is a bounded read, not an asynchronous instance mutation.
-        let (target, asynchronous) = if *operation == LifecycleOperation::List {
-            ("collection", false)
-        } else {
-            ("instance", true)
+        // The canonical action-name entry must agree with the operation-name
+        // entry (and with contracts/cloud-kernel-actions.yaml): reads are
+        // synchronous and carry read schemas; only mutations are
+        // asynchronous with the mutation-result schema.
+        let (target, asynchronous) = match operation {
+            LifecycleOperation::List | LifecycleOperation::Create => ("collection", false),
+            LifecycleOperation::Show | LifecycleOperation::Update | LifecycleOperation::Delete => {
+                ("instance", false)
+            }
+        };
+        let asynchronous = asynchronous
+            || matches!(
+                operation,
+                LifecycleOperation::Create
+                    | LifecycleOperation::Update
+                    | LifecycleOperation::Delete
+            );
+        let input = match operation {
+            LifecycleOperation::Create => resource_contract::ContractKind::for_resource(
+                &descriptor.resource_type.to_string(),
+                &descriptor.schema_version,
+            )
+            .map(|_| {
+                create_input_schema_id(
+                    descriptor.resource_type.namespace(),
+                    &descriptor.collection,
+                    &descriptor.schema_version,
+                )
+            }),
+            _ => None,
+        };
+        let output = match operation {
+            LifecycleOperation::List => {
+                "https://o3k.io/contracts/native-resource-list-response-v1.schema.json"
+            }
+            LifecycleOperation::Show => {
+                "https://o3k.io/contracts/native-resource-envelope-v1.schema.json"
+            }
+            LifecycleOperation::Create
+            | LifecycleOperation::Update
+            | LifecycleOperation::Delete => {
+                "https://o3k.io/contracts/native-mutation-result-v1.schema.json"
+            }
         };
         actions.push(ActionSchemaMetadata {
             name: action.action().to_owned(),
             action_id: action.to_string(),
             target: target.to_owned(),
-            input: Some("https://o3k.io/schemas/native-action-input/v1".to_owned()),
-            output: Some(
-                "https://o3k.io/contracts/native-mutation-result-v1.schema.json".to_owned(),
-            ),
+            input,
+            output: Some(output.to_owned()),
             asynchronous,
         });
     }
@@ -1415,6 +1451,37 @@ mod tests {
         assert!(
             !subnet_actions.contains(&"CreateSubnet"),
             "network:subnet actions must not advertise the canonical create action either: {subnet}"
+        );
+        // Canonical action-name entries must agree with the operation-name
+        // entries (and contracts/cloud-kernel-actions.yaml): reads are
+        // synchronous with read schemas; create targets the collection with
+        // the create-schema input.
+        let compute_action = |name: &str| {
+            compute["actions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|action| action["name"] == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("missing actions entry {name}: {compute}"))
+        };
+        let create_meta = compute_action("CreateServer");
+        assert_eq!(create_meta["target"], "collection", "{create_meta}");
+        assert_eq!(create_meta["asynchronous"], true, "{create_meta}");
+        assert!(
+            create_meta["input"]
+                .as_str()
+                .is_some_and(|input| input.contains("/resource")),
+            "create input must reference the create schema: {create_meta}"
+        );
+        let read_meta = compute_action("ReadServer");
+        assert_eq!(read_meta["target"], "instance", "{read_meta}");
+        assert_eq!(read_meta["asynchronous"], false, "{read_meta}");
+        assert!(
+            read_meta["output"]
+                .as_str()
+                .is_some_and(|output| output.contains("native-resource-envelope")),
+            "read output must be the envelope schema: {read_meta}"
         );
         // A service without a ready controller advertises no lifecycle
         // operations at all (previously only list was readiness-gated).

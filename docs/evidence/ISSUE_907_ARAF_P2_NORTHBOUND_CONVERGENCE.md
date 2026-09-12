@@ -212,11 +212,12 @@ outside #907's evidence-only scope.
     IdempotencyConflict, a same-key retry after deletion fails closed
     (a DELETED ledger tombstone is never a replay target), the dead envelope
     reads are removed, and `update_for` rejects a mismatched `kind` exactly
-    like create. Upgrade note: the type-prefixed derivation is an observable
-    id change for a given key; a same-key retry issued across the upgrade is
-    treated as a new create rather than a replay (in-flight reservations
-    keep their recorded operation identity, so accepted calls replay
-    correctly). Regressions: `native_network_create_replay_returns_same_resource`,
+    like create. Upgrade note: the type-prefixed derivation is an observable id
+    change for a given key. These arms do not write generic idempotency
+    reservations, so a same-key retry issued across the upgrade derives a
+    different id; with the same name the canonical name-uniqueness check
+    rejects it with 409, otherwise it creates a new resource. Clients should
+    retry outstanding creates with a fresh key after the upgrade. Regressions: `native_network_create_replay_returns_same_resource`,
     `native_network_replay_with_changed_name_conflicts`,
     `native_network_replay_after_delete_is_not_a_replay`,
     `production_router_update_rejects_mismatched_resource_kind`

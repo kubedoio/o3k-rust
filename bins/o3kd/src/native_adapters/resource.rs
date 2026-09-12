@@ -667,13 +667,17 @@ impl ResourceApplication for GenericResourceApplication {
             o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent { operation_id, .. } => {
                 // An idempotent replay must reflect the durable operation state.
                 // In particular, a request which was accepted but whose resource
-                // write failed must not be reported as a successful replay.
+                // write failed (or could not be recorded truthfully) must not be
+                // reported as a successful replay.
                 let existing_operation = self
                     .store
                     .get_canonical_operation(operation_id)
                     .await
                     .map_err(|_| ResourceApplicationError::Internal)?;
-                if existing_operation.state == o3k_store::OperationState::Failed {
+                if matches!(
+                    existing_operation.state,
+                    o3k_store::OperationState::Failed | o3k_store::OperationState::UnknownOutcome
+                ) {
                     return Err(ResourceApplicationError::Conflict);
                 }
                 return Ok(MutationResult {
@@ -766,6 +770,11 @@ impl ResourceApplication for GenericResourceApplication {
                 .store
                 .update_canonical_operation_lifecycle(operation_id, &unknown)
                 .await;
+            // The response reports the resource truth (the mutation applied);
+            // the operation record is degraded (unknown_outcome) and same-key
+            // replays terminate as conflicts. This response/record divergence
+            // is deliberate: a completed mutation must not be reported as
+            // incomplete.
         }
         Ok(MutationResult {
             operation_id: operation_id.to_string(),

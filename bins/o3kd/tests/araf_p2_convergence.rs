@@ -2063,8 +2063,8 @@ async fn araf_p2_northbound_convergence() -> Result<(), Box<dyn std::error::Erro
             "agent epoch internals leaked: {body}"
         );
     }
-    // The o3kd process logs are part of the evidence surface: no marker may
-    // appear there either (both generations, appended to one file).
+    // The o3kd process logs are part of the evidence surface: no secret or
+    // DSN marker may appear there (both generations, appended to one file).
     scan_o3kd_log(&data_dir, &secrets);
 
     // ── Phase 2: SIGTERM, restart against the same durable store ──────────
