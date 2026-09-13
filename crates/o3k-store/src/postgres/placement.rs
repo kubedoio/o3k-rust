@@ -223,7 +223,8 @@ impl PlacementRepository for PostgresStore {
         let row = sqlx::query(
             "INSERT INTO placement_providers (id, node_id, state, generation)
              VALUES ($1, $1, 'Enabled', 1)
-             ON CONFLICT (node_id) DO UPDATE SET state = 'Enabled'
+             ON CONFLICT (node_id) DO UPDATE
+             SET state = 'Enabled', generation = placement_providers.generation + 1
              RETURNING id, node_id, state, generation",
         )
         .bind(node_id)
@@ -309,7 +310,8 @@ impl PlacementRepository for PostgresStore {
         let row = sqlx::query(
             "INSERT INTO placement_providers (id, node_id, state, generation)
              VALUES ($1, $1, $2, 1)
-             ON CONFLICT (node_id) DO UPDATE SET state = EXCLUDED.state
+             ON CONFLICT (node_id) DO UPDATE
+             SET state = EXCLUDED.state, generation = placement_providers.generation + 1
              RETURNING id, node_id, state, generation",
         )
         .bind(node_id)
@@ -399,12 +401,14 @@ impl PlacementRepository for PostgresStore {
     }
 
     async fn set_provider_state(&self, provider_id: &str, state: &str) -> Result<(), StoreError> {
-        let res = sqlx::query("UPDATE placement_providers SET state = $1 WHERE id = $2")
-            .bind(state)
-            .bind(provider_id)
-            .execute(&self.pool)
-            .await
-            .map_err(StoreError::Database)?;
+        let res = sqlx::query(
+            "UPDATE placement_providers SET state = $1, generation = generation + 1 WHERE id = $2",
+        )
+        .bind(state)
+        .bind(provider_id)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
 
         if res.rows_affected() == 0 {
             return Err(StoreError::PlacementProviderNotFound);
@@ -520,13 +524,30 @@ impl PlacementRepository for PostgresStore {
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
 
+        let provider_exists = sqlx::query("SELECT 1 FROM placement_providers WHERE id = $1")
+            .bind(provider_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        if provider_exists.is_none() {
+            return Err(StoreError::PlacementProviderNotFound);
+        }
+
         let res_rows = sqlx::query(
-            "SELECT resource_class, amount FROM placement_allocation_resources WHERE allocation_id = $1",
+            "SELECT r.resource_class, r.amount
+             FROM placement_allocation_resources r
+             JOIN placement_allocations a ON a.id = r.allocation_id
+             WHERE r.allocation_id = $1 AND a.provider_id = $2",
         )
         .bind(allocation_id)
+        .bind(provider_id)
         .fetch_all(&mut *tx)
         .await
         .map_err(StoreError::Database)?;
+
+        if res_rows.is_empty() {
+            return Ok(());
+        }
 
         for row in res_rows {
             let rc: String = row.get("resource_class");
@@ -542,8 +563,9 @@ impl PlacementRepository for PostgresStore {
             .map_err(StoreError::Database)?;
         }
 
-        sqlx::query("DELETE FROM placement_allocations WHERE id = $1")
+        sqlx::query("DELETE FROM placement_allocations WHERE id = $1 AND provider_id = $2")
             .bind(allocation_id)
+            .bind(provider_id)
             .execute(&mut *tx)
             .await
             .map_err(StoreError::Database)?;
