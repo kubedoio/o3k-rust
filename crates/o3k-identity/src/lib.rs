@@ -824,6 +824,7 @@ pub struct TokenService {
     token_ttl: Duration,
     catalog_endpoint: String,
     registry: Option<o3k_kernel::KernelRegistry>,
+    canonical_registry: Option<std::sync::Arc<std::sync::RwLock<o3k_kernel::ManifestRegistry>>>,
     /// Serializes snapshot reloads so a reload triggered by an earlier durable
     /// commit can never overwrite one triggered by a later commit.
     reload_lock: Arc<tokio::sync::Mutex<()>>,
@@ -885,6 +886,7 @@ impl TokenService {
             token_ttl,
             catalog_endpoint,
             registry: None,
+            canonical_registry: None,
             reload_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
@@ -900,6 +902,18 @@ impl TokenService {
     #[must_use]
     pub fn with_registry(mut self, registry: o3k_kernel::KernelRegistry) -> Self {
         self.registry = Some(registry);
+        self
+    }
+
+    /// Uses the canonical runtime service authority for compatibility
+    /// projection.  The handle is shared with native discovery and diagnostics
+    /// so lifecycle changes are reflected consistently in all views.
+    #[must_use]
+    pub fn with_manifest_registry(
+        mut self,
+        registry: std::sync::Arc<std::sync::RwLock<o3k_kernel::ManifestRegistry>>,
+    ) -> Self {
+        self.canonical_registry = Some(registry);
         self
     }
 
@@ -1558,6 +1572,11 @@ impl TokenService {
         let registry = self.registry.clone().unwrap_or_else(|| {
             o3k_kernel::KernelRegistry::standard(&self.catalog_endpoint, cinder_url.as_deref())
         });
+        let registry = self
+            .canonical_registry
+            .as_ref()
+            .map(|canonical| registry.clone().with_canonical_registry(canonical.clone()))
+            .unwrap_or(registry);
 
         let enabled_services: std::collections::HashSet<&str> = snapshot
             .services
@@ -1567,9 +1586,19 @@ impl TokenService {
             .collect();
 
         let projected = registry.project_keystone_catalog(project_id);
+        // Once the canonical runtime authority is bound, its lifecycle and
+        // projection linkage are the sole catalog gate.  The identity
+        // snapshot's historical service table is retained only for isolated
+        // compatibility construction where no runtime authority is present;
+        // it must not be able to disagree with live service state.
+        let canonical_bound = self.canonical_registry.is_some();
         projected
             .into_iter()
-            .filter(|svc| enabled_services.is_empty() || enabled_services.contains(svc.id.as_str()))
+            .filter(|svc| {
+                canonical_bound
+                    || enabled_services.is_empty()
+                    || enabled_services.contains(svc.id.as_str())
+            })
             .map(|svc| ServiceDetails {
                 name: svc.name,
                 service_type: svc.service_type,

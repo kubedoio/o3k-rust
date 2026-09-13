@@ -588,7 +588,7 @@ pub async fn build_composition(
     let lifecycle_convergence_reconciler =
         compute_service.spawn_lifecycle_convergence_reconciler(5);
     let extra_projects = parse_extra_project_seeds()?;
-    let identity = match (config.bootstrap_password(), config.token_signing_key()) {
+    let mut identity = match (config.bootstrap_password(), config.token_signing_key()) {
         (Some(password), Some(signing_key)) => {
             let catalog_endpoint = format!("http://{}", config.listen_addr);
             o3k_identity::seed_identity_defaults_in_region(
@@ -667,6 +667,18 @@ pub async fn build_composition(
         );
     }
 
+    // Compatibility metadata is subordinate to the canonical manifests.  It
+    // is registered only after identity validation, so an orphan projection
+    // can never become a catalog service.
+    let compatibility_template = o3k_kernel::KernelRegistry::standard_in_region(
+        &format!("http://{}", config.listen_addr),
+        std::env::var("O3K_CINDER_ENDPOINT").ok().as_deref(),
+        &catalog_region,
+    );
+    compatibility_template
+        .register_projections_into(&mut native_manifest_registry)
+        .map_err(|e| format!("compatibility projection registration failed: {e}"))?;
+
     // Wire native API service adapters.
     let server_reader: Option<std::sync::Arc<dyn o3k_native_api::compute::ServerReader>> = Some(
         std::sync::Arc::new(crate::native_adapters::ServerReaderAdapter {
@@ -689,7 +701,7 @@ pub async fn build_composition(
         std::sync::Arc::new(crate::native_adapters::OperationReaderAdapter {
             store: native_api_store.clone(),
         });
-    let token_issuer: Option<std::sync::Arc<dyn o3k_native_api::auth::TokenIssuer>> =
+    let mut token_issuer: Option<std::sync::Arc<dyn o3k_native_api::auth::TokenIssuer>> =
         identity.as_ref().map(|id_service| {
             std::sync::Arc::new(crate::native_adapters::TokenIssuerAdapter {
                 service: std::sync::Arc::new(id_service.clone()),
@@ -699,9 +711,6 @@ pub async fn build_composition(
     // The governance adapter shares the same identity snapshot as the token
     // issuer, so role/operator grant and revoke converge into subsequent token
     // issuance and scope discovery without a process restart.
-    let governance_identity: Option<std::sync::Arc<o3k_identity::TokenService>> = identity
-        .as_ref()
-        .map(|id_service| std::sync::Arc::new(id_service.clone()));
     let external_controllers = external_controllers_from_config().await?;
     // The diagnostics controller probe needs the same external-controller set
     // that is later moved into the generic resource application, so keep a
@@ -851,6 +860,26 @@ pub async fn build_composition(
         }
         native_manifest_registry.register_in_process_controller(service_id, ready, detail)?;
     }
+
+    // From this point onward every runtime consumer shares one canonical
+    // service authority.  The Keystone adapter receives a derived facade
+    // bound to this handle; it cannot maintain an independent inventory.
+    let canonical_manifest_registry =
+        std::sync::Arc::new(std::sync::RwLock::new(native_manifest_registry));
+    if let Some(identity_service) = identity.as_mut() {
+        *identity_service = identity_service
+            .clone()
+            .with_manifest_registry(canonical_manifest_registry.clone());
+    }
+    token_issuer = identity.as_ref().map(|id_service| {
+        std::sync::Arc::new(crate::native_adapters::TokenIssuerAdapter {
+            service: std::sync::Arc::new(id_service.clone()),
+            oidc_validator: oidc_validator.clone(),
+        }) as std::sync::Arc<dyn o3k_native_api::auth::TokenIssuer>
+    });
+    let governance_identity = identity
+        .as_ref()
+        .map(|id_service| std::sync::Arc::new(id_service.clone()));
     let storage_intent_epoch = storage_intent_epoch(&controller_epoch);
     let native_attachment_workflow: Option<Arc<dyn o3k_api::NativeAttachmentWorkflow>> =
         native_lvm_provider.as_ref().map(|provider| {
@@ -928,12 +957,18 @@ pub async fn build_composition(
         let handler = std::sync::Arc::new(crate::native_adapters::CompositionResourceHandler {
             application: generic_application.clone(),
             store: native_api_store.clone(),
-            manifests: std::sync::Arc::new(native_manifest_registry.clone()),
+            manifests: std::sync::Arc::new(
+                canonical_manifest_registry
+                    .read()
+                    .map_err(|_| "canonical manifest registry poisoned")?
+                    .clone(),
+            ),
             delegation_keys: std::collections::HashMap::from([(key_id.clone(), verification_key)]),
-            dispatcher: o3k_native_api::resource::ResourceDispatcher::from_manifest_registry(
-                &native_manifest_registry,
-            )
-            .map_err(|_| "failed to build composition resource descriptors")?,
+            dispatcher:
+                o3k_native_api::resource::ResourceDispatcher::from_shared_manifest_registry(
+                    canonical_manifest_registry.clone(),
+                )
+                .map_err(|_| "failed to build composition resource descriptors")?,
         });
         let service = o3k_service_sdk::composition::CompositionServiceAdapter::new(
             handler,
@@ -996,8 +1031,8 @@ pub async fn build_composition(
     } else {
         o3k_native_api::pagination::CursorConfig::default()
     };
-    let native_state = o3k_native_api::NativeApiState::new(
-        Some(native_manifest_registry),
+    let native_state = o3k_native_api::NativeApiState::new_shared(
+        canonical_manifest_registry.clone(),
         cursor_config,
         token_issuer,
         server_reader,

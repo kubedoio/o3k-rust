@@ -1,7 +1,11 @@
 //! Canonical Cloud Kernel service registry, resource/action metadata, and
 //! compatibility catalog projections.
 
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{Arc, RwLock},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -204,12 +208,20 @@ pub struct KeystoneCatalogEndpoint {
     pub url: String,
 }
 
-/// Canonical, immutable static Cloud Kernel Service Registry.
+/// Compatibility projection facade over the canonical service authority.
+///
+/// The descriptor vector is bootstrap metadata used to preserve existing
+/// OpenStack shapes. Runtime existence/readiness is read from the bound
+/// `ManifestRegistry`; this type is not an independent authority.
 #[derive(Debug, Clone)]
 pub struct KernelRegistry {
     services: Vec<ServiceDescriptor>,
     service_by_id: HashMap<ServiceId, usize>,
     service_by_namespace: HashMap<ServiceNamespace, usize>,
+    /// Optional shared canonical runtime authority.  The descriptor list is
+    /// retained only as a compatibility projection template; when this field
+    /// is set, existence and lifecycle are always read from `ManifestRegistry`.
+    canonical: Option<Arc<RwLock<crate::manifest::ManifestRegistry>>>,
 }
 
 impl KernelRegistry {
@@ -228,7 +240,68 @@ impl KernelRegistry {
             services,
             service_by_id,
             service_by_namespace,
+            canonical: None,
         }
+    }
+
+    /// Binds this compatibility facade to the canonical runtime service
+    /// authority.  No service state is copied; catalog projection consults the
+    /// shared manifest/controller registry on every request.
+    #[must_use]
+    pub fn with_canonical_registry(
+        mut self,
+        canonical: Arc<RwLock<crate::manifest::ManifestRegistry>>,
+    ) -> Self {
+        self.canonical = Some(canonical);
+        self
+    }
+
+    /// Installs the descriptor metadata as subordinate compatibility
+    /// projections for services already present in the canonical registry.
+    /// Unknown services (for example an externally hosted Cinder endpoint)
+    /// are intentionally skipped because they are not native service
+    /// identities owned by this registry.
+    pub fn register_projections_into(
+        &self,
+        canonical: &mut crate::manifest::ManifestRegistry,
+    ) -> Result<(), crate::manifest::ManifestError> {
+        for service in &self.services {
+            if canonical.get(service.id.as_str()).is_none() {
+                continue;
+            }
+            let projection = crate::manifest::OpenStackCompatibilityProjection {
+                service_id: service.id.to_string(),
+                service_type: service.service_type.clone(),
+                service_name: Some(service.name.clone()),
+                enabled: service.enabled,
+                api_surfaces: service
+                    .api_surfaces
+                    .iter()
+                    .map(|surface| crate::manifest::OpenStackApiSurface {
+                        name: surface.name.clone(),
+                        prefix: surface.prefix.clone(),
+                        version: surface.version.clone(),
+                        min_microversion: None,
+                        max_microversion: None,
+                        enabled: surface.enabled,
+                    })
+                    .collect(),
+                endpoints: service
+                    .endpoints
+                    .iter()
+                    .map(|endpoint| crate::manifest::OpenStackEndpointTemplate {
+                        interface: endpoint.interface.clone(),
+                        region: endpoint.region.clone(),
+                        url_template: endpoint.url_template.clone(),
+                        enabled: true,
+                    })
+                    .collect(),
+                capabilities: Vec::new(),
+                evidence_profile: None,
+            };
+            canonical.register_projection(projection)?;
+        }
+        Ok(())
     }
 
     /// Builds the standard O3K Cloud Kernel registry for the current runtime.
@@ -245,14 +318,17 @@ impl KernelRegistry {
         Self::for_profile_in_region("native-rust-testlab", base_url, cinder_url, region)
     }
 
-    /// Builds the registry configured for a specific product profile.
+    /// Builds a backwards-compatible projection template for a named
+    /// profile.  The profile string is intentionally not a desired-service
+    /// composition mechanism; CloudProfile semantics belong to P15.4.
     #[must_use]
     pub fn for_profile(profile: &str, base_url: &str, cinder_url: Option<&str>) -> Self {
         Self::for_profile_in_region(profile, base_url, cinder_url, "RegionOne")
     }
 
-    /// Builds the registry configured for a specific product profile and
-    /// canonical catalog region.
+    /// Builds a projection template for a profile and canonical catalog
+    /// region. Runtime authority is supplied separately with
+    /// [`Self::with_canonical_registry`].
     ///
     /// The region is the OpenStack compatibility projection of canonical O3K
     /// topology (see the composition root and ADR-0181/ADR-0184). When no
@@ -567,6 +643,9 @@ impl KernelRegistry {
             });
         }
 
+        // P15.2 deliberately does not interpret profile as desired
+        // composition. This helper preserves the historical bootstrap shape
+        // until the P15.4 CloudProfile layer exists.
         let _ = profile;
         Self::new(services)
     }
@@ -609,31 +688,75 @@ impl KernelRegistry {
             .any(|s| s.resource_types.iter().any(|r| r == res))
     }
 
-    /// Projects the static registry into the Keystone `/v3/auth/tokens` catalog format.
+    /// Projects canonical runtime state into the Keystone `/v3/auth/tokens`
+    /// catalog format.  When no canonical registry is bound this remains a
+    /// backwards-compatible bootstrap helper for isolated callers/tests.
     #[must_use]
     pub fn project_keystone_catalog(&self, project_id: &str) -> Vec<KeystoneCatalogService> {
         let mut catalog: Vec<KeystoneCatalogService> = self
             .services
             .iter()
-            .filter(|svc| svc.enabled)
-            .map(|svc| {
-                let endpoints: Vec<KeystoneCatalogEndpoint> = svc
-                    .endpoints
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, ep)| KeystoneCatalogEndpoint {
-                        id: format!("endpoint-{}-{idx}", svc.id),
-                        interface: ep.interface.clone(),
-                        region: ep.region.clone(),
-                        region_id: ep.region.clone(),
-                        url: ep.url_template.replace("{project_id}", project_id),
+            .filter(|svc| {
+                if !svc.enabled {
+                    return false;
+                }
+                self.canonical.as_ref().is_none_or(|canonical| {
+                    canonical.read().ok().is_some_and(|registry| {
+                        registry.is_executable(svc.id.as_str())
+                            && registry
+                                .projection(svc.id.as_str())
+                                .is_some_and(|projection| projection.enabled)
                     })
-                    .collect();
+                })
+            })
+            .map(|svc| {
+                let projection = self.canonical.as_ref().and_then(|canonical| {
+                    canonical
+                        .read()
+                        .ok()
+                        .and_then(|registry| registry.projection(svc.id.as_str()).cloned())
+                });
+                let endpoints: Vec<KeystoneCatalogEndpoint> = projection
+                    .as_ref()
+                    .map(|projection| {
+                        projection
+                            .endpoints
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, endpoint)| endpoint.enabled)
+                            .map(|(idx, endpoint)| KeystoneCatalogEndpoint {
+                                id: format!("endpoint-{}-{idx}", svc.id),
+                                interface: endpoint.interface.clone(),
+                                region: endpoint.region.clone(),
+                                region_id: endpoint.region.clone(),
+                                url: endpoint.url_template.replace("{project_id}", project_id),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_else(|| {
+                        svc.endpoints
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, ep)| KeystoneCatalogEndpoint {
+                                id: format!("endpoint-{}-{idx}", svc.id),
+                                interface: ep.interface.clone(),
+                                region: ep.region.clone(),
+                                region_id: ep.region.clone(),
+                                url: ep.url_template.replace("{project_id}", project_id),
+                            })
+                            .collect()
+                    });
 
                 KeystoneCatalogService {
                     id: svc.id.to_string(),
-                    name: svc.name.clone(),
-                    service_type: svc.service_type.clone(),
+                    name: projection
+                        .as_ref()
+                        .and_then(|projection| projection.service_name.clone())
+                        .unwrap_or_else(|| svc.name.clone()),
+                    service_type: projection.as_ref().map_or_else(
+                        || svc.service_type.clone(),
+                        |projection| projection.service_type.clone(),
+                    ),
                     endpoints,
                 }
             })
