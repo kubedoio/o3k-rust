@@ -824,6 +824,7 @@ pub struct TokenService {
     token_ttl: Duration,
     catalog_endpoint: String,
     registry: Option<o3k_kernel::KernelRegistry>,
+    canonical_registry: Option<std::sync::Arc<std::sync::RwLock<o3k_kernel::ManifestRegistry>>>,
     /// Serializes snapshot reloads so a reload triggered by an earlier durable
     /// commit can never overwrite one triggered by a later commit.
     reload_lock: Arc<tokio::sync::Mutex<()>>,
@@ -885,6 +886,7 @@ impl TokenService {
             token_ttl,
             catalog_endpoint,
             registry: None,
+            canonical_registry: None,
             reload_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
@@ -900,6 +902,18 @@ impl TokenService {
     #[must_use]
     pub fn with_registry(mut self, registry: o3k_kernel::KernelRegistry) -> Self {
         self.registry = Some(registry);
+        self
+    }
+
+    /// Uses the canonical runtime service authority for compatibility
+    /// projection.  The handle is shared with native discovery and diagnostics
+    /// so lifecycle changes are reflected consistently in all views.
+    #[must_use]
+    pub fn with_manifest_registry(
+        mut self,
+        registry: std::sync::Arc<std::sync::RwLock<o3k_kernel::ManifestRegistry>>,
+    ) -> Self {
+        self.canonical_registry = Some(registry);
         self
     }
 
@@ -1558,6 +1572,11 @@ impl TokenService {
         let registry = self.registry.clone().unwrap_or_else(|| {
             o3k_kernel::KernelRegistry::standard(&self.catalog_endpoint, cinder_url.as_deref())
         });
+        let registry = self
+            .canonical_registry
+            .as_ref()
+            .map(|canonical| registry.clone().with_canonical_registry(canonical.clone()))
+            .unwrap_or(registry);
 
         let enabled_services: std::collections::HashSet<&str> = snapshot
             .services
@@ -1567,9 +1586,19 @@ impl TokenService {
             .collect();
 
         let projected = registry.project_keystone_catalog(project_id);
+        // Once the canonical runtime authority is bound, its lifecycle and
+        // projection linkage are the sole catalog gate.  The identity
+        // snapshot's historical service table is retained only for isolated
+        // compatibility construction where no runtime authority is present;
+        // it must not be able to disagree with live service state.
+        let canonical_bound = self.canonical_registry.is_some();
         projected
             .into_iter()
-            .filter(|svc| enabled_services.is_empty() || enabled_services.contains(svc.id.as_str()))
+            .filter(|svc| {
+                canonical_bound
+                    || enabled_services.is_empty()
+                    || enabled_services.contains(svc.id.as_str())
+            })
             .map(|svc| ServiceDetails {
                 name: svc.name,
                 service_type: svc.service_type,
@@ -2417,6 +2446,75 @@ mod tests {
                     "http://127.0.0.1:8776/v3/eba29e2d-53de-461d-ae91-ede7402713cb".to_owned()
                 ),
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_catalog_enumerates_projections_and_gates_unavailable_cinder()
+    -> Result<(), AuthError> {
+        let mut canonical = o3k_kernel::ManifestRegistry::new();
+        canonical
+            .register_external_service(
+                "database",
+                "database",
+                o3k_kernel::ServiceLifecycleState::Ready,
+            )
+            .map_err(|_| AuthError::InvalidRequest)?;
+        canonical
+            .register_external_service(
+                "cinder",
+                "cinder",
+                o3k_kernel::ServiceLifecycleState::NotReady,
+            )
+            .map_err(|_| AuthError::InvalidRequest)?;
+        for (service_id, service_type, url) in [
+            (
+                "database",
+                "database",
+                "http://127.0.0.1/database/{project_id}",
+            ),
+            (
+                "cinder",
+                "volumev3",
+                "http://127.0.0.1:8776/v3/{project_id}",
+            ),
+        ] {
+            canonical
+                .register_projection(o3k_kernel::OpenStackCompatibilityProjection {
+                    service_id: service_id.to_owned(),
+                    service_type: service_type.to_owned(),
+                    service_name: Some(service_id.to_owned()),
+                    enabled: true,
+                    api_surfaces: vec![],
+                    endpoints: vec![o3k_kernel::OpenStackEndpointTemplate {
+                        interface: "public".to_owned(),
+                        region: "RegionOne".to_owned(),
+                        url_template: url.to_owned(),
+                        enabled: true,
+                    }],
+                    capabilities: vec![],
+                    evidence_profile: None,
+                })
+                .map_err(|_| AuthError::InvalidRequest)?;
+        }
+        let service = service_with_snapshot()?
+            .with_manifest_registry(std::sync::Arc::new(std::sync::RwLock::new(canonical)));
+        let (_, response) =
+            service.issue(&admin_request(), UNIX_EPOCH + Duration::from_secs(1_000))?;
+        assert!(
+            response
+                .token
+                .catalog
+                .iter()
+                .any(|entry| entry.service_type == "database")
+        );
+        assert!(
+            !response
+                .token
+                .catalog
+                .iter()
+                .any(|entry| entry.service_type == "volumev3")
         );
         Ok(())
     }

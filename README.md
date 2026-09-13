@@ -143,7 +143,7 @@ current gaps are:
 | E2D-01 | BLOCKER-to-claim | Canonical topology is durable and exposed on `/o3k/v1/topology/*`: regions/AZs plus a validated generic failure-domain hierarchy and provider/host/fabric/storage references (ADR-0181/SPEC-0038, P15.1 #931). OpenStack AZ (Nova) projection, binding consumers, and real-scale evidence remain open. |
 | E2D-02 | BLOCKER-to-claim | Placement/scheduling is still flat capacity selection; no hierarchy, generic traits, topology constraints or failure-domain spreading. (Carve-out: a validated failure-domain hierarchy now exists as canonical topology authority outside placement/consumption; placement itself still does not consume it — P15.1 #931.) |
 | E2D-03 | BLOCKER-to-claim | Building blocks are an accepted architecture concept but not yet a first-class operator/runtime lifecycle. |
-| E2D-04 | BLOCKER-to-composable-catalog | Static `KernelRegistry` and dynamic `ManifestRegistry` still coexist after #928; service authority/catalog projection convergence is P15.2 (#932). |
+| E2D-04 | BLOCKER-to-composable-catalog | Converged in P15.2: `ManifestRegistry` is the canonical runtime service authority; `KernelRegistry` is a derived compatibility facade. Real-process evidence remains tracked by the P15.2 acceptance tests. |
 | E2D-05 | BLOCKER-to-composable-catalog | O3K lacks a declarative desired service-composition/`CloudProfile` layer distinct from runtime service discovery. |
 | E2D-06 | HIGH | Reusable hosted OpenStack service install/version/dependency/upgrade/conformance machinery is not yet generalized beyond bounded profiles such as Cinder. |
 | E2D-07 | BLOCKER-to-edge-product | Local site autonomy and WAN-loss semantics are not yet an explicit product contract; same OS must not mean one stretched WAN-dependent control plane. |
@@ -437,9 +437,9 @@ The runtime catalog answers **what is actually available now**. The deployment
 composition answers **what this cloud should run**. Keeping them separate avoids
 advertising a service before it is installed, healthy and profile-proven.
 
-The current code has both the older static `KernelRegistry` and the newer
-`ManifestRegistry`; convergence to one runtime service authority is a required
-step before arbitrary catalog composition is claimed.
+`ManifestRegistry` is the single runtime service authority. `KernelRegistry`
+is retained only as a compatibility projection facade bound to that authority;
+arbitrary desired catalog composition remains a separate CloudProfile concern.
 
 ## Building blocks and Placement
 

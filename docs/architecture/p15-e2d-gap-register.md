@@ -167,21 +167,23 @@ Rules:
   OpenStack catalog projection derived from one authoritative manifest/service
   state; a compatibility projection may remain separate, but there must not be
   two competing service inventories (ADR-0182).
-- **Current implementation:** the static `KernelRegistry`
-  (`crates/o3k-kernel/src/registry.rs:207-546`) still projects the Keystone
-  catalog, and `for_profile` ignores its profile argument
-  (`crates/o3k-kernel/src/registry.rs:544`). The dynamic `ManifestRegistry`
-  (`crates/o3k-kernel/src/manifest.rs`) drives `/o3k/v1/services` and readiness
-  (`bins/o3kd/src/composition/mod.rs:595-620,754-805`). The two are not
-  derived from each other; `scripts/validate-kernel-actions.py` only
-  cross-checks the static YAML. PR #928 fixed advertised-implies-executable
-  but did not merge the registries.
-- **Evidence:** `bins/o3kd/tests/p12_6_process.rs`,
-  `bins/o3kd/tests/p12_7_convergence.rs`,
+- **Current implementation (P15.2):** `ManifestRegistry`
+  (`crates/o3k-kernel/src/manifest.rs`) owns manifests, controller state and
+  lifecycle. Native discovery, resource/action readiness and diagnostics read
+  that authority. `KernelRegistry`
+  (`crates/o3k-kernel/src/registry.rs`) is retained only as a derived
+  compatibility facade; when bound, Keystone projection checks canonical
+  existence/readiness and linked `OpenStackCompatibilityProjection` metadata.
+- **Evidence:** `bins/o3kd/tests/p15_2_service_registry_process.rs` proves
+  native discovery, resource discovery, lifecycle/readiness, Keystone catalog
+  projection and restart reconstruction against both SQLite and disposable
+  PostgreSQL; `bins/o3kd/tests/p12_6_process.rs`,
+  `bins/o3kd/tests/p12_7_convergence.rs`, and
   `discovery_advertises_only_reachable_lifecycle_operations`
-  (`crates/o3k-native-api/src/lib.rs`).
-- **Remaining delta:** one authoritative service state with the compatibility
-  catalog as a projection of it.
+  (`crates/o3k-native-api/src/lib.rs`) provide the supporting process and
+  reachability evidence.
+- **Remaining delta:** none for the accepted service-registry authority
+  convergence requirement; desired service composition remains P15.4.
 - **Dependency:** none hard; touches the Keystone catalog projection in
   `crates/o3k-identity/src/lib.rs:1538-1553`.
 - **Claim impact:** BLOCKER-to-composable-catalog.

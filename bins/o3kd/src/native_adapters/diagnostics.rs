@@ -493,9 +493,9 @@ impl DiagnosticsReader for DiagnosticsReaderAdapter {
         {
             let service_id = manifest.service_id.clone();
             let registration = reg.controller(&service_id);
-            let lifecycle_state = registration
-                .map(|registration| registration.state.to_string())
-                .unwrap_or_else(|| "declared".to_owned());
+            let lifecycle_state = reg
+                .lifecycle_state(&service_id)
+                .map_or_else(|| "declared".to_owned(), |state| state.to_string());
             let (status, reason) = registration
                 .map(|registration| {
                     service_status_with_freshness(

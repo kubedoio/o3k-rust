@@ -9,7 +9,7 @@
 //!   all application services.
 //! - Service-neutral authorization: `Principal × Action × Resource × Context -> Allow/Deny`.
 //! - Default-deny fail-closed policy model.
-//! - Canonical static service registry with Keystone catalog projection.
+//! - Canonical runtime service authority with Keystone catalog projection.
 //! - Canonical secret-safe audit events and bounded audit sink port.
 
 pub mod action;
@@ -665,6 +665,84 @@ mod tests {
         assert_eq!(image_pub.url, "http://127.0.0.1:18080/");
 
         Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn bound_registry_catalog_follows_canonical_readiness() {
+        let mut manifests = ManifestRegistry::new();
+        manifests.seed_core().expect("core manifests");
+        manifests
+            .register_external_service("database", "database", ServiceLifecycleState::Ready)
+            .expect("database identity");
+        manifests
+            .register_projection(OpenStackCompatibilityProjection {
+                service_id: "database".to_owned(),
+                service_type: "database".to_owned(),
+                service_name: Some("database".to_owned()),
+                enabled: true,
+                api_surfaces: vec![],
+                endpoints: vec![OpenStackEndpointTemplate {
+                    interface: "public".to_owned(),
+                    region: "RegionOne".to_owned(),
+                    url_template: "http://127.0.0.1:18080/database/{project_id}".to_owned(),
+                    enabled: true,
+                }],
+                capabilities: vec![],
+                evidence_profile: None,
+            })
+            .expect("database projection");
+        let template = KernelRegistry::standard("http://127.0.0.1:18080", None);
+        template
+            .register_projections_into(&mut manifests)
+            .expect("linked projections");
+        manifests
+            .register_in_process_controller("identity", true, None)
+            .expect("identity ready");
+        manifests
+            .register_in_process_controller("compute", false, Some("provider unavailable".into()))
+            .expect("compute not ready");
+        let shared = std::sync::Arc::new(std::sync::RwLock::new(manifests));
+        let facade = template.with_canonical_registry(shared);
+        let catalog = facade.project_keystone_catalog("project-abc");
+        assert!(catalog.iter().any(|service| service.id == "identity"));
+        assert!(!catalog.iter().any(|service| service.id == "compute"));
+        assert!(catalog.iter().any(|service| service.id == "database"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn configured_but_unavailable_external_cinder_is_not_advertised() {
+        let mut manifests = ManifestRegistry::new();
+        manifests
+            .register_external_service("cinder", "cinder", ServiceLifecycleState::NotReady)
+            .expect("cinder identity");
+        manifests
+            .register_projection(OpenStackCompatibilityProjection {
+                service_id: "cinder".to_owned(),
+                service_type: "volumev3".to_owned(),
+                service_name: Some("cinder".to_owned()),
+                enabled: true,
+                api_surfaces: vec![],
+                endpoints: vec![OpenStackEndpointTemplate {
+                    interface: "public".to_owned(),
+                    region: "RegionOne".to_owned(),
+                    url_template: "http://127.0.0.1:18776/v3/{project_id}".to_owned(),
+                    enabled: true,
+                }],
+                capabilities: vec![],
+                evidence_profile: None,
+            })
+            .expect("cinder projection");
+        let shared = std::sync::Arc::new(std::sync::RwLock::new(manifests));
+        let facade = KernelRegistry::standard("http://127.0.0.1:18080", None)
+            .with_canonical_registry(shared);
+        let catalog = facade.project_keystone_catalog("project-abc");
+        assert!(
+            !catalog
+                .iter()
+                .any(|service| service.service_type == "volumev3")
+        );
     }
 
     #[test]

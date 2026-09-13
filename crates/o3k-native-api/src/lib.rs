@@ -11,7 +11,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use o3k_kernel::{ManifestRegistry, ServiceLifecycleState, ServiceManifest};
+use o3k_kernel::{ManifestRegistry, ServiceManifest};
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 
@@ -83,6 +83,46 @@ impl NativeApiState {
         network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
     ) -> Result<Self, String> {
         let lifecycle_registry = registry.map(|registry| Arc::new(RwLock::new(registry)));
+        Self::new_with_lifecycle_registry(
+            lifecycle_registry,
+            cursor_config,
+            token_issuer,
+            server_reader,
+            volume_reader,
+            network_reader,
+        )
+    }
+
+    /// Builds state over an already shared canonical service authority.
+    /// Native discovery, resource discovery and diagnostics can therefore not
+    /// drift from compatibility consumers that hold the same handle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_shared(
+        lifecycle_registry: Arc<RwLock<ManifestRegistry>>,
+        cursor_config: pagination::CursorConfig,
+        token_issuer: Option<std::sync::Arc<dyn auth::TokenIssuer>>,
+        server_reader: Option<std::sync::Arc<dyn compute::ServerReader>>,
+        volume_reader: Option<std::sync::Arc<dyn volume::VolumeReader>>,
+        network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
+    ) -> Result<Self, String> {
+        Self::new_with_lifecycle_registry(
+            Some(lifecycle_registry),
+            cursor_config,
+            token_issuer,
+            server_reader,
+            volume_reader,
+            network_reader,
+        )
+    }
+
+    fn new_with_lifecycle_registry(
+        lifecycle_registry: Option<Arc<RwLock<ManifestRegistry>>>,
+        cursor_config: pagination::CursorConfig,
+        token_issuer: Option<std::sync::Arc<dyn auth::TokenIssuer>>,
+        server_reader: Option<std::sync::Arc<dyn compute::ServerReader>>,
+        volume_reader: Option<std::sync::Arc<dyn volume::VolumeReader>>,
+        network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
+    ) -> Result<Self, String> {
         let resource_index = lifecycle_registry
             .as_ref()
             .map(|registry| {
@@ -502,9 +542,8 @@ pub async fn discover_services(State(state): State<NativeApiState>) -> impl Into
         .iter()
         .map(|m| {
             let lc = registry
-                .controller(&m.service_id)
-                .map(|c| c.state.to_string())
-                .unwrap_or_else(|| ServiceLifecycleState::Declared.to_string());
+                .lifecycle_state(&m.service_id)
+                .map_or_else(|| "declared".to_owned(), |state| state.to_string());
             DiscoveredService {
                 id: m.service_id.clone(),
                 namespace: m.namespace.clone(),

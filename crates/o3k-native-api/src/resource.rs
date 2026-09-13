@@ -86,9 +86,7 @@ impl ResourceDispatcher {
             .read()
             .map_err(|_| DescriptorError::InvalidOperation)?;
         for manifest in manifests.all() {
-            let ready = manifests
-                .controller(&manifest.service_id)
-                .is_some_and(|c| c.state == o3k_kernel::controller::ControllerState::Ready);
+            let ready = manifests.is_executable(&manifest.service_id);
             for resource in &manifest.resource_types {
                 let mut lifecycle_actions = HashMap::new();
                 let mut actions = HashMap::new();
