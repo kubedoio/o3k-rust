@@ -2450,6 +2450,75 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn canonical_catalog_enumerates_projections_and_gates_unavailable_cinder()
+    -> Result<(), AuthError> {
+        let mut canonical = o3k_kernel::ManifestRegistry::new();
+        canonical
+            .register_external_service(
+                "database",
+                "database",
+                o3k_kernel::ServiceLifecycleState::Ready,
+            )
+            .map_err(|_| AuthError::InvalidRequest)?;
+        canonical
+            .register_external_service(
+                "cinder",
+                "cinder",
+                o3k_kernel::ServiceLifecycleState::NotReady,
+            )
+            .map_err(|_| AuthError::InvalidRequest)?;
+        for (service_id, service_type, url) in [
+            (
+                "database",
+                "database",
+                "http://127.0.0.1/database/{project_id}",
+            ),
+            (
+                "cinder",
+                "volumev3",
+                "http://127.0.0.1:8776/v3/{project_id}",
+            ),
+        ] {
+            canonical
+                .register_projection(o3k_kernel::OpenStackCompatibilityProjection {
+                    service_id: service_id.to_owned(),
+                    service_type: service_type.to_owned(),
+                    service_name: Some(service_id.to_owned()),
+                    enabled: true,
+                    api_surfaces: vec![],
+                    endpoints: vec![o3k_kernel::OpenStackEndpointTemplate {
+                        interface: "public".to_owned(),
+                        region: "RegionOne".to_owned(),
+                        url_template: url.to_owned(),
+                        enabled: true,
+                    }],
+                    capabilities: vec![],
+                    evidence_profile: None,
+                })
+                .map_err(|_| AuthError::InvalidRequest)?;
+        }
+        let service = service_with_snapshot()?
+            .with_manifest_registry(std::sync::Arc::new(std::sync::RwLock::new(canonical)));
+        let (_, response) =
+            service.issue(&admin_request(), UNIX_EPOCH + Duration::from_secs(1_000))?;
+        assert!(
+            response
+                .token
+                .catalog
+                .iter()
+                .any(|entry| entry.service_type == "database")
+        );
+        assert!(
+            !response
+                .token
+                .catalog
+                .iter()
+                .any(|entry| entry.service_type == "volumev3")
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn catalog_advertises_identity_under_all_interfaces() -> Result<(), AuthError> {
         // Cinder's keystonemiddleware (keystoneauth1) negotiates the catalog by

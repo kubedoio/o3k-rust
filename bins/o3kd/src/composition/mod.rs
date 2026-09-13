@@ -176,6 +176,7 @@ pub struct Composition {
     control_task: Option<tokio::task::JoinHandle<()>>,
     inspect_probe_task: Option<tokio::task::JoinHandle<()>>,
     diagnostics_probe_task: tokio::task::JoinHandle<()>,
+    external_cinder_probe_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Composition {
@@ -197,6 +198,10 @@ impl Composition {
                 .await
                 .is_err()
         {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = self.external_cinder_probe_task {
             task.abort();
             let _ = task.await;
         }
@@ -522,6 +527,7 @@ pub async fn build_composition(
             .with_scheduler(scheduler)
             .with_agent_registry(Arc::new(registry.clone()));
     }
+    let mut external_cinder_client: Option<Arc<o3k_cinder::CinderClient>> = None;
     if let (Some(cinder_password), Ok(cinder_endpoint)) = (
         config.cinder_password(),
         std::env::var("O3K_CINDER_ENDPOINT"),
@@ -536,7 +542,8 @@ pub async fn build_composition(
                 domain_name: "Default".to_owned(),
             },
         ));
-        compute_service = compute_service.with_attachment_provider(cinder_client);
+        compute_service = compute_service.with_attachment_provider(cinder_client.clone());
+        external_cinder_client = Some(cinder_client);
         info!("external Cinder attachment client enabled");
     }
     let inventory_task = agent_control_enabled.then(|| {
@@ -674,9 +681,13 @@ pub async fn build_composition(
     // owned by the external deployment), but its canonical compatibility
     // identity still lives in the same authority. This lets the projection
     // remain lifecycle-gated without making native discovery claim Cinder.
-    if std::env::var("O3K_CINDER_ENDPOINT").is_ok() {
+    if external_cinder_client.is_some() {
         native_manifest_registry
-            .register_external_service("cinder", "cinder", o3k_kernel::ServiceLifecycleState::Ready)
+            .register_external_service(
+                "cinder",
+                "cinder",
+                o3k_kernel::ServiceLifecycleState::NotReady,
+            )
             .map_err(|e| format!("external Cinder identity registration failed: {e}"))?;
     }
     let compatibility_template = o3k_kernel::KernelRegistry::standard_in_region(
@@ -875,6 +886,34 @@ pub async fn build_composition(
     // bound to this handle; it cannot maintain an independent inventory.
     let canonical_manifest_registry =
         std::sync::Arc::new(std::sync::RwLock::new(native_manifest_registry));
+    // External Cinder is advertised only after the real attachment client can
+    // authenticate and execute a read against the configured service.  An
+    // endpoint environment variable alone is never sufficient for Ready.
+    let external_cinder_probe_task = external_cinder_client.map(|client| {
+        let lifecycle_registry = canonical_manifest_registry.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                let ready = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    client.list_volumes("eba29e2d-53de-461d-ae91-ede7402713cb"),
+                )
+                .await
+                .is_ok_and(|result| result.is_ok());
+                if let Ok(mut registry) = lifecycle_registry.write() {
+                    let _ = registry.update_external_service_lifecycle(
+                        "cinder",
+                        if ready {
+                            o3k_kernel::ServiceLifecycleState::Ready
+                        } else {
+                            o3k_kernel::ServiceLifecycleState::NotReady
+                        },
+                    );
+                }
+            }
+        })
+    });
     if let Some(identity_service) = identity.as_mut() {
         *identity_service = identity_service
             .clone()
@@ -1209,6 +1248,7 @@ pub async fn build_composition(
         control_task,
         inspect_probe_task,
         diagnostics_probe_task,
+        external_cinder_probe_task,
     })
 }
 

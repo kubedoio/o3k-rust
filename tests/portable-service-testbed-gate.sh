@@ -79,7 +79,13 @@ echo "==> Token obtained: [REDACTED]"
 
 echo "==> Validating token (GET /v3/auth/tokens)..."
 GET_TOKEN_RESP=$(curl -s -f -H "X-Subject-Token: ${TOKEN}" "http://127.0.0.1:${PORT}/v3/auth/tokens")
-echo "${GET_TOKEN_RESP}" | grep -q "volumev3"
+# An endpoint declaration without Cinder credentials/executability must not
+# make an external Cinder service appear in Keystone. The mock-Cinder
+# component gate separately proves the Ready/catalog path with a live client.
+if echo "${GET_TOKEN_RESP}" | grep -q "volumev3"; then
+    echo "ERROR: unavailable external Cinder was advertised in the catalog"
+    exit 1
+fi
 echo "${GET_TOKEN_RESP}" | grep -q "eba29e2d-53de-461d-ae91-ede7402713cb"
 
 echo "==> Validating token status (HEAD /v3/auth/tokens)..."

@@ -1348,6 +1348,21 @@ impl ManifestRegistry {
         Ok(())
     }
 
+    /// Updates the lifecycle of an externally hosted compatibility identity
+    /// after its real execution/readiness probe completes.
+    pub fn update_external_service_lifecycle(
+        &mut self,
+        service_id: &str,
+        lifecycle: ServiceLifecycleState,
+    ) -> Result<(), ManifestError> {
+        let external = self
+            .external_services
+            .get_mut(service_id)
+            .ok_or(ManifestError::InvalidField("external service_id"))?;
+        external.lifecycle = lifecycle;
+        Ok(())
+    }
+
     /// Registers the runtime readiness of a first-party in-process service.
     ///
     /// In-process services have no transport session to register, but they

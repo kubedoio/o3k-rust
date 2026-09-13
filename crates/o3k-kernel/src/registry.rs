@@ -692,70 +692,75 @@ impl KernelRegistry {
     /// backwards-compatible bootstrap helper for isolated callers/tests.
     #[must_use]
     pub fn project_keystone_catalog(&self, project_id: &str) -> Vec<KeystoneCatalogService> {
+        // A bound facade is only a compatibility projection helper: enumerate
+        // the subordinate projections owned by the canonical registry.  The
+        // descriptor vector below is intentionally retained for unbound legacy
+        // callers, but it must never decide catalog membership once runtime
+        // authority is available.
+        if let Some(canonical) = &self.canonical {
+            let Ok(registry) = canonical.read() else {
+                return Vec::new();
+            };
+            let mut catalog: Vec<KeystoneCatalogService> = registry
+                .all_projections()
+                .into_iter()
+                .filter(|projection| {
+                    projection.enabled && registry.is_executable(projection.service_id.as_str())
+                })
+                .filter_map(|projection| {
+                    let endpoints: Vec<KeystoneCatalogEndpoint> = projection
+                        .endpoints
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, endpoint)| endpoint.enabled)
+                        .map(|(idx, endpoint)| KeystoneCatalogEndpoint {
+                            id: format!("endpoint-{}-{idx}", projection.service_id),
+                            interface: endpoint.interface.clone(),
+                            region: endpoint.region.clone(),
+                            region_id: endpoint.region.clone(),
+                            url: endpoint.url_template.replace("{project_id}", project_id),
+                        })
+                        .collect();
+                    if endpoints.is_empty() {
+                        return None;
+                    }
+                    Some(KeystoneCatalogService {
+                        id: projection.service_id.clone(),
+                        name: projection
+                            .service_name
+                            .clone()
+                            .unwrap_or_else(|| projection.service_id.clone()),
+                        service_type: projection.service_type.clone(),
+                        endpoints,
+                    })
+                })
+                .collect();
+            catalog.sort_by(|a, b| a.service_type.cmp(&b.service_type));
+            return catalog;
+        }
+
         let mut catalog: Vec<KeystoneCatalogService> = self
             .services
             .iter()
-            .filter(|svc| {
-                if !svc.enabled {
-                    return false;
-                }
-                self.canonical.as_ref().is_none_or(|canonical| {
-                    canonical.read().ok().is_some_and(|registry| {
-                        registry.is_executable(svc.id.as_str())
-                            && registry
-                                .projection(svc.id.as_str())
-                                .is_some_and(|projection| projection.enabled)
-                    })
-                })
-            })
+            .filter(|svc| svc.enabled)
             .map(|svc| {
-                let projection = self.canonical.as_ref().and_then(|canonical| {
-                    canonical
-                        .read()
-                        .ok()
-                        .and_then(|registry| registry.projection(svc.id.as_str()).cloned())
-                });
-                let endpoints: Vec<KeystoneCatalogEndpoint> = projection
-                    .as_ref()
-                    .map(|projection| {
-                        projection
-                            .endpoints
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, endpoint)| endpoint.enabled)
-                            .map(|(idx, endpoint)| KeystoneCatalogEndpoint {
-                                id: format!("endpoint-{}-{idx}", svc.id),
-                                interface: endpoint.interface.clone(),
-                                region: endpoint.region.clone(),
-                                region_id: endpoint.region.clone(),
-                                url: endpoint.url_template.replace("{project_id}", project_id),
-                            })
-                            .collect()
+                let endpoints: Vec<KeystoneCatalogEndpoint> = svc
+                    .endpoints
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, ep)| KeystoneCatalogEndpoint {
+                        id: format!("endpoint-{}-{idx}", svc.id),
+                        interface: ep.interface.clone(),
+                        region: ep.region.clone(),
+                        region_id: ep.region.clone(),
+                        url: ep.url_template.replace("{project_id}", project_id),
                     })
-                    .unwrap_or_else(|| {
-                        svc.endpoints
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, ep)| KeystoneCatalogEndpoint {
-                                id: format!("endpoint-{}-{idx}", svc.id),
-                                interface: ep.interface.clone(),
-                                region: ep.region.clone(),
-                                region_id: ep.region.clone(),
-                                url: ep.url_template.replace("{project_id}", project_id),
-                            })
-                            .collect()
-                    });
+                    .collect();
 
                 KeystoneCatalogService {
                     id: svc.id.to_string(),
-                    name: projection
-                        .as_ref()
-                        .and_then(|projection| projection.service_name.clone())
-                        .unwrap_or_else(|| svc.name.clone()),
-                    service_type: projection.as_ref().map_or_else(
-                        || svc.service_type.clone(),
-                        |projection| projection.service_type.clone(),
-                    ),
+                    name: svc.name.clone(),
+                    service_type: svc.service_type.clone(),
                     endpoints,
                 }
             })
