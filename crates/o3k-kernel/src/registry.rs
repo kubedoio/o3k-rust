@@ -258,9 +258,8 @@ impl KernelRegistry {
 
     /// Installs the descriptor metadata as subordinate compatibility
     /// projections for services already present in the canonical registry.
-    /// Unknown services (for example an externally hosted Cinder endpoint)
-    /// are intentionally skipped because they are not native service
-    /// identities owned by this registry.
+    /// Unknown services are intentionally skipped; an external compatibility
+    /// identity must first be registered by the canonical authority.
     pub fn register_projections_into(
         &self,
         canonical: &mut crate::manifest::ManifestRegistry,
