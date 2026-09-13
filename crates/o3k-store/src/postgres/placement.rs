@@ -24,7 +24,7 @@ impl PlacementRepository for PostgresStore {
         provider_id: &str,
     ) -> Result<Option<PlacementProviderRecord>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, node_id, state, generation FROM placement_providers WHERE id = $1",
+            "SELECT id, node_id, state, generation, parent_provider_id, location FROM placement_providers WHERE id = $1",
         )
         .bind(provider_id)
         .fetch_optional(&self.pool)
@@ -41,13 +41,17 @@ impl PlacementRepository for PostgresStore {
             generation: row.get::<i64, _>("generation") as u64,
             inventories: self.load_placement_inventories(provider_id).await?,
             allocations: self.load_placement_allocations(provider_id).await?,
+            parent_provider_id: row.get("parent_provider_id"),
+            traits: self.load_provider_traits(provider_id).await?,
+            failure_domains: self.load_provider_failure_domains(provider_id).await?,
+            location: row.get("location"),
         };
         Ok(Some(provider))
     }
 
     async fn list_providers(&self) -> Result<Vec<PlacementProviderRecord>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, node_id, state, generation FROM placement_providers ORDER BY id",
+            "SELECT id, node_id, state, generation, parent_provider_id, location FROM placement_providers ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await
@@ -63,6 +67,10 @@ impl PlacementRepository for PostgresStore {
                 generation: row.get::<i64, _>("generation") as u64,
                 inventories: self.load_placement_inventories(&provider_id).await?,
                 allocations: self.load_placement_allocations(&provider_id).await?,
+                parent_provider_id: row.get("parent_provider_id"),
+                traits: self.load_provider_traits(&provider_id).await?,
+                failure_domains: self.load_provider_failure_domains(&provider_id).await?,
+                location: row.get("location"),
             };
             providers.push(provider);
         }
@@ -77,7 +85,7 @@ impl PlacementRepository for PostgresStore {
         let limit = i64::try_from(limit)
             .map_err(|_| StoreError::Corrupt("placement page limit out of range".to_owned()))?;
         let rows = sqlx::query(
-            "SELECT id, node_id, state, generation FROM placement_providers \
+            "SELECT id, node_id, state, generation, parent_provider_id, location FROM placement_providers \
              WHERE ($1::text IS NULL OR id > $1) \
              ORDER BY id \
              LIMIT $2",
@@ -97,6 +105,10 @@ impl PlacementRepository for PostgresStore {
                 generation: row.get::<i64, _>("generation") as u64,
                 inventories: self.load_placement_inventories(&provider_id).await?,
                 allocations: Vec::new(),
+                parent_provider_id: row.get("parent_provider_id"),
+                traits: self.load_provider_traits(&provider_id).await?,
+                failure_domains: self.load_provider_failure_domains(&provider_id).await?,
+                location: row.get("location"),
             };
             providers.push(provider);
         }
@@ -242,6 +254,48 @@ impl PlacementRepository for PostgresStore {
         self.get_provider(&id)
             .await?
             .ok_or(StoreError::PlacementProviderNotFound)
+    }
+
+    async fn register_provider_metadata(
+        &self,
+        node_id: &str,
+        inventories: &[PlacementInventoryRecord],
+        parent_provider_id: Option<&str>,
+        traits: &[String],
+        failure_domains: &[String],
+        location: Option<&str>,
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        PostgresStore::register_provider_metadata(
+            self,
+            node_id,
+            inventories,
+            parent_provider_id,
+            traits,
+            failure_domains,
+            location,
+        )
+        .await
+    }
+
+    async fn update_provider_metadata(
+        &self,
+        provider_id: &str,
+        expected_generation: u64,
+        parent_provider_id: Option<&str>,
+        traits: &[String],
+        failure_domains: &[String],
+        location: Option<&str>,
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        PostgresStore::update_provider_metadata(
+            self,
+            provider_id,
+            expected_generation,
+            parent_provider_id,
+            traits,
+            failure_domains,
+            location,
+        )
+        .await
     }
 
     async fn sync_provider(
@@ -743,6 +797,39 @@ impl PlacementRepository for PostgresStore {
         .await
         .map_err(StoreError::Database)?;
 
+        sqlx::query(
+            "UPDATE placement_providers SET parent_provider_id = $1, location = $2 WHERE id = $3",
+        )
+        .bind(&provider.parent_provider_id)
+        .bind(&provider.location)
+        .bind(&provider.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        sqlx::query("DELETE FROM placement_provider_traits WHERE provider_id = $1")
+            .bind(&provider.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        for trait_name in &provider.traits {
+            sqlx::query(
+                "INSERT INTO placement_provider_traits(provider_id, trait) VALUES ($1, $2)",
+            )
+            .bind(&provider.id)
+            .bind(trait_name)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        }
+        sqlx::query("DELETE FROM placement_provider_failure_domains WHERE provider_id = $1")
+            .bind(&provider.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        for domain in &provider.failure_domains {
+            sqlx::query("INSERT INTO placement_provider_failure_domains(provider_id, failure_domain_id) VALUES ($1, $2)").bind(&provider.id).bind(domain).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        }
+
         for inv in &provider.inventories {
             sqlx::query(
                 "INSERT INTO placement_inventories (provider_id, resource_class, total, reserved, allocation_ratio, used)
@@ -767,6 +854,168 @@ impl PlacementRepository for PostgresStore {
 }
 
 impl PostgresStore {
+    async fn load_provider_traits(&self, provider_id: &str) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT trait FROM placement_provider_traits WHERE provider_id = $1 ORDER BY trait",
+        )
+        .bind(provider_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        Ok(rows.iter().map(|row| row.get("trait")).collect())
+    }
+
+    async fn load_provider_failure_domains(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query("SELECT failure_domain_id FROM placement_provider_failure_domains WHERE provider_id = $1 ORDER BY failure_domain_id")
+            .bind(provider_id).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        Ok(rows
+            .iter()
+            .map(|row| row.get("failure_domain_id"))
+            .collect())
+    }
+
+    async fn register_provider_metadata(
+        &self,
+        node_id: &str,
+        inventories: &[PlacementInventoryRecord],
+        parent_provider_id: Option<&str>,
+        traits: &[String],
+        failure_domains: &[String],
+        location: Option<&str>,
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        if parent_provider_id == Some(node_id) || traits.iter().any(|value| value.trim().is_empty())
+        {
+            return Err(StoreError::Corrupt(
+                "invalid placement provider metadata".to_owned(),
+            ));
+        }
+        if let Some(parent) = parent_provider_id
+            && self.get_provider(parent).await?.is_none()
+        {
+            return Err(StoreError::PlacementProviderNotFound);
+        }
+        let provider = self.register_provider(node_id, inventories).await?;
+        self.update_provider_metadata(
+            &provider.id,
+            provider.generation,
+            parent_provider_id,
+            traits,
+            failure_domains,
+            location,
+        )
+        .await
+    }
+
+    async fn update_provider_metadata(
+        &self,
+        provider_id: &str,
+        expected_generation: u64,
+        parent_provider_id: Option<&str>,
+        traits: &[String],
+        failure_domains: &[String],
+        location: Option<&str>,
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        if parent_provider_id == Some(provider_id) || traits.iter().any(|v| v.trim().is_empty()) {
+            return Err(StoreError::Corrupt(
+                "invalid placement provider metadata".to_owned(),
+            ));
+        }
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let current: Option<i64> =
+            sqlx::query_scalar("SELECT generation FROM placement_providers WHERE id = $1")
+                .bind(provider_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?;
+        let Some(current) = current else {
+            return Err(StoreError::PlacementProviderNotFound);
+        };
+        if u64::try_from(current).ok() != Some(expected_generation) {
+            return Err(StoreError::PlacementStaleGeneration);
+        }
+        if let Some(parent) = parent_provider_id {
+            let exists: Option<String> =
+                sqlx::query_scalar("SELECT id FROM placement_providers WHERE id = $1")
+                    .bind(parent)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(StoreError::Database)?;
+            if exists.is_none() {
+                return Err(StoreError::PlacementProviderNotFound);
+            }
+        }
+        // Lock the provider rows and validate the proposed ancestor chain in
+        // the same transaction.  Without this, two writers could race to
+        // install reciprocal parents and persist a cycle.
+        let hierarchy_rows = sqlx::query(
+            "SELECT id, parent_provider_id FROM placement_providers ORDER BY id FOR UPDATE",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut cursor = parent_provider_id.map(str::to_owned);
+        for _ in 0..64 {
+            let Some(id) = cursor else { break };
+            if !seen.insert(id.clone()) || id == provider_id {
+                return Err(StoreError::Corrupt(
+                    "placement provider hierarchy cycle".to_owned(),
+                ));
+            }
+            cursor = hierarchy_rows
+                .iter()
+                .find(|row| row.get::<String, _>("id") == id)
+                .and_then(|row| row.get::<Option<String>, _>("parent_provider_id"));
+        }
+        if cursor.is_some() {
+            return Err(StoreError::Corrupt(
+                "placement provider hierarchy exceeds depth limit".to_owned(),
+            ));
+        }
+        let updated = sqlx::query("UPDATE placement_providers SET parent_provider_id = $1, location = $2, generation = generation + 1 WHERE id = $3 AND generation = $4")
+            .bind(parent_provider_id).bind(location).bind(provider_id).bind(i64::try_from(expected_generation).map_err(|_| StoreError::Corrupt("generation out of range".to_owned()))?).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::PlacementStaleGeneration);
+        }
+        sqlx::query("DELETE FROM placement_provider_traits WHERE provider_id = $1")
+            .bind(provider_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        for value in traits
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            sqlx::query(
+                "INSERT INTO placement_provider_traits(provider_id, trait) VALUES ($1, $2)",
+            )
+            .bind(provider_id)
+            .bind(value)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        }
+        sqlx::query("DELETE FROM placement_provider_failure_domains WHERE provider_id = $1")
+            .bind(provider_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        for value in failure_domains
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            sqlx::query("INSERT INTO placement_provider_failure_domains(provider_id, failure_domain_id) VALUES ($1, $2)").bind(provider_id).bind(value).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        }
+        tx.commit().await.map_err(StoreError::Database)?;
+        self.get_provider(provider_id)
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)
+    }
     async fn load_placement_inventories(
         &self,
         provider_id: &str,
