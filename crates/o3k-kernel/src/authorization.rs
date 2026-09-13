@@ -147,6 +147,25 @@ impl StaticAuthorizer {
         reg("quota", "ReadQuota", "quota", "quota", true);
         reg("quota", "ManageQuota", "quota", "quota", false);
 
+        // Native topology authority (P15.1, ADR-0184/SPEC-0047): reads are
+        // open to any authenticated principal; administration is a distinct
+        // system/operator action, gated to System scope below exactly like
+        // quota:ManageQuota.
+        reg(
+            "topology",
+            "ReadTopology",
+            "topology",
+            "failure_domain",
+            false,
+        );
+        reg(
+            "topology",
+            "ManageTopology",
+            "topology",
+            "failure_domain",
+            false,
+        );
+
         // Cloud Kernel operation visibility is explicitly permissioned; the
         // reader still applies durable owner-scope concealment below this
         // policy check.
@@ -593,6 +612,34 @@ impl Authorizer for StaticAuthorizer {
         if request.action == ActionId::new_unchecked("quota", "ManageQuota")
             && (request.auth_context.effective_scope().kind() != ScopeKind::System
                 || !request.auth_context.has_role("operator"))
+        {
+            return AuthorizationDecision::Deny {
+                reason: DecisionReason::ScopeMismatch,
+            };
+        }
+
+        // Canonical topology administration is durable system/operator
+        // authority, exactly like quota:ManageQuota: project/tenant scope must
+        // never satisfy it, even with an `operator` role string.
+        if request.action == ActionId::new_unchecked("topology", "ManageTopology")
+            && (request.auth_context.effective_scope().kind() != ScopeKind::System
+                || !request.auth_context.has_role("operator"))
+        {
+            return AuthorizationDecision::Deny {
+                reason: DecisionReason::ScopeMismatch,
+            };
+        }
+
+        // The `topology` namespace is reserved for canonical location-topology
+        // administration. Topology *reads* (`topology:ReadTopology`) are open
+        // to any authenticated principal, but every mutation action requires
+        // System scope. Gating the namespace (rather than a literal action
+        // list) means a newly registered topology mutation action cannot
+        // accidentally omit this check; the operator-role requirement stays
+        // explicit per action via `required_roles`.
+        if request.action.namespace() == "topology"
+            && request.action != ActionId::new_unchecked("topology", "ReadTopology")
+            && request.auth_context.effective_scope().kind() != ScopeKind::System
         {
             return AuthorizationDecision::Deny {
                 reason: DecisionReason::ScopeMismatch,

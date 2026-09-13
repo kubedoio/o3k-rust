@@ -237,9 +237,35 @@ impl KernelRegistry {
         Self::for_profile("native-rust-testlab", base_url, cinder_url)
     }
 
+    /// Builds the standard O3K Cloud Kernel registry with an explicit
+    /// canonical catalog region (OpenStack compatibility projection of O3K
+    /// topology).
+    #[must_use]
+    pub fn standard_in_region(base_url: &str, cinder_url: Option<&str>, region: &str) -> Self {
+        Self::for_profile_in_region("native-rust-testlab", base_url, cinder_url, region)
+    }
+
     /// Builds the registry configured for a specific product profile.
     #[must_use]
     pub fn for_profile(profile: &str, base_url: &str, cinder_url: Option<&str>) -> Self {
+        Self::for_profile_in_region(profile, base_url, cinder_url, "RegionOne")
+    }
+
+    /// Builds the registry configured for a specific product profile and
+    /// canonical catalog region.
+    ///
+    /// The region is the OpenStack compatibility projection of canonical O3K
+    /// topology (see the composition root and ADR-0181/ADR-0184). When no
+    /// canonical region is configured the projection falls back to
+    /// `RegionOne`, preserving historical behavior.
+    #[must_use]
+    pub fn for_profile_in_region(
+        profile: &str,
+        base_url: &str,
+        cinder_url: Option<&str>,
+        region: &str,
+    ) -> Self {
+        let region = region.to_owned();
         let base = base_url.trim_end_matches('/');
         let mut services = Vec::new();
 
@@ -285,17 +311,17 @@ impl KernelRegistry {
             endpoints: vec![
                 EndpointTemplate {
                     interface: "public".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     url_template: format!("{base}/v3"),
                 },
                 EndpointTemplate {
                     interface: "internal".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     url_template: format!("{base}/v3"),
                 },
                 EndpointTemplate {
                     interface: "admin".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     url_template: format!("{base}/v3"),
                 },
             ],
@@ -327,19 +353,19 @@ impl KernelRegistry {
             endpoints: vec![
                 EndpointTemplate {
                     interface: "public".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     // Gophercloud's NewImageV2 appends the Glance v2 API
                     // prefix to this catalog service root.
                     url_template: format!("{base}/"),
                 },
                 EndpointTemplate {
                     interface: "internal".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     url_template: format!("{base}/"),
                 },
                 EndpointTemplate {
                     interface: "admin".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     url_template: format!("{base}/"),
                 },
             ],
@@ -385,19 +411,19 @@ impl KernelRegistry {
             endpoints: vec![
                 EndpointTemplate {
                     interface: "public".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     // Gophercloud's NewNetworkV2 appends the Neutron v2.0
                     // prefix to this catalog service root.
                     url_template: format!("{base}/"),
                 },
                 EndpointTemplate {
                     interface: "internal".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     url_template: format!("{base}/"),
                 },
                 EndpointTemplate {
                     interface: "admin".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     url_template: format!("{base}/"),
                 },
             ],
@@ -449,17 +475,17 @@ impl KernelRegistry {
             endpoints: vec![
                 EndpointTemplate {
                     interface: "public".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     url_template: format!("{base}/v2.1/{{project_id}}"),
                 },
                 EndpointTemplate {
                     interface: "internal".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     url_template: format!("{base}/v2.1/{{project_id}}"),
                 },
                 EndpointTemplate {
                     interface: "admin".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     url_template: format!("{base}/v2.1/{{project_id}}"),
                 },
             ],
@@ -487,17 +513,17 @@ impl KernelRegistry {
             endpoints: vec![
                 EndpointTemplate {
                     interface: "public".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     url_template: format!("{base}/placement"),
                 },
                 EndpointTemplate {
                     interface: "internal".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     url_template: format!("{base}/placement"),
                 },
                 EndpointTemplate {
                     interface: "admin".to_owned(),
-                    region: "RegionOne".to_owned(),
+                    region: region.clone(),
                     url_template: format!("{base}/placement"),
                 },
             ],
@@ -524,17 +550,17 @@ impl KernelRegistry {
                 endpoints: vec![
                     EndpointTemplate {
                         interface: "public".to_owned(),
-                        region: "RegionOne".to_owned(),
+                        region: region.clone(),
                         url_template: format!("{cinder_base}/v3/{{project_id}}"),
                     },
                     EndpointTemplate {
                         interface: "internal".to_owned(),
-                        region: "RegionOne".to_owned(),
+                        region: region.clone(),
                         url_template: format!("{cinder_base}/v3/{{project_id}}"),
                     },
                     EndpointTemplate {
                         interface: "admin".to_owned(),
-                        region: "RegionOne".to_owned(),
+                        region: region.clone(),
                         url_template: format!("{cinder_base}/v3/{{project_id}}"),
                     },
                 ],

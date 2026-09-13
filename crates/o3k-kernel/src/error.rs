@@ -41,4 +41,10 @@ pub enum KernelError {
 
     #[error("metering state is corrupt or inconsistent: {0}")]
     MeteringCorrupt(String),
+
+    #[error("topology store unavailable: {0}")]
+    TopologyUnavailable(String),
+
+    #[error("topology store state is corrupt or inconsistent: {0}")]
+    TopologyCorrupt(String),
 }

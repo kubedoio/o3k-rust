@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-topology-failure-domain-v1.schema.json",
+  "title": "O3K Native Topology Failure Domain v1",
+  "description": "Contract for the native topology failure-domain API (`/o3k/v1/topology/failure-domains`): the canonical failure-domain document (exactly the kernel FailureDomain serialization), create/update request bodies, and the bounded page envelope. O3K is the single authority for location topology; no provider, host, hypervisor, cluster, Ceph pool, storage backend, or network-controller identity is representable here.",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/failureDomain" },
+    { "$ref": "#/$defs/createRequest" },
+    { "$ref": "#/$defs/updateRequest" },
+    { "$ref": "#/$defs/page" }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Stable, provider-neutral O3K topology identifier."
+    },
+    "class": {
+      "type": "string",
+      "enum": [
+        "site",
+        "building",
+        "room",
+        "row",
+        "rack",
+        "chassis",
+        "power-domain",
+        "network-domain",
+        "storage-domain"
+      ],
+      "description": "Coarseness class of the failure domain (kebab-case); immutable after creation."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Human-readable display name; the only mutable label besides metadata."
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "maxProperties": 32,
+      "description": "Bounded key/value annotations; keys match ^[a-z0-9][a-z0-9_.-]*$ (1..=64), values are at most 256 characters."
+    },
+    "failureDomain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "class",
+        "name",
+        "availability_domain",
+        "parent",
+        "generation",
+        "metadata"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "class": { "$ref": "#/$defs/class" },
+        "name": { "$ref": "#/$defs/name" },
+        "availability_domain": { "$ref": "#/$defs/identifier" },
+        "parent": {
+          "anyOf": [{ "$ref": "#/$defs/identifier" }, { "type": "null" }],
+          "description": "Parent failure domain, if any; immutable after creation and always within the same availability domain."
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optimistic-concurrency generation; starts at 1 and increments on every successful update."
+        },
+        "metadata": { "$ref": "#/$defs/metadata" }
+      }
+    },
+    "createRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "class", "name", "availability_domain"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "class": { "$ref": "#/$defs/class" },
+        "name": { "$ref": "#/$defs/name" },
+        "availability_domain": { "$ref": "#/$defs/identifier" },
+        "parent": { "anyOf": [{ "$ref": "#/$defs/identifier" }, { "type": "null" }] },
+        "metadata": { "$ref": "#/$defs/metadata" }
+      }
+    },
+    "updateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "metadata"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "metadata": { "$ref": "#/$defs/metadata" }
+      },
+      "description": "Mutable fields only; `id`, `class`, `availability_domain`, and `parent` are immutable after creation. Requires the `If-Match: generation-N` precondition."
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "has_more"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/failureDomain" }
+        },
+        "has_more": { "type": "boolean" },
+        "next_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Opaque HMAC-authenticated keyset continuation; present exactly when `has_more` is true."
+        }
+      }
+    }
+  },
+  "x-o3k-status": "accepted",
+  "x-o3k-related-adr": "ADR-0184",
+  "x-o3k-related-spec": "SPEC-0047"
+}

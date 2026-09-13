@@ -133,6 +133,24 @@ evidence; claim limitations; acceptance criteria.
   with parity tests; bindings by reference merged; `seed_core` non-empty
   regression green; Keystone region/AZ derivation proven in process tests;
   E2D-01 advanced per the gap register's evidence rules.
+- **Real-process evidence boundary (process tests):** topology mutation
+  authorization requires a system-scope `operator` identity, which in a real
+  deployment is federated (OIDC); there is no offline, non-OIDC path to such a
+  token, so offline real-process evidence covers durable region/AZ convergence,
+  restart survival, Keystone catalog-region derivation, topology reads, and the
+  project-scoped 403 denial under real Keystone password auth
+  (`bins/o3kd/tests/p15_1_topology_process.rs`). Operator-authenticated
+  topology CRUD is proven in-process against the production router with the
+  real durable store and the accepted `TokenIssuer` (`bins/o3kd/tests/
+  p15_1_topology_operator.rs`); the federated real-process operator CRUD path
+  remains to be evidenced at the P15.7 convergence gate, mirroring the existing
+  araf P2 Keycloak harness (`bins/o3kd/tests/araf_p2_convergence.rs`).
+- **Notes (P15.1 findings):** only one `o3kd` may drive a given store (the
+  in-memory single-item reads reflect only local mutations; store-backed
+  collection reads observe the full durable sequence). Topology reads are
+  authenticated-principal-wide, so binding references (provider/host/fabric/
+  storage ids) are visible to any authenticated principal; a tenant-safe
+  projection can be introduced later if needed.
 
 ### 4.2 P15.2 — service-registry authority convergence (#932)
 

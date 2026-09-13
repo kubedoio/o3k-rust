@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use o3k_kernel::AuditQuery;
 use sqlx::Row;
 
-fn row(r: &sqlx::postgres::PgRow) -> Result<AuditEventRecord, StoreError> {
+pub(crate) fn row(r: &sqlx::postgres::PgRow) -> Result<AuditEventRecord, StoreError> {
     Ok(AuditEventRecord {
         event_id: r.try_get("event_id").map_err(StoreError::Database)?,
         timestamp: r.try_get("timestamp").map_err(StoreError::Database)?,
@@ -24,22 +24,40 @@ fn row(r: &sqlx::postgres::PgRow) -> Result<AuditEventRecord, StoreError> {
     })
 }
 
+/// Inserts one audit row within an existing transaction using the canonical
+/// `audit_events` semantics: `ON CONFLICT(event_id) DO NOTHING`, and when a row
+/// with the same `event_id` already exists it must be equivalent to the
+/// requested one or the write fails with `StoreError::AuditEventConflict`.
+///
+/// Shared so every write path (the standalone `AuditRepository` and the
+/// transaction-folded topology mutations) reuses the same column mapping and
+/// can never drift.
+pub(crate) async fn insert_audit_event_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    e: &AuditEventRecord,
+) -> Result<(), StoreError> {
+    let result = sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(event_id) DO NOTHING")
+        .bind(&e.event_id).bind(&e.timestamp).bind(&e.request_id).bind(&e.audit_id).bind(&e.principal_id).bind(&e.principal_kind).bind(&e.effective_scope).bind(&e.service).bind(&e.action).bind(&e.resource_type).bind(&e.resource_id).bind(&e.owner_scope).bind(&e.operation_id).bind(&e.outcome).bind(&e.reason_category).execute(&mut **tx).await.map_err(StoreError::Database)?;
+    if result.rows_affected() == 0 {
+        let existing = sqlx::query("SELECT * FROM audit_events WHERE event_id=$1")
+            .bind(&e.event_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or_else(|| StoreError::Corrupt("audit conflict row disappeared".into()))?;
+        if row(&existing)? != *e {
+            return Err(StoreError::AuditEventConflict);
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl AuditRepository for PostgresStore {
     async fn insert_audit_event(&self, e: &AuditEventRecord) -> Result<(), StoreError> {
-        let result = sqlx::query("INSERT INTO audit_events (event_id,timestamp,request_id,audit_id,principal_id,principal_kind,effective_scope,service,action,resource_type,resource_id,owner_scope,operation_id,outcome,reason_category) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(event_id) DO NOTHING")
-            .bind(&e.event_id).bind(&e.timestamp).bind(&e.request_id).bind(&e.audit_id).bind(&e.principal_id).bind(&e.principal_kind).bind(&e.effective_scope).bind(&e.service).bind(&e.action).bind(&e.resource_type).bind(&e.resource_id).bind(&e.owner_scope).bind(&e.operation_id).bind(&e.outcome).bind(&e.reason_category).execute(&self.pool).await.map_err(StoreError::Database)?;
-        if result.rows_affected() == 0 {
-            let existing = sqlx::query("SELECT * FROM audit_events WHERE event_id=$1")
-                .bind(&e.event_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(StoreError::Database)?
-                .ok_or_else(|| StoreError::Corrupt("audit conflict row disappeared".into()))?;
-            if row(&existing)? != *e {
-                return Err(StoreError::AuditEventConflict);
-            }
-        }
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        insert_audit_event_tx(&mut tx, e).await?;
+        tx.commit().await.map_err(StoreError::Database)?;
         Ok(())
     }
     async fn get_audit_event(&self, scope: &str, id: &str) -> Result<AuditEventRecord, StoreError> {

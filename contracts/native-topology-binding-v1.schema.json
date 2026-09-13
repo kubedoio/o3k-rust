@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-topology-binding-v1.schema.json",
+  "title": "O3K Native Topology Binding v1",
+  "description": "Contract for the native topology binding API (`/o3k/v1/topology/failure-domains/{id}/bindings`): the canonical binding document (exactly the kernel TopologyBinding serialization), the path target-kind vocabulary, and the bounded page envelope. A binding records which failure domain a resource provider, host, fabric domain, or storage domain is bound to; it never validates foreign lifecycles and never exposes provider-internal identity.",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/binding" },
+    { "$ref": "#/$defs/page" }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Stable, provider-neutral O3K topology identifier."
+    },
+    "targetKind": {
+      "type": "string",
+      "enum": [
+        "resource-provider",
+        "host",
+        "fabric-domain",
+        "storage-domain"
+      ],
+      "description": "Kind of the bindable target (kebab-case), carried in the request path."
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["failure_domain", "target"],
+      "properties": {
+        "failure_domain": { "$ref": "#/$defs/identifier" },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": { "$ref": "#/$defs/targetKind" },
+            "id": { "$ref": "#/$defs/identifier" }
+          }
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "has_more"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/binding" }
+        },
+        "has_more": { "type": "boolean" },
+        "next_cursor": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Opaque HMAC-authenticated keyset continuation; present exactly when `has_more` is true."
+        }
+      }
+    }
+  },
+  "x-o3k-status": "accepted",
+  "x-o3k-related-adr": "ADR-0184",
+  "x-o3k-related-spec": "SPEC-0047"
+}

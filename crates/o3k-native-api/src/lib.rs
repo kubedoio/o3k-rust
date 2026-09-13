@@ -11,7 +11,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use o3k_kernel::{LocationRegistry, ManifestRegistry, ServiceLifecycleState, ServiceManifest};
+use o3k_kernel::{ManifestRegistry, ServiceLifecycleState, ServiceManifest};
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 
@@ -29,6 +29,7 @@ pub mod pagination;
 pub mod quota;
 pub mod resource;
 pub mod resource_contract;
+pub mod topology;
 pub mod volume;
 
 use resource::{LifecycleOperation, ResourceDescriptor};
@@ -54,10 +55,21 @@ pub struct NativeApiState {
     resource_index: resource::ResourceDispatcher,
     pub resource_application: Option<resource::SharedResourceApplication>,
     pub authorizer: Option<std::sync::Arc<dyn o3k_kernel::Authorizer>>,
-    /// Canonical O3K location topology (regions and availability domains).
+    /// Canonical O3K location topology (regions, availability domains,
+    /// failure domains, and bindings) behind the shared mutation guard.
     /// This is the single authoritative location source; service manifests
-    /// reference canonical IDs only. See ADR-0181 / SPEC-0038.
-    pub locations: Option<LocationRegistry>,
+    /// reference canonical IDs only. See ADR-0181 / SPEC-0038 and P15.1
+    /// (ADR-0184 / SPEC-0047).
+    pub locations: Option<Arc<topology::TopologyGuard>>,
+    /// Durable topology store every mutation persists through before it
+    /// applies to memory. Reads of topology collections are bounded keyset
+    /// pages over this port.
+    ///
+    /// Topology mutation audit is unconditional and structural: every successful
+    /// mutation request is folded into the SAME store transaction as the
+    /// mutation (P15.1 issue #931 MEDIUM-1), so there is no audit sink field —
+    /// a missing sink is no longer possible.
+    pub topology_store: Option<Arc<dyn o3k_kernel::TopologyStore>>,
 }
 
 impl NativeApiState {
@@ -100,13 +112,22 @@ impl NativeApiState {
             resource_application: None,
             authorizer: None,
             locations: None,
+            topology_store: None,
         })
     }
 
-    /// Sets the canonical location registry served by the native API.
+    /// Sets the canonical location topology served and mutated by the native
+    /// API. The guard serializes every durable topology mutation.
     #[must_use]
-    pub fn with_locations(mut self, locations: LocationRegistry) -> Self {
+    pub fn with_locations(mut self, locations: Arc<topology::TopologyGuard>) -> Self {
         self.locations = Some(locations);
+        self
+    }
+
+    /// Sets the durable topology store mutations persist through.
+    #[must_use]
+    pub fn with_topology_store(mut self, store: Arc<dyn o3k_kernel::TopologyStore>) -> Self {
+        self.topology_store = Some(store);
         self
     }
 
@@ -196,6 +217,33 @@ pub fn router(state: NativeApiState) -> Router {
             get(discover_resource_schema),
         )
         .route("/regions", get(discover_regions))
+        .route(
+            "/regions/{region}",
+            axum::routing::put(topology::declare_region).delete(topology::remove_region),
+        )
+        .route(
+            "/regions/{region}/availability-domains/{az}",
+            axum::routing::put(topology::declare_availability_domain)
+                .delete(topology::remove_availability_domain),
+        )
+        .route(
+            "/topology/failure-domains",
+            get(topology::list_failure_domains).post(topology::create_failure_domain),
+        )
+        .route(
+            "/topology/failure-domains/{id}",
+            get(topology::show_failure_domain)
+                .put(topology::update_failure_domain)
+                .delete(topology::delete_failure_domain),
+        )
+        .route(
+            "/topology/failure-domains/{id}/bindings",
+            get(topology::list_bindings),
+        )
+        .route(
+            "/topology/failure-domains/{id}/bindings/{kind}/{target}",
+            axum::routing::put(topology::bind).delete(topology::unbind),
+        )
         .route("/identity/tokens", post(identity::issue_token))
         .route(
             "/identity/scopes",
@@ -314,6 +362,36 @@ pub(crate) fn assert_location_discovery_schema(value: &serde_json::Value) {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
+pub(crate) fn assert_topology_failure_domain_schema(value: &serde_json::Value) {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/native-topology-failure-domain-v1.schema.json"
+    )))
+    .expect("valid native topology failure domain schema");
+    let validator =
+        jsonschema::validator_for(&schema).expect("compiled native topology failure domain schema");
+    if let Err(errors) = validator.validate(value) {
+        panic!("native topology failure domain schema violation: {errors}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+pub(crate) fn assert_topology_binding_schema(value: &serde_json::Value) {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/native-topology-binding-v1.schema.json"
+    )))
+    .expect("valid native topology binding schema");
+    let validator =
+        jsonschema::validator_for(&schema).expect("compiled native topology binding schema");
+    if let Err(errors) = validator.validate(value) {
+        panic!("native topology binding schema violation: {errors}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 pub(crate) fn assert_governance_schema(value: &serde_json::Value) {
     let schema: serde_json::Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -342,6 +420,12 @@ pub async fn api_root() -> Json<ApiRootResponse> {
             "/o3k/v1/resource-types",
             "/o3k/v1/resource-schemas/{namespace}/{collection}/{version}",
             "/o3k/v1/regions",
+            "/o3k/v1/regions/{region}",
+            "/o3k/v1/regions/{region}/availability-domains/{az}",
+            "/o3k/v1/topology/failure-domains",
+            "/o3k/v1/topology/failure-domains/{id}",
+            "/o3k/v1/topology/failure-domains/{id}/bindings",
+            "/o3k/v1/topology/failure-domains/{id}/bindings/{kind}/{target}",
             "/o3k/v1/identity/tokens",
             "/o3k/v1/identity/scopes",
             "/o3k/v1/identity/me",
@@ -635,20 +719,19 @@ pub struct ResourceTypesResponse {
 /// orthogonal placement metadata (see ADR-0181/SPEC-0038).
 ///
 /// Returns `(scope, canonical_regions, availability_domain_selection)`.
-fn placement_for_service(
+async fn placement_for_service(
     manifest: &ServiceManifest,
-    locations: &Option<LocationRegistry>,
+    locations: Option<&topology::TopologyGuard>,
 ) -> (String, Vec<String>, String) {
-    let location_ids = locations
-        .as_ref()
-        .map(|locations| {
-            locations
-                .regions()
-                .iter()
-                .map(|region| region.id.as_str())
-                .collect::<std::collections::BTreeSet<_>>()
-        })
-        .unwrap_or_default();
+    let location_ids = match locations {
+        Some(guard) => guard
+            .read_regions()
+            .await
+            .iter()
+            .map(|region| region.id.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        None => std::collections::BTreeSet::new(),
+    };
 
     // Only disclose region IDs that are canonical O3K location identity.
     // Declared-but-unknown regions are filtered out (fail closed).
@@ -755,7 +838,7 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
                 health: None,
             });
         let (placement, regions, availability_domain_selection) =
-            placement_for_service(&owning_service, &state.locations);
+            placement_for_service(&owning_service, state.locations.as_deref()).await;
         resource_types.push(DiscoveredResourceType {
             namespace: descriptor.resource_type.namespace().to_owned(),
             name: descriptor.resource_type.name().to_owned(),
@@ -894,8 +977,11 @@ pub async fn discover_regions(State(state): State<NativeApiState>) -> impl IntoR
             .into_response();
     };
 
+    // Source regions from the shared topology guard; the wire shape is
+    // byte-identical to the previous registry-direct projection.
     let regions: Vec<DiscoveredRegion> = locations
-        .regions()
+        .read_regions()
+        .await
         .iter()
         .map(|region| DiscoveredRegion {
             id: region.id.clone(),
@@ -1904,7 +1990,9 @@ mod tests {
             None,
         )
         .unwrap()
-        .with_locations(locations.unwrap_or_default())
+        .with_locations(Arc::new(crate::topology::TopologyGuard::new(
+            locations.unwrap_or_default(),
+        )))
     }
 
     async fn get_json(state: NativeApiState, uri: &str) -> (StatusCode, serde_json::Value) {

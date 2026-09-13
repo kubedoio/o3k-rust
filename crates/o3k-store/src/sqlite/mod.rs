@@ -15,6 +15,7 @@ mod metering;
 mod network;
 mod placement;
 mod relationship;
+mod topology;
 mod volume_attachment;
 
 pub use helpers::validate_public_key;

@@ -105,7 +105,9 @@ fn production_router() -> Result<axum::Router, String> {
         None,
         None,
     )?
-    .with_locations(canonical_locations()?)
+    .with_locations(Arc::new(o3k_native_api::topology::TopologyGuard::new(
+        canonical_locations()?,
+    )))
     .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
     Ok(o3k_api::router_with_state(
         o3k_api::AppState::new().with_native_api(native),

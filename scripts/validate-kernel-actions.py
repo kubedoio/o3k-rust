@@ -99,13 +99,17 @@ def check_actions_and_services(root: Path) -> list[str]:
     # 3. Cross-reference actions and services
     # Native O3K capability ownership is declared by ServiceManifest/
     # ManifestRegistry, not by this legacy compatibility projection.  Keep
-    # these canonical native reads out of the mixed OpenStack inventory so a
-    # resource cannot be ambiguously owned by Compute or Neutron.
+    # these canonical native reads and the canonical native topology authority
+    # out of the mixed OpenStack inventory so a resource cannot be
+    # ambiguously owned by Compute or Neutron, and topology administration is
+    # not misread as an OpenStack service action.
     native_only_actions = {
         "network:ListAddressRealms",
         "network:ReadAddressRealm",
         "volume:ListVolumes",
         "volume:ReadVolume",
+        "topology:ReadTopology",
+        "topology:ManageTopology",
     }
     for act in sorted(action_ids):
         if act not in service_actions and act not in native_only_actions:

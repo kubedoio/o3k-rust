@@ -22,6 +22,7 @@ mod policy;
 mod quota;
 mod relationship;
 mod storage;
+mod topology;
 mod volume_attachment;
 
 #[derive(Clone, Debug)]

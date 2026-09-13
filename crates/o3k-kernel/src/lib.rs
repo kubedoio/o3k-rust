@@ -52,7 +52,11 @@ pub use durable_audit::{
 };
 pub use envelope::{ResourceEnvelope, ResourceMeta};
 pub use error::KernelError;
-pub use location::{AvailabilityDomain, LocationError, LocationRegistry, RegionDeclaration};
+pub use location::{
+    AvailabilityDomain, BindingListCursor, BindingTarget, BindingTargetKind, FailureDomain,
+    FailureDomainClass, LocationError, LocationRegistry, RegionDeclaration, TopologyBinding,
+    TopologyError, TopologySnapshot, TopologyStore,
+};
 pub use manifest::{
     ControllerBinding, ControllerDescriptor, DependencyDescriptor, ManifestController,
     ManifestError, ManifestRegistry, NativeResourceMetaV1, NativeResourceV1, OpenStackApiSurface,
@@ -368,6 +372,127 @@ mod tests {
         let request = AuthorizationRequest {
             auth_context: &system,
             action: ActionId::new("governance", "FutureAdminAction")?,
+            resource_target: target,
+        };
+        assert!(auth.authorize(&request).is_allowed());
+        Ok(())
+    }
+
+    #[test]
+    fn topology_read_is_open_to_any_authenticated_principal() -> Result<(), KernelError> {
+        let auth = StaticAuthorizer::standard();
+        let target =
+            ResourceTarget::collection(ResourceType::new("topology", "failure_domain")?, None);
+        // A plain project-scoped tenant token satisfies the read action.
+        let project = test_user_context("usr-1", "proj-1");
+        let request = AuthorizationRequest {
+            auth_context: &project,
+            action: ActionId::new("topology", "ReadTopology")?,
+            resource_target: target.clone(),
+        };
+        assert!(auth.authorize(&request).is_allowed());
+        // So does a service principal.
+        let service = test_service_context("svc-1", "proj-1");
+        let request = AuthorizationRequest {
+            auth_context: &service,
+            action: ActionId::new("topology", "ReadTopology")?,
+            resource_target: target,
+        };
+        assert!(auth.authorize(&request).is_allowed());
+        Ok(())
+    }
+
+    #[test]
+    fn topology_manage_requires_system_scope_and_operator_role() -> Result<(), KernelError> {
+        let auth = StaticAuthorizer::standard();
+        let target =
+            ResourceTarget::collection(ResourceType::new("topology", "failure_domain")?, None);
+        let system = test_system_operator_context();
+        let request = AuthorizationRequest {
+            auth_context: &system,
+            action: ActionId::new("topology", "ManageTopology")?,
+            resource_target: target.clone(),
+        };
+        assert!(auth.authorize(&request).is_allowed());
+
+        // A project-scoped caller with an `operator` role string must never
+        // satisfy topology administration.
+        let mut project = test_user_context("usr-1", "proj-1");
+        project = AuthContext::new(
+            project.principal().clone(),
+            project.effective_scope().clone(),
+            vec!["operator".to_owned()],
+            1700000000,
+            1700003600,
+            "audit-topology-project",
+            "req-topology-project",
+            None,
+        );
+        let request = AuthorizationRequest {
+            auth_context: &project,
+            action: ActionId::new("topology", "ManageTopology")?,
+            resource_target: target.clone(),
+        };
+        assert_eq!(
+            auth.authorize(&request).reason(),
+            &DecisionReason::ScopeMismatch
+        );
+
+        // System scope without the durable operator role is unauthorized.
+        let no_role = test_system_user_context_without_operator_role();
+        let request = AuthorizationRequest {
+            auth_context: &no_role,
+            action: ActionId::new("topology", "ManageTopology")?,
+            resource_target: target.clone(),
+        };
+        assert_eq!(
+            auth.authorize(&request).reason(),
+            &DecisionReason::ScopeMismatch
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn topology_namespace_is_system_gated_for_future_mutation_actions() -> Result<(), KernelError> {
+        let mut auth = StaticAuthorizer::standard();
+        // Register a hypothetical future topology mutation action that only
+        // declares the operator role, to prove the namespace scope gate cannot
+        // be accidentally omitted from new topology mutation actions.
+        auth.register(ActionPolicy {
+            action: ActionId::new("topology", "FutureManageAction")?,
+            expected_resource_type: ResourceType::new("topology", "failure_domain")?,
+            accepted_principals: vec![PrincipalKind::User],
+            require_ownership: false,
+            required_roles: vec!["operator".to_owned()],
+        });
+        let target =
+            ResourceTarget::collection(ResourceType::new("topology", "failure_domain")?, None);
+        // A project-scoped caller with an `operator` role string is denied.
+        let mut project = test_user_context("usr-1", "proj-1");
+        project = AuthContext::new(
+            project.principal().clone(),
+            project.effective_scope().clone(),
+            vec!["operator".to_owned()],
+            1700000000,
+            1700003600,
+            "audit-topology-future",
+            "req-topology-future",
+            None,
+        );
+        let request = AuthorizationRequest {
+            auth_context: &project,
+            action: ActionId::new("topology", "FutureManageAction")?,
+            resource_target: target.clone(),
+        };
+        assert_eq!(
+            auth.authorize(&request).reason(),
+            &DecisionReason::ScopeMismatch
+        );
+        // A system-scoped operator is allowed.
+        let system = test_system_operator_context();
+        let request = AuthorizationRequest {
+            auth_context: &system,
+            action: ActionId::new("topology", "FutureManageAction")?,
             resource_target: target,
         };
         assert!(auth.authorize(&request).is_allowed());
