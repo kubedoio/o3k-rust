@@ -266,7 +266,7 @@ impl KernelRegistry {
         canonical: &mut crate::manifest::ManifestRegistry,
     ) -> Result<(), crate::manifest::ManifestError> {
         for service in &self.services {
-            if canonical.get(service.id.as_str()).is_none() {
+            if !canonical.has_service_identity(service.id.as_str()) {
                 continue;
             }
             let projection = crate::manifest::OpenStackCompatibilityProjection {

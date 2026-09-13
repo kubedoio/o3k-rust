@@ -1211,11 +1211,22 @@ pub enum ManifestError {
 pub struct ManifestRegistry {
     manifests: HashMap<String, ServiceManifest>,
     by_namespace: HashMap<String, String>, // namespace -> service_id
+    /// Canonical identities for externally hosted compatibility services.
+    /// These are intentionally not `ServiceManifest`s: an external service
+    /// owns its own API/lifecycle contract, but its catalog identity still
+    /// belongs to this authority so projections cannot become orphaned.
+    external_services: HashMap<String, ExternalServiceState>,
     controllers: HashMap<String, ControllerRegistration>, // service_id -> registration
     /// Optional OpenStack compatibility projections keyed by canonical service
     /// ID.  Projections are subordinate metadata, never a service inventory.
     projections: HashMap<String, OpenStackCompatibilityProjection>,
     projection_by_type: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalServiceState {
+    namespace: String,
+    lifecycle: ServiceLifecycleState,
 }
 
 impl ManifestRegistry {
@@ -1297,6 +1308,43 @@ impl ManifestRegistry {
             health: None,
         };
         self.controllers.insert(service_id.to_owned(), registration);
+        Ok(())
+    }
+
+    /// Registers an externally hosted compatibility service identity.
+    ///
+    /// External services are not native manifests and therefore do not enter
+    /// native discovery. They do, however, participate in the canonical
+    /// service authority for lifecycle-gated compatibility projections.
+    pub fn register_external_service(
+        &mut self,
+        service_id: &str,
+        namespace: &str,
+        lifecycle: ServiceLifecycleState,
+    ) -> Result<(), ManifestError> {
+        if service_id.trim().is_empty() || namespace.trim().is_empty() {
+            return Err(ManifestError::InvalidField("external service identity"));
+        }
+        if self.manifests.contains_key(service_id)
+            || self.external_services.contains_key(service_id)
+        {
+            return Err(ManifestError::DuplicateServiceId(service_id.to_owned()));
+        }
+        if self.by_namespace.contains_key(namespace)
+            || self
+                .external_services
+                .values()
+                .any(|existing| existing.namespace == namespace)
+        {
+            return Err(ManifestError::DuplicateNamespace(namespace.to_owned()));
+        }
+        self.external_services.insert(
+            service_id.to_owned(),
+            ExternalServiceState {
+                namespace: namespace.to_owned(),
+                lifecycle,
+            },
+        );
         Ok(())
     }
 
@@ -1414,7 +1462,9 @@ impl ManifestRegistry {
         &mut self,
         projection: OpenStackCompatibilityProjection,
     ) -> Result<(), ManifestError> {
-        if !self.manifests.contains_key(&projection.service_id) {
+        if !self.manifests.contains_key(&projection.service_id)
+            && !self.external_services.contains_key(&projection.service_id)
+        {
             return Err(ManifestError::OrphanProjection(projection.service_id));
         }
         if self.projections.contains_key(&projection.service_id) {
@@ -1442,6 +1492,13 @@ impl ManifestRegistry {
         self.projections.get(service_id)
     }
 
+    /// Returns whether the canonical authority contains either a native
+    /// manifest identity or an externally hosted compatibility identity.
+    #[must_use]
+    pub fn has_service_identity(&self, service_id: &str) -> bool {
+        self.manifests.contains_key(service_id) || self.external_services.contains_key(service_id)
+    }
+
     /// Returns all subordinate compatibility projections.
     #[must_use]
     pub fn all_projections(&self) -> Vec<&OpenStackCompatibilityProjection> {
@@ -1457,6 +1514,9 @@ impl ManifestRegistry {
     /// `Declared`; compatibility projections must not treat it as executable.
     #[must_use]
     pub fn lifecycle_state(&self, service_id: &str) -> Option<ServiceLifecycleState> {
+        if let Some(external) = self.external_services.get(service_id) {
+            return Some(external.lifecycle);
+        }
         self.manifests.get(service_id)?;
         let state = self
             .controllers
@@ -4274,6 +4334,33 @@ mod tests {
             registry.register_projection(projection),
             Err(ManifestError::DuplicateProjection(_))
         ));
+    }
+
+    #[test]
+    fn external_compatibility_identity_is_canonical_but_not_native_manifest() {
+        let mut registry = ManifestRegistry::new();
+        registry
+            .register_external_service("cinder", "cinder", ServiceLifecycleState::Ready)
+            .expect("external identity");
+        let projection = OpenStackCompatibilityProjection {
+            service_id: "cinder".into(),
+            service_type: "volumev3".into(),
+            service_name: Some("cinder".into()),
+            enabled: true,
+            api_surfaces: vec![],
+            endpoints: vec![],
+            capabilities: vec![],
+            evidence_profile: None,
+        };
+        registry
+            .register_projection(projection)
+            .expect("linked external projection");
+        assert!(registry.get("cinder").is_none());
+        assert_eq!(
+            registry.lifecycle_state("cinder"),
+            Some(ServiceLifecycleState::Ready)
+        );
+        assert!(registry.is_executable("cinder"));
     }
 
     #[test]

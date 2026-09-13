@@ -670,6 +670,15 @@ pub async fn build_composition(
     // Compatibility metadata is subordinate to the canonical manifests.  It
     // is registered only after identity validation, so an orphan projection
     // can never become a catalog service.
+    // External Cinder is not an O3K native manifest (its API and lifecycle are
+    // owned by the external deployment), but its canonical compatibility
+    // identity still lives in the same authority. This lets the projection
+    // remain lifecycle-gated without making native discovery claim Cinder.
+    if std::env::var("O3K_CINDER_ENDPOINT").is_ok() {
+        native_manifest_registry
+            .register_external_service("cinder", "cinder", o3k_kernel::ServiceLifecycleState::Ready)
+            .map_err(|e| format!("external Cinder identity registration failed: {e}"))?;
+    }
     let compatibility_template = o3k_kernel::KernelRegistry::standard_in_region(
         &format!("http://{}", config.listen_addr),
         std::env::var("O3K_CINDER_ENDPOINT").ok().as_deref(),
